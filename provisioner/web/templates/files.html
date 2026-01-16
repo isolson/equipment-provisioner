@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Manage - {{ title }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3b82f6',
+                        success: '#22c55e',
+                        warning: '#f59e0b',
+                        danger: '#ef4444',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+        .touch-btn { min-height: 48px; min-width: 48px; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1f2937; }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        .drop-zone { border: 2px dashed #4b5563; transition: all 0.2s; }
+        .drop-zone.dragover { border-color: #3b82f6; background: rgba(59, 130, 246, 0.1); }
+
+        /* Device type badge colors */
+        .badge-cambium { background: #22c55e20; color: #22c55e; }
+        .badge-mikrotik { background: #3b82f620; color: #3b82f6; }
+        .badge-tachyon { background: #a855f720; color: #a855f7; }
+        .badge-tarana { background: #f59e0b20; color: #f59e0b; }
+        .badge-unknown { background: #6b728020; color: #6b7280; }
+
+        /* Custom/default badge */
+        .badge-custom { background: #22c55e20; color: #22c55e; }
+        .badge-default { background: #6b728020; color: #9ca3af; }
+    </style>
+</head>
+<body class="dark bg-gray-900 text-gray-100 min-h-screen">
+    <!-- Header -->
+    <header class="bg-gray-800 border-b border-gray-700 px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-4">
+            <a href="/" class="text-gray-400 hover:text-white">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+                </svg>
+            </a>
+            <h1 class="text-xl font-bold">Manage</h1>
+        </div>
+        <div class="flex items-center gap-2">
+            <select id="sort-by" onchange="applySort()" class="bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm">
+                <option value="device_type">Sort by Device</option>
+                <option value="name">Sort by Name</option>
+                <option value="type">Sort by Type</option>
+            </select>
+        </div>
+    </header>
+
+    <!-- Tabs -->
+    <div class="bg-gray-800 border-b border-gray-700 px-4">
+        <div class="flex gap-1">
+            <button onclick="showTab('firmware')" id="tab-firmware" class="px-4 py-3 font-medium border-b-2 border-blue-500 text-blue-400">
+                Firmware
+            </button>
+            <button onclick="showTab('configs')" id="tab-configs" class="px-4 py-3 font-medium border-b-2 border-transparent text-gray-400 hover:text-white">
+                Configs
+            </button>
+            <button onclick="showTab('credentials')" id="tab-credentials" class="px-4 py-3 font-medium border-b-2 border-transparent text-gray-400 hover:text-white">
+                Credentials
+            </button>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <main class="p-4 space-y-6">
+        <!-- ============================================ -->
+        <!-- FIRMWARE SECTION -->
+        <!-- ============================================ -->
+        <div id="section-firmware">
+            <!-- Upload Section -->
+            <div class="bg-gray-800 rounded-xl p-4 mb-6">
+                <h2 class="text-lg font-semibold mb-4">Add Firmware</h2>
+
+                <!-- Device Type Select -->
+                <div class="mb-4">
+                    <label class="block text-sm text-gray-400 mb-2">Device Type</label>
+                    <select id="fw-device-type" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                        <option value="cambium">Cambium ePMP</option>
+                        <option value="mikrotik">MikroTik RouterOS</option>
+                        <option value="tachyon">Tachyon</option>
+                        <option value="tarana">Tarana G1</option>
+                    </select>
+                </div>
+
+                <!-- Upload Methods -->
+                <div class="grid md:grid-cols-2 gap-4">
+                    <!-- File Upload -->
+                    <div class="drop-zone rounded-xl p-6 text-center cursor-pointer"
+                         onclick="document.getElementById('fw-file-input').click()"
+                         ondragover="handleDragOver(event)"
+                         ondragleave="handleDragLeave(event)"
+                         ondrop="handleFirmwareDrop(event)">
+                        <input type="file" id="fw-file-input" class="hidden" accept=".bin,.img,.tbn,.npk" onchange="uploadFirmwareFile(this.files[0])">
+                        <svg class="w-12 h-12 mx-auto text-gray-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                        </svg>
+                        <p class="text-gray-400">Drop firmware file here</p>
+                        <p class="text-sm text-gray-500">or click to browse</p>
+                    </div>
+
+                    <!-- URL Download -->
+                    <div class="bg-gray-700/50 rounded-xl p-4">
+                        <label class="block text-sm text-gray-400 mb-2">Or paste firmware URL</label>
+                        <input type="url" id="fw-url" placeholder="https://example.com/firmware.bin"
+                            class="w-full bg-gray-600 border border-gray-500 rounded-lg px-4 py-3 mb-3 focus:border-blue-500 focus:outline-none">
+                        <button onclick="downloadFirmwareFromUrl()" class="touch-btn w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium">
+                            Download from URL
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Firmware List -->
+            <div class="bg-gray-800 rounded-xl p-4">
+                <h2 class="text-lg font-semibold mb-4">Available Firmware</h2>
+                <div id="firmware-list" class="space-y-2">
+                    <div class="text-gray-500 text-center py-4">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================ -->
+        <!-- CONFIGS SECTION -->
+        <!-- ============================================ -->
+        <div id="section-configs" class="hidden">
+            <!-- Upload Section -->
+            <div class="bg-gray-800 rounded-xl p-4 mb-6">
+                <h2 class="text-lg font-semibold mb-4">Add Config</h2>
+
+                <div class="grid md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm text-gray-400 mb-2">Config Type</label>
+                        <select id="cfg-type" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                            <option value="template">Default Template</option>
+                            <option value="override">Device Override (by MAC)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-400 mb-2">Device Type</label>
+                        <select id="cfg-device-type" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                            <option value="cambium">Cambium ePMP</option>
+                            <option value="mikrotik">MikroTik RouterOS</option>
+                            <option value="tachyon">Tachyon</option>
+                            <option value="tarana">Tarana G1</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- File Upload -->
+                <div class="drop-zone rounded-xl p-6 text-center cursor-pointer"
+                     onclick="document.getElementById('cfg-file-input').click()"
+                     ondragover="handleDragOver(event)"
+                     ondragleave="handleDragLeave(event)"
+                     ondrop="handleConfigDrop(event)">
+                    <input type="file" id="cfg-file-input" class="hidden" accept=".json,.yaml,.rsc,.tar,.tar.gz,.tgz" onchange="uploadConfigFile(this.files[0])">
+                    <svg class="w-12 h-12 mx-auto text-gray-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                    </svg>
+                    <p class="text-gray-400">Drop config file here (.json, .yaml, .rsc, .tar)</p>
+                    <p class="text-sm text-gray-500">or click to browse</p>
+                </div>
+            </div>
+
+            <!-- Config List -->
+            <div class="bg-gray-800 rounded-xl p-4">
+                <h2 class="text-lg font-semibold mb-4">Config Files</h2>
+                <div id="config-list" class="space-y-2">
+                    <div class="text-gray-500 text-center py-4">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================ -->
+        <!-- CREDENTIALS SECTION -->
+        <!-- ============================================ -->
+        <div id="section-credentials" class="hidden">
+            <!-- Add Credential -->
+            <div class="bg-gray-800 rounded-xl p-4 mb-6">
+                <h2 class="text-lg font-semibold mb-4">Add Custom Credential</h2>
+                <p class="text-sm text-gray-400 mb-4">Custom credentials are tried first during provisioning, before built-in defaults.</p>
+
+                <div class="grid md:grid-cols-4 gap-4">
+                    <div>
+                        <label class="block text-sm text-gray-400 mb-2">Device Type</label>
+                        <select id="cred-device-type" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                            <option value="cambium">Cambium</option>
+                            <option value="mikrotik">MikroTik</option>
+                            <option value="tachyon">Tachyon</option>
+                            <option value="tarana">Tarana</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-400 mb-2">Username</label>
+                        <input type="text" id="cred-username" placeholder="admin"
+                            class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-400 mb-2">Password</label>
+                        <input type="password" id="cred-password" placeholder="password"
+                            class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                    </div>
+                    <div class="flex items-end">
+                        <button onclick="addCredential()" class="touch-btn w-full py-3 bg-green-600 hover:bg-green-500 rounded-lg font-medium">
+                            Add Credential
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Credentials List -->
+            <div class="bg-gray-800 rounded-xl p-4">
+                <h2 class="text-lg font-semibold mb-4">All Credentials</h2>
+                <div id="credentials-list" class="space-y-2">
+                    <div class="text-gray-500 text-center py-4">Loading...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
+
+    <!-- Config Editor Modal -->
+    <div id="editor-modal" class="fixed inset-0 z-50 hidden">
+        <div class="absolute inset-0 bg-black/50" onclick="closeEditor()"></div>
+        <div class="absolute inset-4 md:inset-8 bg-gray-800 rounded-2xl shadow-xl overflow-hidden flex flex-col">
+            <div class="px-6 py-4 border-b border-gray-700 flex items-center justify-between">
+                <h3 class="text-xl font-bold" id="editor-title">Edit Config</h3>
+                <button onclick="closeEditor()" class="touch-btn p-2 rounded-lg hover:bg-gray-700">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+            <div class="flex-1 overflow-hidden p-4">
+                <textarea id="editor-content" class="w-full h-full bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm focus:border-blue-500 focus:outline-none resize-none"></textarea>
+            </div>
+            <div class="px-6 py-4 border-t border-gray-700 flex gap-3">
+                <button onclick="saveConfig()" class="touch-btn flex-1 py-3 bg-green-600 hover:bg-green-500 rounded-lg font-medium">
+                    Save Changes
+                </button>
+                <button onclick="closeEditor()" class="touch-btn flex-1 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg font-medium">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentTab = 'firmware';
+        let editingConfig = null;
+        let currentSort = 'device_type';
+
+        // Data caches
+        let firmwareData = [];
+        let configsData = [];
+        let credentialsData = [];
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            // Debug: Test API connectivity
+            try {
+                const testResp = await fetch('/api/test');
+                const testData = await testResp.json();
+                console.log('API test:', testResp.status, testData);
+            } catch (e) {
+                console.error('API test failed:', e);
+            }
+
+            loadFirmware();
+            loadConfigs();
+            loadCredentials();
+        });
+
+        // Tab Management
+        function showTab(tab) {
+            currentTab = tab;
+
+            ['firmware', 'configs', 'credentials'].forEach(t => {
+                const tabBtn = document.getElementById(`tab-${t}`);
+                const section = document.getElementById(`section-${t}`);
+
+                if (t === tab) {
+                    tabBtn.className = 'px-4 py-3 font-medium border-b-2 border-blue-500 text-blue-400';
+                    section.classList.remove('hidden');
+                } else {
+                    tabBtn.className = 'px-4 py-3 font-medium border-b-2 border-transparent text-gray-400 hover:text-white';
+                    section.classList.add('hidden');
+                }
+            });
+        }
+
+        function applySort() {
+            currentSort = document.getElementById('sort-by').value;
+            renderFirmwareList(firmwareData);
+            renderConfigList(configsData);
+            renderCredentialsList(credentialsData);
+        }
+
+        // Drag and Drop
+        function handleDragOver(e) {
+            e.preventDefault();
+            e.currentTarget.classList.add('dragover');
+        }
+
+        function handleDragLeave(e) {
+            e.preventDefault();
+            e.currentTarget.classList.remove('dragover');
+        }
+
+        function handleFirmwareDrop(e) {
+            e.preventDefault();
+            e.currentTarget.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) uploadFirmwareFile(file);
+        }
+
+        function handleConfigDrop(e) {
+            e.preventDefault();
+            e.currentTarget.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) uploadConfigFile(file);
+        }
+
+        // Device type badge helper
+        function deviceBadge(type) {
+            const names = { cambium: 'Cambium', mikrotik: 'MikroTik', tachyon: 'Tachyon', tarana: 'Tarana' };
+            return `<span class="px-2 py-0.5 text-xs font-medium rounded badge-${type || 'unknown'}">${names[type] || type || 'Unknown'}</span>`;
+        }
+
+        // ============================================
+        // FIRMWARE MANAGEMENT
+        // ============================================
+        async function loadFirmware() {
+            try {
+                const response = await fetch('/api/firmware');
+                firmwareData = await response.json();
+                renderFirmwareList(firmwareData);
+            } catch (error) {
+                document.getElementById('firmware-list').innerHTML =
+                    '<div class="text-red-400 text-center py-4">Failed to load firmware</div>';
+            }
+        }
+
+        function renderFirmwareList(firmware) {
+            const list = document.getElementById('firmware-list');
+
+            if (firmware.length === 0) {
+                list.innerHTML = '<div class="text-gray-500 text-center py-4">No firmware files. Upload one above.</div>';
+                return;
+            }
+
+            // Sort
+            let sorted = [...firmware];
+            if (currentSort === 'device_type') {
+                sorted.sort((a, b) => a.device_type.localeCompare(b.device_type) || a.filename.localeCompare(b.filename));
+            } else if (currentSort === 'name') {
+                sorted.sort((a, b) => a.filename.localeCompare(b.filename));
+            }
+
+            list.innerHTML = sorted.map(fw => `
+                <div class="bg-gray-700/50 rounded-lg p-3 flex items-center gap-3">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1">
+                            ${deviceBadge(fw.device_type)}
+                            <span class="font-medium truncate">${fw.filename}</span>
+                        </div>
+                        <div class="text-sm text-gray-400">Version: ${fw.version} | ${formatBytes(fw.size)}</div>
+                    </div>
+                    <button onclick="deleteFirmware('${fw.device_type}', '${fw.filename}')"
+                        class="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/30 rounded-lg" title="Delete">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                        </svg>
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        async function uploadFirmwareFile(file) {
+            if (!file) return;
+
+            const deviceType = document.getElementById('fw-device-type').value;
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('device_type', deviceType);
+
+            showToast('Uploading firmware...', 'info');
+
+            try {
+                const response = await fetch('/api/firmware/upload', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showToast(`Firmware uploaded: ${file.name}`, 'success');
+                    loadFirmware();
+                } else {
+                    showToast(data.detail || 'Upload failed', 'error');
+                }
+            } catch (error) {
+                showToast('Upload failed', 'error');
+            }
+        }
+
+        async function downloadFirmwareFromUrl() {
+            const url = document.getElementById('fw-url').value.trim();
+            if (!url) {
+                showToast('Please enter a URL', 'warning');
+                return;
+            }
+
+            const deviceType = document.getElementById('fw-device-type').value;
+
+            showToast('Downloading firmware...', 'info');
+
+            try {
+                const response = await fetch('/api/firmware/url', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, device_type: deviceType }),
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showToast(`Firmware downloaded: ${data.firmware.filename}`, 'success');
+                    document.getElementById('fw-url').value = '';
+                    loadFirmware();
+                } else {
+                    showToast(data.detail || 'Download failed', 'error');
+                }
+            } catch (error) {
+                showToast('Download failed', 'error');
+            }
+        }
+
+        async function deleteFirmware(deviceType, filename) {
+            if (!confirm(`Delete ${filename}?`)) return;
+
+            try {
+                const response = await fetch(`/api/firmware/${deviceType}/${filename}`, {
+                    method: 'DELETE',
+                });
+
+                if (response.ok) {
+                    showToast('Firmware deleted', 'success');
+                    loadFirmware();
+                } else {
+                    showToast('Delete failed', 'error');
+                }
+            } catch (error) {
+                showToast('Delete failed', 'error');
+            }
+        }
+
+        // ============================================
+        // CONFIG MANAGEMENT
+        // ============================================
+        async function loadConfigs() {
+            try {
+                const response = await fetch('/api/configs');
+                configsData = await response.json();
+                renderConfigList(configsData);
+            } catch (error) {
+                document.getElementById('config-list').innerHTML =
+                    '<div class="text-red-400 text-center py-4">Failed to load configs</div>';
+            }
+        }
+
+        function renderConfigList(configs) {
+            const list = document.getElementById('config-list');
+
+            if (configs.length === 0) {
+                list.innerHTML = '<div class="text-gray-500 text-center py-4">No config files. Upload one above.</div>';
+                return;
+            }
+
+            // Sort
+            let sorted = [...configs];
+            if (currentSort === 'device_type') {
+                sorted.sort((a, b) => (a.device_type || '').localeCompare(b.device_type || '') || a.filename.localeCompare(b.filename));
+            } else if (currentSort === 'name') {
+                sorted.sort((a, b) => a.filename.localeCompare(b.filename));
+            } else if (currentSort === 'type') {
+                sorted.sort((a, b) => a.config_type.localeCompare(b.config_type) || a.filename.localeCompare(b.filename));
+            }
+
+            list.innerHTML = sorted.map(cfg => `
+                <div class="bg-gray-700/50 rounded-lg p-3 flex items-center gap-3">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1">
+                            ${deviceBadge(cfg.device_type)}
+                            <span class="px-2 py-0.5 text-xs font-medium rounded ${cfg.config_type === 'template' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'}">${cfg.config_type}</span>
+                            <span class="font-medium truncate">${cfg.filename}</span>
+                        </div>
+                        <div class="text-sm text-gray-400">${formatBytes(cfg.size)}</div>
+                    </div>
+                    <button onclick="editConfig('${cfg.config_type}', '${cfg.device_type}', '${cfg.filename}')"
+                        class="p-2 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg" title="Edit">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                        </svg>
+                    </button>
+                    <button onclick="deleteConfig('${cfg.config_type}', '${cfg.device_type}', '${cfg.filename}')"
+                        class="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/30 rounded-lg" title="Delete">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                        </svg>
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        async function uploadConfigFile(file) {
+            if (!file) return;
+
+            const configType = document.getElementById('cfg-type').value;
+            const deviceType = document.getElementById('cfg-device-type').value;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('config_type', configType);
+            formData.append('device_type', deviceType);
+
+            showToast('Uploading config...', 'info');
+
+            try {
+                const response = await fetch('/api/configs/upload', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showToast(`Config uploaded: ${file.name}`, 'success');
+                    loadConfigs();
+                } else {
+                    showToast(data.detail || 'Upload failed', 'error');
+                }
+            } catch (error) {
+                showToast('Upload failed', 'error');
+            }
+        }
+
+        async function editConfig(configType, deviceType, filename) {
+            try {
+                const response = await fetch(`/api/configs/${configType}/${deviceType}/${filename}`);
+                const data = await response.json();
+
+                editingConfig = { configType, deviceType, filename };
+                document.getElementById('editor-title').textContent = `Edit: ${filename}`;
+                document.getElementById('editor-content').value = data.content;
+                document.getElementById('editor-modal').classList.remove('hidden');
+            } catch (error) {
+                showToast('Failed to load config', 'error');
+            }
+        }
+
+        function closeEditor() {
+            editingConfig = null;
+            document.getElementById('editor-modal').classList.add('hidden');
+        }
+
+        async function saveConfig() {
+            if (!editingConfig) return;
+
+            const content = document.getElementById('editor-content').value;
+
+            try {
+                const response = await fetch(`/api/configs/${editingConfig.configType}/${editingConfig.deviceType}/${editingConfig.filename}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content }),
+                });
+
+                if (response.ok) {
+                    showToast('Config saved', 'success');
+                    closeEditor();
+                    loadConfigs();
+                } else {
+                    const data = await response.json();
+                    showToast(data.detail || 'Save failed', 'error');
+                }
+            } catch (error) {
+                showToast('Save failed', 'error');
+            }
+        }
+
+        async function deleteConfig(configType, deviceType, filename) {
+            if (!confirm(`Delete ${filename}?`)) return;
+
+            try {
+                const response = await fetch(`/api/configs/${configType}/${deviceType}/${filename}`, {
+                    method: 'DELETE',
+                });
+
+                if (response.ok) {
+                    showToast('Config deleted', 'success');
+                    loadConfigs();
+                } else {
+                    showToast('Delete failed', 'error');
+                }
+            } catch (error) {
+                showToast('Delete failed', 'error');
+            }
+        }
+
+        // ============================================
+        // CREDENTIALS MANAGEMENT
+        // ============================================
+        async function loadCredentials() {
+            try {
+                const response = await fetch('/api/default-credentials');
+                const data = await response.json();
+
+                // Check if response is an array (success) or error object
+                if (Array.isArray(data)) {
+                    credentialsData = data;
+                    renderCredentialsList(credentialsData);
+                } else if (data.detail) {
+                    // API returned an error
+                    console.error('Credentials API error:', data);
+                    document.getElementById('credentials-list').innerHTML =
+                        `<div class="text-red-400 text-center py-4">Error: ${data.detail}</div>`;
+                } else {
+                    // Unexpected response format
+                    console.error('Unexpected credentials response:', data);
+                    document.getElementById('credentials-list').innerHTML =
+                        '<div class="text-red-400 text-center py-4">Unexpected response format</div>';
+                }
+            } catch (error) {
+                console.error('Failed to load credentials:', error);
+                document.getElementById('credentials-list').innerHTML =
+                    '<div class="text-red-400 text-center py-4">Failed to load credentials</div>';
+            }
+        }
+
+        function renderCredentialsList(credentials) {
+            const list = document.getElementById('credentials-list');
+
+            if (credentials.length === 0) {
+                list.innerHTML = '<div class="text-gray-500 text-center py-4">No credentials configured.</div>';
+                return;
+            }
+
+            // Sort
+            let sorted = [...credentials];
+            if (currentSort === 'device_type') {
+                sorted.sort((a, b) => a.device_type.localeCompare(b.device_type) || a.username.localeCompare(b.username));
+            } else if (currentSort === 'name') {
+                sorted.sort((a, b) => a.username.localeCompare(b.username));
+            } else if (currentSort === 'type') {
+                sorted.sort((a, b) => (a.is_custom === b.is_custom ? 0 : a.is_custom ? -1 : 1));
+            }
+
+            list.innerHTML = sorted.map(cred => `
+                <div class="bg-gray-700/50 rounded-lg p-3 flex items-center gap-3 ${cred.is_custom ? '' : 'opacity-60'}">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 mb-1">
+                            ${deviceBadge(cred.device_type)}
+                            <span class="px-2 py-0.5 text-xs font-medium rounded ${cred.is_custom ? 'badge-custom' : 'badge-default'}">${cred.is_custom ? 'CUSTOM' : 'DEFAULT'}</span>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <span class="font-mono text-sm">${escapeHtml(cred.username)}</span>
+                            <span class="text-gray-500 text-sm">${cred.password_hint}</span>
+                        </div>
+                    </div>
+                    ${cred.is_custom ? `
+                        <button onclick="deleteCredential('${cred.device_type}', ${cred.index})"
+                            class="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/30 rounded-lg" title="Delete">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                            </svg>
+                        </button>
+                    ` : ''}
+                </div>
+            `).join('');
+        }
+
+        async function addCredential() {
+            const deviceType = document.getElementById('cred-device-type').value;
+            const username = document.getElementById('cred-username').value.trim();
+            const password = document.getElementById('cred-password').value;
+
+            if (!username) {
+                showToast('Username is required', 'warning');
+                return;
+            }
+
+            showToast('Adding credential...', 'info');
+
+            try {
+                const response = await fetch(`/api/default-credentials/${deviceType}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password }),
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showToast(data.message || 'Credential added', 'success');
+                    document.getElementById('cred-username').value = '';
+                    document.getElementById('cred-password').value = '';
+                    loadCredentials();
+                } else {
+                    showToast(data.detail || 'Failed to add credential', 'error');
+                }
+            } catch (error) {
+                showToast('Failed to add credential', 'error');
+                console.error(error);
+            }
+        }
+
+        async function deleteCredential(deviceType, index) {
+            if (!confirm('Delete this credential?')) return;
+
+            try {
+                const response = await fetch(`/api/default-credentials/${deviceType}/${index}`, {
+                    method: 'DELETE',
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showToast(data.message || 'Credential deleted', 'success');
+                    loadCredentials();
+                } else {
+                    showToast(data.detail || 'Failed to delete', 'error');
+                }
+            } catch (error) {
+                showToast('Failed to delete credential', 'error');
+            }
+        }
+
+        // ============================================
+        // UTILITIES
+        // ============================================
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+
+            const colors = {
+                success: 'bg-green-600',
+                error: 'bg-red-600',
+                warning: 'bg-yellow-600',
+                info: 'bg-blue-600',
+            };
+
+            toast.className = `${colors[type]} text-white px-4 py-3 rounded-lg shadow-lg transform transition-all duration-300 translate-x-full`;
+            toast.textContent = message;
+            container.appendChild(toast);
+
+            requestAnimationFrame(() => toast.classList.remove('translate-x-full'));
+
+            setTimeout(() => {
+                toast.classList.add('translate-x-full');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>

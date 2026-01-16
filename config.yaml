@@ -1,0 +1,124 @@
+# Network Device Auto-Provisioner Configuration
+# Copy this file and customize for your environment
+
+network:
+  # Base network interface (trunk port from managed switch)
+  interface: eth0
+
+  # Detection mode: "vlan" for multi-port VLAN setup, "simple" for single port
+  mode: vlan
+
+  # Seconds to wait after link-up before scanning
+  scan_delay: 10
+
+  # Seconds to wait for device to fully boot
+  device_boot_timeout: 90
+
+  # Management network - for switch-to-Pi communication (webhooks)
+  # The MikroTik switch sends port status changes to this IP
+  # Uses VLAN 1990 (before provisioning VLANs 1991-1996)
+  management:
+    enabled: true
+    ip: 192.168.88.10       # Pi's management IP on VLAN 1990
+    netmask: 255.255.255.0
+    switch_ip: 192.168.88.1 # Switch's IP on VLAN 1990 (for reference only)
+    vlan: 1990              # Management VLAN (tagged on trunk)
+
+# VLAN/Port configuration for multi-device provisioning
+# Each switch port gets its own VLAN for device isolation
+ports:
+  # Starting VLAN ID (ether1 = VLAN 1991, ether2 = VLAN 1992, etc.)
+  vlan_start: 1991
+
+  # Number of provisioning ports (6 ports: ether1-ether6, ether7 is WAN, ether8 is trunk)
+  num_ports: 6
+
+  # Local IP for OrangePi on each VLAN interface
+  # This IP is used to communicate with devices at their link-local addresses
+  local_ip: 169.254.1.2
+
+  # Known device link-local addresses
+  device_ips:
+    cambium: 169.254.1.1
+    tachyon: 169.254.1.1
+    tarana: 169.254.100.1
+    mikrotik: 192.168.88.1  # Default, but often uses DHCP
+
+# Simple mode settings (single port, DHCP-based detection)
+simple_mode:
+  subnet: 192.168.1.0/24
+
+github:
+  # Git repository URL (SSH format for deploy key auth)
+  repo: git@github.com:your-org/network-configs.git
+
+  # Branch to track
+  branch: main
+
+  # Seconds between repository sync checks
+  sync_interval: 300
+
+  # Path to SSH deploy key for private repo access
+  deploy_key: /etc/provisioner/deploy_key
+
+  # Local path for cloned repository
+  local_path: /var/lib/provisioner/repo
+
+credentials:
+  # Device credentials - use environment variables for passwords
+  # Set these in /etc/provisioner/provisioner.env or export them
+  # backup_password is tried if primary password fails
+
+  cambium:
+    username: admin
+    password: "${CAMBIUM_PASSWORD}"
+    backup_password: "${CAMBIUM_BACKUP_PASSWORD}"
+
+  mikrotik:
+    username: admin
+    password: "${MIKROTIK_PASSWORD}"
+
+  tarana:
+    username: admin
+    password: "${TARANA_PASSWORD}"
+
+  tachyon:
+    username: root
+    password: "${TACHYON_PASSWORD}"
+
+notifications:
+  # Slack incoming webhook URL (optional)
+  slack_webhook: "${SLACK_WEBHOOK_URL}"
+
+  # Discord webhook URL (optional)
+  discord_webhook: "${DISCORD_WEBHOOK_URL}"
+
+gpio:
+  # Enable GPIO for LED/buzzer indicators
+  enabled: true
+
+  # GPIO pin numbers (BOARD numbering)
+  green_led: 7    # Success indicator
+  red_led: 8      # Error indicator
+  yellow_led: 9   # In-progress indicator
+  buzzer: 10      # Audio notification
+
+firmware:
+  # Update both firmware banks on dual-bank devices
+  dual_bank_update: true
+
+  # Verify firmware version after update
+  verify_after_reboot: true
+
+  # Seconds to wait for device to reboot
+  reboot_wait_timeout: 180
+
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: INFO
+
+  # Log file path
+  file: /var/log/provisioner.log
+
+  # SQLite database for history
+  db: /var/lib/provisioner/history.db

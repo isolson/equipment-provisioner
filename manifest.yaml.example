@@ -1,0 +1,72 @@
+# Example manifest.yaml for GitHub configs/firmware repository
+# This file should be in the root of your GitHub repository that
+# contains configurations and firmware files.
+
+# Firmware definitions
+firmware:
+  mikrotik:
+    default:
+      version: "7.13"
+      file: "routeros-7.13-arm.npk"
+      sha256: "abc123..."
+      release_notes: "Security fixes and performance improvements"
+
+    # Model-specific firmware
+    hAP_ac2:
+      version: "7.13"
+      file: "routeros-7.13-arm.npk"
+
+    RB4011:
+      version: "7.13"
+      file: "routeros-7.13-arm64.npk"
+
+  cambium:
+    default:
+      version: "4.7.1"
+      file: "ePMP-4.7.1-firmware.img"
+      sha256: "def456..."
+
+    ePMP_3000:
+      version: "4.7.1"
+      file: "ePMP3000-4.7.1.img"
+
+    ePMP_Force_400:
+      version: "4.7.1"
+      file: "ePMPForce400-4.7.1.img"
+
+  tachyon:
+    default:
+      version: "2.5.0"
+      file: "tachyon-30x-2.5.0.bin"
+
+    "301":
+      version: "2.5.0"
+      file: "tachyon-301-2.5.0.bin"
+
+    "302":
+      version: "2.5.0"
+      file: "tachyon-302-2.5.0.bin"
+
+    "303L":
+      version: "2.5.0"
+      file: "tachyon-303L-2.5.0.bin"
+
+  tarana:
+    default:
+      version: "3.2.0"
+      file: "tarana-g1-3.2.0.img"
+
+# Config templates mapping
+configs:
+  mikrotik:
+    default: "templates/mikrotik_router.rsc"
+
+  cambium:
+    default: "templates/cambium_epmp.json"
+    ePMP_3000: "templates/cambium_epmp3000.json"
+
+  tachyon:
+    default: "templates/tachyon_30x.json"
+
+  tarana:
+    default: "templates/tarana_rn.json"

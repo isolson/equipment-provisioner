@@ -1,0 +1,44 @@
+[Unit]
+Description=Equipment Auto-Provisioner Web Interface
+Documentation=https://github.com/isolson/equipment-provisioner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Working directory
+WorkingDirectory=/opt/provisioner
+
+# Environment file for secrets
+EnvironmentFile=-/etc/provisioner/provisioner.env
+
+# Start command - runs both provisioner and web interface
+ExecStart=/opt/provisioner/venv/bin/python -m provisioner.web_server -c /etc/provisioner/config.yaml --port 8080
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=read-only
+
+# Allow network and GPIO access
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_RAWIO
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=512M
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=provisioner-web
+
+[Install]
+WantedBy=multi-user.target

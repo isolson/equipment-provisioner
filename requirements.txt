@@ -1,0 +1,48 @@
+# Network Provisioner Dependencies
+
+# Async HTTP client
+aiohttp>=3.9.0
+
+# Network interface monitoring (netlink)
+pyroute2>=0.7.0
+
+# ARP scanning
+scapy>=2.5.0
+
+# SSH connections
+paramiko>=3.4.0
+asyncssh>=2.14.0
+
+# Mikrotik RouterOS API
+librouteros>=3.2.0
+
+# Config templating
+jinja2>=3.1.0
+
+# Configuration
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# OrangePi GPIO (RPi.GPIO compatible)
+OPi.GPIO>=0.5.0
+
+# Git operations
+gitpython>=3.1.0
+
+# Async SQLite
+aiosqlite>=0.19.0
+
+# CLI output formatting
+rich>=13.0.0
+
+# Data validation
+pydantic>=2.5.0
+
+# SNMP for device detection
+pysnmp>=6.0.0
+
+# Web interface
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+websockets>=12.0
+python-multipart>=0.0.6  # Required for file uploads

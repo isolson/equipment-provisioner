@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment and secrets
+.env
+*.env
+provisioner.env
+deploy_key
+deploy_key.pub
+*.pem
+*.key
+
+# Logs and databases
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Local test scripts (may contain device-specific paths/credentials)
+test_curl.txt
+test_firmware_banks.sh
+sync-to-pi.sh
+
+# Firmware files (too large for git, use Git LFS or separate storage)
+firmware/*.bin
+firmware/*.img
+firmware/*.npk
+firmware/**/*.bin
+firmware/**/*.img
+firmware/**/*.npk
+
+# Local data
+/var/
+/data/
+history.db
