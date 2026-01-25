@@ -721,10 +721,10 @@ class CambiumHandler(BaseHandler):
                 # Check for software upgrade in progress - device is busy, need to wait and retry
                 if "sw_upgrade_is_in_progress" in response.lower():
                     logger.info(f"Device {self.ip} is still applying firmware upgrade, waiting and retrying...")
-                    # Retry up to 12 times (2 minutes total) while upgrade is in progress
-                    for retry in range(12):
+                    # Retry up to 60 times (10 minutes total) while upgrade is in progress
+                    for retry in range(60):
                         await asyncio.sleep(10)
-                        logger.info(f"Upgrade wait retry {retry+1}/12 for {self.ip}...")
+                        logger.info(f"Upgrade wait retry {retry+1}/60 for {self.ip}...")
                         # Re-attempt login
                         proc = await asyncio.create_subprocess_exec(
                             "curl", "-s", "-k", "-m", "10",
