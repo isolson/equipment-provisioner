@@ -468,24 +468,44 @@ class BaseHandler(ABC):
                         banks = await self.get_firmware_banks()
                         bank1_ver = banks.get("bank1", "")
                         bank2_ver = banks.get("bank2", "")
+                        active_bank = banks.get("active", 1)
                         # Use display versions for UI if available
                         bank1_display = banks.get("bank1_display", bank1_ver)
                         bank2_display = banks.get("bank2_display", bank2_ver)
-                        bank_info = f"bank1:{bank1_display}|bank2:{bank2_display}|active:{banks.get('active', 1)}"
+                        bank_info = f"bank1:{bank1_display}|bank2:{bank2_display}|active:{active_bank}"
                         _logger.info(f"[PROVISION] After reboot #1, firmware banks: {bank_info}")
                         await notify("firmware_banks", True, bank_info)
 
-                        # Check if expected firmware is now in bank 1 (using normalized versions)
-                        if expected_firmware and bank1_ver == expected_firmware:
-                            fw1_verified = True
-                            _logger.info(f"[PROVISION] Firmware update 1 verified: bank1={expected_firmware}")
-                        elif not expected_firmware:
-                            fw1_verified = True  # No expected version to check
+                        # Determine which bank to verify based on device behavior
+                        # Devices with update_triggers_reboot write to inactive bank and reboot into it,
+                        # so we should verify the ACTIVE bank, not specifically bank1
+                        if self.update_triggers_reboot:
+                            # Check the active bank (the one just updated and rebooted into)
+                            active_ver = bank1_ver if active_bank == 1 else bank2_ver
+                            if expected_firmware and active_ver == expected_firmware:
+                                fw1_verified = True
+                                _logger.info(f"[PROVISION] Firmware update 1 verified: active bank {active_bank}={expected_firmware}")
+                            elif not expected_firmware:
+                                fw1_verified = True  # No expected version to check
+                        else:
+                            # Traditional devices: check bank1 specifically
+                            if expected_firmware and bank1_ver == expected_firmware:
+                                fw1_verified = True
+                                _logger.info(f"[PROVISION] Firmware update 1 verified: bank1={expected_firmware}")
+                            elif not expected_firmware:
+                                fw1_verified = True  # No expected version to check
 
                         # Update need_fw2 based on current bank2 state (using normalized versions)
+                        # For auto-reboot devices, after FW1 the inactive bank needs update
                         if expected_firmware:
-                            need_fw2 = (bank2_ver != expected_firmware)
-                            _logger.info(f"[PROVISION] After FW1, bank2={bank2_ver}, need_fw2={need_fw2}")
+                            if self.update_triggers_reboot:
+                                # The inactive bank (not active) needs update
+                                inactive_ver = bank2_ver if active_bank == 1 else bank1_ver
+                                need_fw2 = (inactive_ver != expected_firmware)
+                                _logger.info(f"[PROVISION] After FW1, inactive bank={inactive_ver}, need_fw2={need_fw2}")
+                            else:
+                                need_fw2 = (bank2_ver != expected_firmware)
+                                _logger.info(f"[PROVISION] After FW1, bank2={bank2_ver}, need_fw2={need_fw2}")
                     except Exception as e:
                         _logger.error(f"[PROVISION] get_firmware_banks exception: {e}")
 
@@ -585,18 +605,26 @@ class BaseHandler(ABC):
                             banks = await self.get_firmware_banks()
                             bank1_ver = banks.get("bank1", "")
                             bank2_ver = banks.get("bank2", "")
+                            active_bank = banks.get("active", 1)
                             # Use display versions for UI if available
                             bank1_display = banks.get("bank1_display", bank1_ver)
                             bank2_display = banks.get("bank2_display", bank2_ver)
-                            bank_info = f"bank1:{bank1_display}|bank2:{bank2_display}|active:{banks.get('active', 1)}"
+                            bank_info = f"bank1:{bank1_display}|bank2:{bank2_display}|active:{active_bank}"
                             _logger.info(f"[PROVISION] After reboot #2, firmware banks: {bank_info}")
                             await notify("firmware_banks", True, bank_info)
 
-                            # Check if bank 2 now has expected firmware (using normalized versions)
-                            if expected_firmware and bank2_ver == expected_firmware:
-                                fw2_verified = True
-                                _logger.info(f"[PROVISION] Firmware update 2 verified: bank2={expected_firmware}")
-                            elif not expected_firmware:
+                            # For FW2, verify both banks have expected firmware (dual-bank complete)
+                            if expected_firmware:
+                                if bank1_ver == expected_firmware and bank2_ver == expected_firmware:
+                                    fw2_verified = True
+                                    _logger.info(f"[PROVISION] Firmware update 2 verified: both banks={expected_firmware}")
+                                elif self.update_triggers_reboot:
+                                    # For auto-reboot devices, at minimum the active bank should match
+                                    active_ver = bank1_ver if active_bank == 1 else bank2_ver
+                                    if active_ver == expected_firmware:
+                                        fw2_verified = True
+                                        _logger.info(f"[PROVISION] Firmware update 2 verified: active bank {active_bank}={expected_firmware}")
+                            else:
                                 fw2_verified = True  # No expected version to check
                         except Exception as e:
                             _logger.error(f"[PROVISION] get_firmware_banks exception: {e}")
