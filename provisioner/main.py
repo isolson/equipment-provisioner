@@ -398,6 +398,13 @@ class Provisioner:
             await db.update_job(job_id, status=ProvisioningStatus.CONFIGURING)
             await notify_provisioning_progress(port_num, job_id, "configuring", 30)
 
+            # Create firmware lookup callback for model-specific re-lookup
+            def firmware_lookup(device_type: str, model: str) -> tuple:
+                fw_info = self.firmware_manager.get_firmware_file(device_type, model)
+                if fw_info:
+                    return str(fw_info.path), fw_info.version
+                return None, None
+
             result = await self.handler_manager.provision_device(
                 fingerprint=fingerprint,
                 ip=device_ip,
@@ -409,6 +416,7 @@ class Provisioner:
                 interface=interface,
                 firmware_current=firmware_current,
                 on_progress=on_checklist_progress,
+                firmware_lookup_callback=firmware_lookup,
             )
 
             # Update MAC address and serial in checklist and DB if we got device info
@@ -630,6 +638,13 @@ class Provisioner:
             # Run provisioning
             await db.update_job(job_id, status=ProvisioningStatus.CONFIGURING)
 
+            # Create firmware lookup callback for model-specific re-lookup
+            def firmware_lookup(device_type: str, model: str) -> tuple:
+                fw_info = self.firmware_manager.get_firmware_file(device_type, model)
+                if fw_info:
+                    return str(fw_info.path), fw_info.version
+                return None, None
+
             result = await self.handler_manager.provision_device(
                 fingerprint=fingerprint,
                 ip=device.ip_address,
@@ -638,6 +653,7 @@ class Provisioner:
                 firmware_path=firmware_path,
                 expected_firmware=expected_firmware,
                 dual_bank=self.config.firmware.dual_bank_update,
+                firmware_lookup_callback=firmware_lookup,
             )
 
             # Update job record

@@ -256,6 +256,7 @@ class BaseHandler(ABC):
         new_password: Optional[str] = None,
         firmware_current: bool = False,
         on_progress: Optional[Callable[[str, bool, Optional[str]], Awaitable[None]]] = None,
+        firmware_lookup_callback: Optional[Callable[[str, str], tuple]] = None,
     ) -> ProvisioningResult:
         """Run the full provisioning workflow.
 
@@ -279,6 +280,8 @@ class BaseHandler(ABC):
             new_password: New password to set (changes from factory default).
             firmware_current: Hint that firmware is already current (from fingerprint).
             on_progress: Callback for UI updates: (step_name, success, detail).
+            firmware_lookup_callback: Callback to re-lookup firmware by (device_type, model).
+                Returns tuple of (firmware_path, expected_version) or (None, None).
 
         Returns:
             ProvisioningResult with outcome details.
@@ -396,9 +399,20 @@ class BaseHandler(ABC):
                 if model_name:
                     is_valid, error_msg = self.validate_firmware_for_model(firmware_path, model_name)
                     if not is_valid:
-                        result.error_message = error_msg
-                        await notify("firmware_update_1", False, result.error_message)
-                        return result
+                        # Try to re-lookup firmware with the now-known model
+                        if firmware_lookup_callback:
+                            _logger.info(f"[PROVISION] Firmware mismatch, re-looking up for model {model_name}")
+                            new_path, new_version = firmware_lookup_callback(self.device_type, model_name)
+                            if new_path:
+                                _logger.info(f"[PROVISION] Found correct firmware: {new_path} (version {new_version})")
+                                firmware_path = new_path
+                                expected_firmware = new_version
+                                # Re-validate with new firmware
+                                is_valid, error_msg = self.validate_firmware_for_model(firmware_path, model_name)
+                        if not is_valid:
+                            result.error_message = error_msg
+                            await notify("firmware_update_1", False, result.error_message)
+                            return result
 
                 _logger.info(f"[PROVISION] Phase 3: Firmware update 1 (bank 1)")
                 _logger.info(f"    Firmware path: {firmware_path}")

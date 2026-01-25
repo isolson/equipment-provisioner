@@ -95,6 +95,7 @@ class HandlerManager:
         interface: Optional[str] = None,
         firmware_current: bool = False,
         on_progress: Optional[Callable[[str, bool, Optional[str]], Awaitable[None]]] = None,
+        firmware_lookup_callback: Optional[Callable[[str, str], tuple]] = None,
     ) -> ProvisioningResult:
         """Provision a device with configuration and/or firmware.
 
@@ -109,6 +110,7 @@ class HandlerManager:
             interface: Network interface to bind to (e.g., 'eth0.1994').
             firmware_current: If True, firmware is already current (skip updates).
             on_progress: Optional callback for progress updates (step, success, detail).
+            firmware_lookup_callback: Callback to re-lookup firmware by (device_type, model).
 
         Returns:
             ProvisioningResult with outcome details.
@@ -131,6 +133,7 @@ class HandlerManager:
             dual_bank=dual_bank,
             firmware_current=firmware_current,
             on_progress=on_progress,
+            firmware_lookup_callback=firmware_lookup_callback,
         )
 
         if result.success:

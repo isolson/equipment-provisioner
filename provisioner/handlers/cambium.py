@@ -711,11 +711,59 @@ class CambiumHandler(BaseHandler):
                     "incorrect password",
                     "invalid credentials",
                     "authentication failed",
+                    "auth_failed",  # Cambium returns {"msg":"auth_failed","success":0}
                 ]
                 for pattern in rejection_patterns:
                     if pattern.lower() in response.lower():
                         logger.warning(f"Credentials rejected by {self.ip}: {pattern}")
                         return False, True
+
+                # Check for software upgrade in progress - device is busy, need to wait and retry
+                if "sw_upgrade_is_in_progress" in response.lower():
+                    logger.info(f"Device {self.ip} is still applying firmware upgrade, waiting and retrying...")
+                    # Retry up to 12 times (2 minutes total) while upgrade is in progress
+                    for retry in range(12):
+                        await asyncio.sleep(10)
+                        logger.info(f"Upgrade wait retry {retry+1}/12 for {self.ip}...")
+                        # Re-attempt login
+                        proc = await asyncio.create_subprocess_exec(
+                            "curl", "-s", "-k", "-m", "10",
+                            "--interface", self.interface,
+                            "-c", cookie_path, "-b", cookie_path,
+                            "-X", "POST",
+                            "-H", "Content-Type: application/x-www-form-urlencoded",
+                            "-d", f"username={username}&password={password}",
+                            login_url,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        stdout, stderr = await proc.communicate()
+                        if proc.returncode == 0 and stdout:
+                            retry_response = stdout.decode("utf-8", errors="ignore")
+                            logger.info(f"Upgrade wait retry response: {retry_response[:200]}")
+                            if "sw_upgrade_is_in_progress" not in retry_response.lower():
+                                # Upgrade finished, check if we got a valid session
+                                if "stok" in retry_response:
+                                    try:
+                                        for line in retry_response.split("\n"):
+                                            line = line.strip()
+                                            if line.startswith("{"):
+                                                data = json.loads(line)
+                                                if "stok" in data:
+                                                    self._stok = data["stok"]
+                                                    self._connected = True
+                                                    logger.info(f"Connected to Cambium at {self.ip} after upgrade wait (stok={self._stok[:8]}...)")
+                                                    return True, False
+                                    except json.JSONDecodeError:
+                                        pass
+                                # Check for auth failure after upgrade
+                                if "auth_failed" in retry_response.lower():
+                                    return False, True
+                                # Got some other response, break out to continue normal flow
+                                break
+                    # Timed out waiting for upgrade
+                    logger.warning(f"Upgrade on {self.ip} taking too long, giving up")
+                    return False, False
 
                 # Check for max users reached (too many active sessions)
                 if "max_user_number_reached" in response.lower():
