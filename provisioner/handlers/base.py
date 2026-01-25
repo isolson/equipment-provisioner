@@ -409,112 +409,133 @@ class BaseHandler(ABC):
                                 expected_firmware = new_version
                                 # Re-validate with new firmware
                                 is_valid, error_msg = self.validate_firmware_for_model(firmware_path, model_name)
+
+                                # Recalculate if update is still needed with correct firmware
+                                if self.update_triggers_reboot:
+                                    # For auto-reboot devices, check active bank
+                                    active_bank = banks.get("active", 1)
+                                    active_ver = bank1_ver if active_bank == 1 else bank2_ver
+                                    need_fw1 = (active_ver != expected_firmware)
+                                    _logger.info(f"[PROVISION] After re-lookup: active bank {active_bank}={active_ver}, need_fw1={need_fw1}")
+                                else:
+                                    need_fw1 = (bank1_ver != expected_firmware)
+                                    _logger.info(f"[PROVISION] After re-lookup: bank1={bank1_ver}, need_fw1={need_fw1}")
+
+                                # If firmware no longer needed, skip the upload
+                                if not need_fw1:
+                                    _logger.info(f"[PROVISION] Firmware already matches after re-lookup, skipping FW1 update")
+
                         if not is_valid:
                             result.error_message = error_msg
                             await notify("firmware_update_1", False, result.error_message)
                             return result
 
-                _logger.info(f"[PROVISION] Phase 3: Firmware update 1 (bank 1)")
-                _logger.info(f"    Firmware path: {firmware_path}")
-                _logger.info(f"    Expected version: {expected_firmware}")
-                _logger.info(f"    Current bank1: {bank1_ver}")
-
-                await notify("firmware_update_1", "loading", None)
-
-                if not await self.upload_firmware(firmware_path):
-                    result.error_message = "Failed to upload firmware (update 1)"
-                    await notify("firmware_update_1", False, result.error_message)
-                    return result
-
-                if not await self.update_firmware(bank=1 if self.supports_dual_bank else None):
-                    result.error_message = "Failed to stage firmware (update 1)"
-                    await notify("firmware_update_1", False, result.error_message)
-                    return result
-                _logger.info(f"[PROVISION] Firmware update 1 staged")
-
-                # ================================================================
-                # PHASE 4: REBOOT #1
-                # ================================================================
-                _logger.info(f"[PROVISION] Phase 4: Reboot #1")
-                # Some devices (e.g., Tachyon) reboot automatically after update_firmware()
-                if getattr(self, 'update_triggers_reboot', False):
-                    _logger.info(f"[PROVISION] Device reboots automatically after firmware update")
-                else:
-                    if not await self.reboot():
-                        result.error_message = "Failed to reboot device"
-                        await notify("reboot", False, result.error_message)
-                        return result
-                await notify("reboot", "loading", None)
-
-                _logger.info(f"[PROVISION] Waiting for device to come back online...")
-                if not await self.wait_for_reboot():
-                    result.error_message = "Device did not come back online after reboot"
-                    await notify("firmware_update_1", False, result.error_message)
-                    return result
-
-                # ================================================================
-                # PHASE 5: VERIFY FIRMWARE UPDATE 1
-                # ================================================================
-                _logger.info(f"[PROVISION] Phase 5: Verify firmware update 1")
-                if not await self.connect():
-                    result.error_message = "Failed to reconnect after reboot"
-                    await notify("firmware_update_1", False, result.error_message)
-                    return result
-
-                # Check firmware version
-                fw1_verified = False
-                if hasattr(self, 'get_firmware_banks'):
-                    try:
-                        banks = await self.get_firmware_banks()
-                        bank1_ver = banks.get("bank1", "")
-                        bank2_ver = banks.get("bank2", "")
-                        active_bank = banks.get("active", 1)
-                        # Use display versions for UI if available
-                        bank1_display = banks.get("bank1_display", bank1_ver)
-                        bank2_display = banks.get("bank2_display", bank2_ver)
-                        bank_info = f"bank1:{bank1_display}|bank2:{bank2_display}|active:{active_bank}"
-                        _logger.info(f"[PROVISION] After reboot #1, firmware banks: {bank_info}")
-                        await notify("firmware_banks", True, bank_info)
-
-                        # Determine which bank to verify based on device behavior
-                        # Devices with update_triggers_reboot write to inactive bank and reboot into it,
-                        # so we should verify the ACTIVE bank, not specifically bank1
-                        if self.update_triggers_reboot:
-                            # Check the active bank (the one just updated and rebooted into)
-                            active_ver = bank1_ver if active_bank == 1 else bank2_ver
-                            if expected_firmware and active_ver == expected_firmware:
-                                fw1_verified = True
-                                _logger.info(f"[PROVISION] Firmware update 1 verified: active bank {active_bank}={expected_firmware}")
-                            elif not expected_firmware:
-                                fw1_verified = True  # No expected version to check
-                        else:
-                            # Traditional devices: check bank1 specifically
-                            if expected_firmware and bank1_ver == expected_firmware:
-                                fw1_verified = True
-                                _logger.info(f"[PROVISION] Firmware update 1 verified: bank1={expected_firmware}")
-                            elif not expected_firmware:
-                                fw1_verified = True  # No expected version to check
-
-                        # Update need_fw2 based on current bank2 state (using normalized versions)
-                        # For auto-reboot devices, after FW1 the inactive bank needs update
-                        if expected_firmware:
-                            if self.update_triggers_reboot:
-                                # The inactive bank (not active) needs update
-                                inactive_ver = bank2_ver if active_bank == 1 else bank1_ver
-                                need_fw2 = (inactive_ver != expected_firmware)
-                                _logger.info(f"[PROVISION] After FW1, inactive bank={inactive_ver}, need_fw2={need_fw2}")
-                            else:
-                                need_fw2 = (bank2_ver != expected_firmware)
-                                _logger.info(f"[PROVISION] After FW1, bank2={bank2_ver}, need_fw2={need_fw2}")
-                    except Exception as e:
-                        _logger.error(f"[PROVISION] get_firmware_banks exception: {e}")
-
-                if fw1_verified:
+                # After validation/re-lookup, check if FW1 is still needed
+                if not need_fw1:
+                    _logger.info(f"[PROVISION] Skipping FW1 upload - firmware matches after re-lookup")
                     await notify("firmware_update_1", True, expected_firmware)
                 else:
-                    result.error_message = f"Firmware update 1 verification failed"
-                    await notify("firmware_update_1", False, result.error_message)
-                    return result
+                    _logger.info(f"[PROVISION] Phase 3: Firmware update 1 (bank 1)")
+                    _logger.info(f"    Firmware path: {firmware_path}")
+                    _logger.info(f"    Expected version: {expected_firmware}")
+                    _logger.info(f"    Current bank1: {bank1_ver}")
+
+                    await notify("firmware_update_1", "loading", None)
+
+                    if not await self.upload_firmware(firmware_path):
+                        result.error_message = "Failed to upload firmware (update 1)"
+                        await notify("firmware_update_1", False, result.error_message)
+                        return result
+
+                    if not await self.update_firmware(bank=1 if self.supports_dual_bank else None):
+                        result.error_message = "Failed to stage firmware (update 1)"
+                        await notify("firmware_update_1", False, result.error_message)
+                        return result
+                    _logger.info(f"[PROVISION] Firmware update 1 staged")
+
+                    # ================================================================
+                    # PHASE 4: REBOOT #1
+                    # ================================================================
+                    _logger.info(f"[PROVISION] Phase 4: Reboot #1")
+                    # Some devices (e.g., Tachyon) reboot automatically after update_firmware()
+                    if getattr(self, 'update_triggers_reboot', False):
+                        _logger.info(f"[PROVISION] Device reboots automatically after firmware update")
+                    else:
+                        if not await self.reboot():
+                            result.error_message = "Failed to reboot device"
+                            await notify("reboot", False, result.error_message)
+                            return result
+                    await notify("reboot", "loading", None)
+
+                    _logger.info(f"[PROVISION] Waiting for device to come back online...")
+                    if not await self.wait_for_reboot():
+                        result.error_message = "Device did not come back online after reboot"
+                        await notify("firmware_update_1", False, result.error_message)
+                        return result
+
+                    # ================================================================
+                    # PHASE 5: VERIFY FIRMWARE UPDATE 1
+                    # ================================================================
+                    _logger.info(f"[PROVISION] Phase 5: Verify firmware update 1")
+                    if not await self.connect():
+                        result.error_message = "Failed to reconnect after reboot"
+                        await notify("firmware_update_1", False, result.error_message)
+                        return result
+
+                    # Check firmware version
+                    fw1_verified = False
+                    if hasattr(self, 'get_firmware_banks'):
+                        try:
+                            banks = await self.get_firmware_banks()
+                            bank1_ver = banks.get("bank1", "")
+                            bank2_ver = banks.get("bank2", "")
+                            active_bank = banks.get("active", 1)
+                            # Use display versions for UI if available
+                            bank1_display = banks.get("bank1_display", bank1_ver)
+                            bank2_display = banks.get("bank2_display", bank2_ver)
+                            bank_info = f"bank1:{bank1_display}|bank2:{bank2_display}|active:{active_bank}"
+                            _logger.info(f"[PROVISION] After reboot #1, firmware banks: {bank_info}")
+                            await notify("firmware_banks", True, bank_info)
+
+                            # Determine which bank to verify based on device behavior
+                            # Devices with update_triggers_reboot write to inactive bank and reboot into it,
+                            # so we should verify the ACTIVE bank, not specifically bank1
+                            if self.update_triggers_reboot:
+                                # Check the active bank (the one just updated and rebooted into)
+                                active_ver = bank1_ver if active_bank == 1 else bank2_ver
+                                if expected_firmware and active_ver == expected_firmware:
+                                    fw1_verified = True
+                                    _logger.info(f"[PROVISION] Firmware update 1 verified: active bank {active_bank}={expected_firmware}")
+                                elif not expected_firmware:
+                                    fw1_verified = True  # No expected version to check
+                            else:
+                                # Traditional devices: check bank1 specifically
+                                if expected_firmware and bank1_ver == expected_firmware:
+                                    fw1_verified = True
+                                    _logger.info(f"[PROVISION] Firmware update 1 verified: bank1={expected_firmware}")
+                                elif not expected_firmware:
+                                    fw1_verified = True  # No expected version to check
+
+                            # Update need_fw2 based on current bank2 state (using normalized versions)
+                            # For auto-reboot devices, after FW1 the inactive bank needs update
+                            if expected_firmware:
+                                if self.update_triggers_reboot:
+                                    # The inactive bank (not active) needs update
+                                    inactive_ver = bank2_ver if active_bank == 1 else bank1_ver
+                                    need_fw2 = (inactive_ver != expected_firmware)
+                                    _logger.info(f"[PROVISION] After FW1, inactive bank={inactive_ver}, need_fw2={need_fw2}")
+                                else:
+                                    need_fw2 = (bank2_ver != expected_firmware)
+                                    _logger.info(f"[PROVISION] After FW1, bank2={bank2_ver}, need_fw2={need_fw2}")
+                        except Exception as e:
+                            _logger.error(f"[PROVISION] get_firmware_banks exception: {e}")
+
+                    if fw1_verified:
+                        await notify("firmware_update_1", True, expected_firmware)
+                    else:
+                        result.error_message = f"Firmware update 1 verification failed"
+                        await notify("firmware_update_1", False, result.error_message)
+                        return result
 
             result.phases_completed.append(ProvisioningPhase.UPLOADING_FIRMWARE)
 

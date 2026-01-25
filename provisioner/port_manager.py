@@ -203,13 +203,15 @@ class PortManager:
             vlan_id = self.vlan_start + i
             interface_name = f"{self.base_interface}.{vlan_id}"
 
-            self.ports[port_num] = PortConfig(
+            port_config = PortConfig(
                 port_number=port_num,
                 vlan_id=vlan_id,
                 interface_name=interface_name,
                 local_ip=self.local_ip_base,
                 secondary_ips=["169.254.100.2/24"],  # For Tarana devices at 169.254.100.1
             )
+            self.ports[port_num] = port_config
+            logger.debug(f"Port {port_num} config: {interface_name}, IPs: {self.local_ip_base}, secondary: {port_config.secondary_ips}")
 
             self.port_states[port_num] = PortState(
                 port_number=port_num,
@@ -315,13 +317,17 @@ class PortManager:
 
         # Add secondary IPs for other device types (e.g., Tarana at 169.254.100.x)
         if config.secondary_ips:
+            logger.info(f"Adding {len(config.secondary_ips)} secondary IPs to {interface}")
             for secondary_ip in config.secondary_ips:
-                await self._run_cmd([
-                    "ip", "addr", "replace",
-                    secondary_ip,
-                    "dev", interface
-                ])
-                logger.debug(f"Added secondary IP {secondary_ip} to {interface}")
+                try:
+                    await self._run_cmd([
+                        "ip", "addr", "replace",
+                        secondary_ip,
+                        "dev", interface
+                    ])
+                    logger.info(f"Added secondary IP {secondary_ip} to {interface}")
+                except Exception as e:
+                    logger.error(f"Failed to add secondary IP {secondary_ip} to {interface}: {e}")
 
     async def _run_cmd(self, cmd: List[str], check: bool = True) -> subprocess.CompletedProcess:
         """Run a shell command."""
@@ -519,11 +525,13 @@ class PortManager:
         config = self.ports[port_num]
         state = self.port_states[port_num]
 
-        logger.info(f"Detecting device on port {port_num} ({config.interface_name})...")
+        ips_to_try = [ip for ip, _ in DeviceLinkLocalIP.ALL]
+        logger.info(f"Detecting device on port {port_num} ({config.interface_name}), trying IPs: {ips_to_try}")
 
         # Try each known device IP
         for device_ip, possible_types in DeviceLinkLocalIP.ALL:
-            if await self._ping_device(config.interface_name, device_ip):
+            ping_result = await self._ping_device(config.interface_name, device_ip)
+            if ping_result:
                 logger.info(f"Device responding at {device_ip} on port {port_num}")
 
                 # Identify exact type by probing
