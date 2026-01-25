@@ -66,6 +66,18 @@ async def run_standalone(
         logger.info(f"Database initialized: {db_path}")
     except Exception as e:
         logger.warning(f"Database initialization failed: {e}")
+
+    # Initialize display controller
+    from .display import init_display, cleanup_display
+    if config and config.display.sleep_timeout > 0:
+        init_display(
+            sleep_timeout=config.display.sleep_timeout,
+            wake_on_connect=config.display.wake_on_connect,
+            use_dpms=config.display.use_dpms,
+            use_backlight=config.display.use_backlight,
+        )
+    else:
+        logger.debug("Display sleep disabled (timeout=0)")
     
     # Create provisioner if config available
     provisioner = None
@@ -111,6 +123,7 @@ async def run_standalone(
         if provisioner:
             await provisioner.stop()
         manager.stop_status_broadcast()
+        cleanup_display()
 
 
 async def run_web_only(

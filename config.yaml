@@ -113,6 +113,19 @@ firmware:
   # Seconds to wait for device to reboot
   reboot_wait_timeout: 180
 
+display:
+  # Seconds of no connected devices before display sleeps (0 = disabled)
+  sleep_timeout: 300
+
+  # Wake display when a device connects
+  wake_on_connect: true
+
+  # Try DPMS (X11) for display control
+  use_dpms: true
+
+  # Fallback to sysfs backlight control
+  use_backlight: true
+
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR
   level: INFO

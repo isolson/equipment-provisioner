@@ -213,6 +213,16 @@ class Provisioner:
         """Handle device detected on a VLAN port."""
         logger.info(f"Device detected on port {port_num}: {device_type} at {device_ip}")
 
+        # Wake display if configured
+        from .display import get_display
+        display = get_display()
+        if display and display.wake_on_connect and display.is_sleeping():
+            logger.info("Waking display on device connect")
+            await display.wake()
+            # Notify clients of wake
+            from .web.websocket import notify_display_state
+            await notify_display_state(sleeping=False)
+
         # Mark port as provisioning
         self.port_manager.mark_port_provisioning(port_num, True)
 
@@ -519,6 +529,15 @@ class Provisioner:
     async def _on_device_discovered(self, device: DiscoveredDevice) -> None:
         """Handle a newly discovered device."""
         logger.info(f"New device discovered: {device.ip_address} ({device.mac_address})")
+
+        # Wake display if configured
+        from .display import get_display
+        display = get_display()
+        if display and display.wake_on_connect and display.is_sleeping():
+            logger.info("Waking display on device connect")
+            await display.wake()
+            from .web.websocket import notify_display_state
+            await notify_display_state(sleeping=False)
 
         # Use semaphore to limit concurrent provisioning
         async with self._provisioning_semaphore:

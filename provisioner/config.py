@@ -117,6 +117,14 @@ class GPIOConfig(BaseModel):
     buzzer: int = 10
 
 
+class DisplayConfig(BaseModel):
+    """Display sleep/wake configuration."""
+    sleep_timeout: int = Field(default=300, ge=0)  # 0 = disabled
+    wake_on_connect: bool = True
+    use_dpms: bool = True
+    use_backlight: bool = True
+
+
 class LoggingConfig(BaseModel):
     """Logging configuration."""
     level: str = "INFO"
@@ -140,6 +148,7 @@ class Config(BaseModel):
     credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     gpio: GPIOConfig = Field(default_factory=GPIOConfig)
+    display: DisplayConfig = Field(default_factory=DisplayConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     firmware: FirmwareConfig = Field(default_factory=FirmwareConfig)
 

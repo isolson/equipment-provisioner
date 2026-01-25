@@ -312,3 +312,12 @@ async def notify_credentials_required(port_number: int, device_type: str, device
         "error": error,
         "timestamp": datetime.now().isoformat(),
     })
+
+
+async def notify_display_state(sleeping: bool):
+    """Notify clients of display sleep/wake state change."""
+    await manager.broadcast({
+        "type": "display_state",
+        "sleeping": sleeping,
+        "timestamp": datetime.now().isoformat(),
+    })

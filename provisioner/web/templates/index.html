@@ -133,9 +133,25 @@
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: #1f2937; }
         ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+
+        /* Sleep overlay */
+        #sleep-overlay {
+            position: fixed;
+            inset: 0;
+            background: #000;
+            z-index: 9999;
+            display: none;
+            cursor: pointer;
+        }
+        #sleep-overlay.active {
+            display: block;
+        }
     </style>
 </head>
 <body class="dark text-white min-h-screen flex flex-col overflow-hidden">
+    <!-- Sleep Overlay - full screen black, click/touch to wake -->
+    <div id="sleep-overlay" onclick="wakeDisplay()"></div>
+
     <!-- Compact Header -->
     <header class="bg-[#0f0f1a] border-b border-[#1f2937] px-4 py-2 flex items-center justify-between flex-shrink-0">
         <div class="flex items-center gap-3">
@@ -167,10 +183,10 @@
     <!-- Main Content - 2x4 Port Grid -->
     <main class="flex-1 p-3 flex items-center justify-center">
         <div class="w-full max-w-[1000px]">
-            <!-- Top row: ports 2, 4, 6, 8 (even) -->
-            <div class="grid grid-cols-4 gap-3 mb-3" id="port-row-top"></div>
-            <!-- Bottom row: ports 1, 3, 5, 7 (odd) -->
-            <div class="grid grid-cols-4 gap-3" id="port-row-bottom"></div>
+            <!-- Top row: ports 2, 4, 6 (even) -->
+            <div class="grid grid-cols-3 gap-3 mb-3" id="port-row-top"></div>
+            <!-- Bottom row: ports 1, 3, 5 (odd) -->
+            <div class="grid grid-cols-3 gap-3" id="port-row-bottom"></div>
         </div>
     </main>
 
@@ -249,6 +265,14 @@
         let reconnectAttempts = 0;
         const maxReconnectAttempts = 10;
 
+        // Display sleep state
+        let displaySleeping = false;
+        let idleTimeout = null;
+        let displayConfig = {
+            sleep_timeout: 300,
+            wake_on_connect: true,
+        };
+
         // Device vendors
         const deviceVendors = {
             cambium: { name: 'Cambium', color: '#22c55e', defaultUser: 'admin' },
@@ -262,6 +286,8 @@
         document.addEventListener('DOMContentLoaded', () => {
             // Display management URL in header
             document.getElementById('management-url').textContent = window.location.host;
+            // Fetch display config (for sleep timeout)
+            fetchDisplayConfig();
             connectWebSocket();
         });
 
@@ -298,9 +324,14 @@
                 case 'initial_status':
                 case 'status_update':
                     updatePorts(message.data.ports);
+                    checkIdleState();
                     break;
                 case 'port_update':
                     updateSinglePort(message.port_number, message.data);
+                    checkIdleState();
+                    break;
+                case 'display_state':
+                    handleDisplayStateMessage(message);
                     break;
                 case 'provisioning_started':
                 case 'provisioning_progress':
@@ -436,8 +467,8 @@
             topRow.innerHTML = '';
             bottomRow.innerHTML = '';
 
-            const topPorts = [2, 4, 6, 8];
-            const bottomPorts = [1, 3, 5, 7];
+            const topPorts = [2, 4, 6];
+            const bottomPorts = [1, 3, 5];
 
             for (const portNum of topPorts) {
                 const port = ports[portNum] || { vlan_id: 1990 + portNum, link_up: false };
@@ -921,6 +952,107 @@
             if (diffMins < 60) return `${diffMins}m ago`;
             if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ago`;
             return date.toLocaleDateString();
+        }
+
+        // Display Sleep/Wake Functions
+        async function fetchDisplayConfig() {
+            try {
+                const response = await fetch('/api/display/status');
+                const status = await response.json();
+                if (status.available) {
+                    displayConfig.sleep_timeout = status.sleep_timeout || 300;
+                    displayConfig.wake_on_connect = status.wake_on_connect !== false;
+                    displaySleeping = status.sleeping || false;
+                    updateSleepOverlay();
+                }
+            } catch (error) {
+                console.log('Display config not available:', error);
+            }
+        }
+
+        function checkIdleState() {
+            // Skip if sleep timeout is disabled
+            if (displayConfig.sleep_timeout <= 0) {
+                clearIdleTimeout();
+                return;
+            }
+
+            // Count connected devices (link up or device detected)
+            const hasDevices = Object.values(ports).some(p => p.link_up || p.device_detected);
+
+            if (!hasDevices && !displaySleeping) {
+                // No devices - start/reset idle timer
+                startIdleTimeout();
+            } else {
+                // Devices connected - clear timer
+                clearIdleTimeout();
+                // Wake if sleeping and wake_on_connect is enabled
+                if (displaySleeping && displayConfig.wake_on_connect) {
+                    wakeDisplay();
+                }
+            }
+        }
+
+        function startIdleTimeout() {
+            clearIdleTimeout();
+            const timeoutMs = displayConfig.sleep_timeout * 1000;
+            idleTimeout = setTimeout(sleepDisplay, timeoutMs);
+        }
+
+        function clearIdleTimeout() {
+            if (idleTimeout) {
+                clearTimeout(idleTimeout);
+                idleTimeout = null;
+            }
+        }
+
+        async function sleepDisplay() {
+            if (displaySleeping) return;
+
+            // Show overlay immediately for visual feedback
+            displaySleeping = true;
+            updateSleepOverlay();
+
+            // Call backend to actually sleep the display
+            try {
+                await fetch('/api/display/sleep', { method: 'POST' });
+            } catch (error) {
+                console.log('Failed to sleep display:', error);
+            }
+        }
+
+        async function wakeDisplay() {
+            if (!displaySleeping) return;
+
+            // Hide overlay immediately for visual feedback
+            displaySleeping = false;
+            updateSleepOverlay();
+
+            // Call backend to wake the display
+            try {
+                await fetch('/api/display/wake', { method: 'POST' });
+            } catch (error) {
+                console.log('Failed to wake display:', error);
+            }
+
+            // Reset idle timer
+            checkIdleState();
+        }
+
+        function updateSleepOverlay() {
+            const overlay = document.getElementById('sleep-overlay');
+            if (overlay) {
+                if (displaySleeping) {
+                    overlay.classList.add('active');
+                } else {
+                    overlay.classList.remove('active');
+                }
+            }
+        }
+
+        function handleDisplayStateMessage(message) {
+            displaySleeping = message.sleeping;
+            updateSleepOverlay();
         }
     </script>
 </body>

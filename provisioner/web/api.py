@@ -1283,3 +1283,75 @@ async def get_switch_port_mapping(request: Request):
     return {
         "ports": provisioner.port_manager.get_switch_port_mapping(),
     }
+
+
+# ============================================================================
+# Display Control Endpoints
+# ============================================================================
+
+@router.post("/display/sleep")
+async def sleep_display(request: Request):
+    """Put display to sleep mode.
+
+    This blanks the screen using DPMS, backlight, or framebuffer control.
+    Called by frontend after idle timeout.
+    """
+    from ..display import get_display
+    from .websocket import notify_display_state
+
+    display = get_display()
+    if not display:
+        raise HTTPException(status_code=503, detail="Display controller not available")
+
+    success = await display.sleep()
+
+    if success:
+        await notify_display_state(sleeping=True)
+
+    return {
+        "success": success,
+        "sleeping": display.is_sleeping(),
+    }
+
+
+@router.post("/display/wake")
+async def wake_display(request: Request):
+    """Wake display from sleep mode.
+
+    This turns the screen back on. Called by frontend on touch or device connect.
+    """
+    from ..display import get_display
+    from .websocket import notify_display_state
+
+    display = get_display()
+    if not display:
+        raise HTTPException(status_code=503, detail="Display controller not available")
+
+    success = await display.wake()
+
+    if success:
+        await notify_display_state(sleeping=False)
+
+    return {
+        "success": success,
+        "sleeping": display.is_sleeping(),
+    }
+
+
+@router.get("/display/status")
+async def get_display_status(request: Request):
+    """Get current display state and configuration."""
+    from ..display import get_display
+
+    display = get_display()
+    if not display:
+        return {
+            "available": False,
+            "sleeping": False,
+            "sleep_timeout": 0,
+            "wake_on_connect": True,
+        }
+
+    status = display.get_status()
+    status["available"] = True
+    return status
