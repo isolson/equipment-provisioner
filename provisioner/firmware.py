@@ -156,6 +156,15 @@ class FirmwareManager:
         # Cambium ePMP 2000/1000 series
         "epmp 2000": ["epmp-nongps", "epmp2000"],
         "epmp 1000": ["epmp1000", "epmp-nongps"],
+        # Tachyon TNA-30x series (standard) - uses tna-30x firmware
+        "tna-303x": ["tna-30x", "tna30x"],
+        "tna-301": ["tna-30x", "tna30x"],
+        "tna-302": ["tna-30x", "tna30x"],
+        # Tachyon TNA-303L series (long range) - uses tna-303l firmware
+        "tna-303l": ["tna-303l", "tna303l"],
+        "tna-303l-65": ["tna-303l", "tna303l"],
+        # Tachyon TNS-100 series (subscriber) - uses tns-100 firmware
+        "tns-100": ["tns-100", "tns100"],
     }
 
     def _find_firmware_by_convention(
@@ -254,9 +263,12 @@ class FirmwareManager:
         """
         import re
 
-        # Tachyon firmware pattern: tna-30x-1.12.3-r54970-20260115-...
+        # Tachyon firmware patterns:
+        #   tna-30x-1.12.3-r54970-... (standard TNA-30x series)
+        #   tna-303l-1.12.3-r54970-... (TNA-303L long range)
+        #   tns-100-1.12.3-r54970-... (TNS-100 subscriber)
         # Extract version (1.12.3) and revision (54970) -> "1.12.3.54970"
-        tachyon_pattern = r'tna-\d+x?-(\d+\.\d+\.\d+)-r(\d+)'
+        tachyon_pattern = r'tn[as]-\d+[a-z]?-(\d+\.\d+\.\d+)-r(\d+)'
         tachyon_match = re.search(tachyon_pattern, filename.lower())
         if tachyon_match:
             version = tachyon_match.group(1)

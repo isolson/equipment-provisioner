@@ -231,6 +231,21 @@ class BaseHandler(ABC):
         """
         pass
 
+    def validate_firmware_for_model(self, firmware_path: str, model: str) -> tuple[bool, str]:
+        """Validate that firmware file is compatible with the device model.
+
+        Subclasses can override this to implement model-specific validation.
+        Default implementation returns True (no validation).
+
+        Args:
+            firmware_path: Path to firmware file.
+            model: Device model string.
+
+        Returns:
+            Tuple of (is_valid, error_message). error_message is empty if valid.
+        """
+        return True, ""
+
     async def provision(
         self,
         config: Optional[Dict[str, Any]] = None,
@@ -376,6 +391,14 @@ class BaseHandler(ABC):
                     result.error_message = "No firmware file found for this device model"
                     await notify("firmware_update_1", False, result.error_message)
                     return result
+
+                # Validate firmware matches discovered model
+                if model_name:
+                    is_valid, error_msg = self.validate_firmware_for_model(firmware_path, model_name)
+                    if not is_valid:
+                        result.error_message = error_msg
+                        await notify("firmware_update_1", False, result.error_message)
+                        return result
 
                 _logger.info(f"[PROVISION] Phase 3: Firmware update 1 (bank 1)")
                 _logger.info(f"    Firmware path: {firmware_path}")

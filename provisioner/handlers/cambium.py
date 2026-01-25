@@ -1678,10 +1678,14 @@ class CambiumHandler(BaseHandler):
             firmware_file = Path(firmware_path)
             logger.info(f"Uploading firmware {firmware_file.name} to {self.ip} via {self.interface}")
 
+            # Track which cookie file to use
+            cookie_path = None
+
             # Reuse existing stok from connect() if available
             stok = self._stok
             if stok:
                 logger.debug(f"Reusing existing stok for firmware upload: {stok[:16]}...")
+                cookie_path = self._cookie_file  # Use cookie file from connect()
             else:
                 # No existing session, need to login via curl
                 logger.debug(f"No existing stok, logging in via curl for firmware upload...")
@@ -1728,12 +1732,19 @@ class CambiumHandler(BaseHandler):
             # Field name is "image", not "file"
             url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/local_upload_image"
 
-            proc = await asyncio.create_subprocess_exec(
+            # Build curl command with cookies - LuCI requires both stok AND session cookies
+            curl_args = [
                 "curl", "-s", "-k", "-m", "600",  # 10 min timeout for large files
                 "--interface", self.interface,
                 "-X", "POST",
                 "-F", f"image=@{firmware_path}",
-                url,
+            ]
+            if cookie_path:
+                curl_args.extend(["-b", cookie_path])
+            curl_args.append(url)
+
+            proc = await asyncio.create_subprocess_exec(
+                *curl_args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -1750,7 +1761,7 @@ class CambiumHandler(BaseHandler):
 
                 # Poll upload status until ready
                 logger.info(f"Firmware uploaded, polling status...")
-                ready = await self._poll_upload_status_curl(stok)
+                ready = await self._poll_upload_status_curl(stok, cookie_file=cookie_path)
 
                 if ready:
                     logger.info(f"Firmware ready on {self.ip} via {self.interface}")
@@ -1772,12 +1783,13 @@ class CambiumHandler(BaseHandler):
             logger.error(f"Failed to upload firmware via curl: {e}")
             return False
 
-    async def _poll_upload_status_curl(self, stok: str, timeout: int = 300) -> bool:
+    async def _poll_upload_status_curl(self, stok: str, timeout: int = 300, cookie_file: Optional[str] = None) -> bool:
         """Poll /admin/get_upload_status until firmware is ready.
 
         Args:
             stok: Session token
             timeout: Max seconds to wait
+            cookie_file: Path to cookie file for session auth
 
         Returns:
             True if firmware is ready, False if timeout or error
@@ -1788,12 +1800,19 @@ class CambiumHandler(BaseHandler):
 
         while time.time() - start_time < timeout:
             try:
-                proc = await asyncio.create_subprocess_exec(
+                # Build curl command with optional cookies
+                curl_args = [
                     "curl", "-s", "-k", "-m", "10",
                     "--interface", self.interface,
                     "-X", "POST",
                     "-d", "",
-                    url,
+                ]
+                if cookie_file:
+                    curl_args.extend(["-b", cookie_file])
+                curl_args.append(url)
+
+                proc = await asyncio.create_subprocess_exec(
+                    *curl_args,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )

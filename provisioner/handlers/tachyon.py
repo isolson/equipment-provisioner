@@ -77,6 +77,50 @@ class TachyonHandler(BaseHandler):
         """Tachyon devices reboot automatically after POST /update."""
         return True
 
+    # Firmware pattern mappings for model validation
+    MODEL_FIRMWARE_PATTERNS = {
+        # TNA-30x standard series uses tna-30x firmware
+        "tna-301": ["tna-30x", "tna30x"],
+        "tna-302": ["tna-30x", "tna30x"],
+        "tna-303x": ["tna-30x", "tna30x"],
+        # TNA-303L series uses tna-303l firmware
+        "tna-303l": ["tna-303l", "tna303l"],
+        "tna-303l-65": ["tna-303l", "tna303l"],
+        # TNS-100 series uses tns-100 firmware
+        "tns-100": ["tns-100", "tns100"],
+    }
+
+    def validate_firmware_for_model(self, firmware_path: str, model: str) -> tuple[bool, str]:
+        """Validate that firmware file is compatible with the Tachyon model.
+
+        Args:
+            firmware_path: Path to firmware file.
+            model: Device model string (e.g., "TNA-303L-65").
+
+        Returns:
+            Tuple of (is_valid, error_message). error_message is empty if valid.
+        """
+        import os
+        filename = os.path.basename(firmware_path).lower()
+        model_key = model.lower()
+
+        # Look up expected patterns for this model
+        patterns = self.MODEL_FIRMWARE_PATTERNS.get(model_key)
+        if not patterns:
+            # No specific pattern known - allow any tachyon firmware
+            logger.debug(f"No firmware pattern defined for model {model}, allowing any firmware")
+            return True, ""
+
+        # Check if firmware matches any expected pattern
+        for pattern in patterns:
+            if pattern in filename:
+                logger.debug(f"Firmware {filename} matches pattern {pattern} for model {model}")
+                return True, ""
+
+        # Mismatch - provide helpful error
+        expected = " or ".join(patterns)
+        return False, f"Firmware mismatch: model {model} requires firmware with '{expected}' in filename, but got '{filename}'"
+
     async def connect(self) -> bool:
         """Connect to Tachyon device via REST API.
 

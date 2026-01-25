@@ -105,6 +105,7 @@ class PortConfig:
     interface_name: str  # e.g., "eth0.101"
     local_ip: str  # OrangePi's IP on this VLAN (e.g., "169.254.1.2")
     netmask: str = "255.255.255.0"
+    secondary_ips: Optional[List[str]] = None  # Additional IPs for other device types (e.g., Tarana at 169.254.100.x)
     enabled: bool = True
 
 
@@ -207,6 +208,7 @@ class PortManager:
                 vlan_id=vlan_id,
                 interface_name=interface_name,
                 local_ip=self.local_ip_base,
+                secondary_ips=["169.254.100.2/24"],  # For Tarana devices at 169.254.100.1
             )
 
             self.port_states[port_num] = PortState(
@@ -310,6 +312,16 @@ class PortManager:
             f"{config.local_ip}/{self._netmask_to_cidr(config.netmask)}",
             "dev", interface
         ])
+
+        # Add secondary IPs for other device types (e.g., Tarana at 169.254.100.x)
+        if config.secondary_ips:
+            for secondary_ip in config.secondary_ips:
+                await self._run_cmd([
+                    "ip", "addr", "replace",
+                    secondary_ip,
+                    "dev", interface
+                ])
+                logger.debug(f"Added secondary IP {secondary_ip} to {interface}")
 
     async def _run_cmd(self, cmd: List[str], check: bool = True) -> subprocess.CompletedProcess:
         """Run a shell command."""
