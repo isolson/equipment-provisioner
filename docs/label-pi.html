@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Network Provisioner - Pi Label</title>
+  <style>
+    @page { size: 4in 6in; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: Arial, sans-serif;
+      font-size: 8pt;
+      width: 4in;
+      height: 6in;
+      padding: 0.1in;
+      line-height: 1.2;
+    }
+    h1 { font-size: 12pt; text-align: center; border-bottom: 1.5px solid #000; padding-bottom: 2pt; margin-bottom: 4pt; }
+    h2 { font-size: 8pt; background: #000; color: #fff; padding: 1pt 3pt; margin: 4pt 0 2pt 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 7pt; }
+    td, th { padding: 1pt 2pt; text-align: left; }
+    .mono { font-family: monospace; font-size: 7pt; }
+    .cmd { background: #eee; padding: 1pt 3pt; margin: 1pt 0; font-family: monospace; font-size: 6.5pt; }
+    .cols { display: flex; gap: 4pt; }
+    .cols > div { flex: 1; }
+    .creds td { border-bottom: 1px solid #ddd; }
+    .center { text-align: center; }
+    .sm { font-size: 6pt; color: #666; }
+  </style>
+</head>
+<body>
+
+<h1>NETWORK PROVISIONER</h1>
+
+<h2>COMMANDS</h2>
+<div class="cmd">systemctl restart provisioner-web</div>
+<div class="cmd">journalctl -u provisioner-web -f</div>
+
+<h2>NETWORK</h2>
+<table>
+  <tr><td>VLAN interfaces:</td><td class="mono">eth0.1991-1998 (ports 1-8)</td></tr>
+  <tr><td>Primary IP:</td><td class="mono">169.254.1.2/24</td></tr>
+  <tr><td>Secondary IP:</td><td class="mono">169.254.100.2/24 (Tarana)</td></tr>
+</table>
+
+<h2>DEVICE IPs</h2>
+<div class="cols">
+  <div>
+    <table>
+      <tr><td>Cambium/Tachyon:</td><td class="mono">169.254.1.1</td></tr>
+      <tr><td>Tarana:</td><td class="mono">169.254.100.1</td></tr>
+    </table>
+  </div>
+  <div>
+    <table>
+      <tr><td>MikroTik:</td><td class="mono">192.168.88.1</td></tr>
+      <tr><td>Alt:</td><td class="mono">192.168.1.1</td></tr>
+    </table>
+  </div>
+</div>
+
+<h2>DEFAULT CREDENTIALS</h2>
+<table class="creds">
+  <tr><td width="25%"><b>Cambium</b></td><td class="mono">admin / admin</td><td width="25%"><b>Tachyon</b></td><td class="mono">root / (blank)</td></tr>
+  <tr><td><b>Tarana</b></td><td class="mono">admin / admin123</td><td><b>MikroTik</b></td><td class="mono">admin / (blank)</td></tr>
+</table>
+
+<h2>FILES</h2>
+<table>
+  <tr><td width="22%">Config:</td><td class="mono">/etc/provisioner/config.yaml</td></tr>
+  <tr><td>Firmware:</td><td class="mono">/var/lib/provisioner/repo/firmware/</td></tr>
+  <tr><td>Credentials:</td><td class="mono">/var/lib/provisioner/repo/credentials.json</td></tr>
+</table>
+
+<h2>WEB UI</h2>
+<div class="center mono" style="font-size: 10pt; padding: 2pt;">http://&lt;pi-ip&gt;:8080</div>
+
+<h2>PORTS (VLAN 1991-1998)</h2>
+<table>
+  <tr>
+    <td class="center"><b>1</b><br><span class="sm">.1991</span></td>
+    <td class="center"><b>2</b><br><span class="sm">.1992</span></td>
+    <td class="center"><b>3</b><br><span class="sm">.1993</span></td>
+    <td class="center"><b>4</b><br><span class="sm">.1994</span></td>
+    <td class="center"><b>5</b><br><span class="sm">.1995</span></td>
+    <td class="center"><b>6</b><br><span class="sm">.1996</span></td>
+    <td class="center"><b>7</b><br><span class="sm">.1997</span></td>
+    <td class="center"><b>8</b><br><span class="sm">.1998</span></td>
+    <td class="center" style="background:#ddd;"><b>9</b><br><span class="sm">Pi</span></td>
+    <td class="center" style="background:#ddd;"><b>10</b><br><span class="sm">Up</span></td>
+  </tr>
+</table>
+
+<div class="sm center" style="margin-top: 4pt;">
+  Plug device into port 1-8 → Auto-detect → Auto-provision | Port 9=Pi trunk | Port 10=Uplink
+</div>
+
+</body>
+</html>

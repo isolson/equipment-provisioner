@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Provisioning Switch</title>
+  <style>
+    @page { size: 4in 6in; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: Arial, sans-serif;
+      font-size: 8pt;
+      width: 4in;
+      height: 6in;
+      padding: 0.1in;
+      line-height: 1.2;
+    }
+    h1 { font-size: 12pt; text-align: center; border-bottom: 1.5px solid #000; padding-bottom: 2pt; margin-bottom: 4pt; }
+    h2 { font-size: 8pt; background: #000; color: #fff; padding: 1pt 3pt; margin: 4pt 0 2pt 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 7pt; }
+    td, th { padding: 2pt 3pt; text-align: center; border: 1px solid #999; }
+    .mono { font-family: monospace; }
+    .left { text-align: left; }
+    .big { font-size: 11pt; font-weight: bold; }
+    .sm { font-size: 6pt; }
+    .highlight { background: #ffffcc; }
+    .gray { background: #eee; }
+    .step { display: flex; align-items: center; gap: 4pt; padding: 2pt 0; border-bottom: 1px solid #eee; }
+    .step-num { font-size: 10pt; font-weight: bold; width: 16pt; text-align: center; }
+  </style>
+</head>
+<body>
+
+<h1>PROVISIONING SWITCH</h1>
+
+<h2>PORT MAP</h2>
+<table>
+  <tr>
+    <th>Port</th>
+    <td class="big">1</td>
+    <td class="big">2</td>
+    <td class="big">3</td>
+    <td class="big">4</td>
+    <td class="big">5</td>
+    <td class="big">6</td>
+    <td class="big">7</td>
+    <td class="big">8</td>
+    <td class="big gray">9</td>
+    <td class="big gray">10</td>
+  </tr>
+  <tr>
+    <th>VLAN</th>
+    <td class="mono sm">1991</td>
+    <td class="mono sm">1992</td>
+    <td class="mono sm">1993</td>
+    <td class="mono sm">1994</td>
+    <td class="mono sm">1995</td>
+    <td class="mono sm">1996</td>
+    <td class="mono sm">1997</td>
+    <td class="mono sm">1998</td>
+    <td class="mono sm gray">Trunk</td>
+    <td class="mono sm gray">Trunk</td>
+  </tr>
+  <tr>
+    <th>Use</th>
+    <td colspan="8">Device provisioning ports (isolated)</td>
+    <td class="gray">Pi</td>
+    <td class="gray">Uplink</td>
+  </tr>
+</table>
+
+<h2>WORKFLOW</h2>
+<div class="step"><span class="step-num">1</span> Plug device into any port (1-8)</div>
+<div class="step"><span class="step-num">2</span> Switch isolates device on dedicated VLAN</div>
+<div class="step"><span class="step-num">3</span> Pi detects link up, identifies device type</div>
+<div class="step"><span class="step-num">4</span> Pi uploads firmware + config automatically</div>
+<div class="step"><span class="step-num">5</span> Check web UI for status</div>
+
+<h2>SUPPORTED DEVICES</h2>
+<table>
+  <tr class="left"><td width="30%"><b>Cambium</b></td><td class="left">ePMP, Force 300/400, PMP450</td></tr>
+  <tr class="left"><td><b>Tachyon</b></td><td class="left">TNA-30x, TNA-303L, TNS-100</td></tr>
+  <tr class="left"><td><b>Tarana</b></td><td class="left">G1 Base/Remote Node</td></tr>
+  <tr class="left"><td><b>MikroTik</b></td><td class="left">RouterOS devices</td></tr>
+</table>
+
+<h2>TROUBLESHOOTING</h2>
+<table>
+  <tr class="left"><td width="35%">No detection?</td><td class="left">Check cable, power, link LED on switch</td></tr>
+  <tr class="left"><td>Wrong firmware?</td><td class="left">Check firmware dir on Pi</td></tr>
+  <tr class="left"><td>Auth failed?</td><td class="left">Device has non-default password</td></tr>
+  <tr class="left"><td>Stuck?</td><td class="left">Restart provisioner-web service</td></tr>
+</table>
+
+<div style="margin-top: 6pt; padding: 3pt; border: 1px solid #000; text-align: center; font-size: 7pt;">
+  <b>Each port is ISOLATED</b> - devices cannot see each other during provisioning
+</div>
+
+</body>
+</html>

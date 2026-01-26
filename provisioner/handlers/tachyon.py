@@ -720,11 +720,11 @@ class TachyonHandler(BaseHandler):
             return await self._apply_config_curl(config)
 
         try:
-            # Post config with dry_run=false
+            # Post full config directly (API expects raw config, not wrapped)
             result = await self._api_request(
                 "POST",
                 self.API_CONFIG,
-                data={"config": config, "dry_run": False}
+                data=config
             )
 
             logger.info(f"Configuration applied to {self.ip}")
@@ -753,9 +753,11 @@ class TachyonHandler(BaseHandler):
 
         try:
             url = f"{self._base_url}{self.API_CONFIG}"
-            payload = json.dumps({"config": config, "dry_run": False})
+            payload = json.dumps(config)  # API expects raw config, not wrapped
 
-            logger.info(f"Applying config to {self.ip} via {self.interface}")
+            # Log config keys being applied (not values - may contain sensitive data)
+            config_keys = list(config.keys()) if isinstance(config, dict) else "non-dict"
+            logger.info(f"Applying config to {self.ip} via {self.interface}, keys: {config_keys}")
 
             # Build curl command with interface binding
             cmd = [
@@ -780,19 +782,39 @@ class TachyonHandler(BaseHandler):
 
             if proc.returncode == 0:
                 response = stdout.decode("utf-8", errors="ignore")
-                logger.debug(f"Config apply response: {response[:200]}")
+                logger.info(f"Config apply response: {response[:500]}")
 
                 # Try to parse as JSON
                 try:
                     result = json.loads(response)
+
+                    # Check for Tachyon API error format: {"statusCode":400,"error":{...}}
+                    if result.get("statusCode") and result.get("statusCode") >= 400:
+                        error_details = result.get("error", {}).get("details", "Unknown error")
+                        logger.error(f"Config apply failed with status {result['statusCode']}: {error_details}")
+                        return False
+
+                    # Check for error field
+                    if result.get("error"):
+                        error_details = result["error"].get("details", str(result["error"]))
+                        logger.error(f"Config apply error: {error_details}")
+                        return False
+
                     if result.get("errors"):
                         for error in result["errors"]:
                             logger.error(f"Config error: {error}")
                         return False
+
                     if result.get("reboot_required"):
                         logger.info("Configuration requires reboot")
+                    if result.get("warnings"):
+                        for warning in result["warnings"]:
+                            logger.warning(f"Config warning: {warning}")
+
+                    # Log success details
+                    logger.info(f"Config apply result: {result}")
                 except json.JSONDecodeError:
-                    pass
+                    logger.warning(f"Config apply returned non-JSON response")
 
                 logger.info(f"Configuration applied to {self.ip} via {self.interface}")
                 return True
@@ -815,9 +837,13 @@ class TachyonHandler(BaseHandler):
 
         try:
             config_file = Path(config_path)
+            logger.info(f"Loading config from file: {config_path}")
+
             if not config_file.exists():
                 logger.error(f"Config file not found: {config_path}")
                 return False
+
+            logger.info(f"Config file size: {config_file.stat().st_size} bytes")
 
             # Check if it's a tarball
             if tarfile.is_tarfile(config_path):
@@ -1222,4 +1248,126 @@ class TachyonHandler(BaseHandler):
 
         except Exception as e:
             logger.error(f"Failed to change password: {e}")
+            return False
+
+    async def apply_ap_naming(self, hostname: str, ssid: str) -> bool:
+        """Apply AP naming by merging into current config.
+
+        This is safer than replacing the whole config - it:
+        1. GETs the current config from the device
+        2. Merges in just the hostname/name/ssid changes
+        3. POSTs the merged config
+
+        Args:
+            hostname: Hostname to set (e.g., "tw24-north")
+            ssid: SSID to set (e.g., "NORTH")
+
+        Returns:
+            True if config applied successfully
+        """
+        logger.info(f"Applying AP naming to {self.ip}: hostname={hostname}, ssid={ssid}")
+
+        try:
+            # GET current config
+            logger.info(f"Getting current config from {self.ip}")
+            current_config = await self._api_request("GET", self.API_CONFIG)
+
+            if not isinstance(current_config, dict):
+                logger.error(f"Failed to get current config from {self.ip}")
+                return False
+
+            # Merge in our changes
+            # system.hostname and system.name
+            if "system" not in current_config:
+                current_config["system"] = {}
+            current_config["system"]["hostname"] = hostname
+            current_config["system"]["name"] = hostname
+
+            # wireless.radios.wlan0.vaps[0].ssid
+            try:
+                if "wireless" in current_config:
+                    radios = current_config["wireless"].get("radios", {})
+                    if "wlan0" in radios:
+                        vaps = radios["wlan0"].get("vaps", [])
+                        if vaps:
+                            vaps[0]["ssid"] = ssid
+                            logger.info(f"Set SSID to {ssid} in vaps[0]")
+            except (KeyError, IndexError, TypeError) as e:
+                logger.warning(f"Could not set SSID in wireless config: {e}")
+
+            # POST merged config
+            logger.info(f"Applying merged config to {self.ip}")
+            return await self.apply_config(current_config)
+
+        except Exception as e:
+            logger.error(f"Failed to apply AP naming: {e}")
+            return False
+
+    async def verify_config(self, expected_values: Optional[Dict[str, Any]] = None) -> bool:
+        """Verify that configuration was applied correctly.
+
+        Reconnects to the device and checks that key fields match expected values.
+        For Tachyon, verifies: system.hostname, system.name, wireless SSID.
+
+        Args:
+            expected_values: Optional dict of field names to expected values.
+
+        Returns:
+            True if config verification passed.
+        """
+        logger.info(f"[CONFIG VERIFY] Verifying Tachyon config on {self.ip}")
+
+        try:
+            # Reconnect to device
+            await self.disconnect()
+            await asyncio.sleep(3)
+
+            if not await self.connect():
+                logger.error(f"[CONFIG VERIFY] Failed to reconnect to {self.ip}")
+                return False
+
+            # Get current config
+            config = await self._api_request("GET", self.API_CONFIG)
+
+            if not isinstance(config, dict):
+                logger.error(f"[CONFIG VERIFY] Failed to read config from {self.ip}")
+                return False
+
+            # Extract key fields for verification
+            actual_hostname = config.get("system", {}).get("hostname")
+            actual_name = config.get("system", {}).get("name")
+
+            # Get SSID from first VAP
+            actual_ssid = None
+            try:
+                vaps = config.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
+                if vaps:
+                    actual_ssid = vaps[0].get("ssid")
+            except (KeyError, IndexError, TypeError):
+                pass
+
+            logger.info(f"[CONFIG VERIFY] Read back: hostname={actual_hostname}, name={actual_name}, ssid={actual_ssid}")
+
+            # If expected values provided, verify them
+            if expected_values:
+                for field, expected in expected_values.items():
+                    if field == "hostname" and actual_hostname != expected:
+                        logger.error(f"[CONFIG VERIFY] hostname mismatch: expected {expected}, got {actual_hostname}")
+                        return False
+                    elif field == "systemname" and actual_name != expected:
+                        logger.error(f"[CONFIG VERIFY] name mismatch: expected {expected}, got {actual_name}")
+                        return False
+                    elif field == "ssid" and actual_ssid != expected:
+                        logger.error(f"[CONFIG VERIFY] ssid mismatch: expected {expected}, got {actual_ssid}")
+                        return False
+
+                logger.info(f"[CONFIG VERIFY] All expected values verified successfully")
+            else:
+                # No expected values - just verify we could read config
+                logger.info(f"[CONFIG VERIFY] Config readable, no specific values to verify")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"[CONFIG VERIFY] Error during verification: {e}")
             return False

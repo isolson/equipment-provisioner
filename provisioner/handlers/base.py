@@ -410,16 +410,21 @@ class BaseHandler(ABC):
                                 # Re-validate with new firmware
                                 is_valid, error_msg = self.validate_firmware_for_model(firmware_path, model_name)
 
-                                # Recalculate if update is still needed with correct firmware
+                                # Recalculate if updates are still needed with correct firmware
                                 if self.update_triggers_reboot:
-                                    # For auto-reboot devices, check active bank
+                                    # For auto-reboot devices, check active bank for FW1
                                     active_bank = banks.get("active", 1)
                                     active_ver = bank1_ver if active_bank == 1 else bank2_ver
+                                    inactive_ver = bank2_ver if active_bank == 1 else bank1_ver
                                     need_fw1 = (active_ver != expected_firmware)
-                                    _logger.info(f"[PROVISION] After re-lookup: active bank {active_bank}={active_ver}, need_fw1={need_fw1}")
+                                    need_fw2 = (inactive_ver != expected_firmware)
+                                    _logger.info(f"[PROVISION] After re-lookup: active bank {active_bank}={active_ver}, inactive={inactive_ver}")
+                                    _logger.info(f"[PROVISION] After re-lookup: need_fw1={need_fw1}, need_fw2={need_fw2}")
                                 else:
                                     need_fw1 = (bank1_ver != expected_firmware)
-                                    _logger.info(f"[PROVISION] After re-lookup: bank1={bank1_ver}, need_fw1={need_fw1}")
+                                    need_fw2 = (bank2_ver != expected_firmware)
+                                    _logger.info(f"[PROVISION] After re-lookup: bank1={bank1_ver}, bank2={bank2_ver}")
+                                    _logger.info(f"[PROVISION] After re-lookup: need_fw1={need_fw1}, need_fw2={need_fw2}")
 
                                 # If firmware no longer needed, skip the upload
                                 if not need_fw1:
