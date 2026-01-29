@@ -229,13 +229,16 @@ class CambiumHandler(BaseHandler):
             # All attempts failed — restore original credentials to prevent corruption
             self.credentials.update(saved_credentials)
 
-            # Determine failure reason
-            if any_creds_rejected:
-                self.login_error = "Invalid credentials - please enter correct password"
-                logger.error(f"[CREDS] FAILED for {self.ip} - all {len(creds_to_try)} credential sets rejected")
+            # Determine failure reason (don't overwrite specific error already set by handler)
+            if not self.login_error:
+                if any_creds_rejected:
+                    self.login_error = "Invalid credentials - please enter correct password"
+                    logger.error(f"[CREDS] FAILED for {self.ip} - all {len(creds_to_try)} credential sets rejected")
+                else:
+                    self.login_error = "Device not responding - check network connectivity"
+                    logger.error(f"[CREDS] FAILED for {self.ip} - device did not respond (connection issue)")
             else:
-                self.login_error = "Device not responding - check network connectivity"
-                logger.error(f"[CREDS] FAILED for {self.ip} - device did not respond (connection issue)")
+                logger.error(f"[CREDS] FAILED for {self.ip} - {self.login_error}")
             logger.info(f"[CREDS] ========== CAMBIUM CONNECT END (failed) ==========")
             return False
 
@@ -555,51 +558,20 @@ class CambiumHandler(BaseHandler):
                         logger.warning(f"Credentials rejected by {self.ip}: {pattern}")
                         return False, True
 
-                # Check for software upgrade in progress - device is busy, need to wait and retry
+                # Check for software upgrade in progress - device is still applying firmware.
+                # Don't spin here — wait_for_reboot() handles the full boot-up check.
+                # Just signal that the device isn't ready yet (not a credential rejection).
                 if "sw_upgrade_is_in_progress" in response.lower():
-                    logger.info(f"Device {self.ip} is still applying firmware upgrade, waiting and retrying...")
-                    # Retry up to 60 times (10 minutes total) while upgrade is in progress
-                    for retry in range(60):
-                        await asyncio.sleep(10)
-                        logger.info(f"Upgrade wait retry {retry+1}/60 for {self.ip}...")
-                        # Re-attempt login
-                        proc = await asyncio.create_subprocess_exec(
-                            "curl", "-s", "-k", "-m", "10",
-                            "--interface", self.interface,
-                            "-c", cookie_path, "-b", cookie_path,
-                            "-X", "POST",
-                            "-H", "Content-Type: application/x-www-form-urlencoded",
-                            "-d", f"username={username}&password={password}",
-                            login_url,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                        stdout, stderr = await proc.communicate()
-                        if proc.returncode == 0 and stdout:
-                            retry_response = stdout.decode("utf-8", errors="ignore")
-                            logger.info(f"Upgrade wait retry response: {retry_response[:200]}")
-                            if "sw_upgrade_is_in_progress" not in retry_response.lower():
-                                # Upgrade finished, check if we got a valid session
-                                if "stok" in retry_response:
-                                    try:
-                                        for line in retry_response.split("\n"):
-                                            line = line.strip()
-                                            if line.startswith("{"):
-                                                data = json.loads(line)
-                                                if "stok" in data:
-                                                    self._stok = data["stok"]
-                                                    self._connected = True
-                                                    logger.info(f"Connected to Cambium at {self.ip} after upgrade wait (stok={self._stok[:8]}...)")
-                                                    return True, False
-                                    except json.JSONDecodeError:
-                                        pass
-                                # Check for auth failure after upgrade
-                                if "auth_failed" in retry_response.lower():
-                                    return False, True
-                                # Got some other response, break out to continue normal flow
-                                break
-                    # Timed out waiting for upgrade
-                    logger.warning(f"Upgrade on {self.ip} taking too long, giving up")
+                    logger.info(f"Device {self.ip} firmware upgrade still in progress, not ready for login")
+                    return False, False
+
+                # Check for factory reset state — device needs reboot after firmware flash.
+                # Cambium returns {"msg":"reset_has_been_done","success":0} when firmware
+                # was written to flash but device hasn't rebooted yet. Send a reboot now.
+                if "reset_has_been_done" in response.lower():
+                    logger.warning(f"Device {self.ip} reports reset_has_been_done — sending reboot to complete firmware update")
+                    await self._send_bare_reboot()
+                    self.login_error = "Device rebooting to complete firmware update (reset_has_been_done)"
                     return False, False
 
                 # Check for max users reached (too many active sessions)
@@ -900,6 +872,7 @@ class CambiumHandler(BaseHandler):
                     # These map Cambium internal SKU codes to human-readable model names
                     sku_to_model = {
                         "35": "Force 300-25",
+                        "49": "Force 300-19",
                         "53544": "ePMP 4518",
                         # Add more SKU mappings here as discovered
                     }
@@ -1990,16 +1963,17 @@ class CambiumHandler(BaseHandler):
         return result
 
     async def update_firmware(self, bank: Optional[int] = None) -> bool:
-        """Trigger firmware update on specified bank.
+        """No-op for Cambium ePMP — flash write happens during upload_firmware().
 
-        For Cambium ePMP devices, the firmware is already staged after upload_firmware()
-        completes (which polls get_upload_status until status=7). The firmware will be
-        activated on next reboot - no separate "trigger" step is needed.
+        The upload_firmware() flow is:
+        1. POST to local_upload_image (uploads firmware file)
+        2. Poll get_upload_status until status=7 (flash write completes during polling)
+
+        After this returns, the firmware is written to flash and ready.
+        A reboot (from base.py) will boot into the new bank.
         """
-        # For ePMP devices using the local_upload_image flow, firmware is ready after upload
-        # Just return True - the actual activation happens on reboot
-        logger.info(f"Firmware staged on {self.ip}, will activate on reboot" +
-                   (f" (bank {bank})" if bank else ""))
+        bank_str = f" (bank {bank})" if bank else ""
+        logger.info(f"Firmware already written to flash on {self.ip}{bank_str}, ready for reboot")
         return True
 
     async def reboot(self) -> bool:
@@ -2025,12 +1999,63 @@ class CambiumHandler(BaseHandler):
             logger.error(f"Failed to reboot: {e}")
             return False
 
+    async def _send_bare_reboot(self) -> None:
+        """Send a reboot command without requiring a valid session.
+
+        Used when device is in reset_has_been_done state — firmware was flashed
+        but device never rebooted. Tries multiple reboot URL patterns since we
+        may not have a valid stok.
+        """
+        reboot_urls = []
+        # Try with existing stok if we have one
+        if self._stok:
+            reboot_urls.append(f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/reboot")
+        # Try without stok (some firmware versions accept it)
+        reboot_urls.append(f"{self._base_url}/cgi-bin/luci/admin/reboot")
+        # Try the bare /reboot endpoint
+        reboot_urls.append(f"{self._base_url}/reboot")
+
+        for url in reboot_urls:
+            try:
+                curl_args = [
+                    "curl", "-s", "-k", "-m", "10",
+                    "--interface", self.interface,
+                    "-X", "POST",
+                    "-d", "debug=true",
+                ]
+                if self._cookie_file:
+                    curl_args.extend(["-b", self._cookie_file])
+                curl_args.append(url)
+
+                proc = await asyncio.create_subprocess_exec(
+                    *curl_args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+                    if stdout:
+                        resp = stdout.decode("utf-8", errors="ignore")
+                        logger.info(f"Bare reboot response from {url}: {resp[:200]}")
+                        if '"success":1' in resp or "success" in resp.lower():
+                            logger.info(f"Bare reboot succeeded via {url}")
+                            return
+                except asyncio.TimeoutError:
+                    logger.info(f"Bare reboot request timed out for {url} (device may be rebooting)")
+                    return
+            except Exception as e:
+                logger.debug(f"Bare reboot attempt failed for {url}: {e}")
+
+        logger.warning(f"All bare reboot attempts failed for {self.ip} — device may need manual reboot")
+
     async def _reboot_curl(self) -> bool:
         """Reboot device using curl with interface binding."""
         import tempfile
 
         try:
             logger.info(f"Rebooting {self.ip} via {self.interface}")
+
+            cookie_path = None  # Only set if we create a new login session below
 
             # Reuse existing stok from connect() if available
             stok = self._stok
@@ -2081,21 +2106,32 @@ class CambiumHandler(BaseHandler):
             # Trigger reboot via /admin/reboot endpoint (with debug=true as per browser)
             url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/reboot"
 
-            proc = await asyncio.create_subprocess_exec(
+            curl_args = [
                 "curl", "-s", "-k", "-m", "10",
                 "--interface", self.interface,
                 "-X", "POST",
                 "-d", "debug=true",
-                url,
+            ]
+            # Must pass session cookies — stok in URL alone is not sufficient
+            if self._cookie_file:
+                curl_args.extend(["-b", self._cookie_file])
+            elif cookie_path:
+                curl_args.extend(["-b", cookie_path])
+            curl_args.append(url)
+
+            proc = await asyncio.create_subprocess_exec(
+                *curl_args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            # Don't wait too long - connection will drop
             try:
-                await asyncio.wait_for(proc.communicate(), timeout=5)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+                if stdout:
+                    response = stdout.decode("utf-8", errors="ignore")
+                    logger.info(f"Reboot response: {response[:200]}")
             except asyncio.TimeoutError:
-                # Expected - device is rebooting
-                pass
+                # Expected - device is rebooting and drops connection
+                logger.info(f"Reboot request timed out (expected — device is rebooting)")
 
             # Session will be invalid after reboot
             self._stok = None
@@ -2227,39 +2263,112 @@ class CambiumHandler(BaseHandler):
     async def wait_for_reboot(self, timeout: int = 180) -> bool:
         """Wait for device to come back online after reboot.
 
-        Uses interface-bound ping and curl to verify connectivity.
-        This ensures proper routing on VLAN-isolated provisioning ports.
+        Waits for:
+        1. Ping response (device is network-reachable)
+        2. Web server responding (HTTP layer up)
+        3. Login-ready (not mid-upgrade or initializing)
+
+        Uses interface-bound ping and curl for VLAN-isolated provisioning ports.
+        HAR analysis shows normal reboot takes ~51 seconds.
 
         Args:
             timeout: Maximum time to wait in seconds (default 180s / 3 minutes)
         """
         logger.info(f"Waiting for {self.ip} to reboot...")
 
-        # Initial wait for device to go down
+        # Wait for device to go down
         await asyncio.sleep(10)
 
         start_time = asyncio.get_event_loop().time()
-        ping_responded = False
+        phase = "ping"  # ping -> web -> login_ready
 
         while asyncio.get_event_loop().time() - start_time < timeout:
-            # Phase 1: Wait for device to respond to ping
-            if not ping_responded:
-                if await self._ping_device():
-                    logger.info(f"{self.ip} responding to ping, waiting for web server...")
-                    ping_responded = True
-                    # Wait a bit for web services to initialize
-                    await asyncio.sleep(10)
-                    continue
-            else:
-                # Phase 2: Check if web server is up via curl
-                if await self._check_web_server():
-                    logger.info(f"{self.ip} web server is up, device ready")
-                    return True
+            elapsed = int(asyncio.get_event_loop().time() - start_time)
 
-            await asyncio.sleep(3)
+            if phase == "ping":
+                if await self._ping_device():
+                    logger.info(f"{self.ip} responding to ping after {elapsed}s, waiting for web server...")
+                    phase = "web"
+                    await asyncio.sleep(5)
+                    continue
+
+            elif phase == "web":
+                if await self._check_web_server():
+                    logger.info(f"{self.ip} web server is up after {elapsed}s, checking login-ready...")
+                    phase = "login_ready"
+                    await asyncio.sleep(3)
+                    continue
+
+            elif phase == "login_ready":
+                ready, status = await self._check_login_ready()
+                if ready:
+                    logger.info(f"{self.ip} is login-ready after {elapsed}s")
+                    return True
+                elif status == "upgrade_in_progress":
+                    logger.info(f"{self.ip} upgrade in progress post-reboot ({elapsed}s elapsed)...")
+                    await asyncio.sleep(15)
+                    continue
+                else:
+                    logger.info(f"{self.ip} not login-ready yet ({status}), waiting...")
+
+            await asyncio.sleep(5)
 
         logger.error(f"{self.ip} did not come back online within {timeout}s")
         return False
+
+    async def _check_login_ready(self) -> tuple:
+        """Probe the login endpoint to check if the device is ready to accept logins.
+
+        Returns:
+            Tuple of (ready: bool, status: str) where status describes what we saw.
+        """
+        import tempfile
+        try:
+            login_url = f"{self._base_url}/cgi-bin/luci"
+            username = self.credentials.get("username", "admin")
+            password = self.credentials.get("password", "admin")
+
+            if not self._cookie_file:
+                cookie_fd = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+                self._cookie_file = cookie_fd.name
+                cookie_fd.close()
+
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "-k", "-m", "10",
+                "--interface", self.interface,
+                "-c", self._cookie_file, "-b", self._cookie_file,
+                "-X", "POST",
+                "-H", "Content-Type: application/x-www-form-urlencoded",
+                "-d", f"username={username}&password={password}",
+                login_url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode != 0 or not stdout:
+                return False, "no_response"
+
+            response = stdout.decode("utf-8", errors="ignore").lower()
+
+            if "sw_upgrade_is_in_progress" in response:
+                return False, "upgrade_in_progress"
+
+            if "auth_failed" in response:
+                # After reboot, auth_failed could mean the device is still
+                # initializing its auth subsystem. But it could also mean
+                # credentials are wrong. We return True here because the
+                # device IS responding to login attempts — connect() will
+                # handle credential rotation properly.
+                return True, "auth_responding"
+
+            # Any other response (stok, password_change_required, lockout, etc.)
+            # means the device is ready for a real login attempt
+            return True, "ready"
+
+        except Exception as e:
+            logger.debug(f"Login-ready check failed: {e}")
+            return False, f"error: {e}"
 
     async def _ping_device(self) -> bool:
         """Ping the device using interface binding if available."""

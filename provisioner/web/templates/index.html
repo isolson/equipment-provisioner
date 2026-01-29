@@ -52,13 +52,13 @@
             margin-bottom: 4px;
         }
         .vendor-tag {
-            color: white; font-size: 10px; font-weight: 700;
-            padding: 2px 7px; border-radius: 3px;
+            color: white; font-size: 12px; font-weight: 700;
+            padding: 2px 8px; border-radius: 3px;
             text-transform: uppercase; letter-spacing: 0.5px;
         }
-        .model-text { font-size: 13px; font-weight: 600; color: #1f2937; }
-        .port-num-sm { font-size: 20px; font-weight: 900; color: #9ca3af; margin-left: auto; }
-        .speed-tag { font-size: 11px; font-weight: 700; color: #6b7280; }
+        .model-text { font-size: 15px; font-weight: 700; color: #111827; }
+        .port-num-sm { font-size: 22px; font-weight: 900; color: #6b7280; margin-left: auto; }
+        .speed-tag { font-size: 12px; font-weight: 700; color: #374151; }
 
         /* Large status center area */
         .card-status-center {
@@ -72,36 +72,36 @@
             padding: 8px;
             gap: 4px;
         }
-        .card-status-center.s-idle { background: #f9fafb; }
-        .card-status-center.s-active { background: #eff6ff; }
-        .card-status-center.s-complete { background: #f0fdf4; }
-        .card-status-center.s-error { background: #fef2f2; }
-        .card-status-center.s-booting { background: #fffbeb; }
-        .card-status-center.s-ready { background: #f0fdf4; }
+        .card-status-center.s-idle { background: #f3f4f6; }
+        .card-status-center.s-active { background: #dbeafe; }
+        .card-status-center.s-complete { background: #dcfce7; }
+        .card-status-center.s-error { background: #fee2e2; }
+        .card-status-center.s-booting { background: #fef3c7; }
+        .card-status-center.s-ready { background: #dcfce7; }
 
         .status-icon-lg {
-            width: 36px; height: 36px; border-radius: 50%;
+            width: 40px; height: 40px; border-radius: 50%;
             display: flex; align-items: center; justify-content: center;
         }
-        .status-icon-lg.s-active { background: #dbeafe; color: #1e40af; }
-        .status-icon-lg.s-complete { background: #dcfce7; color: #166534; }
-        .status-icon-lg.s-error { background: #fee2e2; color: #991b1b; }
-        .status-icon-lg.s-booting { background: #fef3c7; color: #92400e; }
-        .status-icon-lg.s-ready { background: #dcfce7; color: #166534; }
-        .status-icon-lg.s-idle { background: #f3f4f6; color: #9ca3af; }
+        .status-icon-lg.s-active { background: #bfdbfe; color: #1e3a8a; }
+        .status-icon-lg.s-complete { background: #bbf7d0; color: #14532d; }
+        .status-icon-lg.s-error { background: #fecaca; color: #7f1d1d; }
+        .status-icon-lg.s-booting { background: #fde68a; color: #78350f; }
+        .status-icon-lg.s-ready { background: #bbf7d0; color: #14532d; }
+        .status-icon-lg.s-idle { background: #e5e7eb; color: #6b7280; }
 
         .status-text-lg {
-            font-size: 15px; font-weight: 700;
+            font-size: 18px; font-weight: 800;
             letter-spacing: 0.5px; text-align: center;
         }
-        .status-text-lg.s-active { color: #1e40af; }
-        .status-text-lg.s-complete { color: #166534; }
-        .status-text-lg.s-error { color: #991b1b; }
-        .status-text-lg.s-booting { color: #92400e; }
-        .status-text-lg.s-ready { color: #166534; }
-        .status-text-lg.s-idle { color: #9ca3af; }
+        .status-text-lg.s-active { color: #1e3a8a; }
+        .status-text-lg.s-complete { color: #14532d; }
+        .status-text-lg.s-error { color: #7f1d1d; }
+        .status-text-lg.s-booting { color: #78350f; }
+        .status-text-lg.s-ready { color: #14532d; }
+        .status-text-lg.s-idle { color: #6b7280; }
 
-        .status-sub { font-size: 11px; color: #6b7280; }
+        .status-sub { font-size: 14px; color: #374151; font-weight: 500; }
 
         @keyframes icon-pulse {
             0%, 100% { opacity: 1; }
@@ -525,11 +525,20 @@
                     'starting': 'STARTING', 'detecting': 'DETECTING', 'configuring': 'CONFIGURING',
                     'login': 'LOGGING IN', 'model_confirmed': 'DETECTING MODEL',
                     'device_info': 'READING INFO', 'firmware_banks': 'CHECKING FIRMWARE',
-                    'firmware_update_1': 'UPDATING FW BANK 1', 'firmware_update_2': 'UPDATING FW BANK 2',
+                    'firmware_update_1': 'UPDATING FW 1', 'firmware_update_2': 'UPDATING FW 2',
                     'config_upload': 'APPLYING CONFIG', 'config_verify': 'VERIFYING CONFIG',
                     'reboot': 'REBOOTING', 'verify': 'VERIFYING FW',
                 };
-                const text = stepLabels[port.current_step] || 'PROVISIONING';
+                // Use current step label, or derive from last completed checklist step
+                let text = stepLabels[port.current_step];
+                if (!text) {
+                    const cl = port.checklist || {};
+                    const stepOrder = ['login', 'model_confirmed', 'firmware_banks', 'firmware_update_1', 'config_upload', 'config_verify', 'firmware_update_2', 'reboot', 'verify'];
+                    for (const k of stepOrder) {
+                        if (cl[k] === 'loading') { text = stepLabels[k]; break; }
+                    }
+                    if (!text) text = 'STARTING';
+                }
                 const prog = getStepProgress(port);
                 const stepNum = Math.min(prog.done + 1, prog.total);
                 return { text, sub: `Step ${stepNum} of ${prog.total}`, cls: 'active', icon: 'spinner' };
@@ -731,14 +740,29 @@
                 html += renderEntry(startEntry);
             }
 
-            let firstPendingMarked = false;
+            // Find the LAST loading step — that's the true current step.
+            // Earlier 'loading' entries are stale (backend doesn't always clear them).
+            let lastLoadingKey = null;
+            if (isActive) {
+                for (const [key] of allSteps) {
+                    if (getIconState(checklist, key) === 'loading') lastLoadingKey = key;
+                }
+            }
+
             for (const [key, label] of allSteps) {
                 // Skip steps that never appeared in checklist or log — they weren't part of this run
                 const logged = logByLabel[label];
                 if (checklist[key] === undefined && !logged) continue;
 
-                // Determine state: prefer checklist truth over stale log entries
+                // Determine state from checklist
                 let state = getIconState(checklist, key);
+
+                // Only the LAST loading step should actually show as loading.
+                // Earlier 'loading' steps have implicitly succeeded (we moved past them).
+                if (isActive && state === 'loading' && key !== lastLoadingKey) {
+                    state = 'success';
+                }
+                // current_step override
                 if (isActive && state === 'pending' && curStep === key) state = 'loading';
 
                 // Build detail text
@@ -757,10 +781,11 @@
                 const time = logged ? logged.time : '';
                 if (logged) detail = logged.detail || detail;
 
-                // First pending step should pulse as loading
-                if (isActive && state === 'pending' && !firstPendingMarked) {
+                // If active and this is the first pending step after all done ones, show as loading
+                if (isActive && state === 'pending' && !lastLoadingKey) {
+                    // No loading step in checklist — promote first pending
                     state = 'loading';
-                    firstPendingMarked = true;
+                    lastLoadingKey = key; // prevent promoting more than one
                 }
 
                 // Only show completed/error/skipped always, loading/pending only during active

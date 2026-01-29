@@ -519,9 +519,8 @@ class BaseHandler(ABC):
                     else:
                         if not await self.reboot():
                             result.error_message = "Failed to reboot device"
-                            await notify("reboot", False, result.error_message)
+                            await notify("firmware_update_1", False, result.error_message)
                             return result
-                    await notify("reboot", "loading", None)
 
                     _logger.info(f"[PROVISION] Waiting for device to come back online...")
                     if not await self.wait_for_reboot():
@@ -688,9 +687,8 @@ class BaseHandler(ABC):
                     else:
                         if not await self.reboot():
                             result.error_message = "Failed to reboot device"
-                            await notify("reboot", False, result.error_message)
+                            await notify("firmware_update_2", False, result.error_message)
                             return result
-                    await notify("reboot", "loading", None)
 
                     _logger.info(f"[PROVISION] Waiting for device to come back online...")
                     if not await self.wait_for_reboot():
