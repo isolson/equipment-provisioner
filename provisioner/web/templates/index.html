@@ -451,7 +451,7 @@
             // Loading firmware updates
             if (checklist.firmware_update_1 === 'loading' || checklist.firmware_update_2 === 'loading') return 'active';
             // Complete when verify is done
-            if (port.last_result === 'complete' || (checklist.login === true && checklist.verify === true)) return 'success';
+            if (port.last_result === 'complete' || port.last_result === 'success' || (checklist.login === true && (checklist.verify === true || checklist.config_verify === true))) return 'success';
             // Failed
             if (port.last_result === 'failed' || checklist.login === false || checklist.firmware_update_1 === false) return 'error';
             if (port.waiting_for_boot) return 'warning';
@@ -543,12 +543,15 @@
             if (checklist.reboot === true && checklist.verify !== true) {
                 return { text: 'REBOOTING', sub: 'Waiting for device...', cls: 'booting', icon: 'spinner' };
             }
+            const isDone = port.last_result === 'complete' || port.last_result === 'success';
+            if (isDone) {
+                return { text: 'COMPLETE', sub: 'Ready to deploy', cls: 'complete', icon: 'check' };
+            }
             const loginOk = checklist.login === true;
             const configOk = checklist.config_upload === true || checklist.config_upload === 'skipped';
-            const fw1Ok = checklist.firmware_update_1 === true;
             const verifyOk = checklist.verify === true || checklist.config_verify === true;
-            if ((loginOk && configOk && fw1Ok && verifyOk) || port.last_result === 'complete') {
-                return { text: 'COMPLETE', cls: 'complete', icon: 'check' };
+            if (loginOk && configOk && verifyOk) {
+                return { text: 'COMPLETE', sub: 'Ready to deploy', cls: 'complete', icon: 'check' };
             }
             if (checklist.login === false || checklist.firmware_update_1 === false || port.last_result === 'failed') {
                 return { text: 'FAILED', sub: port.last_error ? port.last_error.substring(0, 40) : 'Tap for details', cls: 'error', icon: 'x' };
