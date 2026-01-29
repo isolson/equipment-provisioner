@@ -160,44 +160,11 @@ class BaseHandler(ABC):
             True if config verification passed.
         """
         # Default implementation - just verify we can still connect
+        # Config apply does not trigger a reboot, so the device should still be up.
         _logger.info(f"[CONFIG VERIFY] Default verification - checking device accessibility")
         await self.disconnect()
 
-        # Phase 1: Wait for web server to go DOWN (device is rebooting)
-        if hasattr(self, '_check_web_server'):
-            _logger.info(f"[CONFIG VERIFY] Waiting for device to start rebooting...")
-            went_down = False
-            for _ in range(12):  # Up to 60s for device to go down
-                if not await self._check_web_server():
-                    _logger.info(f"[CONFIG VERIFY] Web server went down on {self.ip}")
-                    went_down = True
-                    break
-                await asyncio.sleep(5)
-            if not went_down:
-                _logger.info(f"[CONFIG VERIFY] Web server stayed up — config may not require reboot")
-
-        # Phase 2: Wait for web server to come back UP
-        max_web_wait = 120  # seconds
-        web_up = False
-        if hasattr(self, '_check_web_server'):
-            _logger.info(f"[CONFIG VERIFY] Waiting for web server on {self.ip}...")
-            start = asyncio.get_event_loop().time()
-            while asyncio.get_event_loop().time() - start < max_web_wait:
-                if await self._check_web_server():
-                    _logger.info(f"[CONFIG VERIFY] Web server is up on {self.ip}")
-                    web_up = True
-                    break
-                await asyncio.sleep(5)
-            if not web_up:
-                _logger.error(f"[CONFIG VERIFY] Web server not reachable after {max_web_wait}s")
-                return False
-        else:
-            # No _check_web_server method — fall back to a fixed wait
-            _logger.info(f"[CONFIG VERIFY] No web server check available, waiting 15s")
-            await asyncio.sleep(15)
-            web_up = True
-
-        # Web server is up — try to login (limited retries, stop on auth errors)
+        # Try to reconnect and verify device is accessible
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
@@ -786,8 +753,10 @@ class BaseHandler(ABC):
             # ================================================================
             _logger.info(f"[PROVISION] Phase 10: Final verification")
             result.new_firmware = await self.get_firmware_version()
-            await notify("verify", True, result.new_firmware)
-            await notify("reboot", True, None)
+            did_firmware_update = need_fw1 or need_fw2
+            if did_firmware_update:
+                await notify("reboot", True, None)
+                await notify("verify", True, result.new_firmware)
             result.phases_completed.append(ProvisioningPhase.VERIFYING)
 
             result.success = True

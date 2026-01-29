@@ -70,6 +70,7 @@ class JobStatus(BaseModel):
     device_type: Optional[str] = None
     device_model: Optional[str] = None
     mac_address: Optional[str] = None
+    serial_number: Optional[str] = None
     ip_address: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
@@ -295,6 +296,7 @@ async def get_jobs(
                 device_type=job.device_type,
                 device_model=job.device_model,
                 mac_address=job.mac_address,
+                serial_number=job.serial_number,
                 ip_address=job.ip_address,
                 started_at=job.started_at.isoformat() if job.started_at else None,
                 completed_at=job.completed_at.isoformat() if job.completed_at else None,
@@ -328,6 +330,7 @@ async def get_job(job_id: int, request: Request):
             device_type=job.device_type,
             device_model=job.device_model,
             mac_address=job.mac_address,
+            serial_number=job.serial_number,
             ip_address=job.ip_address,
             started_at=job.started_at.isoformat() if job.started_at else None,
             completed_at=job.completed_at.isoformat() if job.completed_at else None,

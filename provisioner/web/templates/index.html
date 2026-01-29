@@ -353,7 +353,8 @@
                         const now = new Date().toLocaleTimeString('en-US', { hour12: false });
                         const stepNames = { login: 'Login', model_confirmed: 'Model', firmware_banks: 'FW Check',
                             firmware_update_1: 'FW Bank 1', firmware_update_2: 'FW Bank 2',
-                            config_upload: 'Config', reboot: 'Reboot', verify: 'Verify' };
+                            config_upload: 'Config', config_verify: 'Verify',
+                            reboot: 'Reboot', verify: 'Verify FW' };
                         // Parse FW versions for detail on fw update steps
                         let fwVersions = {};
                         const fwSrc = newCl.firmware_banks || oldCl.firmware_banks;
@@ -393,11 +394,9 @@
                             ports[message.port_number].provisioning = true;
                             ports[message.port_number].current_step = 'starting';
                             const now = new Date().toLocaleTimeString('en-US', { hour12: false });
-                            // Don't wipe existing log — port_update entries may have already arrived.
-                            // renderActivityLog uses canonical step order + checklist fallback, so
-                            // any steps not in the log will be filled from checklist state.
-                            if (!portActivityLogs[message.port_number]) portActivityLogs[message.port_number] = [];
-                            portActivityLogs[message.port_number].push({ time: now, step: 'Started', state: 'loading', detail: '' });
+                            // Wipe log for fresh run. renderActivityLog reconstructs any
+                            // fast-completing steps from the checklist state.
+                            portActivityLogs[message.port_number] = [{ time: now, step: 'Started', state: 'loading', detail: '' }];
                         } else if (message.type === 'provisioning_progress') {
                             // Track current step for status display
                             ports[message.port_number].current_step = message.step;
@@ -504,12 +503,16 @@
 
         function getStepProgress(port) {
             const cl = port.checklist || {};
-            const keys = ['login', 'model_confirmed', 'firmware_update_1', 'firmware_update_2', 'config_upload', 'reboot', 'verify'];
-            let done = 0, total = keys.length;
-            for (const k of keys) {
+            // Only count steps that are present in the checklist (not all possible steps)
+            const allKeys = ['login', 'model_confirmed', 'firmware_banks', 'firmware_update_1', 'config_upload', 'config_verify', 'firmware_update_2', 'reboot', 'verify'];
+            let done = 0, total = 0;
+            for (const k of allKeys) {
+                if (cl[k] === undefined) continue;
+                total++;
                 const v = cl[k];
                 if (v === true || v === 'skipped' || (typeof v === 'string' && v.length > 0 && v !== 'loading')) done++;
             }
+            if (total === 0) total = 1; // avoid division by zero
             return { done, total };
         }
 
@@ -523,16 +526,19 @@
                     'login': 'LOGGING IN', 'model_confirmed': 'DETECTING MODEL',
                     'device_info': 'READING INFO', 'firmware_banks': 'CHECKING FIRMWARE',
                     'firmware_update_1': 'UPDATING FW BANK 1', 'firmware_update_2': 'UPDATING FW BANK 2',
-                    'config_upload': 'APPLYING CONFIG', 'reboot': 'REBOOTING', 'verify': 'VERIFYING',
+                    'config_upload': 'APPLYING CONFIG', 'config_verify': 'VERIFYING CONFIG',
+                    'reboot': 'REBOOTING', 'verify': 'VERIFYING FW',
                 };
                 const text = stepLabels[port.current_step] || 'PROVISIONING';
                 const prog = getStepProgress(port);
-                return { text, sub: `Step ${prog.done + 1} of ${prog.total}`, cls: 'active', icon: 'spinner' };
+                const stepNum = Math.min(prog.done + 1, prog.total);
+                return { text, sub: `Step ${stepNum} of ${prog.total}`, cls: 'active', icon: 'spinner' };
             }
             if (port.waiting_for_boot) return { text: 'BOOTING', sub: 'Waiting for device...', cls: 'booting', icon: 'spinner' };
             if (checklist.firmware_update_1 === 'loading' || checklist.firmware_update_2 === 'loading') {
                 const prog = getStepProgress(port);
-                return { text: 'UPDATING FIRMWARE', sub: `Step ${prog.done + 1} of ${prog.total}`, cls: 'active', icon: 'spinner' };
+                const stepNum = Math.min(prog.done + 1, prog.total);
+                return { text: 'UPDATING FIRMWARE', sub: `Step ${stepNum} of ${prog.total}`, cls: 'active', icon: 'spinner' };
             }
             if (checklist.reboot === true && checklist.verify !== true) {
                 return { text: 'REBOOTING', sub: 'Waiting for device...', cls: 'booting', icon: 'spinner' };
@@ -540,7 +546,7 @@
             const loginOk = checklist.login === true;
             const configOk = checklist.config_upload === true || checklist.config_upload === 'skipped';
             const fw1Ok = checklist.firmware_update_1 === true;
-            const verifyOk = checklist.verify === true;
+            const verifyOk = checklist.verify === true || checklist.config_verify === true;
             if ((loginOk && configOk && fw1Ok && verifyOk) || port.last_result === 'complete') {
                 return { text: 'COMPLETE', cls: 'complete', icon: 'check' };
             }
@@ -694,11 +700,11 @@
             }
 
             // Build unified list in canonical provisioning order
-            // Config goes between FW Bank 1 and FW Bank 2 (see HANDLER_DEVELOPMENT.md)
+            // Steps that never appear in checklist or log are omitted (e.g. reboot when no FW update)
             const allSteps = [
                 ['login', 'Login'], ['model_confirmed', 'Model'], ['firmware_banks', 'FW Check'],
-                ['firmware_update_1', 'FW Bank 1'], ['config_upload', 'Config'],
-                ['firmware_update_2', 'FW Bank 2'], ['reboot', 'Reboot'], ['verify', 'Verify']
+                ['firmware_update_1', 'FW Bank 1'], ['config_upload', 'Config'], ['config_verify', 'Verify'],
+                ['firmware_update_2', 'FW Bank 2'], ['reboot', 'Reboot'], ['verify', 'Verify FW']
             ];
             const checklist = port?.checklist || {};
             const isActive = port && (port.provisioning || port.waiting_for_boot);
@@ -724,33 +730,39 @@
 
             let firstPendingMarked = false;
             for (const [key, label] of allSteps) {
-                // Use logged entry if available
-                if (logByLabel[label]) {
-                    html += renderEntry(logByLabel[label]);
-                    continue;
-                }
-                // Otherwise derive from checklist state
+                // Skip steps that never appeared in checklist or log — they weren't part of this run
+                const logged = logByLabel[label];
+                if (checklist[key] === undefined && !logged) continue;
+
+                // Determine state: prefer checklist truth over stale log entries
                 let state = getIconState(checklist, key);
                 if (isActive && state === 'pending' && curStep === key) state = 'loading';
-                // First pending step after all completed ones should pulse as loading
+
+                // Build detail text
+                let detail = '';
+                if (key === 'model_confirmed' && typeof checklist[key] === 'string') detail = checklist[key];
+                if (key === 'firmware_update_1') detail = fwV.bank1 || '';
+                if (key === 'firmware_update_2') detail = fwV.bank2 || '';
+                if (key === 'firmware_banks') {
+                    const v1 = (fwV.bank1 || '?').split(' ')[0];
+                    const v2 = (fwV.bank2 || '?').split(' ')[0];
+                    detail = v1 === v2 ? v1 : `${v1} / ${v2}`;
+                    if (fwV.active) detail += ` (bank ${fwV.active})`;
+                }
+
+                // Use logged entry timestamp if available
+                const time = logged ? logged.time : '';
+                if (logged) detail = logged.detail || detail;
+
+                // First pending step should pulse as loading
                 if (isActive && state === 'pending' && !firstPendingMarked) {
                     state = 'loading';
                     firstPendingMarked = true;
                 }
 
+                // Only show completed/error/skipped always, loading/pending only during active
                 if (state === 'success' || state === 'skipped' || state === 'error') {
-                    let detail = '';
-                    if (key === 'model_confirmed' && typeof checklist[key] === 'string') detail = checklist[key];
-                    if (key === 'firmware_update_1') detail = fwV.bank1 || '';
-                    if (key === 'firmware_update_2') detail = fwV.bank2 || '';
-                    if (key === 'firmware_banks') {
-                        // Short format: just versions, skip "rev" build numbers
-                        const v1 = (fwV.bank1 || '?').split(' ')[0];
-                        const v2 = (fwV.bank2 || '?').split(' ')[0];
-                        detail = v1 === v2 ? v1 : `${v1} / ${v2}`;
-                        if (fwV.active) detail += ` (bank ${fwV.active})`;
-                    }
-                    html += renderEntry({ time: '', step: label, state, detail });
+                    html += renderEntry({ time, step: label, state, detail });
                 } else if (isActive && state === 'loading') {
                     html += renderEntry({ time: '', step: label, state: 'loading', detail: '' });
                 } else if (isActive && state === 'pending') {
@@ -964,33 +976,71 @@
                 return;
             }
 
-            container.innerHTML = `
-                <table class="w-full text-sm">
-                    <thead>
-                        <tr class="text-left text-gray-600 border-b border-gray-300">
-                            <th class="pb-2">Time</th>
-                            <th class="pb-2">Port</th>
-                            <th class="pb-2">Device</th>
-                            <th class="pb-2">Status</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${jobs.map(job => {
-                            const vendor = deviceVendors[job.device_type] || deviceVendors.unknown;
-                            const statusColor = job.status === 'completed' ? 'text-green-700' :
-                                               job.status === 'failed' ? 'text-red-700' : 'text-gray-600';
-                            return `
-                                <tr class="border-b border-gray-200">
-                                    <td class="py-2 text-gray-600">${formatTime(job.started_at)}</td>
-                                    <td class="py-2 text-gray-900">${job.port_number || '-'}</td>
-                                    <td class="py-2"><span style="color: ${vendor.color}">${vendor.name}</span> ${job.device_model || ''}</td>
-                                    <td class="py-2 ${statusColor} font-medium">${job.status?.toUpperCase()}</td>
-                                </tr>
-                            `;
-                        }).join('')}
-                    </tbody>
-                </table>
-            `;
+            container.innerHTML = jobs.map((job, i) => {
+                const vendor = deviceVendors[job.device_type] || deviceVendors.unknown;
+                const isOk = job.status === 'completed';
+                const isFail = job.status === 'failed';
+                const statusColor = isOk ? '#166534' : isFail ? '#991b1b' : '#6b7280';
+                const statusIcon = isOk ? '\u2713' : isFail ? '\u2717' : '\u25cf';
+                const statusText = job.status?.toUpperCase();
+                const ident = job.mac_address || job.serial_number || '';
+                const identLabel = job.mac_address && job.serial_number
+                    ? `${job.mac_address} / ${job.serial_number}`
+                    : ident;
+
+                // Build detail rows for expand
+                const details = [];
+                if (job.mac_address) details.push(['MAC', job.mac_address]);
+                if (job.serial_number) details.push(['Serial', job.serial_number]);
+                if (job.ip_address) details.push(['IP', job.ip_address]);
+                if (job.device_model) details.push(['Model', job.device_model]);
+                if (job.old_firmware) details.push(['FW Before', job.old_firmware]);
+                if (job.new_firmware) details.push(['FW After', job.new_firmware]);
+                if (job.config_applied) details.push(['Config', job.config_applied]);
+                if (job.started_at) details.push(['Started', new Date(job.started_at).toLocaleString('en-US', { hour12: false })]);
+                if (job.completed_at) details.push(['Completed', new Date(job.completed_at).toLocaleString('en-US', { hour12: false })]);
+                if (job.error_message) details.push(['Error', job.error_message]);
+
+                return `
+                    <div class="border-b border-gray-200">
+                        <div class="flex items-center gap-3 py-3 cursor-pointer hover:bg-gray-50 px-1 rounded" onclick="toggleHistoryDetail(${i})">
+                            <span style="color:${statusColor};font-size:14px;width:16px;text-align:center">${statusIcon}</span>
+                            <div class="flex-1 min-w-0">
+                                <div class="flex items-center gap-2 text-sm">
+                                    <span class="font-medium" style="color:${vendor.color}">${vendor.name}</span>
+                                    <span class="text-gray-900">${job.device_model || ''}</span>
+                                    <span class="text-gray-400">Port ${job.port_number || '?'}</span>
+                                </div>
+                                <div class="text-xs text-gray-500 truncate font-mono">${identLabel}</div>
+                            </div>
+                            <div class="text-right flex-shrink-0">
+                                <div class="text-xs font-medium" style="color:${statusColor}">${statusText}</div>
+                                <div class="text-xs text-gray-400">${formatTime(job.started_at)}</div>
+                            </div>
+                            <svg class="w-4 h-4 text-gray-400 transition-transform" id="history-chevron-${i}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                            </svg>
+                        </div>
+                        <div id="history-detail-${i}" class="hidden pb-3 px-1">
+                            <div style="display:grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 12px; padding: 8px 12px; background: #f9fafb; border-radius: 6px; margin-left: 28px;">
+                                ${details.map(([label, value]) => `
+                                    <span style="color:#9ca3af">${label}</span>
+                                    <span class="${label === 'Error' ? 'text-red-700' : 'text-gray-900'}" style="font-family:monospace;word-break:break-all">${value}</span>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function toggleHistoryDetail(index) {
+            const detail = document.getElementById(`history-detail-${index}`);
+            const chevron = document.getElementById(`history-chevron-${index}`);
+            if (detail) {
+                detail.classList.toggle('hidden');
+                chevron?.classList.toggle('rotate-180');
+            }
         }
 
         // Settings
@@ -1057,10 +1107,13 @@
             const now = new Date();
             const diffMs = now - date;
             const diffMins = Math.floor(diffMs / 60000);
-            if (diffMins < 1) return 'Just now';
-            if (diffMins < 60) return `${diffMins}m ago`;
-            if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ago`;
-            return date.toLocaleDateString();
+            const timeStr = date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+            // Today: show time + relative
+            if (diffMins < 1) return `${timeStr} (now)`;
+            if (diffMins < 60) return `${timeStr} (${diffMins}m ago)`;
+            if (diffMins < 1440) return `${timeStr} (${Math.floor(diffMins / 60)}h ago)`;
+            // Older: show date + time
+            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' + timeStr;
         }
 
         // Display Sleep/Wake Functions
