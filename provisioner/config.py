@@ -49,12 +49,8 @@ class SimpleModeConfig(BaseModel):
     subnet: str = "192.168.1.0/24"
 
 
-class GitHubConfig(BaseModel):
-    """GitHub repository configuration."""
-    repo: str
-    branch: str = "main"
-    sync_interval: int = Field(default=300, ge=60)
-    deploy_key: str = "/etc/provisioner/deploy_key"
+class DataConfig(BaseModel):
+    """Local data directory configuration for firmware and configs."""
     local_path: str = "/var/lib/provisioner/repo"
 
 
@@ -144,7 +140,7 @@ class Config(BaseModel):
     network: NetworkConfig = Field(default_factory=NetworkConfig)
     ports: PortsConfig = Field(default_factory=PortsConfig)
     simple_mode: SimpleModeConfig = Field(default_factory=SimpleModeConfig)
-    github: GitHubConfig
+    data: DataConfig = Field(default_factory=DataConfig)
     credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     gpio: GPIOConfig = Field(default_factory=GPIOConfig)

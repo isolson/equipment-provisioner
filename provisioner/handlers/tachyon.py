@@ -235,8 +235,13 @@ class TachyonHandler(BaseHandler):
                         break
 
             if new_password and new_password != self.credentials.get("password"):
-                logger.info(f"[CONFIG] Config changes device password — updating credentials for reconnect")
-                self.credentials["password"] = new_password
+                # Skip hashed passwords — config files store hashes like "$1$..." or "$6$..."
+                # which can't be used for login. Only update if it looks like plaintext.
+                if new_password.startswith("$") or len(new_password) > 30:
+                    logger.info(f"[CONFIG] Config contains hashed password ({len(new_password)} chars) — keeping current credentials")
+                else:
+                    logger.info(f"[CONFIG] Config changes device password — updating credentials for reconnect")
+                    self.credentials["password"] = new_password
         except Exception as e:
             logger.warning(f"[CONFIG] Could not extract password from config: {e}")
 

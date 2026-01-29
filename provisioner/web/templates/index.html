@@ -7,16 +7,8 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
-            darkMode: 'class',
             theme: {
-                extend: {
-                    colors: {
-                        // High contrast colors for readability
-                        'port-bg': '#1a1a2e',
-                        'card-bg': '#16213e',
-                        'card-border': '#0f3460',
-                    }
-                }
+                extend: {}
             }
         }
     </script>
@@ -27,27 +19,27 @@
         }
 
         body {
-            background: #0a0a0f;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
         }
 
         /* Fixed card sizing for 1024x600 display */
         .port-card {
             height: 250px;
-            background: linear-gradient(145deg, #1a1a2e 0%, #16213e 100%);
-            border: 2px solid #0f3460;
+            background: #ffffff;
+            border: 2px solid #d1d5db;
             transition: border-color 0.2s ease;
         }
 
-        .port-card.state-success { border-color: #22c55e; }
-        .port-card.state-warning { border-color: #f59e0b; }
-        .port-card.state-error { border-color: #ef4444; }
-        .port-card.state-active { border-color: #3b82f6; animation: pulse-glow 2s infinite; }
-        .port-card.state-idle { border-color: #374151; }
+        .port-card.state-success { border-color: #16a34a; }
+        .port-card.state-warning { border-color: #d97706; }
+        .port-card.state-error { border-color: #dc2626; }
+        .port-card.state-active { border-color: #2563eb; animation: pulse-glow 2s infinite; }
+        .port-card.state-idle { border-color: #e5e7eb; }
 
         @keyframes pulse-glow {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
-            50% { box-shadow: 0 0 15px 2px rgba(59, 130, 246, 0.3); }
+            0%, 100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.25); }
+            50% { box-shadow: 0 0 15px 2px rgba(37, 99, 235, 0.2); }
         }
 
         /* Status icons */
@@ -62,12 +54,12 @@
             font-size: 14px;
         }
 
-        .status-icon.pending { background: #374151; color: #6b7280; }
-        .status-icon.success { background: #166534; color: #4ade80; }
-        .status-icon.error { background: #7f1d1d; color: #fca5a5; }
-        .status-icon.active { background: #1e40af; color: #93c5fd; animation: icon-pulse 1.5s infinite; }
-        .status-icon.loading { background: #854d0e; color: #fbbf24; animation: icon-pulse 1.5s infinite; }
-        .status-icon.skipped { background: #374151; color: #9ca3af; }
+        .status-icon.pending { background: #e5e7eb; color: #6b7280; }
+        .status-icon.success { background: #dcfce7; color: #166534; }
+        .status-icon.error { background: #fee2e2; color: #991b1b; }
+        .status-icon.active { background: #dbeafe; color: #1e40af; animation: icon-pulse 1.5s infinite; }
+        .status-icon.loading { background: #fef3c7; color: #92400e; animation: icon-pulse 1.5s infinite; }
+        .status-icon.skipped { background: #f3f4f6; color: #6b7280; }
 
         @keyframes icon-pulse {
             0%, 100% { opacity: 1; }
@@ -76,8 +68,8 @@
 
         /* Speed badge */
         .speed-badge {
-            background: #1e40af;
-            color: #93c5fd;
+            background: #dbeafe;
+            color: #1e40af;
             font-weight: 700;
             font-size: 14px;
             padding: 4px 10px;
@@ -86,7 +78,7 @@
 
         /* Device info section */
         .device-info {
-            background: rgba(0, 0, 0, 0.3);
+            background: #f0f0f0;
             border-radius: 6px;
             padding: 8px 10px;
         }
@@ -100,12 +92,12 @@
             text-align: center;
         }
 
-        .status-bar.idle { background: #1f2937; color: #6b7280; }
-        .status-bar.booting { background: #78350f; color: #fcd34d; }
-        .status-bar.ready { background: #14532d; color: #86efac; }
-        .status-bar.active { background: #1e3a8a; color: #93c5fd; }
-        .status-bar.complete { background: #166534; color: #4ade80; }
-        .status-bar.error { background: #7f1d1d; color: #fca5a5; }
+        .status-bar.idle { background: #f3f4f6; color: #6b7280; }
+        .status-bar.booting { background: #fef3c7; color: #92400e; }
+        .status-bar.ready { background: #dcfce7; color: #166534; }
+        .status-bar.active { background: #dbeafe; color: #1e40af; }
+        .status-bar.complete { background: #dcfce7; color: #166534; }
+        .status-bar.error { background: #fee2e2; color: #991b1b; }
 
         /* No link state - dim the card */
         .port-card.no-link {
@@ -116,14 +108,14 @@
         .header-btn {
             min-height: 40px;
             min-width: 40px;
-            background: #1f2937;
+            background: #e5e7eb;
             border-radius: 8px;
             display: flex;
             align-items: center;
             justify-content: center;
         }
 
-        .header-btn:hover { background: #374151; }
+        .header-btn:hover { background: #d1d5db; }
 
         /* Modal styles */
         .modal-backdrop {
@@ -131,8 +123,8 @@
         }
 
         ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: #1f2937; }
-        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        ::-webkit-scrollbar-track { background: #f3f4f6; }
+        ::-webkit-scrollbar-thumb { background: #9ca3af; border-radius: 4px; }
 
         /* Sleep overlay */
         #sleep-overlay {
@@ -148,19 +140,19 @@
         }
     </style>
 </head>
-<body class="dark text-white min-h-screen flex flex-col overflow-hidden">
+<body class="text-gray-900 min-h-screen flex flex-col overflow-hidden">
     <!-- Sleep Overlay - full screen black, click/touch to wake -->
     <div id="sleep-overlay" onclick="wakeDisplay()"></div>
 
     <!-- Compact Header -->
-    <header class="bg-[#0f0f1a] border-b border-[#1f2937] px-4 py-2 flex items-center justify-between flex-shrink-0">
+    <header class="bg-white border-b border-gray-300 px-4 py-2 flex items-center justify-between flex-shrink-0">
         <div class="flex items-center gap-3">
             <div class="w-3 h-3 rounded-full bg-green-500" id="connection-indicator"></div>
-            <h1 class="text-lg font-bold text-white">Device Provisioner</h1>
-            <span class="text-xs text-gray-500 font-mono" id="management-url"></span>
+            <h1 class="text-lg font-bold text-gray-900">Device Provisioner</h1>
+            <span class="text-xs text-gray-400 font-mono" id="management-url"></span>
         </div>
         <div class="flex items-center gap-2">
-            <span class="text-sm text-gray-400 mr-2" id="status-text">Connecting...</span>
+            <span class="text-sm text-gray-600 mr-2" id="status-text">Connecting...</span>
             <a href="/files" class="header-btn p-2" title="Firmware & Configs">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
@@ -192,46 +184,46 @@
 
     <!-- Port Action Modal -->
     <div id="port-modal" class="fixed inset-0 z-50 hidden">
-        <div class="modal-backdrop absolute inset-0 bg-black/60" onclick="closeModal()"></div>
-        <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md bg-[#16213e] rounded-xl shadow-xl overflow-hidden flex flex-col max-h-[80vh] border border-[#0f3460]">
-            <div class="px-5 py-3 border-b border-[#0f3460] flex items-center justify-between">
+        <div class="modal-backdrop absolute inset-0 bg-black/40" onclick="closeModal()"></div>
+        <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md bg-white rounded-xl shadow-xl overflow-hidden flex flex-col max-h-[80vh] border border-gray-300">
+            <div class="px-5 py-3 border-b border-gray-300 flex items-center justify-between">
                 <h3 class="text-lg font-bold" id="modal-title">Port Actions</h3>
-                <button onclick="closeModal()" class="p-2 rounded-lg hover:bg-[#1a1a2e]">
+                <button onclick="closeModal()" class="p-2 rounded-lg hover:bg-gray-100">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                     </svg>
                 </button>
             </div>
             <div class="flex-1 overflow-y-auto p-5" id="modal-content"></div>
-            <div class="px-5 py-3 border-t border-[#0f3460] flex gap-2" id="modal-footer"></div>
+            <div class="px-5 py-3 border-t border-gray-300 flex gap-2" id="modal-footer"></div>
         </div>
     </div>
 
     <!-- History Modal -->
     <div id="history-modal" class="fixed inset-0 z-50 hidden">
-        <div class="modal-backdrop absolute inset-0 bg-black/60" onclick="closeHistoryModal()"></div>
-        <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-2xl bg-[#16213e] rounded-xl shadow-xl overflow-hidden flex flex-col max-h-[80vh] border border-[#0f3460]">
-            <div class="px-5 py-3 border-b border-[#0f3460] flex items-center justify-between">
+        <div class="modal-backdrop absolute inset-0 bg-black/40" onclick="closeHistoryModal()"></div>
+        <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-2xl bg-white rounded-xl shadow-xl overflow-hidden flex flex-col max-h-[80vh] border border-gray-300">
+            <div class="px-5 py-3 border-b border-gray-300 flex items-center justify-between">
                 <h3 class="text-lg font-bold">Provisioning History</h3>
-                <button onclick="closeHistoryModal()" class="p-2 rounded-lg hover:bg-[#1a1a2e]">
+                <button onclick="closeHistoryModal()" class="p-2 rounded-lg hover:bg-gray-100">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                     </svg>
                 </button>
             </div>
             <div class="flex-1 overflow-y-auto p-5" id="history-content">
-                <div class="text-gray-400 text-center py-8">Loading...</div>
+                <div class="text-gray-600 text-center py-8">Loading...</div>
             </div>
         </div>
     </div>
 
     <!-- Settings Modal -->
     <div id="settings-modal" class="fixed inset-0 z-50 hidden">
-        <div class="modal-backdrop absolute inset-0 bg-black/60" onclick="closeSettings()"></div>
-        <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md bg-[#16213e] rounded-xl shadow-xl overflow-hidden flex flex-col max-h-[80vh] border border-[#0f3460]">
-            <div class="px-5 py-3 border-b border-[#0f3460] flex items-center justify-between">
+        <div class="modal-backdrop absolute inset-0 bg-black/40" onclick="closeSettings()"></div>
+        <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md bg-white rounded-xl shadow-xl overflow-hidden flex flex-col max-h-[80vh] border border-gray-300">
+            <div class="px-5 py-3 border-b border-gray-300 flex items-center justify-between">
                 <h3 class="text-lg font-bold">Settings</h3>
-                <button onclick="closeSettings()" class="p-2 rounded-lg hover:bg-[#1a1a2e]">
+                <button onclick="closeSettings()" class="p-2 rounded-lg hover:bg-gray-100">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                     </svg>
@@ -239,14 +231,14 @@
             </div>
             <div class="flex-1 overflow-y-auto p-5 space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-2">System Status</label>
-                    <div class="bg-[#1a1a2e] rounded-lg p-3 text-sm" id="system-status">Loading...</div>
+                    <label class="block text-sm font-medium text-gray-600 mb-2">System Status</label>
+                    <div class="bg-gray-50 rounded-lg p-3 text-sm border border-gray-200" id="system-status">Loading...</div>
                 </div>
                 <div class="space-y-2">
-                    <button onclick="triggerGitSync()" class="w-full py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm">
+                    <button onclick="triggerGitSync()" class="w-full py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm text-white">
                         Sync GitHub Repository
                     </button>
-                    <button onclick="location.reload()" class="w-full py-2 bg-[#1a1a2e] hover:bg-[#252540] rounded-lg font-medium text-sm">
+                    <button onclick="location.reload()" class="w-full py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
                         Refresh Page
                     </button>
                 </div>
@@ -278,7 +270,7 @@
             cambium: { name: 'Cambium', color: '#22c55e', defaultUser: 'admin' },
             mikrotik: { name: 'MikroTik', color: '#3b82f6', defaultUser: 'admin' },
             tachyon: { name: 'Tachyon', color: '#a855f7', defaultUser: 'root' },
-            tarana: { name: 'Tarana', color: '#f59e0b', defaultUser: 'admin' },
+            tarana: { name: 'Tarana', color: '#d97706', defaultUser: 'admin' },
             unknown: { name: 'Unknown', color: '#6b7280', defaultUser: 'admin' },
         };
 
@@ -545,8 +537,8 @@
             div.innerHTML = `
                 <!-- Header: Port number + Speed -->
                 <div class="flex items-center justify-between mb-2">
-                    <div class="text-3xl font-black text-white">${portNum}</div>
-                    ${speed ? `<div class="speed-badge">${speed}</div>` : '<div class="text-gray-500 text-sm">—</div>'}
+                    <div class="text-3xl font-black text-gray-900">${portNum}</div>
+                    ${speed ? `<div class="speed-badge">${speed}</div>` : '<div class="text-gray-400 text-sm">\u2014</div>'}
                 </div>
 
                 <!-- Status Icons Row: Login → FW1 → Config → FW2 -->
@@ -582,12 +574,12 @@
                 <!-- Device Info -->
                 <div class="device-info flex-1 mb-2">
                     ${port.device_detected || checklist.login ? `
-                        <div class="text-white text-sm truncate mb-1">
+                        <div class="text-gray-900 text-sm truncate mb-1">
                             <span class="font-bold" style="color: ${vendor.color}">${vendor.name}</span>${model ? ` ${model}` : ''}
                         </div>
-                        ${mac ? `<div class="text-blue-300 text-xs font-mono truncate">${mac}</div>` : ''}
+                        ${mac ? `<div class="text-blue-700 text-xs font-mono truncate">${mac}</div>` : ''}
                     ` : `
-                        <div class="text-gray-500 text-sm">${noLink ? 'No device connected' : 'Waiting for device...'}</div>
+                        <div class="text-gray-400 text-sm">${noLink ? 'No device connected' : 'Waiting for device...'}</div>
                     `}
                 </div>
 
@@ -625,34 +617,34 @@
             document.getElementById('modal-content').innerHTML = `
                 <div class="space-y-4">
                     <div class="grid grid-cols-2 gap-3 text-sm">
-                        <div class="text-gray-400">Model</div>
-                        <div class="text-white font-medium">${model || '-'}</div>
-                        <div class="text-gray-400">MAC Address</div>
-                        <div class="text-blue-300 font-mono text-xs">${mac || '-'}</div>
-                        <div class="text-gray-400">Serial</div>
-                        <div class="text-purple-300 font-mono text-xs">${serial || '-'}</div>
-                        <div class="text-gray-400">IP Address</div>
-                        <div class="text-white">${port.device_ip || '-'}</div>
-                        <div class="text-gray-400">Link Speed</div>
-                        <div class="text-white">${port.link_speed || '-'}</div>
-                        <div class="text-gray-400">Firmware Bank 1</div>
-                        <div class="text-green-400 font-mono text-xs">${fw1Ver}${activeBank === '1' ? ' (active)' : ''}</div>
-                        <div class="text-gray-400">Firmware Bank 2</div>
-                        <div class="text-green-400 font-mono text-xs">${fw2Ver}${activeBank === '2' ? ' (active)' : ''}</div>
+                        <div class="text-gray-600">Model</div>
+                        <div class="text-gray-900 font-medium">${model || '-'}</div>
+                        <div class="text-gray-600">MAC Address</div>
+                        <div class="text-blue-700 font-mono text-xs">${mac || '-'}</div>
+                        <div class="text-gray-600">Serial</div>
+                        <div class="text-purple-700 font-mono text-xs">${serial || '-'}</div>
+                        <div class="text-gray-600">IP Address</div>
+                        <div class="text-gray-900">${port.device_ip || '-'}</div>
+                        <div class="text-gray-600">Link Speed</div>
+                        <div class="text-gray-900">${port.link_speed || '-'}</div>
+                        <div class="text-gray-600">Firmware Bank 1</div>
+                        <div class="text-green-700 font-mono text-xs">${fw1Ver}${activeBank === '1' ? ' (active)' : ''}</div>
+                        <div class="text-gray-600">Firmware Bank 2</div>
+                        <div class="text-green-700 font-mono text-xs">${fw2Ver}${activeBank === '2' ? ' (active)' : ''}</div>
                     </div>
 
                     ${port.last_error ? `
-                        <div class="p-3 bg-red-900/30 border border-red-800 rounded-lg text-red-300 text-sm">
+                        <div class="p-3 bg-red-50 border border-red-300 rounded-lg text-red-700 text-sm">
                             ${port.last_error}
                         </div>
                     ` : ''}
                 </div>
             `;
             document.getElementById('modal-footer').innerHTML = `
-                <button onclick="openProvisionModal(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm">
+                <button onclick="openProvisionModal(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
                     ${port.last_result === 'complete' ? 'Re-provision' : 'Provision'}
                 </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-[#1a1a2e] hover:bg-[#252540] rounded-lg font-medium text-sm">
+                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
                     Close
                 </button>
             `;
@@ -667,41 +659,41 @@
             document.getElementById('modal-title').textContent = `Provision Port ${portNum}`;
             document.getElementById('modal-content').innerHTML = `
                 <div class="space-y-4">
-                    <div class="p-3 bg-[#1a1a2e] rounded-lg">
+                    <div class="p-3 bg-gray-50 rounded-lg border border-gray-200">
                         <div class="font-bold text-lg" style="color: ${vendor.color}">${vendor.name}</div>
-                        <div class="text-sm text-gray-400">${port.device_ip || 'Unknown IP'}</div>
+                        <div class="text-sm text-gray-600">${port.device_ip || 'Unknown IP'}</div>
                     </div>
 
                     <div>
-                        <div class="text-sm font-medium text-gray-300 mb-2">Options</div>
+                        <div class="text-sm font-medium text-gray-600 mb-2">Options</div>
                         <div class="space-y-2">
                             <label class="flex items-center gap-3 cursor-pointer">
-                                <input type="checkbox" id="skip-config" class="w-5 h-5 rounded bg-[#1a1a2e] border-gray-600">
-                                <span class="text-sm text-white">Skip configuration</span>
+                                <input type="checkbox" id="skip-config" class="w-5 h-5 rounded bg-white border-gray-300">
+                                <span class="text-sm text-gray-900">Skip configuration</span>
                             </label>
                             <label class="flex items-center gap-3 cursor-pointer">
-                                <input type="checkbox" id="skip-firmware" class="w-5 h-5 rounded bg-[#1a1a2e] border-gray-600">
-                                <span class="text-sm text-white">Skip firmware update</span>
+                                <input type="checkbox" id="skip-firmware" class="w-5 h-5 rounded bg-white border-gray-300">
+                                <span class="text-sm text-gray-900">Skip firmware update</span>
                             </label>
                         </div>
                     </div>
 
                     <div>
-                        <div class="text-sm font-medium text-gray-300 mb-2">Custom Credentials (optional)</div>
+                        <div class="text-sm font-medium text-gray-600 mb-2">Custom Credentials (optional)</div>
                         <div class="grid grid-cols-2 gap-2">
                             <input type="text" id="custom-username" placeholder="Username"
-                                class="bg-[#1a1a2e] border border-gray-600 rounded-lg px-3 py-2 text-sm text-white">
+                                class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900">
                             <input type="password" id="custom-password" placeholder="Password"
-                                class="bg-[#1a1a2e] border border-gray-600 rounded-lg px-3 py-2 text-sm text-white">
+                                class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900">
                         </div>
                     </div>
                 </div>
             `;
             document.getElementById('modal-footer').innerHTML = `
-                <button onclick="startProvisioning(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm">
+                <button onclick="startProvisioning(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
                     Start Provisioning
                 </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-[#1a1a2e] hover:bg-[#252540] rounded-lg font-medium text-sm">
+                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
                     Cancel
                 </button>
             `;
@@ -716,37 +708,37 @@
             document.getElementById('modal-title').textContent = `Credentials Required - Port ${portNum}`;
             document.getElementById('modal-content').innerHTML = `
                 <div class="space-y-4">
-                    <div class="p-3 bg-red-900/30 border border-red-700 rounded-lg">
-                        <div class="flex items-center gap-2 text-red-300 font-medium mb-1">
+                    <div class="p-3 bg-red-50 border border-red-300 rounded-lg">
+                        <div class="flex items-center gap-2 text-red-700 font-medium mb-1">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
                             </svg>
                             Authentication Failed
                         </div>
-                        <div class="text-sm text-red-200">${port.last_error || 'Default credentials were rejected. Please enter the correct credentials.'}</div>
+                        <div class="text-sm text-red-700">${port.last_error || 'Default credentials were rejected. Please enter the correct credentials.'}</div>
                     </div>
 
-                    <div class="p-3 bg-[#1a1a2e] rounded-lg">
+                    <div class="p-3 bg-gray-50 rounded-lg border border-gray-200">
                         <div class="font-bold text-lg" style="color: ${vendor.color}">${vendor.name}</div>
-                        <div class="text-sm text-gray-400">${port.device_ip || 'Unknown IP'}</div>
+                        <div class="text-sm text-gray-600">${port.device_ip || 'Unknown IP'}</div>
                     </div>
 
                     <div>
-                        <div class="text-sm font-medium text-gray-300 mb-2">Enter Device Credentials</div>
+                        <div class="text-sm font-medium text-gray-600 mb-2">Enter Device Credentials</div>
                         <div class="space-y-2">
                             <input type="text" id="custom-username" placeholder="Username" value="${vendor.defaultUser || 'admin'}"
-                                class="w-full bg-[#1a1a2e] border border-gray-600 rounded-lg px-3 py-2 text-sm text-white">
+                                class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900">
                             <input type="password" id="custom-password" placeholder="Password"
-                                class="w-full bg-[#1a1a2e] border border-gray-600 rounded-lg px-3 py-2 text-sm text-white" autofocus>
+                                class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900" autofocus>
                         </div>
                     </div>
                 </div>
             `;
             document.getElementById('modal-footer').innerHTML = `
-                <button onclick="retryWithCredentials(${portNum})" class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm">
+                <button onclick="retryWithCredentials(${portNum})" class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm text-white">
                     Retry with Credentials
                 </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-[#1a1a2e] hover:bg-[#252540] rounded-lg font-medium text-sm">
+                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
                     Cancel
                 </button>
             `;
@@ -844,21 +836,21 @@
                 const jobs = await response.json();
                 renderHistory(jobs);
             } catch (error) {
-                document.getElementById('history-content').innerHTML = '<div class="text-red-400 text-center py-4">Failed to load</div>';
+                document.getElementById('history-content').innerHTML = '<div class="text-red-700 text-center py-4">Failed to load</div>';
             }
         }
 
         function renderHistory(jobs) {
             const container = document.getElementById('history-content');
             if (jobs.length === 0) {
-                container.innerHTML = '<div class="text-gray-400 text-center py-8">No history</div>';
+                container.innerHTML = '<div class="text-gray-600 text-center py-8">No history</div>';
                 return;
             }
 
             container.innerHTML = `
                 <table class="w-full text-sm">
                     <thead>
-                        <tr class="text-left text-gray-400 border-b border-[#0f3460]">
+                        <tr class="text-left text-gray-600 border-b border-gray-300">
                             <th class="pb-2">Time</th>
                             <th class="pb-2">Port</th>
                             <th class="pb-2">Device</th>
@@ -868,12 +860,12 @@
                     <tbody>
                         ${jobs.map(job => {
                             const vendor = deviceVendors[job.device_type] || deviceVendors.unknown;
-                            const statusColor = job.status === 'completed' ? 'text-green-400' :
-                                               job.status === 'failed' ? 'text-red-400' : 'text-gray-400';
+                            const statusColor = job.status === 'completed' ? 'text-green-700' :
+                                               job.status === 'failed' ? 'text-red-700' : 'text-gray-600';
                             return `
-                                <tr class="border-b border-[#0f3460]/50">
-                                    <td class="py-2 text-gray-400">${formatTime(job.started_at)}</td>
-                                    <td class="py-2 text-white">${job.port_number || '-'}</td>
+                                <tr class="border-b border-gray-200">
+                                    <td class="py-2 text-gray-600">${formatTime(job.started_at)}</td>
+                                    <td class="py-2 text-gray-900">${job.port_number || '-'}</td>
                                     <td class="py-2"><span style="color: ${vendor.color}">${vendor.name}</span> ${job.device_model || ''}</td>
                                     <td class="py-2 ${statusColor} font-medium">${job.status?.toUpperCase()}</td>
                                 </tr>
@@ -900,16 +892,16 @@
                 const status = await response.json();
                 document.getElementById('system-status').innerHTML = `
                     <div class="grid grid-cols-2 gap-1 text-sm">
-                        <div class="text-gray-400">Status</div>
-                        <div class="${status.running ? 'text-green-400' : 'text-red-400'} font-medium">${status.running ? 'RUNNING' : 'STOPPED'}</div>
-                        <div class="text-gray-400">Mode</div>
-                        <div class="text-white">${status.mode?.toUpperCase() || 'VLAN'}</div>
-                        <div class="text-gray-400">Active Ports</div>
-                        <div class="text-white">${status.active_ports || 0} / ${status.total_ports || 6}</div>
+                        <div class="text-gray-600">Status</div>
+                        <div class="${status.running ? 'text-green-700' : 'text-red-700'} font-medium">${status.running ? 'RUNNING' : 'STOPPED'}</div>
+                        <div class="text-gray-600">Mode</div>
+                        <div class="text-gray-900">${status.mode?.toUpperCase() || 'VLAN'}</div>
+                        <div class="text-gray-600">Active Ports</div>
+                        <div class="text-gray-900">${status.active_ports || 0} / ${status.total_ports || 6}</div>
                     </div>
                 `;
             } catch (error) {
-                document.getElementById('system-status').innerHTML = '<div class="text-red-400">Failed to load</div>';
+                document.getElementById('system-status').innerHTML = '<div class="text-red-700">Failed to load</div>';
             }
         }
 

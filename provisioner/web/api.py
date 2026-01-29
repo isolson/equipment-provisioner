@@ -84,7 +84,6 @@ class SystemStatus(BaseModel):
     running: bool
     mode: str  # "vlan" or "simple"
     uptime_seconds: Optional[float] = None
-    github_last_sync: Optional[str] = None
     total_ports: int
     active_ports: int
     devices_detected: int
@@ -381,18 +380,6 @@ async def get_system_status(request: Request):
     )
 
 
-@router.post("/github/sync")
-async def trigger_github_sync(request: Request, background_tasks: BackgroundTasks):
-    """Manually trigger GitHub repository sync."""
-    try:
-        from ..github_sync import get_sync
-        sync = get_sync()
-        background_tasks.add_task(sync.clone_or_pull)
-        return {"message": "GitHub sync triggered"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # ============================================================================
 # Device Detection/Identification
 # ============================================================================
@@ -525,7 +512,7 @@ def _get_data_path(request: Request) -> Path:
     """Get the data path for firmware/configs."""
     provisioner = request.app.state.provisioner
     if provisioner and hasattr(provisioner, 'config'):
-        return Path(provisioner.config.github.local_path)
+        return Path(provisioner.config.data.local_path)
     # Fallback to default
     return Path("/var/lib/provisioner/repo")
 

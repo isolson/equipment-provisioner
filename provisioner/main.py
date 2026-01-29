@@ -23,7 +23,7 @@ from .db import init_db, close_db, ProvisioningRecord, ProvisioningStatus
 from .detector import DeviceDetector, DiscoveredDevice
 from .fingerprint import identify_device, DeviceType
 from .firmware import FirmwareManager
-from .github_sync import init_sync, get_sync
+from .config_store import init_store, get_store
 from .gpio import init_gpio, cleanup_gpio, get_gpio
 from .handler_manager import HandlerManager
 from .notifier import init_notifier, get_notifier
@@ -79,23 +79,14 @@ class Provisioner:
             gpio_controller=gpio,
         )
 
-        # Initialize GitHub sync
-        sync = init_sync(
-            repo_url=self.config.github.repo,
-            local_path=self.config.github.local_path,
-            branch=self.config.github.branch,
-            deploy_key=self.config.github.deploy_key,
-            sync_interval=self.config.github.sync_interval,
-        )
-
-        # Initial sync
-        logger.info("Syncing configuration repository...")
-        await sync.clone_or_pull()
+        # Initialize local config/firmware store
+        store = init_store(self.config.data.local_path)
+        store.ensure_directories()
 
         # Initialize firmware manager
         self.firmware_manager = FirmwareManager(
-            firmware_path=str(sync.firmware_path),
-            manifest_path=str(sync.local_path / "manifest.yaml"),
+            firmware_path=str(store.firmware_path),
+            manifest_path=str(store.local_path / "manifest.yaml"),
         )
 
         # Initialize handler manager with credentials
@@ -120,7 +111,7 @@ class Provisioner:
 
         # Load alternate credentials from credentials.json
         alternate_credentials = {}
-        creds_path = Path(self.config.github.local_path) / "credentials.json"
+        creds_path = Path(self.config.data.local_path) / "credentials.json"
         if creds_path.exists():
             try:
                 with open(creds_path) as f:
@@ -172,7 +163,7 @@ class Provisioner:
         self._running = True
 
         # Start background tasks based on mode
-        tasks = [asyncio.create_task(self._periodic_github_sync())]
+        tasks = []
 
         if self._use_vlan_mode:
             tasks.append(asyncio.create_task(self.port_manager.start_monitoring()))
@@ -327,7 +318,7 @@ class Provisioner:
             )
 
             # Get config and firmware paths
-            sync = get_sync()
+            store = get_store()
 
             # For VLAN mode, we need to probe the device to get model info
             # since we only know the general type (cambium, tachyon, etc.)
@@ -353,7 +344,7 @@ class Provisioner:
                 port_status = self.port_manager._get_single_port_status(port_num)
                 await notify_port_change(port_num, port_status)
 
-            config_path = sync.get_config_template(
+            config_path = store.get_config_template(
                 device_type,
                 fingerprint.model,
             )
@@ -521,19 +512,6 @@ class Provisioner:
             await notifier.notify_failed(result, device_ip)
             return False
 
-    async def _periodic_github_sync(self) -> None:
-        """Periodically sync GitHub repository."""
-        sync = get_sync()
-        while self._running:
-            await asyncio.sleep(self.config.github.sync_interval)
-            try:
-                await sync.clone_or_pull()
-                # Reload firmware manager manifest
-                if self.firmware_manager:
-                    self.firmware_manager._load_manifest()
-            except Exception as e:
-                logger.error(f"GitHub sync failed: {e}")
-
     async def _on_device_discovered(self, device: DiscoveredDevice) -> None:
         """Handle a newly discovered device."""
         logger.info(f"New device discovered: {device.ip_address} ({device.mac_address})")
@@ -596,15 +574,15 @@ class Provisioner:
             )
 
             # Get config and firmware paths
-            sync = get_sync()
+            store = get_store()
 
-            config_path = sync.get_config_template(
+            config_path = store.get_config_template(
                 fingerprint.device_type.value,
                 fingerprint.model,
             )
 
             # Check for device-specific override
-            override = sync.get_device_override(device.mac_address)
+            override = store.get_device_override(device.mac_address)
             if override:
                 logger.info(f"Found device override for {device.mac_address}")
 

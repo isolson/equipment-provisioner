@@ -7,7 +7,6 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
-            darkMode: 'class',
             theme: {
                 extend: {
                     colors: {
@@ -24,16 +23,16 @@
         * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
         .touch-btn { min-height: 48px; min-width: 48px; }
         ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: #1f2937; }
-        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
-        .drop-zone { border: 2px dashed #4b5563; transition: all 0.2s; }
+        ::-webkit-scrollbar-track { background: #f3f4f6; }
+        ::-webkit-scrollbar-thumb { background: #9ca3af; border-radius: 4px; }
+        .drop-zone { border: 2px dashed #9ca3af; transition: all 0.2s; }
         .drop-zone.dragover { border-color: #3b82f6; background: rgba(59, 130, 246, 0.1); }
 
         /* Device type badge colors */
         .badge-cambium { background: #22c55e20; color: #22c55e; }
         .badge-mikrotik { background: #3b82f620; color: #3b82f6; }
         .badge-tachyon { background: #a855f720; color: #a855f7; }
-        .badge-tarana { background: #f59e0b20; color: #f59e0b; }
+        .badge-tarana { background: #d9770620; color: #d97706; }
         .badge-unknown { background: #6b728020; color: #6b7280; }
 
         /* Custom/default badge */
@@ -41,11 +40,11 @@
         .badge-default { background: #6b728020; color: #9ca3af; }
     </style>
 </head>
-<body class="dark bg-gray-900 text-gray-100 min-h-screen">
+<body class="bg-[#f5f5f5] text-gray-900 min-h-screen" style="font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Menlo', monospace;">
     <!-- Header -->
-    <header class="bg-gray-800 border-b border-gray-700 px-4 py-3 flex items-center justify-between">
+    <header class="bg-white border-b border-gray-300 px-4 py-3 flex items-center justify-between">
         <div class="flex items-center gap-4">
-            <a href="/" class="text-gray-400 hover:text-white">
+            <a href="/" class="text-gray-600 hover:text-gray-900">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
                 </svg>
@@ -53,7 +52,7 @@
             <h1 class="text-xl font-bold">Manage</h1>
         </div>
         <div class="flex items-center gap-2">
-            <select id="sort-by" onchange="applySort()" class="bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm">
+            <select id="sort-by" onchange="applySort()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm">
                 <option value="device_type">Sort by Device</option>
                 <option value="name">Sort by Name</option>
                 <option value="type">Sort by Type</option>
@@ -62,15 +61,15 @@
     </header>
 
     <!-- Tabs -->
-    <div class="bg-gray-800 border-b border-gray-700 px-4">
+    <div class="bg-white border-b border-gray-300 px-4">
         <div class="flex gap-1">
-            <button onclick="showTab('firmware')" id="tab-firmware" class="px-4 py-3 font-medium border-b-2 border-blue-500 text-blue-400">
+            <button onclick="showTab('firmware')" id="tab-firmware" class="px-4 py-3 font-medium border-b-2 border-blue-500 text-blue-600">
                 Firmware
             </button>
-            <button onclick="showTab('configs')" id="tab-configs" class="px-4 py-3 font-medium border-b-2 border-transparent text-gray-400 hover:text-white">
+            <button onclick="showTab('configs')" id="tab-configs" class="px-4 py-3 font-medium border-b-2 border-transparent text-gray-600 hover:text-gray-900">
                 Configs
             </button>
-            <button onclick="showTab('credentials')" id="tab-credentials" class="px-4 py-3 font-medium border-b-2 border-transparent text-gray-400 hover:text-white">
+            <button onclick="showTab('credentials')" id="tab-credentials" class="px-4 py-3 font-medium border-b-2 border-transparent text-gray-600 hover:text-gray-900">
                 Credentials
             </button>
         </div>
@@ -83,13 +82,13 @@
         <!-- ============================================ -->
         <div id="section-firmware">
             <!-- Upload Section -->
-            <div class="bg-gray-800 rounded-xl p-4 mb-6">
+            <div class="bg-white rounded-xl p-4 mb-6 border border-gray-200">
                 <h2 class="text-lg font-semibold mb-4">Add Firmware</h2>
 
                 <!-- Device Type Select -->
                 <div class="mb-4">
-                    <label class="block text-sm text-gray-400 mb-2">Device Type</label>
-                    <select id="fw-device-type" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                    <label class="block text-sm text-gray-600 mb-2">Device Type</label>
+                    <select id="fw-device-type" class="w-full bg-white border border-gray-300 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
                         <option value="cambium">Cambium ePMP</option>
                         <option value="mikrotik">MikroTik RouterOS</option>
                         <option value="tachyon">Tachyon</option>
@@ -106,19 +105,19 @@
                          ondragleave="handleDragLeave(event)"
                          ondrop="handleFirmwareDrop(event)">
                         <input type="file" id="fw-file-input" class="hidden" accept=".bin,.img,.tbn,.npk" onchange="uploadFirmwareFile(this.files[0])">
-                        <svg class="w-12 h-12 mx-auto text-gray-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg class="w-12 h-12 mx-auto text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
                         </svg>
-                        <p class="text-gray-400">Drop firmware file here</p>
-                        <p class="text-sm text-gray-500">or click to browse</p>
+                        <p class="text-gray-600">Drop firmware file here</p>
+                        <p class="text-sm text-gray-400">or click to browse</p>
                     </div>
 
                     <!-- URL Download -->
-                    <div class="bg-gray-700/50 rounded-xl p-4">
-                        <label class="block text-sm text-gray-400 mb-2">Or paste firmware URL</label>
+                    <div class="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                        <label class="block text-sm text-gray-600 mb-2">Or paste firmware URL</label>
                         <input type="url" id="fw-url" placeholder="https://example.com/firmware.bin"
-                            class="w-full bg-gray-600 border border-gray-500 rounded-lg px-4 py-3 mb-3 focus:border-blue-500 focus:outline-none">
-                        <button onclick="downloadFirmwareFromUrl()" class="touch-btn w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium">
+                            class="w-full bg-white border border-gray-300 rounded-lg px-4 py-3 mb-3 focus:border-blue-500 focus:outline-none">
+                        <button onclick="downloadFirmwareFromUrl()" class="touch-btn w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-white">
                             Download from URL
                         </button>
                     </div>
@@ -126,10 +125,10 @@
             </div>
 
             <!-- Firmware List -->
-            <div class="bg-gray-800 rounded-xl p-4">
+            <div class="bg-white rounded-xl p-4 border border-gray-200">
                 <h2 class="text-lg font-semibold mb-4">Available Firmware</h2>
                 <div id="firmware-list" class="space-y-2">
-                    <div class="text-gray-500 text-center py-4">Loading...</div>
+                    <div class="text-gray-400 text-center py-4">Loading...</div>
                 </div>
             </div>
         </div>
@@ -139,20 +138,20 @@
         <!-- ============================================ -->
         <div id="section-configs" class="hidden">
             <!-- Upload Section -->
-            <div class="bg-gray-800 rounded-xl p-4 mb-6">
+            <div class="bg-white rounded-xl p-4 mb-6 border border-gray-200">
                 <h2 class="text-lg font-semibold mb-4">Add Config</h2>
 
                 <div class="grid md:grid-cols-2 gap-4 mb-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-2">Config Type</label>
-                        <select id="cfg-type" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                        <label class="block text-sm text-gray-600 mb-2">Config Type</label>
+                        <select id="cfg-type" class="w-full bg-white border border-gray-300 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
                             <option value="template">Default Template</option>
                             <option value="override">Device Override (by MAC)</option>
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-2">Device Type</label>
-                        <select id="cfg-device-type" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                        <label class="block text-sm text-gray-600 mb-2">Device Type</label>
+                        <select id="cfg-device-type" class="w-full bg-white border border-gray-300 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
                             <option value="cambium">Cambium ePMP</option>
                             <option value="mikrotik">MikroTik RouterOS</option>
                             <option value="tachyon">Tachyon</option>
@@ -168,19 +167,19 @@
                      ondragleave="handleDragLeave(event)"
                      ondrop="handleConfigDrop(event)">
                     <input type="file" id="cfg-file-input" class="hidden" accept=".json,.yaml,.rsc,.tar,.tar.gz,.tgz" onchange="uploadConfigFile(this.files[0])">
-                    <svg class="w-12 h-12 mx-auto text-gray-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg class="w-12 h-12 mx-auto text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
                     </svg>
-                    <p class="text-gray-400">Drop config file here (.json, .yaml, .rsc, .tar)</p>
-                    <p class="text-sm text-gray-500">or click to browse</p>
+                    <p class="text-gray-600">Drop config file here (.json, .yaml, .rsc, .tar)</p>
+                    <p class="text-sm text-gray-400">or click to browse</p>
                 </div>
             </div>
 
             <!-- Config List -->
-            <div class="bg-gray-800 rounded-xl p-4">
+            <div class="bg-white rounded-xl p-4 border border-gray-200">
                 <h2 class="text-lg font-semibold mb-4">Config Files</h2>
                 <div id="config-list" class="space-y-2">
-                    <div class="text-gray-500 text-center py-4">Loading...</div>
+                    <div class="text-gray-400 text-center py-4">Loading...</div>
                 </div>
             </div>
         </div>
@@ -190,14 +189,14 @@
         <!-- ============================================ -->
         <div id="section-credentials" class="hidden">
             <!-- Add Credential -->
-            <div class="bg-gray-800 rounded-xl p-4 mb-6">
+            <div class="bg-white rounded-xl p-4 mb-6 border border-gray-200">
                 <h2 class="text-lg font-semibold mb-4">Add Custom Credential</h2>
-                <p class="text-sm text-gray-400 mb-4">Custom credentials are tried first during provisioning, before built-in defaults.</p>
+                <p class="text-sm text-gray-600 mb-4">Custom credentials are tried first during provisioning, before built-in defaults.</p>
 
                 <div class="grid md:grid-cols-4 gap-4">
                     <div>
-                        <label class="block text-sm text-gray-400 mb-2">Device Type</label>
-                        <select id="cred-device-type" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                        <label class="block text-sm text-gray-600 mb-2">Device Type</label>
+                        <select id="cred-device-type" class="w-full bg-white border border-gray-300 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
                             <option value="cambium">Cambium</option>
                             <option value="mikrotik">MikroTik</option>
                             <option value="tachyon">Tachyon</option>
@@ -205,17 +204,17 @@
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-2">Username</label>
+                        <label class="block text-sm text-gray-600 mb-2">Username</label>
                         <input type="text" id="cred-username" placeholder="admin"
-                            class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                            class="w-full bg-white border border-gray-300 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
                     </div>
                     <div>
-                        <label class="block text-sm text-gray-400 mb-2">Password</label>
+                        <label class="block text-sm text-gray-600 mb-2">Password</label>
                         <input type="password" id="cred-password" placeholder="password"
-                            class="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                            class="w-full bg-white border border-gray-300 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
                     </div>
                     <div class="flex items-end">
-                        <button onclick="addCredential()" class="touch-btn w-full py-3 bg-green-600 hover:bg-green-500 rounded-lg font-medium">
+                        <button onclick="addCredential()" class="touch-btn w-full py-3 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-white">
                             Add Credential
                         </button>
                     </div>
@@ -223,10 +222,10 @@
             </div>
 
             <!-- Credentials List -->
-            <div class="bg-gray-800 rounded-xl p-4">
+            <div class="bg-white rounded-xl p-4 border border-gray-200">
                 <h2 class="text-lg font-semibold mb-4">All Credentials</h2>
                 <div id="credentials-list" class="space-y-2">
-                    <div class="text-gray-500 text-center py-4">Loading...</div>
+                    <div class="text-gray-400 text-center py-4">Loading...</div>
                 </div>
             </div>
         </div>
@@ -237,24 +236,24 @@
 
     <!-- Config Editor Modal -->
     <div id="editor-modal" class="fixed inset-0 z-50 hidden">
-        <div class="absolute inset-0 bg-black/50" onclick="closeEditor()"></div>
-        <div class="absolute inset-4 md:inset-8 bg-gray-800 rounded-2xl shadow-xl overflow-hidden flex flex-col">
-            <div class="px-6 py-4 border-b border-gray-700 flex items-center justify-between">
+        <div class="absolute inset-0 bg-black/40" onclick="closeEditor()"></div>
+        <div class="absolute inset-4 md:inset-8 bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col border border-gray-200">
+            <div class="px-6 py-4 border-b border-gray-300 flex items-center justify-between">
                 <h3 class="text-xl font-bold" id="editor-title">Edit Config</h3>
-                <button onclick="closeEditor()" class="touch-btn p-2 rounded-lg hover:bg-gray-700">
+                <button onclick="closeEditor()" class="touch-btn p-2 rounded-lg hover:bg-gray-100">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                     </svg>
                 </button>
             </div>
             <div class="flex-1 overflow-hidden p-4">
-                <textarea id="editor-content" class="w-full h-full bg-gray-900 border border-gray-700 rounded-lg p-4 font-mono text-sm focus:border-blue-500 focus:outline-none resize-none"></textarea>
+                <textarea id="editor-content" class="w-full h-full bg-gray-50 border border-gray-300 rounded-lg p-4 font-mono text-sm text-gray-900 focus:border-blue-500 focus:outline-none resize-none"></textarea>
             </div>
-            <div class="px-6 py-4 border-t border-gray-700 flex gap-3">
-                <button onclick="saveConfig()" class="touch-btn flex-1 py-3 bg-green-600 hover:bg-green-500 rounded-lg font-medium">
+            <div class="px-6 py-4 border-t border-gray-300 flex gap-3">
+                <button onclick="saveConfig()" class="touch-btn flex-1 py-3 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-white">
                     Save Changes
                 </button>
-                <button onclick="closeEditor()" class="touch-btn flex-1 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg font-medium">
+                <button onclick="closeEditor()" class="touch-btn flex-1 py-3 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-gray-800">
                     Cancel
                 </button>
             </div>
@@ -296,10 +295,10 @@
                 const section = document.getElementById(`section-${t}`);
 
                 if (t === tab) {
-                    tabBtn.className = 'px-4 py-3 font-medium border-b-2 border-blue-500 text-blue-400';
+                    tabBtn.className = 'px-4 py-3 font-medium border-b-2 border-blue-500 text-blue-600';
                     section.classList.remove('hidden');
                 } else {
-                    tabBtn.className = 'px-4 py-3 font-medium border-b-2 border-transparent text-gray-400 hover:text-white';
+                    tabBtn.className = 'px-4 py-3 font-medium border-b-2 border-transparent text-gray-600 hover:text-gray-900';
                     section.classList.add('hidden');
                 }
             });
@@ -353,7 +352,7 @@
                 renderFirmwareList(firmwareData);
             } catch (error) {
                 document.getElementById('firmware-list').innerHTML =
-                    '<div class="text-red-400 text-center py-4">Failed to load firmware</div>';
+                    '<div class="text-red-700 text-center py-4">Failed to load firmware</div>';
             }
         }
 
@@ -361,7 +360,7 @@
             const list = document.getElementById('firmware-list');
 
             if (firmware.length === 0) {
-                list.innerHTML = '<div class="text-gray-500 text-center py-4">No firmware files. Upload one above.</div>';
+                list.innerHTML = '<div class="text-gray-400 text-center py-4">No firmware files. Upload one above.</div>';
                 return;
             }
 
@@ -374,16 +373,16 @@
             }
 
             list.innerHTML = sorted.map(fw => `
-                <div class="bg-gray-700/50 rounded-lg p-3 flex items-center gap-3">
+                <div class="bg-gray-50 rounded-lg p-3 flex items-center gap-3 border border-gray-200">
                     <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2 mb-1">
                             ${deviceBadge(fw.device_type)}
                             <span class="font-medium truncate">${fw.filename}</span>
                         </div>
-                        <div class="text-sm text-gray-400">Version: ${fw.version} | ${formatBytes(fw.size)}</div>
+                        <div class="text-sm text-gray-600">Version: ${fw.version} | ${formatBytes(fw.size)}</div>
                     </div>
                     <button onclick="deleteFirmware('${fw.device_type}', '${fw.filename}')"
-                        class="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/30 rounded-lg" title="Delete">
+                        class="p-2 text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg" title="Delete">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
                         </svg>
@@ -480,7 +479,7 @@
                 renderConfigList(configsData);
             } catch (error) {
                 document.getElementById('config-list').innerHTML =
-                    '<div class="text-red-400 text-center py-4">Failed to load configs</div>';
+                    '<div class="text-red-700 text-center py-4">Failed to load configs</div>';
             }
         }
 
@@ -488,7 +487,7 @@
             const list = document.getElementById('config-list');
 
             if (configs.length === 0) {
-                list.innerHTML = '<div class="text-gray-500 text-center py-4">No config files. Upload one above.</div>';
+                list.innerHTML = '<div class="text-gray-400 text-center py-4">No config files. Upload one above.</div>';
                 return;
             }
 
@@ -503,23 +502,23 @@
             }
 
             list.innerHTML = sorted.map(cfg => `
-                <div class="bg-gray-700/50 rounded-lg p-3 flex items-center gap-3">
+                <div class="bg-gray-50 rounded-lg p-3 flex items-center gap-3 border border-gray-200">
                     <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2 mb-1">
                             ${deviceBadge(cfg.device_type)}
-                            <span class="px-2 py-0.5 text-xs font-medium rounded ${cfg.config_type === 'template' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'}">${cfg.config_type}</span>
+                            <span class="px-2 py-0.5 text-xs font-medium rounded ${cfg.config_type === 'template' ? 'bg-blue-500/20 text-blue-600' : 'bg-purple-500/20 text-purple-600'}">${cfg.config_type}</span>
                             <span class="font-medium truncate">${cfg.filename}</span>
                         </div>
-                        <div class="text-sm text-gray-400">${formatBytes(cfg.size)}</div>
+                        <div class="text-sm text-gray-600">${formatBytes(cfg.size)}</div>
                     </div>
                     <button onclick="editConfig('${cfg.config_type}', '${cfg.device_type}', '${cfg.filename}')"
-                        class="p-2 text-blue-400 hover:text-blue-300 hover:bg-blue-900/30 rounded-lg" title="Edit">
+                        class="p-2 text-blue-600 hover:text-blue-500 hover:bg-blue-50 rounded-lg" title="Edit">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
                         </svg>
                     </button>
                     <button onclick="deleteConfig('${cfg.config_type}', '${cfg.device_type}', '${cfg.filename}')"
-                        class="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/30 rounded-lg" title="Delete">
+                        class="p-2 text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg" title="Delete">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
                         </svg>
@@ -638,17 +637,17 @@
                     // API returned an error
                     console.error('Credentials API error:', data);
                     document.getElementById('credentials-list').innerHTML =
-                        `<div class="text-red-400 text-center py-4">Error: ${data.detail}</div>`;
+                        `<div class="text-red-700 text-center py-4">Error: ${data.detail}</div>`;
                 } else {
                     // Unexpected response format
                     console.error('Unexpected credentials response:', data);
                     document.getElementById('credentials-list').innerHTML =
-                        '<div class="text-red-400 text-center py-4">Unexpected response format</div>';
+                        '<div class="text-red-700 text-center py-4">Unexpected response format</div>';
                 }
             } catch (error) {
                 console.error('Failed to load credentials:', error);
                 document.getElementById('credentials-list').innerHTML =
-                    '<div class="text-red-400 text-center py-4">Failed to load credentials</div>';
+                    '<div class="text-red-700 text-center py-4">Failed to load credentials</div>';
             }
         }
 
@@ -656,7 +655,7 @@
             const list = document.getElementById('credentials-list');
 
             if (credentials.length === 0) {
-                list.innerHTML = '<div class="text-gray-500 text-center py-4">No credentials configured.</div>';
+                list.innerHTML = '<div class="text-gray-400 text-center py-4">No credentials configured.</div>';
                 return;
             }
 
@@ -671,7 +670,7 @@
             }
 
             list.innerHTML = sorted.map(cred => `
-                <div class="bg-gray-700/50 rounded-lg p-3 flex items-center gap-3 ${cred.is_custom ? '' : 'opacity-60'}">
+                <div class="bg-gray-50 rounded-lg p-3 flex items-center gap-3 border border-gray-200 ${cred.is_custom ? '' : 'opacity-60'}">
                     <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2 mb-1">
                             ${deviceBadge(cred.device_type)}
@@ -679,12 +678,12 @@
                         </div>
                         <div class="flex items-center gap-4">
                             <span class="font-mono text-sm">${escapeHtml(cred.username)}</span>
-                            <span class="text-gray-500 text-sm">${cred.password_hint}</span>
+                            <span class="text-gray-400 text-sm">${cred.password_hint}</span>
                         </div>
                     </div>
                     ${cred.is_custom ? `
                         <button onclick="deleteCredential('${cred.device_type}', ${cred.index})"
-                            class="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/30 rounded-lg" title="Delete">
+                            class="p-2 text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg" title="Delete">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
                             </svg>

@@ -48,20 +48,8 @@ ports:
 simple_mode:
   subnet: 192.168.1.0/24
 
-github:
-  # Git repository URL (SSH format for deploy key auth)
-  repo: git@github.com:your-org/network-configs.git
-
-  # Branch to track
-  branch: main
-
-  # Seconds between repository sync checks
-  sync_interval: 300
-
-  # Path to SSH deploy key for private repo access
-  deploy_key: /etc/provisioner/deploy_key
-
-  # Local path for cloned repository
+data:
+  # Local path for firmware files and config templates
   local_path: /var/lib/provisioner/repo
 
 credentials:
