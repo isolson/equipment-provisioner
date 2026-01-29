@@ -163,17 +163,40 @@ class GitHubSync:
 
         return None
 
+    # Model aliases for config templates - maps model to config name
+    # This allows different models to share the same config template
+    CONFIG_MODEL_ALIASES = {
+        "tachyon": {
+            # TNA-303L uses the same config as TNA-303X
+            "tna-303l": "tna-303x",
+            "tna-303l-65": "tna-303x",
+        },
+        "cambium": {
+            # ePMP 4518 SM default config
+            "epmp 4518": "f4518-sm-defaultconfig",
+        },
+    }
+
     def get_config_template(self, device_type: str, model: Optional[str] = None) -> Optional[Path]:
         """Get the path to the config template for a device type.
 
         Searches in order:
         1. {templates_path}/{device_type}/{model}.json (model-specific in subdir)
-        2. {templates_path}/{device_type}/default.json (default in subdir)
-        3. {templates_path}/{device_type}/*.json (any file in subdir)
-        4. {templates_path}/{device_type}_{model}.json (legacy model-specific)
-        5. {templates_path}/{device_type}.json (legacy device type)
+        2. {templates_path}/{device_type}/{alias}.json (aliased model in subdir)
+        3. {templates_path}/{device_type}/default.json (default in subdir)
+        4. {templates_path}/{device_type}/*.json (any file in subdir)
+        5. {templates_path}/{device_type}_{model}.json (legacy model-specific)
+        6. {templates_path}/{device_type}.json (legacy device type)
         """
         device_dir = self.templates_path / device_type
+
+        # Check for model alias (e.g., TNA-303L -> TNA-303X)
+        model_alias = None
+        if model and device_type in self.CONFIG_MODEL_ALIASES:
+            model_key = model.lower()
+            model_alias = self.CONFIG_MODEL_ALIASES[device_type].get(model_key)
+            if model_alias:
+                logger.debug(f"Config model alias: {model} -> {model_alias}")
 
         # Check device type subdirectory (new structure from web uploads)
         if device_dir.exists() and device_dir.is_dir():
@@ -184,6 +207,14 @@ class GitHubSync:
                     if model_template.exists():
                         return model_template
 
+            # Try aliased model template (e.g., TNA-303L -> TNA-303X config)
+            if model_alias:
+                for ext in [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]:
+                    alias_template = device_dir / f"{model_alias}{ext}"
+                    if alias_template.exists():
+                        logger.info(f"Using aliased config template: {alias_template.name} for model {model}")
+                        return alias_template
+
             # Default template in subdirectory
             for ext in [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]:
                 default_template = device_dir / f"default{ext}"
@@ -191,8 +222,10 @@ class GitHubSync:
                     return default_template
 
             # Any config file in subdirectory (first one found)
+            # Exclude ap.* files — those are AP naming templates, not provisioning configs
             for ext in [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]:
-                files = list(device_dir.glob(f"*{ext}"))
+                files = [f for f in device_dir.glob(f"*{ext}")
+                         if not f.stem.lower().startswith("ap")]
                 if files:
                     return sorted(files)[0]  # Return first alphabetically
 
@@ -203,12 +236,21 @@ class GitHubSync:
                 if model_template.exists():
                     return model_template
 
+        # Legacy: Check aliased model template in root
+        if model_alias:
+            for ext in [".json", ".rsc", ".yaml"]:
+                alias_template = self.templates_path / f"{device_type}_{model_alias}{ext}"
+                if alias_template.exists():
+                    logger.info(f"Using aliased config template: {alias_template.name} for model {model}")
+                    return alias_template
+
         # Legacy: Fall back to device type template in root
         for ext in [".json", ".rsc", ".yaml", ".txt"]:
             template = self.templates_path / f"{device_type}{ext}"
             if template.exists():
                 return template
 
+        logger.warning(f"No config template found for {device_type}/{model}")
         return None
 
     def get_device_override(self, mac_address: str) -> Optional[Dict[str, Any]]:

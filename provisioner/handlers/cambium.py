@@ -3,187 +3,18 @@
 import asyncio
 import json
 import logging
+import os
 import re
+import tempfile
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
-from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, Tuple
+import urllib.parse
 
 import aiohttp
 
 from .base import BaseHandler, DeviceInfo
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class CambiumConfig:
-    """Structured Cambium ePMP configuration."""
-    # System
-    device_name: str = ""
-    location: str = ""
-    contact: str = ""
-
-    # Network
-    network_mode: str = "bridge"  # bridge, router, nat
-    management_ip_mode: str = "dhcp"  # dhcp, static
-    management_ip: str = ""
-    management_netmask: str = ""
-    management_gateway: str = ""
-    management_vlan: int = 1
-    management_vlan_enabled: bool = False
-
-    # Wireless
-    device_mode: str = "sta"  # ap, sta (subscriber)
-    wireless_mode: str = "eptp"  # eptp, tdd, wifi
-    channel_bandwidth: int = 20  # 20, 40, 80
-    frequency: int = 0  # 0 = auto
-    tx_power: str = "auto"  # auto or dBm value
-    country_code: str = "US"
-    ssid: str = ""
-    security_mode: str = "wpa2"  # open, wpa2, wpa2-enterprise
-    security_key: str = ""
-
-    # QoS
-    qos_enabled: bool = True
-    mir_downlink: int = 0  # 0 = unlimited
-    mir_uplink: int = 0
-
-    # Services
-    snmp_enabled: bool = True
-    snmp_community: str = "public"
-    ssh_enabled: bool = True
-    https_enabled: bool = True
-    http_redirect: bool = True
-    ntp_enabled: bool = True
-    ntp_servers: List[str] = field(default_factory=lambda: ["pool.ntp.org"])
-
-    # Logging
-    syslog_enabled: bool = False
-    syslog_server: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for API."""
-        return {
-            "system": {
-                "deviceName": self.device_name,
-                "location": self.location,
-                "contact": self.contact,
-            },
-            "network": {
-                "networkMode": self.network_mode,
-                "management": {
-                    "ipMode": self.management_ip_mode,
-                    "ip": self.management_ip,
-                    "netmask": self.management_netmask,
-                    "gateway": self.management_gateway,
-                },
-                "vlan": {
-                    "enabled": self.management_vlan_enabled,
-                    "id": self.management_vlan,
-                },
-            },
-            "wireless": {
-                "deviceMode": self.device_mode,
-                "wirelessMode": self.wireless_mode,
-                "channelBandwidth": self.channel_bandwidth,
-                "frequency": self.frequency,
-                "txPower": self.tx_power,
-                "countryCode": self.country_code,
-                "ssid": self.ssid,
-                "security": {
-                    "mode": self.security_mode,
-                    "key": self.security_key,
-                },
-            },
-            "qos": {
-                "enabled": self.qos_enabled,
-                "mirDownlink": self.mir_downlink,
-                "mirUplink": self.mir_uplink,
-            },
-            "services": {
-                "snmp": {
-                    "enabled": self.snmp_enabled,
-                    "community": self.snmp_community,
-                },
-                "ssh": {"enabled": self.ssh_enabled},
-                "https": {"enabled": self.https_enabled},
-                "httpRedirect": self.http_redirect,
-                "ntp": {
-                    "enabled": self.ntp_enabled,
-                    "servers": self.ntp_servers,
-                },
-                "syslog": {
-                    "enabled": self.syslog_enabled,
-                    "server": self.syslog_server,
-                },
-            },
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "CambiumConfig":
-        """Create from dictionary."""
-        config = cls()
-
-        # System
-        system = data.get("system", {})
-        config.device_name = system.get("deviceName", system.get("device_name", ""))
-        config.location = system.get("location", "")
-        config.contact = system.get("contact", "")
-
-        # Network
-        network = data.get("network", {})
-        config.network_mode = network.get("networkMode", network.get("network_mode", "bridge"))
-
-        mgmt = network.get("management", {})
-        config.management_ip_mode = mgmt.get("ipMode", mgmt.get("mode", "dhcp"))
-        config.management_ip = mgmt.get("ip", mgmt.get("ip_address", ""))
-        config.management_netmask = mgmt.get("netmask", "")
-        config.management_gateway = mgmt.get("gateway", "")
-
-        vlan = network.get("vlan", {})
-        config.management_vlan_enabled = vlan.get("enabled", False)
-        config.management_vlan = vlan.get("id", vlan.get("management_vlan", 1))
-
-        # Wireless
-        wireless = data.get("wireless", {})
-        config.device_mode = wireless.get("deviceMode", wireless.get("mode", "sta"))
-        config.wireless_mode = wireless.get("wirelessMode", "eptp")
-        config.channel_bandwidth = wireless.get("channelBandwidth", wireless.get("bandwidth", 20))
-        config.frequency = wireless.get("frequency", 0)
-        config.tx_power = str(wireless.get("txPower", wireless.get("tx_power", "auto")))
-        config.country_code = wireless.get("countryCode", wireless.get("country_code", "US"))
-        config.ssid = wireless.get("ssid", "")
-
-        security = wireless.get("security", {})
-        config.security_mode = security.get("mode", "wpa2")
-        config.security_key = security.get("key", security.get("password", ""))
-
-        # QoS
-        qos = data.get("qos", {})
-        config.qos_enabled = qos.get("enabled", True)
-        config.mir_downlink = qos.get("mirDownlink", qos.get("mir_downlink", 0))
-        config.mir_uplink = qos.get("mirUplink", qos.get("mir_uplink", 0))
-
-        # Services
-        services = data.get("services", {})
-
-        snmp = services.get("snmp", {})
-        config.snmp_enabled = snmp.get("enabled", True)
-        config.snmp_community = snmp.get("community", "public")
-
-        config.ssh_enabled = services.get("ssh", {}).get("enabled", True)
-        config.https_enabled = services.get("https", {}).get("enabled", True)
-        config.http_redirect = services.get("httpRedirect", services.get("http_redirect", True))
-
-        ntp = services.get("ntp", {})
-        config.ntp_enabled = ntp.get("enabled", True)
-        config.ntp_servers = ntp.get("servers", ["pool.ntp.org"])
-
-        syslog = services.get("syslog", services.get("logging", {}))
-        config.syslog_enabled = syslog.get("enabled", syslog.get("syslog_enabled", False))
-        config.syslog_server = syslog.get("server", syslog.get("syslog_server", ""))
-
-        return config
 
 
 class CambiumHandler(BaseHandler):
@@ -239,6 +70,7 @@ class CambiumHandler(BaseHandler):
         self.login_error: Optional[str] = None  # Human-readable login error for UI
         self._credentials_confirmed: bool = False  # True after successful login (for reconnect)
         self._password_change_required: bool = False  # Device requires password change on first login
+        self._last_applied_config: Optional[Dict[str, str]] = None  # Flat keys applied via set_param
 
     @property
     def device_type(self) -> str:
@@ -316,6 +148,9 @@ class CambiumHandler(BaseHandler):
 
             logger.info(f"[CREDS] Will try {len(creds_to_try)} credential set(s)")
 
+            # Save original credentials so we can restore on failure
+            saved_credentials = self.credentials.copy()
+
             # Track if we got any response from device (vs connection failure)
             device_responded = False
             any_creds_rejected = False
@@ -326,7 +161,7 @@ class CambiumHandler(BaseHandler):
                 password = creds["password"]
                 logger.info(f"[CREDS] Attempt {i+1}/{len(creds_to_try)}: Trying {username}/{'*' * len(password) if password else '(empty)'} for {self.ip}")
 
-                # Update credentials for this attempt
+                # Temporarily set credentials for this login attempt
                 self.credentials["username"] = username
                 self.credentials["password"] = password
 
@@ -391,6 +226,9 @@ class CambiumHandler(BaseHandler):
                     logger.error(f"Account locked on {self.ip}")
                     return False
 
+            # All attempts failed — restore original credentials to prevent corruption
+            self.credentials.update(saved_credentials)
+
             # Determine failure reason
             if any_creds_rejected:
                 self.login_error = "Invalid credentials - please enter correct password"
@@ -434,7 +272,6 @@ class CambiumHandler(BaseHandler):
             set_param_url = f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/set_param"
 
             # Build the payload matching browser behavior
-            import urllib.parse
             changed_elements = json.dumps({
                 "device_props": {
                     "admin_password": new_password,
@@ -766,10 +603,13 @@ class CambiumHandler(BaseHandler):
                     return False, False
 
                 # Check for max users reached (too many active sessions)
+                # Treat as lockout (not credential rejection) to prevent connect() from
+                # rotating to the next credential set and corrupting self.credentials
                 if "max_user_number_reached" in response.lower():
-                    logger.warning(f"Device {self.ip} has too many active sessions - waiting for timeout")
+                    logger.warning(f"Device {self.ip} has too many active sessions - treating as lockout")
                     self.login_error = "Too many active sessions on device - wait for timeout or reboot device"
-                    return False, True
+                    self._account_locked_until = asyncio.get_event_loop().time() + 60
+                    return False, False
 
                 # Check for account lockout
                 lockout_match = re.search(r'account is locked.*?(\d+)\s*minutes?\s*left', response, re.IGNORECASE)
@@ -1248,22 +1088,25 @@ class CambiumHandler(BaseHandler):
                 return {"raw": text}
 
     async def apply_config(self, config: Dict[str, Any]) -> bool:
-        """Apply configuration via API."""
+        """Apply configuration via set_param endpoint.
+
+        Accepts flat Cambium device_props keys (e.g. wirelessInterfaceSSID).
+        Strips metadata keys and delegates to _apply_config_settings_curl.
+        """
         try:
-            # Convert to CambiumConfig for validation if it's a raw dict
-            if not isinstance(config, CambiumConfig):
-                cambium_config = CambiumConfig.from_dict(config)
-                api_config = cambium_config.to_dict()
-            else:
-                api_config = config.to_dict()
+            # Strip metadata keys
+            props = {k: v for k, v in config.items()
+                     if not k.startswith("_") and k not in ("device_props", "template_props")}
 
-            if not self._use_cgi:
-                await self._api_post(self.API_ENDPOINTS["config_set"], api_config)
-            else:
-                await self._cgi_post(self.CGI_ENDPOINTS["config"], api_config)
+            # If config is already wrapped in device_props, unwrap it
+            if "device_props" in config and isinstance(config["device_props"], dict):
+                props = config["device_props"]
 
-            logger.info(f"Configuration applied to {self.ip}")
-            return True
+            if not props:
+                logger.warning(f"No config properties to apply on {self.ip}")
+                return True
+
+            return await self._apply_config_settings_curl(props)
 
         except Exception as e:
             logger.error(f"Failed to apply config: {e}")
@@ -1273,8 +1116,7 @@ class CambiumHandler(BaseHandler):
         """Apply configuration from JSON file.
 
         For Cambium devices, this uploads the config file as a restore operation.
-        After successful config apply, updates credentials to custom password
-        since the config changes the device password.
+        Credentials are NOT updated here — connect() handles credential rotation.
         """
         try:
             config_file = Path(config_path)
@@ -1291,15 +1133,10 @@ class CambiumHandler(BaseHandler):
                     config = json.load(f)
                 success = await self.apply_config(config)
 
-            # After config applied, update credentials for reconnect after reboot
-            # The config contains the hashed password matching our custom credentials
-            if success:
-                custom_cred = self._get_custom_credential()
-                if custom_cred:
-                    logger.info(f"Config applied - updating credentials for reconnect")
-                    self.credentials["username"] = custom_cred.get("username", "admin")
-                    self.credentials["password"] = custom_cred["password"]
-
+            # Don't update self.credentials here — the password change from
+            # the config template may not take effect immediately. The connect()
+            # method has credential rotation that will try both default and
+            # custom passwords, so let it figure out which one works.
             return success
 
         except json.JSONDecodeError as e:
@@ -1325,205 +1162,364 @@ class CambiumHandler(BaseHandler):
             return await self._apply_tar_config_curl(config_path)
 
     async def _apply_json_config_curl(self, config_path: str) -> bool:
-        """Apply JSON config file using curl with interface binding.
+        """Apply JSON config file via config_import endpoint.
 
-        Supports two formats:
-        - Cambium native template format (device_props): POST directly
-        - Generic config format: Convert through CambiumConfig
+        CONFIRMED via browser HAR capture (2026-01-28):
+        - POST /admin/config_import as multipart/form-data
+        - Fields: skipIllegal=1, image=@file.json
+        - Response: {"success":1,"filepath":"/tmp/uploaded_file","err":""}
+        - Then poll get_param with act=status&applyStatusNeeded=true
+        - Apply is done when response contains template_props.applyFinished=1
+
+        See docs/cambium-config.md for full reference.
         """
-        import tempfile
-
         try:
-            # Read and parse the JSON config
-            with open(config_path, "r") as f:
-                config_data = json.load(f)
+            if not self._stok:
+                logger.error(f"No stok available for config_import on {self.ip}")
+                return False
 
-            # Check if this is Cambium's native template format
-            is_native_format = "device_props" in config_data or "template_props" in config_data
+            config_import_url = (
+                f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/config_import"
+            )
 
-            if is_native_format:
-                logger.info(f"Detected Cambium native template format")
-                config_json = json.dumps(config_data)
-            else:
-                # Convert through CambiumConfig for validation and API format
-                cambium_config = CambiumConfig.from_dict(config_data)
-                api_config = cambium_config.to_dict()
-                config_json = json.dumps(api_config)
+            logger.info(f"Uploading JSON config to {self.ip} via config_import: {config_path}")
 
-            logger.info(f"Applying JSON config to {self.ip} via {self.interface}")
+            # Upload the JSON file with skipIllegal=1
+            cmd = [
+                "curl", "-s", "-k", "-m", "30",
+                "--interface", self.interface,
+                "-b", self._cookie_file,
+                "-X", "POST",
+                "-F", "skipIllegal=1",
+                "-F", f"image=@{config_path};type=application/json",
+                config_import_url,
+            ]
 
-            # Reuse existing stok from connect() if available
-            stok = self._stok
-            if stok:
-                logger.debug(f"Reusing existing stok: {stok[:16]}...")
-            else:
-                # No existing session, need to login via curl
-                logger.debug(f"No existing stok, logging in via curl...")
-                cookie_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-                cookie_path = cookie_file.name
-                cookie_file.close()
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
 
-                username = self.credentials.get("username", "admin")
-                password = self.credentials.get("password", "admin")
-                login_url = f"{self._base_url}/cgi-bin/luci"
-
-                proc = await asyncio.create_subprocess_exec(
-                    "curl", "-s", "-k", "-m", "10",
-                    "--interface", self.interface,
-                    "-c", cookie_path, "-b", cookie_path,
-                    "-X", "POST",
-                    "-d", f"username={username}&password={password}",
-                    login_url,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+            if proc.returncode != 0:
+                logger.error(
+                    f"config_import curl failed: rc={proc.returncode}, "
+                    f"stderr={stderr.decode() if stderr else ''}"
                 )
-                stdout, stderr = await proc.communicate()
+                return False
 
-                if proc.returncode != 0:
-                    logger.error(f"Login failed: {stderr.decode()}")
+            response = stdout.decode("utf-8", errors="ignore")
+            logger.info(f"config_import response: {response[:500]}")
+
+            # Check upload success
+            try:
+                resp_data = json.loads(response)
+                success_val = resp_data.get("success")
+                if success_val != 1 and success_val != "1":
+                    err = resp_data.get("err", "")
+                    logger.error(
+                        f"config_import failed on {self.ip}: success={success_val}, err={err!r}"
+                    )
                     return False
+            except json.JSONDecodeError:
+                logger.error(f"config_import returned non-JSON: {response[:500]}")
+                return False
 
-                response = stdout.decode("utf-8", errors="ignore")
+            logger.info(f"Config uploaded to {self.ip}, waiting for apply to finish...")
+
+            # Poll for applyFinished
+            applied = await self._poll_config_apply_status()
+            if applied:
+                logger.info(f"Configuration applied successfully on {self.ip}")
+                # Store that we applied a config (for verification)
                 try:
-                    match = re.search(r'"stok":"([^"]+)"', response)
-                    if match:
-                        stok = match.group(1)
-                        self._stok = stok  # Save for future use
+                    with open(config_path, "r") as f:
+                        config_data = json.load(f)
+                    # Extract flat keys for verification
+                    if "device_props" in config_data:
+                        flat_keys = config_data["device_props"]
+                    else:
+                        flat_keys = {k: v for k, v in config_data.items()
+                                     if not k.startswith("_")}
+                    self._last_applied_config = flat_keys
                 except Exception:
                     pass
-
-                if not stok:
-                    logger.error(f"Failed to get stok token: {response[:200]}")
-                    return False
-
-                logger.debug(f"Got new stok: {stok[:16]}...")
-
-            # Helper to build curl command with optional cookie arg
-            def curl_cmd(*args):
-                cmd = ["curl", "-s", "-k", "--interface", self.interface]
-                cmd.extend(args)
-                return cmd
-
-            # Step 2: Try API config endpoints
-            # ePMP devices support different endpoints depending on firmware version
-            if is_native_format:
-                # Native template format endpoints
-                # Primary: /admin/config_import (confirmed from Cambium web UI)
-                api_endpoints = [
-                    f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/config_import",
-                    f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/device_config",
-                    f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/system/config/import",
-                    f"{self._base_url}/api/config/import",
-                ]
             else:
-                # Generic config endpoints
-                api_endpoints = [
-                    f"{self._base_url}/api/config/set",
-                    f"{self._base_url}/cgi-bin/luci/;stok={stok}/api/config",
-                    f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/network/config",
-                ]
+                logger.error(f"Config apply did not finish on {self.ip}")
 
-            # config_json was already set above based on format type
-            success = False
+            return applied
 
-            for endpoint in api_endpoints:
-                proc = await asyncio.create_subprocess_exec(
-                    *curl_cmd("-m", "30", "-X", "POST",
-                              "-H", "Content-Type: application/json",
-                              "-d", config_json, endpoint),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await proc.communicate()
-
-                if proc.returncode == 0:
-                    response = stdout.decode("utf-8", errors="ignore")
-                    logger.debug(f"Config response from {endpoint}: {response[:300]}")
-
-                    # Check for success indicators
-                    if any(s in response.lower() for s in ["success", "ok", "applied", "saved"]):
-                        logger.info(f"Configuration applied to {self.ip} via {self.interface}")
-                        success = True
-                        break
-
-                    # Check if response is valid JSON with success status
-                    try:
-                        resp_json = json.loads(response)
-                        if resp_json.get("status") == "ok" or resp_json.get("success"):
-                            logger.info(f"Configuration applied to {self.ip} via {self.interface}")
-                            success = True
-                            break
-                    except json.JSONDecodeError:
-                        pass
-
-            if success:
-                return True
-
-            # For native format, also try file upload (multipart/form-data)
-            if is_native_format:
-                logger.info("Trying file upload method for native template...")
-                # config_import uses field name "image" and skipIllegal=1 (confirmed from browser)
-                endpoint = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/config_import"
-                proc = await asyncio.create_subprocess_exec(
-                    *curl_cmd("-m", "30", "-X", "POST",
-                              "-F", "skipIllegal=1",
-                              "-F", f"image=@{config_path}", endpoint),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await proc.communicate()
-
-                if proc.returncode == 0:
-                    response = stdout.decode("utf-8", errors="ignore")
-                    logger.debug(f"Config import response: {response[:300]}")
-
-                    # Check for success:1 in JSON response
-                    if '"success":1' in response or '"success": 1' in response:
-                        logger.info(f"Configuration imported to {self.ip} via {self.interface}")
-
-                        # Config requires reboot to apply - send reboot command
-                        logger.info(f"Rebooting {self.ip} to apply configuration...")
-                        reboot_url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/reboot"
-                        proc = await asyncio.create_subprocess_exec(
-                            *curl_cmd("-m", "10", "-X", "POST", "-d", "debug=true", reboot_url),
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                        await proc.communicate()
-
-                        # Wait for device to come back online
-                        logger.info(f"Waiting for {self.ip} to reboot and apply config...")
-                        self._stok = None  # Will need new session after reboot
-                        if await self.wait_for_reboot():
-                            logger.info(f"Config applied and device back online at {self.ip}")
-                            return True
-                        else:
-                            logger.warning(f"Device did not come back after config reboot, assuming success")
-                            return True
-                    else:
-                        logger.warning(f"Config import response: {response}")
-
-            # If API endpoints didn't work, try applying individual settings
-            logger.warning(f"API config endpoints failed, trying individual settings...")
-            return await self._apply_config_settings_curl(stok, config_data)
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in config file {config_path}: {e}")
-            return False
         except Exception as e:
-            logger.error(f"Failed to apply JSON config via curl: {e}")
+            logger.error(f"Failed to apply JSON config via config_import: {e}")
             return False
 
-    async def _apply_config_settings_curl(self, stok: str, config_data: dict) -> bool:
-        """Apply config by setting individual parameters via LuCI.
+    async def _poll_config_apply_status(self, timeout: int = 60, interval: float = 3.0) -> bool:
+        """Poll get_param until config apply finishes.
 
-        This is a fallback when the bulk config API isn't available.
+        After config_import, the device applies config asynchronously.
+        Poll with act=status&applyStatusNeeded=true until the response
+        contains template_props.applyFinished == 1.
+
+        CONFIRMED via HAR capture: the UI polls this same way.
         """
-        # For now, log what we would apply and return success
-        # Full implementation would iterate through config_data and set each value
-        logger.info(f"Config data to apply: {list(config_data.keys())}")
-        logger.warning("Individual settings application not yet implemented - config may need manual application")
-        return True
+        get_param_url = (
+            f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/get_param"
+        )
+
+        elapsed = 0.0
+        while elapsed < timeout:
+            cmd = [
+                "curl", "-s", "-k", "-m", "10",
+                "--interface", self.interface,
+                "-b", self._cookie_file,
+                "-X", "POST",
+                "-H", "Content-Type: application/x-www-form-urlencoded",
+                "-d", "act=status&applyStatusNeeded=true&debug=true",
+                get_param_url,
+            ]
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode == 0:
+                try:
+                    resp = json.loads(stdout.decode("utf-8", errors="ignore"))
+                    template_props = resp.get("template_props", {})
+                    if template_props.get("applyFinished") == 1:
+                        logger.info(f"Config apply finished on {self.ip} after {elapsed:.0f}s")
+                        return True
+                    # Log progress
+                    initiator = resp.get("device_props", {}).get("initiatorState", {})
+                    if isinstance(initiator, dict) and initiator.get("import"):
+                        logger.debug(f"Config import still in progress on {self.ip}...")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+            await asyncio.sleep(interval)
+            elapsed += interval
+
+        logger.error(f"Config apply timed out after {timeout}s on {self.ip}")
+        return False
+
+    # Keys that cannot be set via set_param (read-only, table types, certificates)
+    _SKIP_KEYS_SUFFIXES = (
+        "Table", "Certificate", "Pem",
+        "MacAddress", "SerialNumber",
+    )
+    _SKIP_KEYS_PREFIXES = (
+        # Read-only system/hardware info
+        "cambiumCurrent", "cambiumConnected", "cambiumEffective",
+        "cambiumSystem", "cambiumHardware", "cambiumLicense",
+        # Counters and statistics
+        "sysUpTime", "ethTx", "ethRx", "wireless80211",
+    )
+    _SKIP_KEYS_EXACT = frozenset({
+        # Read-only firmware/system info
+        "cambiumCurrentuImageVersion", "cambiumCurrentuImageIVersion",
+        "cambiumCurrentuImageDate", "cambiumCurrentuImageIDate",
+        # Certificate blobs
+        "uhttpdMainPem", "wirelessRadiusUser1Certificate",
+        "wirelessRadiusUser2Certificate",
+        # Hardware identifiers
+        "systemConfigSWLockBit", "systemConfigHWLockBit",
+        "cambiumDeviceMode", "cambiumDeviceType",
+        # Network state (DHCP-assigned, not settable directly)
+        "networkInterfaceIPMethod",
+    })
+    # Essential provisioning keys — used as fallback if full config set fails
+    _ESSENTIAL_KEYS = (
+        "wirelessInterfaceSSID", "snmpSystemName", "systemConfigDeviceName",
+        "admin_password", "wirelessInterfaceEncryptionKey",
+        "crashReporterEnable",
+    )
+
+    def _filter_settable_props(self, props: dict) -> dict:
+        """Filter out keys that cannot be set via set_param.
+
+        Removes:
+        - Table keys (value is list/dict, or key ends with 'Table')
+        - Certificate/PEM/MAC/serial keys
+        - Known read-only prefixes (cambiumCurrent*, cambiumConnected*, etc.)
+        - Known read-only exact keys
+        - Keys with None values
+        """
+        filtered = {}
+        skipped = []
+        for key, value in props.items():
+            # Skip None values
+            if value is None:
+                skipped.append(key)
+                continue
+            # Skip table/complex values (lists, dicts)
+            if isinstance(value, (list, dict)):
+                skipped.append(key)
+                continue
+            # Skip known suffixes
+            if any(key.endswith(s) for s in self._SKIP_KEYS_SUFFIXES):
+                skipped.append(key)
+                continue
+            # Skip known read-only prefixes
+            if any(key.startswith(p) for p in self._SKIP_KEYS_PREFIXES):
+                skipped.append(key)
+                continue
+            # Skip known read-only keys
+            if key in self._SKIP_KEYS_EXACT:
+                skipped.append(key)
+                continue
+            filtered[key] = value
+
+        if skipped:
+            logger.info(f"Filtered {len(skipped)} non-settable keys: {skipped[:15]}{'...' if len(skipped) > 15 else ''}")
+
+        return filtered
+
+    async def _apply_config_settings_curl(self, config_props: dict) -> bool:
+        """Apply config properties via set_param endpoint.
+
+        Wraps flat key/value pairs into the device_props format and POSTs
+        to /admin/set_param as form-encoded data. No reboot required.
+
+        Non-settable keys (tables, certificates, read-only) are filtered
+        out automatically before sending.
+
+        If the full property set fails, retries with only essential
+        provisioning keys (SSID, hostname, device name, password).
+
+        Args:
+            config_props: Flat dict of Cambium device_props keys to values.
+
+        Returns:
+            True if set_param returned success.
+        """
+        if not self._stok:
+            logger.error(f"No stok available for set_param on {self.ip}")
+            return False
+
+        if not config_props:
+            logger.warning(f"No config properties to apply on {self.ip}")
+            return True
+
+        # Filter out non-settable keys
+        settable = self._filter_settable_props(config_props)
+        if not settable:
+            logger.warning(f"All config properties were filtered out on {self.ip}")
+            return True
+
+        logger.info(f"Sending {len(settable)} settable properties (from {len(config_props)} total)")
+
+        success = await self._send_set_param(settable)
+        if success:
+            return True
+
+        # Fallback: retry with only essential provisioning keys
+        essential = {k: v for k, v in settable.items() if k in self._ESSENTIAL_KEYS}
+        if essential and len(essential) < len(settable):
+            logger.warning(
+                f"Full config set failed ({len(settable)} keys). "
+                f"Retrying with {len(essential)} essential keys: {list(essential.keys())}"
+            )
+            success = await self._send_set_param(essential)
+            if success:
+                logger.info(f"Essential-only config applied on {self.ip}")
+                return True
+            logger.error(f"Essential-only config also failed on {self.ip}")
+
+        return False
+
+    async def _send_set_param(self, props: dict) -> bool:
+        """Send a set_param request with the given properties.
+
+        Writes the form data to a temp file to handle large payloads
+        reliably, then POSTs via curl.
+
+        Args:
+            props: Flat dict of settable device_props keys to values.
+
+        Returns:
+            True if set_param returned success.
+        """
+        # Build the changed_elements JSON
+        changed_elements = json.dumps({
+            "device_props": props,
+            "template_props": {"config_id": "0"},
+        })
+
+        form_data = f"changed_elements={urllib.parse.quote(changed_elements)}&debug=true"
+
+        set_param_url = f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/set_param"
+        logger.info(f"POST set_param to {self.ip} ({len(props)} keys, {len(form_data)} bytes)")
+
+        # Write form data to temp file to avoid command-line length issues
+        data_file = None
+        try:
+            data_file = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, prefix="cambium_setparam_"
+            )
+            data_file.write(form_data)
+            data_file.close()
+
+            cmd = [
+                "curl", "-s", "-k", "-m", "30",
+                "--interface", self.interface,
+                "-b", self._cookie_file,
+                "-X", "POST",
+                "-H", "Content-Type: application/x-www-form-urlencoded",
+                "--data-binary", f"@{data_file.name}",
+                set_param_url,
+            ]
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+        finally:
+            if data_file:
+                try:
+                    os.unlink(data_file.name)
+                except OSError:
+                    pass
+
+        if proc.returncode != 0:
+            logger.error(f"set_param curl failed: rc={proc.returncode}, stderr={stderr.decode() if stderr else ''}")
+            return False
+
+        response = stdout.decode("utf-8", errors="ignore")
+
+        # Check for success
+        try:
+            resp_data = json.loads(response)
+            success_val = resp_data.get("success")
+            if success_val == 1 or success_val == "1":
+                logger.info(f"set_param succeeded on {self.ip} ({len(props)} keys)")
+                # Store applied config for verification
+                self._last_applied_config = dict(props)
+                return True
+            else:
+                err = resp_data.get("err", "")
+                # Log full response for debugging
+                logger.error(
+                    f"set_param failed on {self.ip}: success={success_val}, err={err!r}, "
+                    f"full_response={response[:2000]}"
+                )
+                return False
+        except json.JSONDecodeError:
+            # Non-JSON response — check for HTML error page
+            if response.strip().startswith("<!DOCTYPE") or response.strip().startswith("<html"):
+                logger.error(f"set_param returned HTML error page (session expired?)")
+                return False
+            # Some firmware returns plain text success
+            if "success" in response.lower():
+                self._last_applied_config = dict(props)
+                return True
+            logger.error(f"set_param returned non-JSON: {response[:500]}")
+            return False
 
     async def _apply_tar_config_curl(self, config_path: str) -> bool:
         """Apply TAR archive config using curl with interface binding.
@@ -1925,14 +1921,19 @@ class CambiumHandler(BaseHandler):
 
         try:
             # Use get_param endpoint (POST) which has both bank versions
+            # Requires form body: act=config_regular&debug=true
             if self._use_cgi and self._stok:
                 url = f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/get_param"
                 cmd = [
                     "curl", "-s", "-k", "-m", "10",
                     "--interface", self.interface,
                     "-X", "POST",
-                    url
+                    "-H", "Content-Type: application/x-www-form-urlencoded",
+                    "-d", "act=config_regular&debug=true",
                 ]
+                if self._cookie_file:
+                    cmd.extend(["-b", self._cookie_file])
+                cmd.append(url)
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
@@ -1945,16 +1946,18 @@ class CambiumHandler(BaseHandler):
                     if not text.strip().startswith('<!DOCTYPE'):
                         try:
                             data = json.loads(text)
+                            # Response wraps config in device_props
+                            props = data.get("device_props", data)
                             # Log all version-related keys for debugging
-                            version_keys = [k for k in data.keys() if 'version' in k.lower() or 'image' in k.lower()]
+                            version_keys = [k for k in props.keys() if 'version' in k.lower() or 'image' in k.lower()]
                             logger.debug(f"get_param version keys: {version_keys}")
                             for key in version_keys:
-                                logger.debug(f"  {key} = {data.get(key)}")
+                                logger.debug(f"  {key} = {props.get(key)}")
 
                             # cambiumCurrentuImageVersion = active bank
                             # cambiumCurrentuImageIVersion = inactive bank (I = Inactive)
-                            active_ver = data.get("cambiumCurrentuImageVersion")
-                            inactive_ver = data.get("cambiumCurrentuImageIVersion")
+                            active_ver = props.get("cambiumCurrentuImageVersion")
+                            inactive_ver = props.get("cambiumCurrentuImageIVersion")
 
                             if active_ver:
                                 result["bank1"] = active_ver
@@ -2444,3 +2447,196 @@ class CambiumHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Failed to change password: {e}")
             return False
+
+    async def apply_ap_naming(self, hostname: str, ssid: str) -> bool:
+        """Apply AP naming via set_param.
+
+        Sets wirelessInterfaceSSID, snmpSystemName, and systemConfigDeviceName
+        directly through the set_param endpoint. No reboot required.
+
+        Args:
+            hostname: Hostname to set (e.g., "tw24-north")
+            ssid: SSID to set (e.g., "tw24-north" for Cambium)
+
+        Returns:
+            True if config applied successfully
+        """
+        logger.info(f"Applying AP naming to {self.ip}: hostname={hostname}, ssid={ssid}")
+
+        try:
+            props = {
+                "wirelessInterfaceSSID": ssid,
+                "snmpSystemName": hostname,
+                "systemConfigDeviceName": hostname,
+            }
+            return await self._apply_config_settings_curl(props)
+
+        except Exception as e:
+            logger.error(f"Failed to apply AP naming: {e}")
+            return False
+
+    async def verify_config(self, expected_values: Optional[Dict[str, Any]] = None) -> bool:
+        """Verify that configuration was applied correctly.
+
+        Cambium config apply via native template (set_param) does NOT trigger
+        a reboot — the config is applied in-place. So we skip the wait-for-down
+        phase entirely and read config directly using the existing session.
+
+        Falls back to disconnect/reconnect if the existing session is stale.
+
+        Args:
+            expected_values: Optional dict of field names to expected values.
+
+        Returns:
+            True if config verification passed.
+        """
+        logger.info(f"[CONFIG VERIFY] Verifying Cambium config on {self.ip}")
+
+        # Build expected_values from last applied config if not provided
+        if not expected_values and self._last_applied_config:
+            expected_values = {}
+            # Map device_props keys to the field names _check_config_values expects
+            key_map = {
+                "wirelessInterfaceSSID": "ssid",
+                "snmpSystemName": "hostname",
+                "systemConfigDeviceName": "devicename",
+            }
+            for prop_key, verify_key in key_map.items():
+                if prop_key in self._last_applied_config:
+                    expected_values[verify_key] = self._last_applied_config[prop_key]
+            if expected_values:
+                logger.info(f"[CONFIG VERIFY] Built expected values from last applied config: {expected_values}")
+
+        # Try reading config with the existing session first (no reboot expected)
+        if self._stok and self._cookie_file:
+            logger.info(f"[CONFIG VERIFY] Trying existing session for config read")
+            config = await self._get_config_curl()
+            if isinstance(config, dict) and config:
+                return self._check_config_values(config, expected_values)
+            logger.warning(f"[CONFIG VERIFY] Existing session failed, will reconnect")
+
+        # Fallback: disconnect and reconnect with credential rotation
+        await self.disconnect()
+
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info(f"[CONFIG VERIFY] Login attempt {attempt}/{max_attempts} for {self.ip}")
+                if not await self.connect():
+                    login_err = self.login_error or ""
+                    auth_keywords = ["credentials", "password", "locked", "session", "unauthorized"]
+                    if any(kw in login_err.lower() for kw in auth_keywords):
+                        logger.error(f"[CONFIG VERIFY] Auth/lockout error, stopping retries: {login_err}")
+                        return False
+                    logger.warning(f"[CONFIG VERIFY] Reconnect attempt {attempt} failed: {login_err}")
+                    if attempt < max_attempts:
+                        await asyncio.sleep(10)
+                    continue
+
+                config = await self._get_config_curl()
+
+                if not isinstance(config, dict) or not config:
+                    logger.warning(f"[CONFIG VERIFY] Attempt {attempt}: failed to read config from {self.ip}")
+                    await self.disconnect()
+                    if attempt < max_attempts:
+                        await asyncio.sleep(10)
+                    continue
+
+                return self._check_config_values(config, expected_values)
+
+            except Exception as e:
+                logger.warning(f"[CONFIG VERIFY] Attempt {attempt} error: {e}")
+                await self.disconnect()
+                if attempt < max_attempts:
+                    await asyncio.sleep(10)
+
+        logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed for {self.ip}")
+        return False
+
+    def _check_config_values(self, config: Dict[str, Any], expected_values: Optional[Dict[str, Any]] = None) -> bool:
+        """Check config dict against expected values. Returns True if OK."""
+        actual_ssid = config.get("wirelessInterfaceSSID")
+        actual_snmp_name = config.get("snmpSystemName")
+        actual_device_name = config.get("systemConfigDeviceName")
+
+        logger.info(f"[CONFIG VERIFY] Read back: ssid={actual_ssid}, snmpName={actual_snmp_name}, deviceName={actual_device_name}")
+
+        if expected_values:
+            for field, expected in expected_values.items():
+                if field == "ssid" and actual_ssid != expected:
+                    logger.error(f"[CONFIG VERIFY] SSID mismatch: expected {expected}, got {actual_ssid}")
+                    return False
+                elif field == "hostname" and actual_snmp_name != expected:
+                    logger.error(f"[CONFIG VERIFY] snmpSystemName mismatch: expected {expected}, got {actual_snmp_name}")
+                    return False
+                elif field == "devicename" and actual_device_name != expected:
+                    logger.error(f"[CONFIG VERIFY] deviceName mismatch: expected {expected}, got {actual_device_name}")
+                    return False
+
+            logger.info(f"[CONFIG VERIFY] All expected values verified successfully")
+        else:
+            logger.info(f"[CONFIG VERIFY] Config readable, no specific values to verify")
+
+        return True
+
+    async def _get_config_curl(self) -> Dict[str, Any]:
+        """Read device config using curl with interface binding.
+
+        Uses the get_param endpoint which returns full config as JSON.
+        Requires an active stok session from connect().
+
+        The endpoint requires form body: act=config_regular&debug=true
+        Response format: {"success":"1", "device_props": {...}, "template_props": {...}, ...}
+        Returns the device_props dict (flat key/value config).
+        """
+        if not self._stok:
+            logger.warning(f"[CONFIG VERIFY] No stok available for config read")
+            return {}
+
+        url = f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/get_param"
+        cmd = [
+            "curl", "-s", "-k", "-m", "10",
+            "--interface", self.interface,
+            "-b", self._cookie_file,
+            "-X", "POST",
+            "-H", "Content-Type: application/x-www-form-urlencoded",
+            "-d", "act=config_regular&debug=true",
+            url
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode == 0 and stdout:
+                text = stdout.decode("utf-8", errors="ignore")
+                stripped = text.strip()
+                if stripped.startswith("<?xml") or stripped.startswith("<!DOCTYPE") or stripped.startswith("<html"):
+                    logger.warning(f"[CONFIG VERIFY] get_param returned HTML/XML error page")
+                    return {}
+                try:
+                    data = json.loads(text)
+                    # Response wraps config in device_props
+                    device_props = data.get("device_props", {})
+                    if device_props:
+                        logger.info(f"[CONFIG VERIFY] Config read OK, {len(device_props)} keys in device_props")
+                        return device_props
+                    # Fallback: maybe flat keys at top level
+                    if data.get("success") == "1" or data.get("success") == 1:
+                        logger.info(f"[CONFIG VERIFY] Config read OK, {len(data)} top-level keys")
+                        return data
+                    logger.warning(f"[CONFIG VERIFY] get_param response missing device_props: {list(data.keys())[:10]}")
+                    return {}
+                except json.JSONDecodeError:
+                    logger.warning(f"[CONFIG VERIFY] get_param returned non-JSON: {text[:200]}")
+                    return {}
+            else:
+                logger.warning(f"[CONFIG VERIFY] curl get_param failed: rc={proc.returncode}, stderr={stderr.decode() if stderr else ''}")
+                return {}
+        except Exception as e:
+            logger.error(f"[CONFIG VERIFY] _get_config_curl error: {e}")
+            return {}

@@ -1,10 +1,14 @@
 """Abstract base handler for network device provisioning."""
 
+import asyncio
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Dict, Any, Callable, Awaitable
+
+_logger = logging.getLogger(__name__)
 
 
 class ProvisioningPhase(str, Enum):
@@ -138,6 +142,86 @@ class BaseHandler(ABC):
             True if configuration applied successfully.
         """
         pass
+
+    async def verify_config(self, expected_values: Optional[Dict[str, Any]] = None) -> bool:
+        """Verify that configuration was applied correctly.
+
+        Reconnects to the device and checks that key fields match expected values.
+        Override in device-specific handlers to implement actual verification.
+
+        Waits for the device's web server to be reachable before attempting login,
+        and stops immediately on auth/lockout errors to avoid session exhaustion.
+
+        Args:
+            expected_values: Optional dict of field names to expected values.
+                            If None, just verifies device is accessible.
+
+        Returns:
+            True if config verification passed.
+        """
+        # Default implementation - just verify we can still connect
+        _logger.info(f"[CONFIG VERIFY] Default verification - checking device accessibility")
+        await self.disconnect()
+
+        # Phase 1: Wait for web server to go DOWN (device is rebooting)
+        if hasattr(self, '_check_web_server'):
+            _logger.info(f"[CONFIG VERIFY] Waiting for device to start rebooting...")
+            went_down = False
+            for _ in range(12):  # Up to 60s for device to go down
+                if not await self._check_web_server():
+                    _logger.info(f"[CONFIG VERIFY] Web server went down on {self.ip}")
+                    went_down = True
+                    break
+                await asyncio.sleep(5)
+            if not went_down:
+                _logger.info(f"[CONFIG VERIFY] Web server stayed up — config may not require reboot")
+
+        # Phase 2: Wait for web server to come back UP
+        max_web_wait = 120  # seconds
+        web_up = False
+        if hasattr(self, '_check_web_server'):
+            _logger.info(f"[CONFIG VERIFY] Waiting for web server on {self.ip}...")
+            start = asyncio.get_event_loop().time()
+            while asyncio.get_event_loop().time() - start < max_web_wait:
+                if await self._check_web_server():
+                    _logger.info(f"[CONFIG VERIFY] Web server is up on {self.ip}")
+                    web_up = True
+                    break
+                await asyncio.sleep(5)
+            if not web_up:
+                _logger.error(f"[CONFIG VERIFY] Web server not reachable after {max_web_wait}s")
+                return False
+        else:
+            # No _check_web_server method — fall back to a fixed wait
+            _logger.info(f"[CONFIG VERIFY] No web server check available, waiting 15s")
+            await asyncio.sleep(15)
+            web_up = True
+
+        # Web server is up — try to login (limited retries, stop on auth errors)
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                _logger.info(f"[CONFIG VERIFY] Login attempt {attempt}/{max_attempts}")
+                if await self.connect():
+                    _logger.info(f"[CONFIG VERIFY] Device accessible after config apply")
+                    return True
+
+                # Check for auth/lockout errors — stop immediately, don't burn attempts
+                login_err = getattr(self, 'login_error', None) or ""
+                auth_keywords = ["credentials", "password", "locked", "session", "unauthorized"]
+                if any(kw in login_err.lower() for kw in auth_keywords):
+                    _logger.error(f"[CONFIG VERIFY] Auth/lockout error, stopping retries: {login_err}")
+                    return False
+
+                _logger.warning(f"[CONFIG VERIFY] Reconnect attempt {attempt} failed: {login_err}")
+            except Exception as e:
+                _logger.warning(f"[CONFIG VERIFY] Attempt {attempt} error: {e}")
+
+            if attempt < max_attempts:
+                await asyncio.sleep(10)
+
+        _logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed")
+        return False
 
     @abstractmethod
     async def upload_firmware(self, firmware_path: str) -> bool:
@@ -548,10 +632,13 @@ class BaseHandler(ABC):
             # PHASE 6: CONFIG APPLY
             # ================================================================
             _logger.info(f"[PROVISION] Phase 6: Apply config")
+            _logger.info(f"[PROVISION] Config path: {config_path}, inline config: {bool(config)}")
             if config or config_path:
                 if config:
+                    _logger.info(f"[PROVISION] Applying inline config with {len(config)} keys")
                     success = await self.apply_config(config)
                 else:
+                    _logger.info(f"[PROVISION] Applying config from file: {config_path}")
                     success = await self.apply_config_file(config_path)
 
                 if not success:
@@ -562,7 +649,23 @@ class BaseHandler(ABC):
                 result.config_applied = config_path or "inline"
                 result.phases_completed.append(ProvisioningPhase.CONFIGURING)
                 await notify("config_upload", True, None)
+                _logger.info(f"[PROVISION] Config applied successfully")
+
+                # ============================================================
+                # PHASE 6b: CONFIG VERIFICATION
+                # ============================================================
+                _logger.info(f"[PROVISION] Phase 6b: Verify config applied")
+                await notify("config_verify", "loading", None)
+
+                if not await self.verify_config():
+                    result.error_message = "Config verification failed - device may not have applied config correctly"
+                    await notify("config_verify", False, result.error_message)
+                    return result
+
+                await notify("config_verify", True, None)
+                _logger.info(f"[PROVISION] Config verification passed")
             else:
+                _logger.info(f"[PROVISION] No config to apply - skipping")
                 await notify("config_upload", "skipped", "No config specified")
 
             # ================================================================
@@ -583,6 +686,19 @@ class BaseHandler(ABC):
                     _logger.info(f"[PROVISION] Phase 7: Firmware update 2 (bank 2)")
                     _logger.info(f"    Current bank2: {bank2_ver}")
                     await notify("firmware_update_2", "loading", None)
+
+                    # Ensure fresh session before FW2 upload.
+                    # Config verify disconnects/reconnects and the session may
+                    # be stale, especially after a config-triggered reboot.
+                    _logger.info(f"[PROVISION] Reconnecting before FW2 upload...")
+                    try:
+                        await self.disconnect()
+                    except Exception:
+                        pass
+                    if not await self.connect():
+                        result.error_message = "Failed to reconnect before firmware update 2"
+                        await notify("firmware_update_2", False, result.error_message)
+                        return result
 
                     if not await self.upload_firmware(firmware_path):
                         result.error_message = "Failed to upload firmware (update 2)"

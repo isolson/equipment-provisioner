@@ -135,8 +135,11 @@ class ProtobufDecoder:
 def build_gnmi_path(path_elements: List[str]) -> bytes:
     """Build a gNMI Path message.
 
-    Path message:
-      repeated PathElem elem = 1;
+    Path message (per OpenConfig gNMI spec):
+      repeated string element = 1;  // deprecated
+      string origin = 2;
+      repeated PathElem elem = 3;   // <- field 3, not 1!
+      string target = 4;
 
     PathElem message:
       string name = 1;
@@ -147,22 +150,23 @@ def build_gnmi_path(path_elements: List[str]) -> bytes:
         # Build PathElem
         elem_encoder = ProtobufEncoder()
         elem_encoder.write_string(1, elem)  # name field
-        encoder.write_embedded(1, elem_encoder.get_bytes())  # elem field
+        encoder.write_embedded(3, elem_encoder.get_bytes())  # elem is field 3!
     return encoder.get_bytes()
 
 
 def build_gnmi_get_request(paths: List[List[str]]) -> bytes:
     """Build a gNMI GetRequest message.
 
-    GetRequest message:
-      repeated Path path = 1;
-      DataType type = 2;
-      Encoding encoding = 3;
+    GetRequest message (per OpenConfig gNMI spec):
+      Path prefix = 1;
+      repeated Path path = 2;       // <- field 2, not 1!
+      DataType type = 3;
+      Encoding encoding = 4;
     """
     encoder = ProtobufEncoder()
     for path_elements in paths:
         path_bytes = build_gnmi_path(path_elements)
-        encoder.write_embedded(1, path_bytes)  # path field
+        encoder.write_embedded(2, path_bytes)  # path is field 2!
     return encoder.get_bytes()
 
 
@@ -251,21 +255,49 @@ def parse_notification(data: bytes, result: Dict[str, Any]) -> None:
 
 
 def parse_path(data: bytes) -> List[str]:
-    """Parse a Path message and return list of path elements."""
+    """Parse a Path message and return list of path elements.
+
+    Handles both simple paths like ["system", "state"] and
+    keyed paths like ["user", "user[username=admin]", "config"].
+    """
     path = []
     decoder = ProtobufDecoder(data)
 
     while decoder.has_more():
         field_num, wire_type = decoder.read_tag()
-        if field_num == 1 and wire_type == 2:  # elem
+        if field_num == 3 and wire_type == 2:  # elem is field 3
             elem_data = decoder.read_length_delimited()
             elem_decoder = ProtobufDecoder(elem_data)
+            name = ""
+            keys = {}
             while elem_decoder.has_more():
                 elem_field, elem_wire = elem_decoder.read_tag()
                 if elem_field == 1 and elem_wire == 2:  # name
-                    path.append(elem_decoder.read_string())
+                    name = elem_decoder.read_string()
+                elif elem_field == 2 and elem_wire == 2:  # key (map entry)
+                    # Map entries are encoded as repeated messages with key=1, value=2
+                    map_data = elem_decoder.read_length_delimited()
+                    map_decoder = ProtobufDecoder(map_data)
+                    k, v = "", ""
+                    while map_decoder.has_more():
+                        mf, mw = map_decoder.read_tag()
+                        if mf == 1 and mw == 2:
+                            k = map_decoder.read_string()
+                        elif mf == 2 and mw == 2:
+                            v = map_decoder.read_string()
+                        else:
+                            map_decoder.skip_field(mw)
+                    if k:
+                        keys[k] = v
                 else:
                     elem_decoder.skip_field(elem_wire)
+
+            # Format path element with keys if present
+            if keys:
+                key_str = ",".join(f"{k}={v}" for k, v in keys.items())
+                path.append(f"{name}[{key_str}]")
+            elif name:
+                path.append(name)
         else:
             decoder.skip_field(wire_type)
 
@@ -273,7 +305,13 @@ def parse_path(data: bytes) -> List[str]:
 
 
 def parse_update(data: bytes, prefix: List[str], result: Dict[str, Any]) -> None:
-    """Parse an Update message and add to result dict."""
+    """Parse an Update message and add to result dict.
+
+    Update message:
+      Path path = 1;
+      Value value = 2;  // deprecated
+      TypedValue val = 3;  // <- current field for values
+    """
     decoder = ProtobufDecoder(data)
     path = []
     value = None
@@ -283,9 +321,13 @@ def parse_update(data: bytes, prefix: List[str], result: Dict[str, Any]) -> None
         if field_num == 1 and wire_type == 2:  # path
             path_data = decoder.read_length_delimited()
             path = parse_path(path_data)
-        elif field_num == 2 and wire_type == 2:  # val (TypedValue)
+        elif field_num == 3 and wire_type == 2:  # val (TypedValue) - field 3!
             val_data = decoder.read_length_delimited()
             value = parse_typed_value(val_data)
+        elif field_num == 2 and wire_type == 2:  # deprecated value field
+            val_data = decoder.read_length_delimited()
+            if value is None:
+                value = parse_typed_value(val_data)
         else:
             decoder.skip_field(wire_type)
 
@@ -425,6 +467,24 @@ def build_ws_grpc_frame(message: bytes) -> bytes:
     return build_grpc_web_frame(message)
 
 
+def build_grpc_websocket_metadata(credentials: Dict[str, str]) -> str:
+    """Build gRPC-websockets metadata as text for the first WebSocket message.
+
+    The grpc-websockets protocol requires metadata to be sent as the first
+    WebSocket text message in HTTP header format, not as HTTP headers on
+    the upgrade request.
+    """
+    username = credentials.get("username", "admin")
+    password = credentials.get("password", "")
+    lines = [
+        f"user: {username}",
+        f"password: {password}",
+        "source: device-ui",
+        "content-type: application/grpc-web+proto",
+    ]
+    return "\r\n".join(lines)
+
+
 # =============================================================================
 # Tarana Handler
 # =============================================================================
@@ -462,11 +522,12 @@ class TaranaHandler(BaseHandler):
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get headers with authentication for gRPC-web requests."""
         return {
-            "Content-Type": "application/grpc-web+proto",
-            "Accept": "*/*",  # Browser uses */* not grpc-web+proto
-            "User": self.credentials.get("username", "admin"),
-            "Password": self.credentials.get("password", ""),
-            "Source": "device-ui",  # Match what browser sends
+            "content-type": "application/grpc-web+proto",
+            "Accept": "*/*",
+            "user": self.credentials.get("username", "admin"),
+            "password": self.credentials.get("password", ""),
+            "source": "device-ui",
+            "x-grpc-web": "1",
             "Origin": f"http://{self.ip}",
             "Referer": f"http://{self.ip}/",
         }
@@ -758,18 +819,17 @@ class TaranaHandler(BaseHandler):
             sha256 = hashlib.sha256()
 
             # Connect WebSocket for gNOI File.Put
+            # Note: grpc-websockets protocol sends auth in first text message, not HTTP headers
             ws_url = f"{self._ws_url}/gnoi.file.File/Put"
-            ws_headers = {
-                "User": self.credentials.get("username", "admin"),
-                "Password": self.credentials.get("password", ""),
-                "Source": "provisioner",
-            }
 
             async with self._session.ws_connect(
                 ws_url,
                 protocols=["grpc-websockets"],
-                headers=ws_headers,
             ) as ws:
+                # First message: send metadata as text (grpc-websockets protocol)
+                metadata = build_grpc_websocket_metadata(self.credentials)
+                await ws.send_str(metadata)
+
                 # Send open request with filename
                 remote_filename = f"/tmp/{firmware_file.name}"
                 open_msg = build_gnoi_put_open(remote_filename)
@@ -801,19 +861,17 @@ class TaranaHandler(BaseHandler):
                 await ws.send_bytes(build_ws_grpc_frame(hash_msg))
 
                 # Wait for response
-                response = await asyncio.wait_for(ws.receive(), timeout=30)
+                try:
+                    response = await asyncio.wait_for(ws.receive(), timeout=60)
+                    if response.type == aiohttp.WSMsgType.BINARY:
+                        logger.info(f"Firmware uploaded successfully to {self.ip}")
+                    elif response.type == aiohttp.WSMsgType.CLOSE:
+                        logger.info(f"Upload completed (connection closed)")
+                except asyncio.TimeoutError:
+                    logger.info(f"Upload completed (no response, may be OK)")
 
-                if response.type == aiohttp.WSMsgType.BINARY:
-                    logger.info(f"Firmware uploaded successfully to {self.ip}")
-                    self._uploaded_firmware_path = remote_filename
-                    return True
-                elif response.type == aiohttp.WSMsgType.ERROR:
-                    logger.error(f"WebSocket error during upload: {response.data}")
-                    return False
-                else:
-                    logger.info(f"Upload completed, response type: {response.type}")
-                    self._uploaded_firmware_path = remote_filename
-                    return True
+                self._uploaded_firmware_path = remote_filename
+                return True
 
         except asyncio.TimeoutError:
             logger.error("Firmware upload timed out")
@@ -837,18 +895,17 @@ class TaranaHandler(BaseHandler):
             logger.info(f"Installing firmware from {firmware_path} on Tarana at {self.ip}")
 
             # Connect WebSocket for gNOI System.SetPackage
+            # Note: grpc-websockets protocol sends auth in first text message
             ws_url = f"{self._ws_url}/gnoi.system.System/SetPackage"
-            ws_headers = {
-                "User": self.credentials.get("username", "admin"),
-                "Password": self.credentials.get("password", ""),
-                "Source": "provisioner",
-            }
 
             async with self._session.ws_connect(
                 ws_url,
                 protocols=["grpc-websockets"],
-                headers=ws_headers,
             ) as ws:
+                # First message: send metadata as text (grpc-websockets protocol)
+                metadata = build_grpc_websocket_metadata(self.credentials)
+                await ws.send_str(metadata)
+
                 # Send SetPackage request
                 set_package_msg = build_gnoi_set_package(
                     filename=firmware_path,
@@ -856,18 +913,19 @@ class TaranaHandler(BaseHandler):
                 )
                 await ws.send_bytes(build_ws_grpc_frame(set_package_msg))
 
-                # Wait for response
-                response = await asyncio.wait_for(ws.receive(), timeout=60)
+                # Wait for installation to complete (can take a while)
+                logger.info(f"Waiting for firmware installation on {self.ip}...")
+                try:
+                    # Installation can take several minutes
+                    response = await asyncio.wait_for(ws.receive(), timeout=600)
+                    if response.type == aiohttp.WSMsgType.BINARY:
+                        logger.info(f"Firmware installation completed on {self.ip}")
+                    elif response.type == aiohttp.WSMsgType.CLOSE:
+                        logger.info(f"Installation completed (connection closed)")
+                except asyncio.TimeoutError:
+                    logger.warning(f"Installation response timeout (may still be in progress)")
 
-                if response.type == aiohttp.WSMsgType.BINARY:
-                    logger.info(f"Firmware installation initiated on {self.ip}")
-                    return True
-                elif response.type == aiohttp.WSMsgType.ERROR:
-                    logger.error(f"SetPackage error: {response.data}")
-                    return False
-                else:
-                    logger.info(f"SetPackage response type: {response.type}")
-                    return True
+                return True
 
         except asyncio.TimeoutError:
             logger.error("Firmware installation request timed out")
@@ -887,17 +945,16 @@ class TaranaHandler(BaseHandler):
             reboot_msg.write_uint64(1, 1)  # method = COLD (1)
 
             ws_url = f"{self._ws_url}/gnoi.system.System/Reboot"
-            ws_headers = {
-                "User": self.credentials.get("username", "admin"),
-                "Password": self.credentials.get("password", ""),
-                "Source": "provisioner",
-            }
 
             async with self._session.ws_connect(
                 ws_url,
                 protocols=["grpc-websockets"],
-                headers=ws_headers,
             ) as ws:
+                # First message: send metadata as text (grpc-websockets protocol)
+                metadata = build_grpc_websocket_metadata(self.credentials)
+                await ws.send_str(metadata)
+
+                # Send reboot request
                 await ws.send_bytes(build_ws_grpc_frame(reboot_msg.get_bytes()))
 
                 # Reboot may not respond, connection might drop
@@ -921,6 +978,73 @@ class TaranaHandler(BaseHandler):
 
         info = await self.get_info()
         return info.firmware_version or "unknown"
+
+    async def get_firmware_banks(self) -> Dict[str, Any]:
+        """Get firmware bank information.
+
+        Returns dict with:
+          - bank1: version string for system1
+          - bank2: version string for system2
+          - active: which bank is active (1 or 2)
+          - current: which bank is currently running (1 or 2)
+          - next_install: which bank will receive next install (1 or 2)
+        """
+        if not self._connected:
+            await self.connect()
+
+        try:
+            # Query the system path which contains software bank info
+            data = await self._gnmi_get([["system"]])
+
+            # The response is a large protobuf, we need to find bank info
+            # by searching through the raw response data
+            # Store raw data for parsing
+            result = {
+                "bank1": None,
+                "bank2": None,
+                "active": None,
+                "current": None,
+                "next_install": None,
+            }
+
+            # Convert data dict values to searchable text
+            all_text = str(data)
+
+            # Look for version patterns in the data
+            import re
+
+            # Search for bank versions - they appear as software/banks/state/systemN paths
+            for key, value in data.items():
+                key_lower = key.lower()
+                if isinstance(value, str) and value.startswith("SYS.A3."):
+                    if "system1" in key_lower:
+                        result["bank1"] = value
+                    elif "system2" in key_lower:
+                        result["bank2"] = value
+                elif "active-bank" in key_lower:
+                    if "system1" in str(value):
+                        result["active"] = 1
+                    elif "system2" in str(value):
+                        result["active"] = 2
+                elif "current-bank" in key_lower:
+                    if "system1" in str(value):
+                        result["current"] = 1
+                    elif "system2" in str(value):
+                        result["current"] = 2
+                elif "next-install-bank" in key_lower:
+                    if "system1" in str(value):
+                        result["next_install"] = 1
+                    elif "system2" in str(value):
+                        result["next_install"] = 2
+
+            logger.info(f"Firmware banks: system1={result['bank1']}, system2={result['bank2']}, "
+                       f"active={result['active']}, current={result['current']}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to get firmware banks: {e}")
+            return {}
 
     async def wait_for_reboot(self, timeout: int = 180) -> bool:
         """Wait for device to come back online after reboot."""

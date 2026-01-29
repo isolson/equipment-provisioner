@@ -205,6 +205,41 @@ class TachyonHandler(BaseHandler):
         logger.info(f"[CREDS] ========== TACHYON CONNECT END (failed) ==========")
         return False
 
+    def _update_credentials_from_config(self, config: Dict[str, Any]) -> None:
+        """Extract password from config and update self.credentials.
+
+        Tachyon config stores user credentials at system.users[N].password.
+        If the config being applied changes the password, we must update our
+        stored credentials so that verify_config() can reconnect after the
+        config-triggered reboot.
+        """
+        try:
+            users = config.get("system", {}).get("users", [])
+            if not users:
+                return
+
+            # Find the user matching our current username (usually "root" at index 0 or 1)
+            current_user = self.credentials.get("username", "root")
+            new_password = None
+
+            for user in users:
+                if isinstance(user, dict) and user.get("name") == current_user:
+                    new_password = user.get("password")
+                    break
+
+            # Fallback: if no name match, use the first user with a password
+            if new_password is None:
+                for user in users:
+                    if isinstance(user, dict) and "password" in user:
+                        new_password = user["password"]
+                        break
+
+            if new_password and new_password != self.credentials.get("password"):
+                logger.info(f"[CONFIG] Config changes device password — updating credentials for reconnect")
+                self.credentials["password"] = new_password
+        except Exception as e:
+            logger.warning(f"[CONFIG] Could not extract password from config: {e}")
+
     def _get_custom_credential(self) -> Optional[Dict[str, str]]:
         """Get custom credential for Tachyon devices from credentials.json.
 
@@ -715,6 +750,10 @@ class TachyonHandler(BaseHandler):
         Args:
             config: Configuration dictionary to apply
         """
+        # Extract password from config before applying — if the config changes
+        # the device password, we need the new one for reconnect after reboot.
+        self._update_credentials_from_config(config)
+
         # Use curl when interface binding is needed
         if self.interface:
             return await self._apply_config_curl(config)
@@ -826,6 +865,16 @@ class TachyonHandler(BaseHandler):
             logger.error(f"Failed to apply config via curl: {e}")
             return False
 
+    def _deep_merge(self, base: dict, overlay: dict) -> dict:
+        """Recursively merge overlay into base. Overlay values win on conflict."""
+        merged = base.copy()
+        for key, value in overlay.items():
+            if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+                merged[key] = self._deep_merge(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from JSON file or tarball.
 
@@ -871,6 +920,16 @@ class TachyonHandler(BaseHandler):
                 # Plain JSON file
                 with open(config_file, "r") as f:
                     config = json.load(f)
+
+            # GET current config from device and merge template into it
+            # This preserves device-only fields that the firmware requires
+            try:
+                current_config = await self._api_request("GET", self.API_CONFIG)
+                if isinstance(current_config, dict):
+                    config = self._deep_merge(current_config, config)
+                    logger.info(f"Merged template config into current device config")
+            except Exception as e:
+                logger.warning(f"Could not GET current config for merge, applying template as-is: {e}")
 
             return await self.apply_config(config)
 
@@ -1306,8 +1365,11 @@ class TachyonHandler(BaseHandler):
     async def verify_config(self, expected_values: Optional[Dict[str, Any]] = None) -> bool:
         """Verify that configuration was applied correctly.
 
-        Reconnects to the device and checks that key fields match expected values.
+        Waits for the device's web server to be reachable before attempting login,
+        then reconnects and checks that key fields match expected values.
         For Tachyon, verifies: system.hostname, system.name, wireless SSID.
+
+        Stops immediately on auth/lockout errors to avoid session exhaustion.
 
         Args:
             expected_values: Optional dict of field names to expected values.
@@ -1316,58 +1378,104 @@ class TachyonHandler(BaseHandler):
             True if config verification passed.
         """
         logger.info(f"[CONFIG VERIFY] Verifying Tachyon config on {self.ip}")
+        await self.disconnect()
 
-        try:
-            # Reconnect to device
-            await self.disconnect()
-            await asyncio.sleep(3)
+        # Phase 1: Wait for web server to go DOWN (device is rebooting)
+        logger.info(f"[CONFIG VERIFY] Waiting for device to start rebooting...")
+        went_down = False
+        for _ in range(12):  # Up to 60s for device to go down
+            if not await self._check_web_server():
+                logger.info(f"[CONFIG VERIFY] Web server went down on {self.ip} (reboot started)")
+                went_down = True
+                break
+            await asyncio.sleep(5)
 
-            if not await self.connect():
-                logger.error(f"[CONFIG VERIFY] Failed to reconnect to {self.ip}")
-                return False
+        if not went_down:
+            logger.info(f"[CONFIG VERIFY] Web server stayed up — config may not require reboot")
 
-            # Get current config
-            config = await self._api_request("GET", self.API_CONFIG)
+        # Phase 2: Wait for web server to come back UP
+        max_web_wait = 120  # seconds
+        logger.info(f"[CONFIG VERIFY] Waiting for web server to come back on {self.ip}...")
+        start = asyncio.get_event_loop().time()
+        web_up = False
+        while asyncio.get_event_loop().time() - start < max_web_wait:
+            if await self._check_web_server():
+                logger.info(f"[CONFIG VERIFY] Web server is up on {self.ip}")
+                web_up = True
+                break
+            await asyncio.sleep(5)
 
-            if not isinstance(config, dict):
-                logger.error(f"[CONFIG VERIFY] Failed to read config from {self.ip}")
-                return False
-
-            # Extract key fields for verification
-            actual_hostname = config.get("system", {}).get("hostname")
-            actual_name = config.get("system", {}).get("name")
-
-            # Get SSID from first VAP
-            actual_ssid = None
-            try:
-                vaps = config.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
-                if vaps:
-                    actual_ssid = vaps[0].get("ssid")
-            except (KeyError, IndexError, TypeError):
-                pass
-
-            logger.info(f"[CONFIG VERIFY] Read back: hostname={actual_hostname}, name={actual_name}, ssid={actual_ssid}")
-
-            # If expected values provided, verify them
-            if expected_values:
-                for field, expected in expected_values.items():
-                    if field == "hostname" and actual_hostname != expected:
-                        logger.error(f"[CONFIG VERIFY] hostname mismatch: expected {expected}, got {actual_hostname}")
-                        return False
-                    elif field == "systemname" and actual_name != expected:
-                        logger.error(f"[CONFIG VERIFY] name mismatch: expected {expected}, got {actual_name}")
-                        return False
-                    elif field == "ssid" and actual_ssid != expected:
-                        logger.error(f"[CONFIG VERIFY] ssid mismatch: expected {expected}, got {actual_ssid}")
-                        return False
-
-                logger.info(f"[CONFIG VERIFY] All expected values verified successfully")
-            else:
-                # No expected values - just verify we could read config
-                logger.info(f"[CONFIG VERIFY] Config readable, no specific values to verify")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"[CONFIG VERIFY] Error during verification: {e}")
+        if not web_up:
+            logger.error(f"[CONFIG VERIFY] Web server not reachable after {max_web_wait}s")
             return False
+
+        # Web server is up — try to login and read config (limited retries)
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info(f"[CONFIG VERIFY] Login attempt {attempt}/{max_attempts} for {self.ip}")
+                if not await self.connect():
+                    # Check for auth/lockout errors — stop immediately
+                    login_err = self.login_error or ""
+                    auth_keywords = ["credentials", "password", "locked", "session", "unauthorized"]
+                    if any(kw in login_err.lower() for kw in auth_keywords):
+                        logger.error(f"[CONFIG VERIFY] Auth/lockout error, stopping retries: {login_err}")
+                        return False
+                    logger.warning(f"[CONFIG VERIFY] Reconnect attempt {attempt} failed: {login_err}")
+                    if attempt < max_attempts:
+                        await asyncio.sleep(10)
+                    continue
+
+                # Get current config
+                config = await self._api_request("GET", self.API_CONFIG)
+
+                if not isinstance(config, dict):
+                    logger.warning(f"[CONFIG VERIFY] Attempt {attempt}: failed to read config from {self.ip}")
+                    await self.disconnect()
+                    if attempt < max_attempts:
+                        await asyncio.sleep(10)
+                    continue
+
+                # Extract key fields for verification
+                actual_hostname = config.get("system", {}).get("hostname")
+                actual_name = config.get("system", {}).get("name")
+
+                # Get SSID from first VAP
+                actual_ssid = None
+                try:
+                    vaps = config.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
+                    if vaps:
+                        actual_ssid = vaps[0].get("ssid")
+                except (KeyError, IndexError, TypeError):
+                    pass
+
+                logger.info(f"[CONFIG VERIFY] Read back: hostname={actual_hostname}, name={actual_name}, ssid={actual_ssid}")
+
+                # If expected values provided, verify them
+                if expected_values:
+                    for field, expected in expected_values.items():
+                        if field == "hostname" and actual_hostname != expected:
+                            logger.error(f"[CONFIG VERIFY] hostname mismatch: expected {expected}, got {actual_hostname}")
+                            return False
+                        elif field == "systemname" and actual_name != expected:
+                            logger.error(f"[CONFIG VERIFY] name mismatch: expected {expected}, got {actual_name}")
+                            return False
+                        elif field == "ssid" and actual_ssid != expected:
+                            logger.error(f"[CONFIG VERIFY] ssid mismatch: expected {expected}, got {actual_ssid}")
+                            return False
+
+                    logger.info(f"[CONFIG VERIFY] All expected values verified successfully")
+                else:
+                    # No expected values - just verify we could read config
+                    logger.info(f"[CONFIG VERIFY] Config readable, no specific values to verify")
+
+                return True
+
+            except Exception as e:
+                logger.warning(f"[CONFIG VERIFY] Attempt {attempt} error: {e}")
+                await self.disconnect()
+                if attempt < max_attempts:
+                    await asyncio.sleep(10)
+
+        logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed for {self.ip}")
+        return False
