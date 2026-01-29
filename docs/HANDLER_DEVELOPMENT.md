@@ -238,27 +238,50 @@ else:
 
 ## UI Display Requirements
 
-The UI displays these checklist items:
+### Port Card
 
-| Icon | Checklist Step | What It Shows |
-|------|----------------|---------------|
-| 🔒 | login | Green if connected |
-| ⚙️ | config_upload | Green if config applied |
-| 1 | firmware bank 1 | Green with version if known |
-| 2 | firmware bank 2 | Green with version if known |
+Each port card shows two zones:
 
-**Card displays:**
-- Vendor name (from device_type)
-- Model name (from `model_confirmed` or `device_model`)
+1. **Identity line** (top) — vendor tag, model name, port number, link speed.
+   Only appears when a device is detected.
+2. **Status center** (fills the card) — large icon + text showing current state:
+   - `NO LINK` (gray) — no cable / no device
+   - `DETECTING` (amber spinner) — waiting for device
+   - `READY` (green check) — device detected, tap to provision
+   - `LOGGING IN` / `CHECKING FIRMWARE` / `APPLYING CONFIG` / etc. (blue spinner) — active provisioning step with "Step N of 7" subtitle
+   - `COMPLETE` (green check) — all steps passed
+   - `FAILED` (red X) — error with truncated message
+   - `NEEDS CREDENTIALS` (red alert) — tap to enter password
 
-**Modal displays (on tap):**
-- Model
-- MAC Address
-- Serial Number
-- IP Address
-- Link Speed
-- Firmware Bank 1 (with "active" indicator)
-- Firmware Bank 2 (with "active" indicator)
+### Modal (tap a card)
+
+Opens an activity log view with:
+
+**Device summary** (top grid):
+- MAC Address, Serial, IP, Link Speed
+- FW Bank 1 and FW Bank 2 with version and active indicator
+
+**Activity log** — timestamped step-by-step entries in provisioning order:
+
+| Step | Checklist Key | Detail Shown |
+|------|---------------|--------------|
+| Login | `login` | MAC address |
+| Model | `model_confirmed` | Model name string |
+| FW Check | `firmware_banks` | "bank1_ver / bank2_ver (bank N)" |
+| FW Bank 1 | `firmware_update_1` | Firmware version |
+| Config | `config_upload` | — |
+| FW Bank 2 | `firmware_update_2` | Firmware version |
+| Reboot | `reboot` | — |
+| Verify | `verify` | — |
+
+Each entry shows a state indicator: ✓ success (green), ✗ error (red), ● loading (blue pulse), ○ pending (gray), — skipped (gray strikethrough).
+
+Steps not yet logged but visible in the checklist appear without timestamps.
+The current active step (matching `port.current_step`) shows with a blue loading indicator and highlighted background.
+
+**Footer:**
+- During provisioning: "Close" button only
+- After completion/failure: "Retry" + "Close" buttons. Retry opens the provision options modal to restart from the beginning.
 
 ## Config File Locations
 

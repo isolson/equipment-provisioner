@@ -106,6 +106,21 @@ Implementation notes:
 - Use high contrast colors for readability
 - Progress indicators must be clearly visible
 
+### Port Card Design
+Each port card (250px height) has two zones:
+- **Identity line** — compact top bar with vendor color tag, model name, port number, link speed. Hidden when no device is detected.
+- **Status center** — large area filling the card with a state icon (36px circle), bold status text, and optional subtitle (e.g. "Step 4 of 7"). Background color matches state (blue=active, green=complete, red=error, gray=idle, amber=booting).
+
+Cards are clickable when a device is detected, opening the activity log modal.
+
+### Activity Log Modal
+Tapping a port card opens a modal with:
+- **Device summary grid** — labeled rows for MAC, Serial, IP, Link Speed, FW Bank 1, FW Bank 2 (with active indicator).
+- **Activity log** — timestamped entries in canonical provisioning order: Login → Model → FW Check → FW Bank 1 → Config → FW Bank 2 → Reboot → Verify. Each entry shows state (✓/✗/●/○), step name, and detail text (firmware version, model name, etc.). Active step has blue highlight. Steps not yet in the log but visible in the checklist appear without timestamps.
+- **Footer** — "Close" during provisioning; "Retry" + "Close" after completion or failure.
+
+The modal live-updates during active provisioning via WebSocket re-renders.
+
 ### Responsive Behavior
 - UI must work at 800x480 minimum
 - Test all views at target resolution before deployment
