@@ -1,4 +1,83 @@
-"""Tarana Wireless G1 device handler using gRPC-web/gNOI protocols."""
+"""Tarana Wireless G1 device handler using gRPC-web/gNOI protocols.
+
+Protocol overview
+=================
+Tarana G1 devices expose a gRPC-web gateway over plain HTTP on the device's
+link-local IP (169.254.100.1).  Two transports are used:
+
+  * **gNMI over gRPC-web (HTTP POST)** – device queries (Get) and config
+    mutations (Set).  Auth credentials are sent as custom HTTP headers
+    ``user`` and ``password`` on *every* request (no session/cookie).
+
+  * **gNOI over WebSocket** – file transfer (File.Put) and system commands
+    (System.SetPackage, System.Reboot).  The ``grpc-websockets`` sub-protocol
+    requires the *first* WebSocket text message to carry metadata in HTTP-
+    header format (``user: …\\r\\npassword: …``), *not* as HTTP upgrade
+    headers.
+
+Networking
+----------
+* Device IP is always **169.254.100.1** (Tarana-specific link-local).
+* The provisioner host must be reachable at **169.254.100.2** on the
+  same VLAN interface so that aiohttp can ``local_addr``-bind correctly.
+* If the generic ``169.254.1.1`` is passed in, the handler silently
+  rewrites it to ``169.254.100.1``.
+
+Authentication & credential rotation
+-------------------------------------
+Factory-default credentials are ``admin / admin123``.
+
+On **first plug-in** (``_credentials_confirmed`` is False) the handler
+*always* tries the factory default first, then falls back to any
+configured credential that differs.  On **reconnect** (after a reboot
+during provisioning, ``_credentials_confirmed`` is True) it tries the
+previously-confirmed credential first, falling back to factory default.
+
+Auth failures are detected in two ways – both are required:
+
+1. **HTTP response headers** – Tarana returns HTTP 200 even on auth
+   failure but sets ``Grpc-Status`` / ``Grpc-Message`` as HTTP response
+   headers (not body trailers).  ``_gnmi_get()`` checks these headers
+   *before* reading the body and raises ``RuntimeError`` so the
+   credential-rotation loop in ``connect()`` can catch it and try the
+   next credential set.
+
+2. **gRPC body trailers** – on successful HTTP 200 responses with a
+   body, the trailing frame (flag ``0x80``) may contain
+   ``grpc-status: N`` lines; these are also checked.
+
+⚠ **Do not** remove or reorder the header check in ``_gnmi_get()`` –
+without it, auth failures silently appear as "0 bytes / no data".
+
+Firmware version strings
+------------------------
+Bank versions are full dotted strings like ``SYS.A3.R10.XXX.3.611.002.00``.
+The firmware file on disk uses the same format as its filename
+(``SYS.A3.R10.XXX.3.622.005.00.tbn``), and the version is extracted by
+stripping the ``.tbn`` extension.  This ensures exact string comparison
+between device banks and the expected version works correctly.
+
+⚠ **Do not** shorten or normalize these version strings – the
+provisioner's bank-comparison logic depends on exact string equality.
+
+gNMI paths (known schema)
+--------------------------
+The following gNMI paths are used and are known to work on G1 firmware
+≥ 3.611:
+
+  * ``/system``                          – full system tree (state, software,
+    aaa, certificates, management, dns, grpc-server, alarms)
+  * ``/system/state/hostname``           – serial number (e.g. S197A1252300723)
+  * ``/system/state/role``               – ``rn`` (Remote Node) or ``bn``
+    (Base Node)
+  * ``/system/software/state/active-bank``  – ``system1`` or ``system2``
+  * ``/system/software/state/current-bank`` – currently running bank
+  * ``/system/software/state/next-install-bank`` – target for next install
+  * ``/system/software/banks/state/system1`` – bank 1 version string
+  * ``/system/software/banks/state/system2`` – bank 2 version string
+  * ``/platform/components/component[name=sys]`` – hardware description
+  * ``/connections``, ``/radios/radio``  – link status / signal quality
+"""
 
 import asyncio
 import logging
@@ -144,13 +223,33 @@ def build_gnmi_path(path_elements: List[str]) -> bytes:
     PathElem message:
       string name = 1;
       map<string, string> key = 2;
+
+    Supports keyed elements like "component[name=sys]" which become
+    PathElem(name="component", key={"name": "sys"}).
     """
+    import re
     encoder = ProtobufEncoder()
     for elem in path_elements:
-        # Build PathElem
         elem_encoder = ProtobufEncoder()
-        elem_encoder.write_string(1, elem)  # name field
-        encoder.write_embedded(3, elem_encoder.get_bytes())  # elem is field 3!
+
+        # Parse key expressions like "component[name=sys]" or "radio[id=0]"
+        match = re.match(r'^([^\[]+)\[(.+)\]$', elem)
+        if match:
+            name = match.group(1)
+            key_str = match.group(2)
+            elem_encoder.write_string(1, name)
+            # Parse key=value pairs (comma-separated)
+            for kv in key_str.split(','):
+                k, v = kv.split('=', 1)
+                # Build map entry: key=1(string), value=2(string)
+                map_encoder = ProtobufEncoder()
+                map_encoder.write_string(1, k.strip())
+                map_encoder.write_string(2, v.strip())
+                elem_encoder.write_embedded(2, map_encoder.get_bytes())
+        else:
+            elem_encoder.write_string(1, elem)
+
+        encoder.write_embedded(3, elem_encoder.get_bytes())
     return encoder.get_bytes()
 
 
@@ -395,7 +494,8 @@ def build_gnoi_put_open(filename: str, permissions: int = 0o644) -> bytes:
     # Build Details message
     details = ProtobufEncoder()
     details.write_string(1, filename)  # remote_file
-    details.write_uint64(2, permissions)  # permissions
+    if permissions:
+        details.write_uint64(2, permissions)  # permissions (browser omits this)
 
     # Build PutRequest with open field
     request = ProtobufEncoder()
@@ -414,11 +514,15 @@ def build_gnoi_put_contents(chunk: bytes) -> bytes:
 def build_gnoi_put_hash(hash_type: int, hash_value: bytes) -> bytes:
     """Build gNOI file.PutRequest with hash.
 
-    HashType enum:
+    HashType enum (standard gNOI):
       UNSPECIFIED = 0;
       MD5 = 1;
       SHA256 = 2;
       SHA512 = 3;
+
+    ⚠ Tarana G1 uses hash_type=3 with a 16-byte MD5 digest (not SHA512).
+    This contradicts the standard enum but matches observed device behavior
+    from HAR captures.  Always pass hash_type=3 with MD5 for Tarana.
     """
     # Build HashRequest message
     hash_msg = ProtobufEncoder()
@@ -435,21 +539,38 @@ def build_gnoi_put_hash(hash_type: int, hash_value: bytes) -> bytes:
 def build_gnoi_set_package(filename: str, version: str = "", activate: bool = True) -> bytes:
     """Build gNOI system.SetPackageRequest.
 
-    SetPackageRequest message:
-      Package package = 1;
-      string method = 2;
+    ⚠ Tarana G1 uses a NON-STANDARD Package proto.  Field numbers differ
+    from the OpenConfig gNOI spec.  See docs/tarana-protocol.md for the
+    HAR-verified wire format.
 
-    Package message:
-      string filename = 1;
-      string version = 2;
-      bool activate = 3;
+    Standard gNOI Package:
+      string filename = 1;  string version = 2;  bool activate = 3;
+
+    Tarana G1 actual (from HAR capture):
+
+      SetPackageRequest message:
+        Package package = 1;
+
+      Package message:
+        string filename = 1;
+        // fields 2–4 unused
+        bool activate = 5;           // ⚠ NOT field 3
+        VersionInfo version_info = 6;
+
+      VersionInfo message:
+        string version = 1;          // same filename string
+        int32 method = 2;            // observed value: 10
     """
+    # Build VersionInfo (field 6 of Package)
+    version_info = ProtobufEncoder()
+    version_info.write_string(1, filename)  # version = filename string
+    version_info.write_uint64(2, 10)        # method = 10 (observed from HAR)
+
     # Build Package message
     package = ProtobufEncoder()
-    package.write_string(1, filename)  # filename
-    if version:
-        package.write_string(2, version)  # version
-    package.write_bool(3, activate)  # activate
+    package.write_string(1, filename)                    # field 1: filename
+    package.write_bool(5, activate)                      # field 5: activate (NOT 3)
+    package.write_embedded(6, version_info.get_bytes())  # field 6: VersionInfo
 
     # Build SetPackageRequest
     request = ProtobufEncoder()
@@ -467,12 +588,12 @@ def build_ws_grpc_frame(message: bytes) -> bytes:
     return build_grpc_web_frame(message)
 
 
-def build_grpc_websocket_metadata(credentials: Dict[str, str]) -> str:
-    """Build gRPC-websockets metadata as text for the first WebSocket message.
+def build_grpc_websocket_metadata(credentials: Dict[str, str]) -> bytes:
+    """Build gRPC-websockets metadata for the first WebSocket message.
 
     The grpc-websockets protocol requires metadata to be sent as the first
-    WebSocket text message in HTTP header format, not as HTTP headers on
-    the upgrade request.
+    WebSocket **binary** message in HTTP-header format.  The Tarana G1 gRPC
+    gateway expects this as a binary frame (opcode 2), NOT a text frame.
     """
     username = credentials.get("username", "admin")
     password = credentials.get("password", "")
@@ -481,8 +602,9 @@ def build_grpc_websocket_metadata(credentials: Dict[str, str]) -> str:
         f"password: {password}",
         "source: device-ui",
         "content-type: application/grpc-web+proto",
+        "x-grpc-web: 1",
     ]
-    return "\r\n".join(lines)
+    return "\r\n".join(lines).encode("utf-8")
 
 
 # =============================================================================
@@ -495,13 +617,33 @@ class TaranaHandler(BaseHandler):
     Protocol:
     - gNMI over gRPC-web (HTTP POST) for device queries
     - gNOI over WebSocket for file operations and system commands
-    - Authentication via User/Password HTTP headers
+    - Authentication via ``user`` / ``password`` HTTP headers (every request)
+
+    Key invariants – do NOT change without updating tests:
+
+    * ``DEFAULT_IP`` is ``169.254.100.1``; the host binds to ``169.254.100.2``.
+    * ``DEFAULT_CREDENTIALS`` is ``admin / admin123`` (factory default).
+    * ``connect()`` tries DEFAULT_CREDENTIALS **first** on a fresh device,
+      then falls back to configured credentials.  On reconnect (after a
+      confirmed login) the confirmed credential goes first.
+    * ``_gnmi_get()`` checks ``Grpc-Status`` / ``Grpc-Message`` **HTTP
+      response headers** before reading the body.  Tarana returns HTTP 200
+      even on auth failure; without this check auth errors appear as
+      silent empty responses.
+    * Firmware bank versions are full dotted strings like
+      ``SYS.A3.R10.XXX.3.611.002.00`` – compared via exact string equality.
     """
 
-    # Tarana uses 169.254.100.1, different from other devices
+    # Tarana uses 169.254.100.1, different from other devices.
+    # The provisioner host must have 169.254.100.2 on the same VLAN interface.
     DEFAULT_IP = "169.254.100.1"
 
-    def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None):
+    # Factory default credentials for Tarana devices.
+    # This is the FIRST credential tried on every fresh device plug-in.
+    DEFAULT_CREDENTIALS = {"username": "admin", "password": "admin123"}
+
+    def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None,
+                 alternate_credentials: list = None):
         # Use Tarana's default IP if the standard link-local is passed
         if ip == "169.254.1.1":
             ip = self.DEFAULT_IP
@@ -510,6 +652,9 @@ class TaranaHandler(BaseHandler):
         self._base_url = f"http://{ip}"
         self._ws_url = f"ws://{ip}"
         self._device_data: Dict[str, Any] = {}
+        self.login_error: Optional[str] = None
+        self._credentials_confirmed: bool = False
+        self._alternate_credentials = alternate_credentials or []
 
     @property
     def device_type(self) -> str:
@@ -533,54 +678,119 @@ class TaranaHandler(BaseHandler):
         }
 
     async def connect(self) -> bool:
-        """Connect to Tarana device and verify authentication."""
-        try:
-            # Create session with appropriate settings
-            timeout = aiohttp.ClientTimeout(total=30)
+        """Connect to Tarana device and verify authentication.
 
-            # For Tarana at 169.254.100.1, we need to bind to 169.254.100.2
-            # to ensure traffic goes through the correct VLAN interface
-            local_addr = None
-            if self.interface:
-                # Use the secondary IP (169.254.100.2) for Tarana
-                local_addr = ("169.254.100.2", 0)
-                logger.info(f"Tarana: binding to local address {local_addr[0]} for interface {self.interface}")
+        Tries credentials in order:
+        1. If reconnecting after successful login, try confirmed creds first
+        2. Default credentials (admin/admin123)
+        3. Configured credentials from config (if different from default)
+        """
+        self.login_error = None
+        logger.info(f"[CREDS] ========== TARANA CONNECT START for {self.ip} ==========")
 
-            connector = aiohttp.TCPConnector(ssl=False, local_addr=local_addr)
-            self._session = aiohttp.ClientSession(
-                connector=connector,
-                timeout=timeout
-            )
+        # Build credential list
+        creds_to_try = []
 
-            logger.info(f"Tarana: attempting gNMI connection to {self.ip}")
+        if self._credentials_confirmed:
+            # Reconnect after reboot — use previously confirmed credentials first
+            logger.info(f"[CREDS] Reconnect mode - using previously confirmed credentials first")
+            creds_to_try.append(self.credentials.copy())
+            # Fall back to default if confirmed creds fail (e.g. password was reset)
+            if self.credentials.get("password") != self.DEFAULT_CREDENTIALS["password"]:
+                creds_to_try.append(self.DEFAULT_CREDENTIALS.copy())
+        else:
+            # Fresh device — always try factory default first
+            creds_to_try.append(self.DEFAULT_CREDENTIALS.copy())
+            logger.info(f"[CREDS] Added default credentials (admin/admin123)")
 
-            # Test connection with a simple gNMI Get request
-            data = await self._gnmi_get([["system"]])
+            # Then try configured credentials if different from default
+            if self.credentials.get("password") != self.DEFAULT_CREDENTIALS["password"]:
+                creds_to_try.append(self.credentials.copy())
+                logger.info(f"[CREDS] Added configured credentials")
 
-            if data:
-                self._connected = True
-                self._device_data = data
-                logger.info(f"Connected to Tarana at {self.ip}")
-                return True
-            else:
-                logger.warning(f"Connected but got no data from Tarana at {self.ip}")
-                # Try curl as diagnostic
-                await self._curl_test_gnmi()
-                self._connected = True
-                return True
+        logger.info(f"[CREDS] Will try {len(creds_to_try)} credential set(s)")
 
-        except aiohttp.ClientResponseError as e:
-            if e.status == 401:
-                self.login_error = "Invalid credentials"
-                logger.error(f"Authentication failed for Tarana at {self.ip}")
-            else:
-                self.login_error = f"HTTP error {e.status}"
-                logger.error(f"HTTP error connecting to Tarana at {self.ip}: {e}")
-            return False
-        except Exception as e:
-            self.login_error = str(e)
-            logger.error(f"Failed to connect to Tarana at {self.ip}: {e}")
-            return False
+        last_error = None
+
+        for i, creds in enumerate(creds_to_try):
+            username = creds.get("username", "admin")
+            password = creds.get("password", "")
+            logger.info(f"[CREDS] Attempt {i+1}/{len(creds_to_try)}: "
+                        f"Trying {username}/{'*' * len(password) if password else '(empty)'}")
+
+            self.credentials = creds.copy()
+            self.login_error = None
+
+            # Close previous session if any
+            if self._session:
+                await self._session.close()
+                self._session = None
+
+            try:
+                # Session-level timeout must be generous: firmware uploads
+                # stream ~120 MB over WebSocket and can take several minutes.
+                # During a write-only WebSocket upload, no data is read from
+                # the socket until the upload completes — so sock_read MUST
+                # be None here.  Individual request timeouts are set per-call
+                # (e.g. _gnmi_get uses ClientTimeout(total=30),
+                # wait_for_reboot uses ClientTimeout(total=10)).
+                timeout = aiohttp.ClientTimeout(
+                    total=None,       # no overall cap — uploads run long
+                    connect=15,       # TCP connect timeout
+                    sock_read=None,   # no idle-read cap (upload is write-only)
+                )
+
+                local_addr = None
+                if self.interface:
+                    local_addr = ("169.254.100.2", 0)
+                    logger.info(f"Tarana: binding to local address {local_addr[0]} for interface {self.interface}")
+
+                connector = aiohttp.TCPConnector(ssl=False, local_addr=local_addr)
+                self._session = aiohttp.ClientSession(
+                    connector=connector,
+                    timeout=timeout
+                )
+
+                logger.info(f"Tarana: attempting gNMI connection to {self.ip}")
+
+                data = await self._gnmi_get([["system"]])
+
+                if data:
+                    self._connected = True
+                    self._credentials_confirmed = True
+                    self._device_data = data
+                    logger.info(f"[CREDS] Login succeeded with attempt {i+1}")
+                    logger.info(f"Connected to Tarana at {self.ip}")
+                    return True
+                else:
+                    logger.warning(f"Connected but got no data from Tarana at {self.ip}")
+                    last_error = "No data returned from device"
+
+            except RuntimeError as e:
+                error_msg = str(e)
+                if "authentication" in error_msg.lower() or "password" in error_msg.lower():
+                    logger.warning(f"[CREDS] Attempt {i+1} auth failed: {error_msg}")
+                    last_error = "Invalid credentials"
+                else:
+                    logger.error(f"[CREDS] Attempt {i+1} gRPC error: {error_msg}")
+                    last_error = error_msg
+            except aiohttp.ClientResponseError as e:
+                if e.status == 401:
+                    logger.warning(f"[CREDS] Attempt {i+1} HTTP 401 auth failed")
+                    last_error = "Invalid credentials"
+                else:
+                    logger.error(f"[CREDS] Attempt {i+1} HTTP error {e.status}")
+                    last_error = f"HTTP error {e.status}"
+                    break  # Non-auth HTTP errors — don't retry
+            except Exception as e:
+                logger.error(f"[CREDS] Attempt {i+1} error: {e}")
+                last_error = str(e)
+                break  # Connection/network errors — don't retry
+
+        # All attempts failed
+        self.login_error = last_error or "Failed to connect to device"
+        logger.error(f"[CREDS] All {len(creds_to_try)} credential attempts failed: {self.login_error}")
+        return False
 
     async def _curl_test_gnmi(self) -> None:
         """Diagnostic: Test gNMI with curl to compare with aiohttp."""
@@ -605,9 +815,9 @@ class TaranaHandler(BaseHandler):
                 "-X", "POST",
                 "-H", "Content-Type: application/grpc-web+proto",
                 "-H", "Accept: */*",
-                "-H", f"User: {self.credentials.get('username', 'admin')}",
-                "-H", f"Password: {self.credentials.get('password', '')}",
-                "-H", "Source: device-ui",
+                "-H", f"user: {self.credentials.get('username', 'admin')}",
+                "-H", f"password: {self.credentials.get('password', '')}",
+                "-H", "source: device-ui",
                 "-H", f"Origin: http://{self.ip}",
                 "--data-binary", f"@{request_file}",
                 "-o", "-",
@@ -649,13 +859,37 @@ class TaranaHandler(BaseHandler):
         logger.info(f"Disconnected from Tarana at {self.ip}")
 
     async def _gnmi_get(self, paths: List[List[str]]) -> Dict[str, Any]:
-        """Execute a gNMI Get request.
+        """Execute a gNMI Get request via gRPC-web over HTTP POST.
 
         Args:
             paths: List of path element lists, e.g. [["system"], ["radios", "radio"]]
 
         Returns:
-            Dictionary of path -> value mappings
+            Dictionary of ``"path/element/name" -> value`` mappings.
+
+        Raises:
+            RuntimeError: On gRPC-level errors, including authentication
+                failures.  The error message contains the ``Grpc-Message``
+                text from the device (e.g. "Password authentication failed").
+
+        Important implementation notes:
+
+        1. **HTTP-header gRPC errors** – Tarana returns HTTP 200 even on
+           auth failure, putting the error into ``Grpc-Status`` /
+           ``Grpc-Message`` *HTTP response headers* (not body trailers).
+           This method checks those headers **before** reading the body.
+           ⚠ Do not remove this check – without it, auth failures produce
+           a silent 0-byte response that ``connect()`` cannot distinguish
+           from a network glitch.
+
+        2. **Body-trailer gRPC errors** – on a normal 200 response with a
+           body, the last gRPC-web frame (flag ``0x80``) may contain
+           ``grpc-status: N`` text lines.  These are also checked and
+           raised as ``RuntimeError``.
+
+        3. The response body is a sequence of gRPC-web frames:
+           ``[0x00][4-byte BE length][protobuf data]`` for data frames,
+           ``[0x80][4-byte BE length][text trailers]`` for the trailer.
         """
         if not self._session:
             raise RuntimeError("Not connected")
@@ -671,10 +905,15 @@ class TaranaHandler(BaseHandler):
         logger.debug(f"gNMI request headers: {headers}")
         logger.debug(f"gNMI request frame ({len(frame)} bytes): {frame[:50].hex()}...")
 
+        # Per-request timeout for gNMI queries (session timeout is open-ended
+        # to allow long firmware uploads over the same session).
+        request_timeout = aiohttp.ClientTimeout(total=30)
+
         async with self._session.post(
             url,
             headers=headers,
-            data=frame
+            data=frame,
+            timeout=request_timeout,
         ) as response:
             logger.info(f"gNMI Get response status: {response.status}")
             logger.debug(f"gNMI Get response headers: {dict(response.headers)}")
@@ -684,6 +923,16 @@ class TaranaHandler(BaseHandler):
                 logger.error(f"gNMI Get failed: {response.status} - {error_text}")
                 response.raise_for_status()
 
+            # Check for gRPC errors in HTTP response headers.
+            # Tarana returns HTTP 200 even on auth failure, but sets
+            # Grpc-Status and Grpc-Message as HTTP headers (not body trailers).
+            grpc_status_hdr = response.headers.get("Grpc-Status") or response.headers.get("grpc-status")
+            grpc_message_hdr = response.headers.get("Grpc-Message") or response.headers.get("grpc-message")
+            if grpc_status_hdr and grpc_status_hdr != "0":
+                error_msg = grpc_message_hdr or f"gRPC error {grpc_status_hdr}"
+                logger.error(f"gNMI Get failed (header): grpc-status={grpc_status_hdr}, message={grpc_message_hdr}")
+                raise RuntimeError(f"gRPC error: {error_msg}")
+
             response_data = await response.read()
             logger.info(f"gNMI response length: {len(response_data)} bytes")
 
@@ -692,26 +941,52 @@ class TaranaHandler(BaseHandler):
                 hex_preview = response_data[:100].hex()
                 logger.debug(f"gNMI response hex (first 100 bytes): {hex_preview}")
 
-            # Parse gRPC-web frame
+            # Parse gRPC-web frame(s) from response body.
+            # The body contains one or more frames:
+            #   - Data frame(s): flag byte 0x00, then 4-byte length, then protobuf
+            #   - Trailer frame: flag byte 0x80, then 4-byte length, then text
+            #     with "grpc-status: N\r\n" and optionally "grpc-message: ...\r\n"
             if len(response_data) < 5:
                 logger.warning(f"Empty gNMI response (got {len(response_data)} bytes)")
                 return {}
 
-            try:
-                is_trailer, message_data = parse_grpc_web_frame(response_data)
-                logger.debug(f"gRPC frame: is_trailer={is_trailer}, message_len={len(message_data)}")
-            except Exception as e:
-                logger.error(f"Failed to parse gRPC-web frame: {e}")
-                logger.error(f"Raw response: {response_data[:200].hex()}")
-                return {}
+            # Walk through all frames in the response
+            message_data = b""
+            grpc_status = None
+            grpc_message = None
+            offset = 0
 
-            if is_trailer:
-                # Check if there's a grpc-status in the trailer
-                try:
-                    trailer_text = message_data.decode('utf-8', errors='ignore')
-                    logger.warning(f"Received trailer instead of response: {trailer_text}")
-                except:
-                    logger.warning("Received trailer instead of response")
+            while offset + 5 <= len(response_data):
+                flag = response_data[offset]
+                frame_len = struct.unpack('>I', response_data[offset + 1:offset + 5])[0]
+                frame_body = response_data[offset + 5:offset + 5 + frame_len]
+                offset += 5 + frame_len
+
+                is_trailer = (flag & 0x80) != 0
+                if is_trailer:
+                    # Parse trailer text for grpc-status and grpc-message
+                    trailer_text = frame_body.decode('utf-8', errors='ignore')
+                    logger.debug(f"gRPC trailer: {trailer_text.strip()}")
+                    for line in trailer_text.split('\r\n'):
+                        line = line.strip()
+                        if line.lower().startswith('grpc-status:'):
+                            try:
+                                grpc_status = int(line.split(':', 1)[1].strip())
+                            except ValueError:
+                                pass
+                        elif line.lower().startswith('grpc-message:'):
+                            grpc_message = line.split(':', 1)[1].strip()
+                else:
+                    message_data = frame_body
+
+            # Check gRPC status from trailer
+            if grpc_status is not None and grpc_status != 0:
+                error_msg = grpc_message or f"gRPC error {grpc_status}"
+                logger.error(f"gNMI Get failed: grpc-status={grpc_status}, message={grpc_message}")
+                raise RuntimeError(f"gRPC error: {error_msg}")
+
+            if not message_data:
+                logger.warning("No data frame in gNMI response")
                 return {}
 
             # Parse GetResponse
@@ -720,38 +995,73 @@ class TaranaHandler(BaseHandler):
             return result
 
     async def get_info(self) -> DeviceInfo:
-        """Get device information from Tarana via gNMI."""
+        """Get device information from Tarana via gNMI.
+
+        Uses specific gNMI paths known from the Tarana G1 schema:
+          - /system/state: hostname (= serial), role (rn/bn), boot info
+          - /system/software/state: active-bank, boot-status, firmware version
+          - /platform/components/component[name=sys]: hardware model/description
+        """
         info = DeviceInfo(device_type=self.device_type, ip_address=self.ip)
 
         try:
-            # Query multiple paths for device info
-            data = await self._gnmi_get([
-                ["system"],
-                ["system", "state"],
-                ["system", "config"],
-                ["radios"],
-            ])
-
+            # Use the /system path which returns the full system tree
+            # including state, software/banks, aaa, etc.
+            data = self._device_data or await self._gnmi_get([["system"]])
             self._device_data.update(data)
 
-            # Extract info from response
-            # The exact paths depend on Tarana's gNMI schema
+            # Extract info from known Tarana gNMI paths
             for key, value in data.items():
+                if not isinstance(value, str):
+                    continue
                 key_lower = key.lower()
-                if "model" in key_lower and not info.model:
-                    info.model = str(value)
-                elif "serial" in key_lower and not info.serial_number:
-                    info.serial_number = str(value)
-                elif "mac" in key_lower and not info.mac_address:
-                    info.mac_address = str(value).upper()
-                elif "hostname" in key_lower or "name" in key_lower:
-                    if not info.hostname:
-                        info.hostname = str(value)
-                elif "version" in key_lower or "firmware" in key_lower or "software" in key_lower:
-                    if not info.firmware_version:
-                        info.firmware_version = str(value)
-                elif "hardware" in key_lower and "version" in key_lower:
-                    info.hardware_version = str(value)
+
+                # Hostname is the serial number (e.g. S197A1252300723)
+                if "state/hostname" in key_lower:
+                    info.hostname = value
+                    info.serial_number = value
+
+                # Role tells us the device type: rn = Remote Node, bn = Base Node
+                elif "state/role" in key_lower:
+                    role = value.lower()
+                    if role == "rn":
+                        info.model = "G1 Remote Node"
+                    elif role == "bn":
+                        info.model = "G1 Base Node"
+                    else:
+                        info.model = f"G1 {value}"
+
+                # Active bank firmware version from software/banks
+                elif "software/state/active-bank" in key_lower:
+                    info.extra["active_bank"] = value
+
+                # Software bank versions (e.g. SYS.A3.R10.XXX.3.611.002.00)
+                elif "software/banks" in key_lower and "state/version" in key_lower:
+                    if "system1" in key_lower:
+                        info.extra["bank1_version"] = value
+                    elif "system2" in key_lower:
+                        info.extra["bank2_version"] = value
+
+            # Set firmware version from the active bank
+            active_bank = info.extra.get("active_bank", "")
+            if "system1" in active_bank:
+                info.firmware_version = info.extra.get("bank1_version", "")
+            elif "system2" in active_bank:
+                info.firmware_version = info.extra.get("bank2_version", "")
+
+            # If we didn't get firmware from banks, try querying platform
+            if not info.firmware_version:
+                try:
+                    platform_data = await self._gnmi_get([
+                        ["platform", "components", "component[name=sys]"],
+                    ])
+                    self._device_data.update(platform_data)
+                    for key, value in platform_data.items():
+                        if isinstance(value, str) and "version" in key.lower():
+                            info.firmware_version = value
+                            break
+                except Exception:
+                    pass
 
             # Store raw data for debugging
             info.extra["gnmi_data"] = data
@@ -800,7 +1110,28 @@ class TaranaHandler(BaseHandler):
             return False
 
     async def upload_firmware(self, firmware_path: str) -> bool:
-        """Upload firmware to the device using gNOI File.Put over WebSocket."""
+        """Upload firmware to the device using gNOI File.Put over WebSocket.
+
+        Protocol (observed from Tarana G1 web UI via HAR capture):
+
+        1. Open WebSocket to ``ws://<ip>/gnoi.file.File/Put``
+           with sub-protocol ``grpc-websockets``.
+        2. **MSG 0 (text):** Send auth metadata as ``\\r\\n``-delimited
+           key-value pairs (user, password, source, content-type).
+        3. **MSG 1 (binary):** gRPC frame with PutRequest.open
+           containing the bare filename (NOT ``/tmp/filename``).
+        4. **MSGs 2..N (binary):** gRPC frames with PutRequest.contents
+           — 64 KB chunks of the firmware file.
+        5. **MSG N+1 (binary):** gRPC frame with PutRequest.hash
+           — MD5 hash (hash_type=3, 16 bytes).
+        6. **MSG N+2 (binary):** End-of-stream signal — single byte ``0x01``.
+        7. Read server response messages confirming ``grpc-status: 0``.
+
+        ⚠ Hash type MUST be MD5 (type 3).  The device rejects SHA256.
+        ⚠ The end-of-stream byte ``0x01`` is required after the hash.
+        ⚠ The filename is the bare name (e.g. ``SYS.A3...tbn``),
+           not a path like ``/tmp/SYS.A3...tbn``.
+        """
         if not self._session:
             raise RuntimeError("Not connected")
 
@@ -814,30 +1145,43 @@ class TaranaHandler(BaseHandler):
 
         try:
             import hashlib
+            import time
 
-            # Calculate SHA256 hash while reading
-            sha256 = hashlib.sha256()
+            # Tarana uses MD5 (hash_type=3), not SHA256
+            md5 = hashlib.md5()
 
-            # Connect WebSocket for gNOI File.Put
-            # Note: grpc-websockets protocol sends auth in first text message, not HTTP headers
+            # Use self._session (the authenticated session) for WebSocket.
+            # A fresh/dedicated session lacks cookies/auth state from the
+            # prior gNMI login and the WS upgrade may hang or be rejected.
             ws_url = f"{self._ws_url}/gnoi.file.File/Put"
+            logger.info(f"Opening WebSocket to {ws_url}")
 
             async with self._session.ws_connect(
                 ws_url,
                 protocols=["grpc-websockets"],
             ) as ws:
-                # First message: send metadata as text (grpc-websockets protocol)
+                upload_start = time.monotonic()
+                logger.info(f"WebSocket connected in {time.monotonic() - upload_start:.2f}s")
+
+                # MSG 0: send auth metadata as BINARY (not text!)
+                # The Tarana gRPC-websocket gateway requires opcode 2 (binary).
                 metadata = build_grpc_websocket_metadata(self.credentials)
-                await ws.send_str(metadata)
+                await ws.send_bytes(metadata)
+                logger.info(f"Sent auth metadata ({len(metadata)} bytes) at {time.monotonic() - upload_start:.2f}s")
 
-                # Send open request with filename
-                remote_filename = f"/tmp/{firmware_file.name}"
-                open_msg = build_gnoi_put_open(remote_filename)
-                await ws.send_bytes(build_ws_grpc_frame(open_msg))
+                # MSG 1: send open request with bare filename (no /tmp/ prefix)
+                # Browser sends NO permissions field, just the filename.
+                remote_filename = firmware_file.name
+                open_msg = build_gnoi_put_open(remote_filename, permissions=0)
+                frame0 = build_ws_grpc_frame(open_msg)
+                await ws.send_bytes(frame0)
+                logger.info(f"Sent open request ({len(frame0)} bytes) at {time.monotonic() - upload_start:.2f}s")
 
-                # Read and send file chunks
-                chunk_size = 64 * 1024  # 64KB chunks
+                # MSGs 2..N: send file chunks.
+                # Browser uses 64KB (65536) chunks — match exactly.
+                chunk_size = 64 * 1024
                 bytes_sent = 0
+                chunks_sent = 0
 
                 with open(firmware_file, "rb") as f:
                     while True:
@@ -845,32 +1189,70 @@ class TaranaHandler(BaseHandler):
                         if not chunk:
                             break
 
-                        sha256.update(chunk)
+                        md5.update(chunk)
 
-                        # Send chunk
                         contents_msg = build_gnoi_put_contents(chunk)
-                        await ws.send_bytes(build_ws_grpc_frame(contents_msg))
+                        frame = build_ws_grpc_frame(contents_msg)
+                        await ws.send_bytes(frame)
 
                         bytes_sent += len(chunk)
-                        progress = (bytes_sent / file_size) * 100
-                        if bytes_sent % (chunk_size * 10) == 0:
-                            logger.info(f"Upload progress: {progress:.1f}%")
+                        chunks_sent += 1
+                        if chunks_sent == 1:
+                            logger.info(f"First chunk sent ({len(frame)} bytes frame) "
+                                       f"at {time.monotonic() - upload_start:.2f}s")
+                        if chunks_sent % 100 == 0:
+                            elapsed = time.monotonic() - upload_start
+                            progress = (bytes_sent / file_size) * 100
+                            rate_mbps = (bytes_sent * 8 / 1_000_000) / elapsed if elapsed > 0 else 0
+                            logger.info(f"Upload progress: {progress:.1f}% "
+                                       f"({bytes_sent}/{file_size} bytes, "
+                                       f"{elapsed:.1f}s, {rate_mbps:.1f} Mbps)")
 
-                # Send hash to finalize
-                hash_msg = build_gnoi_put_hash(2, sha256.digest())  # SHA256 = 2
+                elapsed = time.monotonic() - upload_start
+                logger.info(f"All {chunks_sent} chunks sent in {elapsed:.1f}s "
+                           f"({bytes_sent} bytes)")
+
+                # MSG N+1: send MD5 hash to finalize (hash_type=3 = MD5)
+                hash_msg = build_gnoi_put_hash(3, md5.digest())
                 await ws.send_bytes(build_ws_grpc_frame(hash_msg))
+                logger.info(f"Firmware hash (MD5): {md5.hexdigest()}")
 
-                # Wait for response
+                # MSG N+2: end-of-stream signal (single byte 0x01)
+                await ws.send_bytes(b'\x01')
+
+                total_elapsed = time.monotonic() - upload_start
+                logger.info(f"Upload stream complete in {total_elapsed:.1f}s, "
+                           f"waiting for server response...")
+
+                # Read server response (multiple messages: headers, body, trailer)
                 try:
-                    response = await asyncio.wait_for(ws.receive(), timeout=60)
-                    if response.type == aiohttp.WSMsgType.BINARY:
-                        logger.info(f"Firmware uploaded successfully to {self.ip}")
-                    elif response.type == aiohttp.WSMsgType.CLOSE:
-                        logger.info(f"Upload completed (connection closed)")
-                except asyncio.TimeoutError:
-                    logger.info(f"Upload completed (no response, may be OK)")
+                    grpc_ok = False
+                    for _ in range(10):  # read up to 10 response messages
+                        response = await asyncio.wait_for(ws.receive(), timeout=120)
+                        if response.type == aiohttp.WSMsgType.BINARY:
+                            logger.debug(f"Upload response: {len(response.data)} bytes")
+                        elif response.type == aiohttp.WSMsgType.TEXT:
+                            # Trailer text with grpc-status
+                            if "grpc-status: 0" in response.data:
+                                grpc_ok = True
+                                break
+                            elif "grpc-status:" in response.data:
+                                logger.error(f"Upload failed: {response.data}")
+                                return False
+                        elif response.type in (aiohttp.WSMsgType.CLOSE,
+                                               aiohttp.WSMsgType.CLOSED):
+                            break
 
+                    if grpc_ok:
+                        logger.info(f"Firmware uploaded successfully to {self.ip}")
+                    else:
+                        logger.info(f"Upload completed (no explicit grpc-status)")
+                except asyncio.TimeoutError:
+                    logger.info(f"Upload completed (response timeout, may be OK)")
+
+                # Store filename for SetPackage step
                 self._uploaded_firmware_path = remote_filename
+                self._uploaded_firmware_hash = md5.digest()
                 return True
 
         except asyncio.TimeoutError:
@@ -881,49 +1263,79 @@ class TaranaHandler(BaseHandler):
             return False
 
     async def update_firmware(self, bank: Optional[int] = None) -> bool:
-        """Trigger firmware installation using gNOI System.SetPackage."""
+        """Trigger firmware installation using gNOI System.SetPackage.
+
+        Protocol (observed from Tarana G1 web UI via HAR capture):
+
+        1. Open WebSocket to ``ws://<ip>/gnoi.system.System/SetPackage``
+           with sub-protocol ``grpc-websockets``.
+        2. **MSG 0 (text):** Auth metadata (same as File/Put).
+        3. **MSG 1 (binary):** gRPC frame with SetPackageRequest
+           containing filename + activate=true.
+        4. **MSG 2 (binary):** gRPC frame with hash (same MD5 sent
+           during File/Put).
+        5. **MSG 3 (binary):** End-of-stream signal ``0x01``.
+        6. Read server response confirming ``grpc-status: 0``.
+
+        The device completes installation in ~2 seconds (it stages the
+        firmware to the next-install bank but does NOT auto-reboot).
+        """
         if not self._session:
             raise RuntimeError("Not connected")
 
         try:
-            # Get the uploaded firmware path
             firmware_path = getattr(self, '_uploaded_firmware_path', None)
+            firmware_hash = getattr(self, '_uploaded_firmware_hash', None)
             if not firmware_path:
                 logger.error("No firmware has been uploaded")
                 return False
 
-            logger.info(f"Installing firmware from {firmware_path} on Tarana at {self.ip}")
+            logger.info(f"Installing firmware {firmware_path} on Tarana at {self.ip}")
 
-            # Connect WebSocket for gNOI System.SetPackage
-            # Note: grpc-websockets protocol sends auth in first text message
             ws_url = f"{self._ws_url}/gnoi.system.System/SetPackage"
 
             async with self._session.ws_connect(
                 ws_url,
                 protocols=["grpc-websockets"],
             ) as ws:
-                # First message: send metadata as text (grpc-websockets protocol)
+                # MSG 0: auth metadata (binary frame, not text)
                 metadata = build_grpc_websocket_metadata(self.credentials)
-                await ws.send_str(metadata)
+                await ws.send_bytes(metadata)
 
-                # Send SetPackage request
+                # MSG 1: SetPackage request (filename + activate)
                 set_package_msg = build_gnoi_set_package(
                     filename=firmware_path,
                     activate=True
                 )
                 await ws.send_bytes(build_ws_grpc_frame(set_package_msg))
 
-                # Wait for installation to complete (can take a while)
-                logger.info(f"Waiting for firmware installation on {self.ip}...")
+                # MSG 2: hash (same MD5 from upload step)
+                if firmware_hash:
+                    hash_msg = build_gnoi_put_hash(3, firmware_hash)
+                    await ws.send_bytes(build_ws_grpc_frame(hash_msg))
+
+                # MSG 3: end-of-stream signal
+                await ws.send_bytes(b'\x01')
+
+                # Read response
+                logger.info(f"Waiting for SetPackage response from {self.ip}...")
                 try:
-                    # Installation can take several minutes
-                    response = await asyncio.wait_for(ws.receive(), timeout=600)
-                    if response.type == aiohttp.WSMsgType.BINARY:
-                        logger.info(f"Firmware installation completed on {self.ip}")
-                    elif response.type == aiohttp.WSMsgType.CLOSE:
-                        logger.info(f"Installation completed (connection closed)")
+                    for _ in range(10):
+                        response = await asyncio.wait_for(ws.receive(), timeout=60)
+                        if response.type == aiohttp.WSMsgType.BINARY:
+                            logger.debug(f"SetPackage response: {len(response.data)} bytes")
+                        elif response.type == aiohttp.WSMsgType.TEXT:
+                            if "grpc-status: 0" in response.data:
+                                logger.info(f"SetPackage succeeded on {self.ip}")
+                                break
+                            elif "grpc-status:" in response.data:
+                                logger.error(f"SetPackage failed: {response.data}")
+                                return False
+                        elif response.type in (aiohttp.WSMsgType.CLOSE,
+                                               aiohttp.WSMsgType.CLOSED):
+                            break
                 except asyncio.TimeoutError:
-                    logger.warning(f"Installation response timeout (may still be in progress)")
+                    logger.warning(f"SetPackage response timeout (may still be OK)")
 
                 return True
 
@@ -935,40 +1347,55 @@ class TaranaHandler(BaseHandler):
             return False
 
     async def reboot(self) -> bool:
-        """Reboot the device using gNOI System.Reboot."""
+        """Reboot the device using gNOI System.Reboot via gRPC-web HTTP POST.
+
+        Protocol (observed from Tarana G1 web UI via HAR capture):
+
+        Reboot is a **unary RPC** sent as a standard gRPC-web HTTP POST
+        (NOT over WebSocket), unlike the streaming File/Put and SetPackage.
+
+        * POST ``http://<ip>/gnoi.system.System/Reboot``
+        * Body: gRPC-web frame wrapping an empty RebootRequest protobuf
+          (``00 00 00 00 00`` = uncompressed, 0-byte message)
+        * Response: ``grpc-status: 0`` on success
+        * The device reboots within seconds; the connection may drop.
+        """
         if not self._session:
             raise RuntimeError("Not connected")
 
         try:
-            # Build Reboot request (simple message with reboot method)
-            reboot_msg = ProtobufEncoder()
-            reboot_msg.write_uint64(1, 1)  # method = COLD (1)
+            # Empty RebootRequest — the HAR shows 5 bytes: flag(0) + length(0)
+            frame = build_grpc_web_frame(b"")
 
-            ws_url = f"{self._ws_url}/gnoi.system.System/Reboot"
+            url = f"{self._base_url}/gnoi.system.System/Reboot"
+            headers = self._get_auth_headers()
 
-            async with self._session.ws_connect(
-                ws_url,
-                protocols=["grpc-websockets"],
-            ) as ws:
-                # First message: send metadata as text (grpc-websockets protocol)
-                metadata = build_grpc_websocket_metadata(self.credentials)
-                await ws.send_str(metadata)
+            logger.info(f"Sending reboot command to {self.ip}")
 
-                # Send reboot request
-                await ws.send_bytes(build_ws_grpc_frame(reboot_msg.get_bytes()))
+            try:
+                async with self._session.post(
+                    url,
+                    headers=headers,
+                    data=frame,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response:
+                    logger.info(f"Reboot response status: {response.status}")
+                    # Check for gRPC success in headers
+                    grpc_status = response.headers.get("Grpc-Status") or response.headers.get("grpc-status")
+                    if grpc_status and grpc_status != "0":
+                        grpc_msg = response.headers.get("Grpc-Message") or response.headers.get("grpc-message")
+                        logger.error(f"Reboot failed: grpc-status={grpc_status}, message={grpc_msg}")
+                        return False
+                    logger.info(f"Reboot command accepted by {self.ip}")
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                # Connection drop is expected — device is rebooting
+                logger.info(f"Reboot sent to {self.ip} (connection dropped, expected)")
 
-                # Reboot may not respond, connection might drop
-                try:
-                    response = await asyncio.wait_for(ws.receive(), timeout=5)
-                    logger.info(f"Reboot acknowledged by {self.ip}")
-                except asyncio.TimeoutError:
-                    logger.info(f"Reboot sent to {self.ip} (no ack expected)")
-
-                return True
+            return True
 
         except Exception as e:
             # Connection errors are expected during reboot
-            logger.info(f"Reboot initiated on {self.ip} (connection closed)")
+            logger.info(f"Reboot initiated on {self.ip} (connection closed: {e})")
             return True
 
     async def get_firmware_version(self) -> str:
@@ -980,14 +1407,21 @@ class TaranaHandler(BaseHandler):
         return info.firmware_version or "unknown"
 
     async def get_firmware_banks(self) -> Dict[str, Any]:
-        """Get firmware bank information.
+        """Get firmware bank information from gNMI ``/system`` tree.
 
         Returns dict with:
-          - bank1: version string for system1
-          - bank2: version string for system2
-          - active: which bank is active (1 or 2)
-          - current: which bank is currently running (1 or 2)
-          - next_install: which bank will receive next install (1 or 2)
+          - bank1: Full version string for system1, e.g. ``"SYS.A3.R10.XXX.3.611.002.00"``
+          - bank2: Full version string for system2 (same format)
+          - active: Which bank is active (``1`` or ``2``)
+          - current: Which bank is currently running (``1`` or ``2``)
+          - next_install: Which bank will receive next firmware install (``1`` or ``2``)
+
+        ⚠ Bank version strings must be returned **verbatim** as reported by
+        the device (e.g. ``SYS.A3.R10.XXX.3.611.002.00``).  The base
+        provisioning workflow in ``BaseHandler.provision()`` compares them
+        to ``expected_firmware`` via **exact string equality**.  The
+        ``FirmwareManager`` extracts the expected version by stripping
+        ``.tbn`` from the firmware filename, which produces the same format.
         """
         if not self._connected:
             await self.connect()
@@ -1057,7 +1491,8 @@ class TaranaHandler(BaseHandler):
         while asyncio.get_event_loop().time() - start_time < timeout:
             try:
                 # Try a simple gNMI request
-                connector = aiohttp.TCPConnector(ssl=False)
+                local_addr = ("169.254.100.2", 0) if self.interface else None
+                connector = aiohttp.TCPConnector(ssl=False, local_addr=local_addr)
                 async with aiohttp.ClientSession(connector=connector) as session:
                     url = f"{self._base_url}/gnmi.gNMI/Get"
 
