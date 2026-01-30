@@ -513,36 +513,46 @@ class DeviceFingerprinter:
         # Known SKU to model mappings
         sku_to_model = {
             "35": "Force 300-25",
+            "38": "Force 300-16",
             "49": "Force 300-19",
             "53544": "ePMP 4518",
-            # Add more as discovered
+            "53545": "ePMP 4525",
+            "53264": "ePMP 4600",
+            "53561": "ePMP 4625",
         }
 
         try:
-            url = f"https://{ip}/js/cambium_sku.js"
+            # Try HTTPS first, fall back to HTTP (some models like ePMP 4525 are HTTP-only)
+            content = None
+            for scheme in ["https", "http"]:
+                url = f"{scheme}://{ip}/js/cambium_sku.js"
 
-            if self.interface:
-                # Use curl with interface binding
-                proc = await asyncio.create_subprocess_exec(
-                    "curl", "-s", "-k", "-m", "5",
-                    "--interface", self.interface,
-                    url,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, _ = await proc.communicate()
+                if self.interface:
+                    proc = await asyncio.create_subprocess_exec(
+                        "curl", "-s", "-k", "-m", "5",
+                        "--interface", self.interface,
+                        url,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, _ = await proc.communicate()
 
-                if proc.returncode == 0 and stdout:
-                    content = stdout.decode("utf-8", errors="ignore")
+                    if proc.returncode == 0 and stdout:
+                        content = stdout.decode("utf-8", errors="ignore")
+                        break
                 else:
-                    return
-            else:
-                timeout_obj = aiohttp.ClientTimeout(total=5)
-                async with aiohttp.ClientSession(timeout=timeout_obj) as session:
-                    async with session.get(url, ssl=False) as response:
-                        if response.status != 200:
-                            return
-                        content = await response.text()
+                    timeout_obj = aiohttp.ClientTimeout(total=5)
+                    try:
+                        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+                            async with session.get(url, ssl=False) as response:
+                                if response.status == 200:
+                                    content = await response.text()
+                                    break
+                    except Exception:
+                        continue
+
+            if not content:
+                return
 
             # Extract SKU code: window.sku = 35;
             sku_match = re.search(r'window\.sku\s*=\s*(\d+)', content)
@@ -551,6 +561,10 @@ class DeviceFingerprinter:
                 if sku_code in sku_to_model:
                     fingerprint.model = sku_to_model[sku_code]
                     logger.info(f"Cambium SKU {sku_code} = {fingerprint.model}")
+                elif sku_code.startswith("53"):
+                    # 53xxx SKUs are ePMP AX series (WiFi 6)
+                    fingerprint.model = f"ePMP AX (SKU {sku_code})"
+                    logger.info(f"Cambium SKU {sku_code} -> ePMP AX series (53xxx)")
                 else:
                     fingerprint.model = f"Cambium (SKU {sku_code})"
                     logger.info(f"Cambium SKU {sku_code} (unknown model)")

@@ -1,0 +1,23 @@
+{
+  "_comment": "Tachyon AP config - the following fields are auto-injected, no placeholders needed",
+  "_auto_injected_fields": {
+    "system.hostname": "hostname (e.g., tw05-north)",
+    "system.name": "hostname (e.g., tw05-north)",
+    "wireless.radios.wlan0.vaps[0].ssid": "ssid (e.g., NORTH)"
+  },
+  "system": {
+    "hostname": "placeholder-will-be-replaced",
+    "name": "placeholder-will-be-replaced"
+  },
+  "wireless": {
+    "radios": {
+      "wlan0": {
+        "vaps": [
+          {
+            "ssid": "placeholder-will-be-replaced"
+          }
+        ]
+      }
+    }
+  }
+}

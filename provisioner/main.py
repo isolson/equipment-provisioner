@@ -13,7 +13,7 @@ import signal
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -201,7 +201,11 @@ class Provisioner:
         logger.info("Provisioner stopped")
 
     async def _on_port_device_detected(self, port_num: int, device_type: str, device_ip: str) -> None:
-        """Handle device detected on a VLAN port."""
+        """Handle device detected on a VLAN port.
+
+        Spawns provisioning as a separate task so it can be cancelled
+        if the device is unexpectedly unplugged.
+        """
         logger.info(f"Device detected on port {port_num}: {device_type} at {device_ip}")
 
         # Wake display if configured
@@ -214,19 +218,38 @@ class Provisioner:
             from .web.websocket import notify_display_state
             await notify_display_state(sleeping=False)
 
-        # Mark port as provisioning
+        # Spawn provisioning as a cancellable task
+        task = asyncio.create_task(self._run_port_provisioning(port_num, device_type, device_ip))
+
+        # Store task reference for cancellation on unexpected unplug
+        if port_num in self.port_manager.port_states:
+            self.port_manager.port_states[port_num].provisioning_task = task
+
+    async def _run_port_provisioning(self, port_num: int, device_type: str, device_ip: str) -> None:
+        """Run provisioning for a port device as a cancellable task."""
         self.port_manager.mark_port_provisioning(port_num, True)
+        cancelled = False
 
         success = False
         try:
             async with self._provisioning_semaphore:
                 success = await self._provision_port_device(port_num, device_type, device_ip)
+        except asyncio.CancelledError:
+            logger.warning(f"Provisioning cancelled for port {port_num} (device unplugged)")
+            cancelled = True
+            success = False
         finally:
-            # Only apply grace period for successful provisioning (allows time for reboot)
-            self.port_manager.mark_port_provisioning(port_num, False, success=success)
+            if port_num in self.port_manager.port_states:
+                state = self.port_manager.port_states[port_num]
+                state.provisioning_task = None
+                state.expecting_reboot = False
+            # Don't overwrite state if cancelled — link-down handler already reset everything
+            if not cancelled:
+                self.port_manager.mark_port_provisioning(port_num, False, success=success)
 
     async def _provision_port_device(
-        self, port_num: int, device_type: str, device_ip: str
+        self, port_num: int, device_type: str, device_ip: str,
+        custom_credentials: Optional[Dict[str, str]] = None,
     ) -> bool:
         """Provision a device detected on a VLAN port.
 
@@ -266,6 +289,14 @@ class Provisioner:
         async def on_checklist_progress(step: str, success: Union[bool, str], detail: Optional[str] = None):
             """Update checklist as each step completes."""
             logger.debug(f"Checklist progress: port={port_num} step={step} success={success} detail={detail}")
+
+            # Track reboot state so unexpected link-loss can cancel provisioning
+            if step == "reboot_started":
+                self.port_manager.set_expecting_reboot(port_num, True)
+                return  # Internal signal, don't update checklist or UI
+            elif step == "reboot_ended":
+                self.port_manager.set_expecting_reboot(port_num, False)
+                return  # Internal signal, don't update checklist or UI
 
             # Send provisioning progress to update status bar in UI
             await notify_provisioning_progress(port_num, job_id, step)
@@ -330,6 +361,16 @@ class Provisioner:
 
             # Use fingerprint module to get detailed device info
             fingerprint = await identify_device(device_ip, mac=None, interface=interface)
+
+            # If re-fingerprint returned "unknown" but port detection already identified
+            # the device type, fall back to the detected type. This happens when devices
+            # (e.g., Tarana with gRPC-web) don't expose traditional HTTP signatures.
+            if fingerprint.device_type == DeviceType.UNKNOWN and device_type:
+                logger.warning(
+                    f"Re-fingerprint returned unknown for {device_ip}, "
+                    f"falling back to detected type: {device_type}"
+                )
+                fingerprint.device_type = DeviceType(device_type)
 
             # Update record with fingerprint info
             await db.update_job(
@@ -408,6 +449,7 @@ class Provisioner:
                 firmware_current=firmware_current,
                 on_progress=on_checklist_progress,
                 firmware_lookup_callback=firmware_lookup,
+                custom_credentials=custom_credentials,
             )
 
             # Update MAC address and serial in checklist and DB if we got device info

@@ -513,20 +513,24 @@ class BaseHandler(ABC):
                     # PHASE 4: REBOOT #1
                     # ================================================================
                     _logger.info(f"[PROVISION] Phase 4: Reboot #1")
+                    await notify("reboot_started", True, None)
                     # Some devices (e.g., Tachyon) reboot automatically after update_firmware()
                     if getattr(self, 'update_triggers_reboot', False):
                         _logger.info(f"[PROVISION] Device reboots automatically after firmware update")
                     else:
                         if not await self.reboot():
+                            await notify("reboot_ended", True, None)
                             result.error_message = "Failed to reboot device"
                             await notify("firmware_update_1", False, result.error_message)
                             return result
 
                     _logger.info(f"[PROVISION] Waiting for device to come back online...")
                     if not await self.wait_for_reboot():
+                        await notify("reboot_ended", True, None)
                         result.error_message = "Device did not come back online after reboot"
                         await notify("firmware_update_1", False, result.error_message)
                         return result
+                    await notify("reboot_ended", True, None)
 
                     # ================================================================
                     # PHASE 5: VERIFY FIRMWARE UPDATE 1
@@ -681,20 +685,24 @@ class BaseHandler(ABC):
                     # PHASE 8: REBOOT #2
                     # ================================================================
                     _logger.info(f"[PROVISION] Phase 8: Reboot #2")
+                    await notify("reboot_started", True, None)
                     # Some devices (e.g., Tachyon) reboot automatically after update_firmware()
                     if getattr(self, 'update_triggers_reboot', False):
                         _logger.info(f"[PROVISION] Device reboots automatically after firmware update")
                     else:
                         if not await self.reboot():
+                            await notify("reboot_ended", True, None)
                             result.error_message = "Failed to reboot device"
                             await notify("firmware_update_2", False, result.error_message)
                             return result
 
                     _logger.info(f"[PROVISION] Waiting for device to come back online...")
                     if not await self.wait_for_reboot():
+                        await notify("reboot_ended", True, None)
                         result.error_message = "Device did not come back online after reboot"
                         await notify("firmware_update_2", False, result.error_message)
                         return result
+                    await notify("reboot_ended", True, None)
 
                     # ================================================================
                     # PHASE 9: VERIFY FIRMWARE UPDATE 2

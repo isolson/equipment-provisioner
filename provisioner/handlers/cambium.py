@@ -25,6 +25,21 @@ class CambiumHandler(BaseHandler):
     JSON API calls depending on firmware version.
     """
 
+    # Model to firmware filename pattern mapping
+    MODEL_FIRMWARE_PATTERNS = {
+        # ePMP AX series (WiFi 6) - uses ePMP-AX firmware
+        "epmp 4518": ["epmp-ax", "epmp_ax"],
+        "epmp 4525": ["epmp-ax", "epmp_ax"],
+        "epmp 4600": ["epmp-ax", "epmp_ax"],
+        "epmp 4625": ["epmp-ax", "epmp_ax"],
+        # Force 300 series - uses ePMP-AC firmware
+        "force 300-25": ["epmp-ac", "epmp_ac", "force300", "force-300"],
+        "force 300-19": ["epmp-ac", "epmp_ac", "force300", "force-300"],
+        "force 300-16": ["epmp-ac", "epmp_ac", "force300", "force-300"],
+        "force 300-13": ["epmp-ac", "epmp_ac", "force300", "force-300"],
+        "force 300 csm": ["epmp-ac", "epmp_ac", "force300", "force-300"],
+    }
+
     # Default credentials (tried first)
     DEFAULT_CREDENTIALS = {"username": "admin", "password": "admin"}
 
@@ -84,8 +99,87 @@ class CambiumHandler(BaseHandler):
     def supports_password_change(self) -> bool:
         return True
 
+    def validate_firmware_for_model(self, firmware_path: str, model: str) -> tuple[bool, str]:
+        """Validate that firmware file is compatible with the Cambium model."""
+        import os
+        filename = os.path.basename(firmware_path).lower()
+        model_key = model.lower().replace("cambium ", "").strip()
+
+        # Look up expected patterns for this model
+        patterns = self.MODEL_FIRMWARE_PATTERNS.get(model_key)
+        # Fallback: "ePMP AX (SKU 53xxx)" -> use AX firmware patterns
+        if not patterns and model_key.startswith("epmp ax"):
+            patterns = ["epmp-ax", "epmp_ax"]
+        if not patterns:
+            logger.debug(f"No firmware pattern defined for model {model}, allowing any firmware")
+            return True, ""
+
+        for pattern in patterns:
+            if pattern in filename:
+                logger.debug(f"Firmware {filename} matches pattern {pattern} for model {model}")
+                return True, ""
+
+        expected = " or ".join(patterns)
+        return False, f"Firmware mismatch: model {model} requires firmware with '{expected}' in filename, but got '{filename}'"
+
     async def connect(self) -> bool:
         """Connect to Cambium device via REST API or CGI.
+
+        Retries on connection failures (web server not ready) but stops immediately
+        on credential rejection or account lockout. Tries HTTPS first, then falls
+        back to HTTP if HTTPS never responds (some models like ePMP 4525 default to HTTP).
+
+        Sets self.login_error with details if login fails.
+        """
+        logger.info(f"[CREDS] ========== CAMBIUM CONNECT START for {self.ip} ==========")
+
+        # Retry connection when device web server isn't ready yet (curl returncode 7).
+        # Some Cambium models (e.g., ePMP 4525) default to HTTP instead of HTTPS.
+        connect_retry_delay = 10  # Seconds between retries
+
+        # Try HTTPS first (2 attempts), then HTTP as fallback (3 attempts)
+        schemes = [
+            (f"https://{self.ip}", "HTTPS", 2),
+            (f"http://{self.ip}", "HTTP", 3),
+        ]
+
+        for scheme_url, scheme_label, max_retries in schemes:
+            self._base_url = scheme_url
+
+            for connect_attempt in range(1, max_retries + 1):
+                result = await self._connect_once()
+                if result:
+                    logger.info(f"[CREDS] Connected via {scheme_label}")
+                    return True
+
+                # Don't retry if credentials were rejected, account locked, or device is rebooting
+                if self.login_error and any(kw in self.login_error.lower() for kw in
+                        ["credentials", "password", "locked", "sessions", "rebooting"]):
+                    logger.info(f"[CREDS] Not retrying - auth/lockout error: {self.login_error}")
+                    return False
+
+                # Clean up failed session before retrying
+                if self._session:
+                    try:
+                        await self._session.close()
+                    except Exception:
+                        pass
+                    self._session = None
+
+                if connect_attempt < max_retries:
+                    logger.info(f"[CREDS] {scheme_label} not responding, retry {connect_attempt}/{max_retries - 1} "
+                               f"in {connect_retry_delay}s (web server may still be starting)...")
+                    await asyncio.sleep(connect_retry_delay)
+
+            # HTTPS exhausted, try HTTP
+            if scheme_label == "HTTPS":
+                logger.info(f"[CREDS] HTTPS failed after {max_retries} attempts, trying HTTP...")
+
+        logger.info(f"[CREDS] ========== CAMBIUM CONNECT END (failed after HTTPS+HTTP attempts) ==========")
+        return False
+
+    async def _connect_once(self) -> bool:
+        """Single connection attempt to Cambium device via REST API or CGI.
 
         Tries credential sets in order to avoid account lockout:
         1. Default credentials (admin/admin) - if password change required, auto-changes it
@@ -96,8 +190,6 @@ class CambiumHandler(BaseHandler):
         """
         self.login_error = None  # Clear previous error
         self._password_change_required = False
-
-        logger.info(f"[CREDS] ========== CAMBIUM CONNECT START for {self.ip} ==========")
 
         try:
             connector = aiohttp.TCPConnector(ssl=False)
@@ -127,22 +219,50 @@ class CambiumHandler(BaseHandler):
             if self._credentials_confirmed:
                 logger.info(f"[CREDS] Reconnect mode - using previously confirmed credentials first")
                 creds_to_try.append(self.credentials.copy())
-                creds_to_try.append(self.DEFAULT_CREDENTIALS.copy())
-            else:
-                # Fresh device - try default first, then custom
-                # 1. Always try default credentials first (admin/admin)
-                creds_to_try.append(self.DEFAULT_CREDENTIALS.copy())
-                logger.info(f"[CREDS] Added default credentials (admin/admin)")
-
-                # 2. Add custom credential from credentials.json if different from default
-                if custom_cred and custom_cred.get("password") != self.DEFAULT_CREDENTIALS["password"]:
+                # Also try custom credential (config may have changed the password)
+                if custom_cred and custom_cred.get("password") != self.credentials.get("password"):
                     creds_to_try.append(custom_cred)
-                    logger.info(f"[CREDS] Added custom credential from credentials.json")
+                # Also try default if different from above
+                if self.DEFAULT_CREDENTIALS.get("password") != self.credentials.get("password"):
+                    creds_to_try.append(self.DEFAULT_CREDENTIALS.copy())
+            else:
+                # Fresh device — build credential list
+                # self.credentials may be UI-provided overrides (via handler_manager),
+                # so check if they differ from defaults before deciding order.
+                handler_password = self.credentials.get("password", "")
+                default_password = self.DEFAULT_CREDENTIALS.get("password", "")
+                handler_is_ui_override = handler_password and handler_password != default_password
 
-                # 3. Add backup password as third option if configured and different
-                if backup_password and backup_password != self.DEFAULT_CREDENTIALS["password"]:
+                if handler_is_ui_override:
+                    # UI override credentials — try those first
+                    creds_to_try.append(self.credentials.copy())
+                    logger.info(f"[CREDS] Added UI/handler credentials first")
+
+                # Always try default credentials (admin/admin)
+                if not handler_is_ui_override:
+                    creds_to_try.append(self.DEFAULT_CREDENTIALS.copy())
+                    logger.info(f"[CREDS] Added default credentials (admin/admin)")
+
+                # Add custom credential from credentials.json if different from what we already have
+                if custom_cred:
+                    custom_password = custom_cred.get("password", "")
+                    already_have = any(c.get("password") == custom_password for c in creds_to_try)
+                    if not already_have:
+                        creds_to_try.append(custom_cred)
+                        logger.info(f"[CREDS] Added custom credential from credentials.json")
+
+                # Add default if UI override was first and default not yet added
+                if handler_is_ui_override:
+                    already_have_default = any(c.get("password") == default_password for c in creds_to_try)
+                    if not already_have_default:
+                        creds_to_try.append(self.DEFAULT_CREDENTIALS.copy())
+                        logger.info(f"[CREDS] Added default credentials (admin/admin)")
+
+                # Add backup password as last option if configured and different
+                if backup_password:
                     backup_cred = {"username": self.credentials.get("username", "admin"), "password": backup_password}
-                    if backup_cred not in creds_to_try:
+                    already_have = any(c.get("password") == backup_password for c in creds_to_try)
+                    if not already_have:
                         creds_to_try.append(backup_cred)
                         logger.info(f"[CREDS] Added backup credential")
 
@@ -872,12 +992,19 @@ class CambiumHandler(BaseHandler):
                     # These map Cambium internal SKU codes to human-readable model names
                     sku_to_model = {
                         "35": "Force 300-25",
+                        "38": "Force 300-16",
                         "49": "Force 300-19",
                         "53544": "ePMP 4518",
-                        # Add more SKU mappings here as discovered
+                        "53545": "ePMP 4525",
+                        "53264": "ePMP 4600",
+                        "53561": "ePMP 4625",
                     }
                     if sku_code in sku_to_model:
                         info.model = sku_to_model[sku_code]
+                    elif sku_code.startswith("53"):
+                        # 53xxx SKUs are ePMP AX series (WiFi 6)
+                        info.model = f"ePMP AX (SKU {sku_code})"
+                        logger.info(f"SKU {sku_code} -> ePMP AX series (53xxx)")
                     else:
                         info.model = f"Cambium ePMP (SKU {sku_code})"
                     logger.info(f"Got SKU code {sku_code}: {info.model}")

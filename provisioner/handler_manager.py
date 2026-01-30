@@ -42,6 +42,7 @@ class HandlerManager:
         fingerprint: DeviceFingerprint,
         ip: str,
         interface: Optional[str] = None,
+        custom_credentials: Optional[Dict[str, str]] = None,
     ) -> Optional[BaseHandler]:
         """Get the appropriate handler for a device.
 
@@ -49,6 +50,7 @@ class HandlerManager:
             fingerprint: Device fingerprint with type information.
             ip: IP address of the device.
             interface: Network interface to bind to (e.g., 'eth0.1994').
+            custom_credentials: Optional credentials from UI override.
 
         Returns:
             Handler instance or None if device type not supported.
@@ -65,10 +67,15 @@ class HandlerManager:
             return None
 
         # Get credentials for this device type
-        creds = self.credentials.get(device_type.value, {})
-        if not creds:
-            logger.warning(f"No credentials configured for {device_type.value}")
-            creds = {"username": "admin", "password": ""}
+        # If custom credentials provided via UI, use those as primary
+        if custom_credentials:
+            creds = custom_credentials.copy()
+            logger.info(f"Using custom credentials from UI for {device_type.value}")
+        else:
+            creds = self.credentials.get(device_type.value, {})
+            if not creds:
+                logger.warning(f"No credentials configured for {device_type.value}")
+                creds = {"username": "admin", "password": ""}
 
         # Get alternate credentials if available
         alt_creds = self.alternate_credentials.get(device_type.value, [])
@@ -96,6 +103,7 @@ class HandlerManager:
         firmware_current: bool = False,
         on_progress: Optional[Callable[[str, bool, Optional[str]], Awaitable[None]]] = None,
         firmware_lookup_callback: Optional[Callable[[str, str], tuple]] = None,
+        custom_credentials: Optional[Dict[str, str]] = None,
     ) -> ProvisioningResult:
         """Provision a device with configuration and/or firmware.
 
@@ -115,7 +123,8 @@ class HandlerManager:
         Returns:
             ProvisioningResult with outcome details.
         """
-        handler = self.get_handler(fingerprint, ip, interface=interface)
+        handler = self.get_handler(fingerprint, ip, interface=interface,
+                                    custom_credentials=custom_credentials)
 
         if not handler:
             return ProvisioningResult(

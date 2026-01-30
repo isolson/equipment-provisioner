@@ -133,6 +133,8 @@ class PortState:
     last_error: Optional[str] = None  # Error message if failed
     checklist: ProvisioningChecklist = field(default_factory=ProvisioningChecklist)  # Step-by-step progress
     provision_attempted: bool = False  # True once provisioning has been attempted (prevents re-trigger)
+    expecting_reboot: bool = False  # True during planned reboots (firmware updates)
+    provisioning_task: Optional[asyncio.Task] = None  # Reference to active provisioning task for cancellation
 
 
 @dataclass
@@ -348,17 +350,11 @@ class PortManager:
         return sum(bin(int(x)).count('1') for x in netmask.split('.'))
 
     async def cleanup(self) -> None:
-        """Remove VLAN interfaces."""
+        """Stop monitoring. VLAN interfaces are left in place to avoid a race
+        condition where the old process deletes interfaces after a new process
+        has already recreated them during a service restart.  setup() handles
+        existing interfaces idempotently via 'ip addr replace'."""
         self._running = False
-
-        for config in self.ports.values():
-            try:
-                interface = config.interface_name
-                if Path(f"/sys/class/net/{interface}").exists():
-                    await self._run_cmd(["ip", "link", "delete", interface], check=False)
-                    logger.debug(f"Removed interface {interface}")
-            except Exception as e:
-                logger.debug(f"Cleanup error for {config.interface_name}: {e}")
 
     def on_device_detected(
         self,
@@ -692,6 +688,16 @@ class PortManager:
                     state.last_error = error
                 state.ping_failures = 0  # Reset ping failures
 
+    def set_expecting_reboot(self, port_num: int, expecting: bool) -> None:
+        """Set whether a port is expecting a planned reboot (firmware update).
+
+        When True, link-down events during provisioning are ignored.
+        When False, link-down events during provisioning cancel the task.
+        """
+        if port_num in self.port_states:
+            self.port_states[port_num].expecting_reboot = expecting
+            logger.debug(f"Port {port_num} expecting_reboot={expecting}")
+
     def update_port_device_info(
         self,
         port_num: int,
@@ -869,7 +875,34 @@ class PortManager:
             # Link went down - only clear state if not provisioning and not waiting for boot
             # During provisioning or boot wait, devices may cause link flaps
             if state.provisioning:
-                logger.debug(f"Ignoring link down on port {port_num} during provisioning")
+                if state.expecting_reboot:
+                    logger.debug(f"Ignoring link down on port {port_num} during expected reboot")
+                else:
+                    # Unexpected link loss during provisioning — device was likely unplugged
+                    logger.warning(f"Unexpected link down on port {port_num} during provisioning — cancelling and resetting")
+                    if state.provisioning_task and not state.provisioning_task.done():
+                        state.provisioning_task.cancel()
+                    state.provisioning = False
+                    state.provisioning_task = None
+                    state.expecting_reboot = False
+                    state.link_up = False
+                    state.device_detected = False
+                    state.device_type = None
+                    state.device_ip = None
+                    state.device_mac = None
+                    state.device_serial = None
+                    state.device_model = None
+                    state.ping_failures = 0
+                    state.link_speed = None
+                    state.waiting_for_boot = False
+                    state.boot_wait_until = None
+                    state.boot_ping_responded = False
+                    state.last_result = None
+                    state.last_error = None
+                    state.provision_attempted = False
+                    state.provisioning_ended = None
+                    state.checklist.reset()
+                    logger.info(f"Port {port_num} fully reset after unexpected unplug")
             elif state.waiting_for_boot:
                 logger.debug(f"Ignoring link down on port {port_num} during boot wait")
             else:

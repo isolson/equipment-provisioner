@@ -145,6 +145,7 @@ class FirmwareManager:
         "epmp 4518": ["epmp-ax", "epmp_ax"],
         "epmp 4525": ["epmp-ax", "epmp_ax"],
         "epmp 4600": ["epmp-ax", "epmp_ax"],
+        "epmp 4625": ["epmp-ax", "epmp_ax"],
         # Cambium Force 300 series - uses AC firmware
         "force 300-25": ["epmp-ac", "epmp_ac", "force300", "force-300"],
         "force 300-19": ["epmp-ac", "epmp_ac", "force300", "force-300"],
@@ -190,14 +191,18 @@ class FirmwareManager:
             logger.warning(f"Firmware directory does not exist: {device_dir}")
             return None
 
-        # Common firmware file extensions
-        firmware_extensions = {'.bin', '.npk', '.img', '.fw', '.tar', '.gz'}
+        # Common firmware file extensions.
+        # .tbn = Tarana G1 firmware bundle (e.g. SYS.A3.R10.XXX.3.622.005.00.tbn)
+        firmware_extensions = {'.bin', '.npk', '.img', '.fw', '.tar', '.gz', '.tbn'}
 
         # Get firmware patterns for this model
         model_patterns = None
         if model:
             model_key = model.lower().replace("cambium ", "").strip()
             model_patterns = self.MODEL_FIRMWARE_PATTERNS.get(model_key)
+            # Fallback: "ePMP AX (SKU 53xxx)" -> use AX firmware patterns
+            if not model_patterns and model_key.startswith("epmp ax"):
+                model_patterns = ["epmp-ax", "epmp_ax"]
             logger.info(f"Model key: '{model_key}', patterns: {model_patterns}")
 
         # Find all firmware files
@@ -263,6 +268,22 @@ class FirmwareManager:
             Version string or "unknown".
         """
         import re
+
+        # Tarana firmware pattern:
+        #   SYS.A3.R10.XXX.3.622.005.00.tbn
+        # Version is the full filename without the .tbn extension, e.g.
+        #   "SYS.A3.R10.XXX.3.622.005.00"
+        #
+        # ⚠ This MUST return the full dotted string including the "SYS.A3.R10.XXX."
+        # prefix.  The Tarana device reports bank versions in this exact format
+        # (e.g. "SYS.A3.R10.XXX.3.611.002.00") and the provisioning workflow
+        # compares expected_firmware to bank versions via exact string equality.
+        # Returning only the numeric tail (e.g. "3.622.005.00") would cause
+        # every firmware check to see a mismatch and re-flash on every plug-in.
+        if filename.upper().startswith("SYS.") and filename.lower().endswith(".tbn"):
+            version = filename.rsplit(".", 1)[0]  # Strip .tbn extension
+            logger.debug(f"Extracted Tarana version from {filename}: {version}")
+            return version
 
         # Tachyon firmware patterns:
         #   tna-30x-1.12.3-r54970-... (standard TNA-30x series)

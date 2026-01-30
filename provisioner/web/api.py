@@ -250,25 +250,57 @@ async def _run_provisioning(
     device_ip: str,
     req: ProvisionRequest,
 ):
-    """Run provisioning in background task."""
+    """Run provisioning in background task.
+
+    Wraps _provision_port_device with proper port state management,
+    matching what _run_port_provisioning does for auto-provisioning.
+    """
+    import asyncio
+
+    # Mark port as actively provisioning (clears old failed state in UI)
+    provisioner.port_manager.mark_port_provisioning(port_number, True)
+
+    # Clear old result/error so UI doesn't flash the previous failure
+    if port_number in provisioner.port_manager.port_states:
+        state = provisioner.port_manager.port_states[port_number]
+        state.last_result = None
+        state.last_error = None
+        state.provisioning_task = asyncio.current_task()
+
+    success = False
+    cancelled = False
     try:
         # Get custom credentials if set
         creds = _credential_overrides.get(port_number)
-        
-        # TODO: Pass custom credentials to provisioner
-        # For now, use the standard provisioning flow
-        await provisioner._provision_port_device(
+        custom_credentials = None
+        if creds:
+            custom_credentials = {"username": creds.username, "password": creds.password}
+
+        success = await provisioner._provision_port_device(
             port_number,
             device_type,
             device_ip,
+            custom_credentials=custom_credentials,
         )
-        
+
         # Clear credentials after use
         if port_number in _credential_overrides:
             del _credential_overrides[port_number]
-            
+
+    except asyncio.CancelledError:
+        logger.warning(f"Retry provisioning cancelled for port {port_number} (device unplugged)")
+        cancelled = True
+        success = False
     except Exception as e:
         logger.exception(f"Background provisioning failed for port {port_number}")
+        success = False
+    finally:
+        if port_number in provisioner.port_manager.port_states:
+            state = provisioner.port_manager.port_states[port_number]
+            state.provisioning_task = None
+            state.expecting_reboot = False
+        if not cancelled:
+            provisioner.port_manager.mark_port_provisioning(port_number, False, success=success)
 
 
 # ============================================================================
