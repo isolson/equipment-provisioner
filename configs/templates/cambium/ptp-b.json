@@ -1,0 +1,6 @@
+{
+  "_comment": "Cambium PTP side-B config template. Add slave/SM-side PTP settings from a device config export.",
+  "wirelessInterfaceSSID": "{{ssid}}",
+  "snmpSystemName": "{{hostname}}",
+  "systemConfigDeviceName": "{{hostname}}"
+}

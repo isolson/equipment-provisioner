@@ -11,9 +11,11 @@ link-local IP (169.254.100.1).  Two transports are used:
 
   * **gNOI over WebSocket** – file transfer (File.Put) and system commands
     (System.SetPackage, System.Reboot).  The ``grpc-websockets`` sub-protocol
-    requires the *first* WebSocket text message to carry metadata in HTTP-
-    header format (``user: …\\r\\npassword: …``), *not* as HTTP upgrade
-    headers.
+    requires the *first* WebSocket binary message to carry metadata in HTTP-
+    header format (``user: …\\r\\npassword: …\\r\\n``), *not* as HTTP upgrade
+    headers.  Subsequent gRPC data frames are prefixed with ``0x00`` before
+    the standard 5-byte gRPC header (total 6-byte header per frame).
+    End-of-stream is a standalone ``0x01`` byte.
 
 Networking
 ----------
@@ -584,8 +586,22 @@ def build_gnoi_set_package(filename: str, version: str = "", activate: bool = Tr
 # =============================================================================
 
 def build_ws_grpc_frame(message: bytes) -> bytes:
-    """Build a WebSocket gRPC frame (same format as gRPC-web)."""
-    return build_grpc_web_frame(message)
+    """Build a gRPC frame for the ``grpc-websockets`` WebSocket sub-protocol.
+
+    Unlike standard gRPC-web (HTTP POST) which uses a 5-byte header, the
+    ``grpc-websockets`` protocol prepends an extra byte before each frame:
+
+      * ``0x00`` = data frame (followed by standard 5-byte gRPC header + payload)
+      * ``0x01`` = end-of-stream / half-close (sent as a standalone 1-byte message)
+
+    Client data message layout::
+
+        [0x00] [flag:1] [length:4 BE] [protobuf payload]
+
+    Verified from HAR capture: browser sends 41-byte open frame (1 + 5 + 35),
+    65546-byte data chunks (1 + 5 + 65540), and 28-byte hash frame (1 + 5 + 22).
+    """
+    return b'\x00' + build_grpc_web_frame(message)
 
 
 def build_grpc_websocket_metadata(credentials: Dict[str, str]) -> bytes:
@@ -604,7 +620,9 @@ def build_grpc_websocket_metadata(credentials: Dict[str, str]) -> bytes:
         "content-type: application/grpc-web+proto",
         "x-grpc-web: 1",
     ]
-    return "\r\n".join(lines).encode("utf-8")
+    # Each line ends with \r\n, including the last one (109 bytes total for
+    # default credentials, verified from HAR capture).
+    return ("\r\n".join(lines) + "\r\n").encode("utf-8")
 
 
 # =============================================================================
@@ -1116,16 +1134,18 @@ class TaranaHandler(BaseHandler):
 
         1. Open WebSocket to ``ws://<ip>/gnoi.file.File/Put``
            with sub-protocol ``grpc-websockets``.
-        2. **MSG 0 (text):** Send auth metadata as ``\\r\\n``-delimited
-           key-value pairs (user, password, source, content-type).
-        3. **MSG 1 (binary):** gRPC frame with PutRequest.open
-           containing the bare filename (NOT ``/tmp/filename``).
-        4. **MSGs 2..N (binary):** gRPC frames with PutRequest.contents
-           — 64 KB chunks of the firmware file.
-        5. **MSG N+1 (binary):** gRPC frame with PutRequest.hash
-           — MD5 hash (hash_type=3, 16 bytes).
+        2. **MSG 0 (binary):** Send auth metadata as ``\\r\\n``-delimited
+           key-value pairs ending with ``\\r\\n`` (109 bytes for default creds).
+           No ``0x00`` prefix — raw header text.
+        3. **MSG 1 (binary):** ``0x00`` + gRPC frame with PutRequest.open
+           containing the bare filename (NOT ``/tmp/filename``).  41 bytes.
+        4. **MSGs 2..N (binary):** ``0x00`` + gRPC frames with PutRequest.contents
+           — 64 KB chunks of the firmware file.  65546 bytes each.
+        5. **MSG N+1 (binary):** ``0x00`` + gRPC frame with PutRequest.hash
+           — MD5 hash (hash_type=3, 16 bytes).  28 bytes.
         6. **MSG N+2 (binary):** End-of-stream signal — single byte ``0x01``.
-        7. Read server response messages confirming ``grpc-status: 0``.
+        7. Read 6 binary response messages (3 pairs of header+payload)
+           confirming ``grpc-status: 0``.
 
         ⚠ Hash type MUST be MD5 (type 3).  The device rejects SHA256.
         ⚠ The end-of-stream byte ``0x01`` is required after the hash.
@@ -1224,21 +1244,30 @@ class TaranaHandler(BaseHandler):
                 logger.info(f"Upload stream complete in {total_elapsed:.1f}s, "
                            f"waiting for server response...")
 
-                # Read server response (multiple messages: headers, body, trailer)
+                # Read server response.  The server sends 6 binary WS messages
+                # in 3 pairs (header-frame + payload): initial metadata, body
+                # (PutResponse with filename echo), and trailers (grpc-status).
+                # All messages are BINARY — there are no TEXT frames.
                 try:
                     grpc_ok = False
                     for _ in range(10):  # read up to 10 response messages
                         response = await asyncio.wait_for(ws.receive(), timeout=120)
                         if response.type == aiohttp.WSMsgType.BINARY:
-                            logger.debug(f"Upload response: {len(response.data)} bytes")
-                        elif response.type == aiohttp.WSMsgType.TEXT:
-                            # Trailer text with grpc-status
-                            if "grpc-status: 0" in response.data:
-                                grpc_ok = True
-                                break
-                            elif "grpc-status:" in response.data:
-                                logger.error(f"Upload failed: {response.data}")
-                                return False
+                            data = response.data
+                            logger.debug(f"Upload response: {len(data)} bytes, "
+                                        f"hex={data[:20].hex()}")
+                            # Check if this binary message contains grpc-status text.
+                            # The trailer payload is plain text like "grpc-status: 0\r\n".
+                            try:
+                                text = data.decode('utf-8', errors='ignore')
+                                if "grpc-status: 0" in text:
+                                    grpc_ok = True
+                                    break
+                                elif "grpc-status:" in text:
+                                    logger.error(f"Upload gRPC error: {text.strip()}")
+                                    return False
+                            except Exception:
+                                pass
                         elif response.type in (aiohttp.WSMsgType.CLOSE,
                                                aiohttp.WSMsgType.CLOSED):
                             break
@@ -1269,82 +1298,130 @@ class TaranaHandler(BaseHandler):
 
         1. Open WebSocket to ``ws://<ip>/gnoi.system.System/SetPackage``
            with sub-protocol ``grpc-websockets``.
-        2. **MSG 0 (text):** Auth metadata (same as File/Put).
-        3. **MSG 1 (binary):** gRPC frame with SetPackageRequest
+        2. **MSG 0 (binary):** Auth metadata (same format as File/Put).
+        3. **MSG 1 (binary):** ``0x00`` + gRPC frame with SetPackageRequest
            containing filename + activate=true.
-        4. **MSG 2 (binary):** gRPC frame with hash (same MD5 sent
-           during File/Put).
+        4. **MSG 2 (binary):** ``0x00`` + gRPC frame with hash (same MD5
+           sent during File/Put).
         5. **MSG 3 (binary):** End-of-stream signal ``0x01``.
-        6. Read server response confirming ``grpc-status: 0``.
+        6. Read binary response pairs confirming ``grpc-status: 0``.
 
-        The device completes installation in ~2 seconds (it stages the
-        firmware to the next-install bank but does NOT auto-reboot).
+        After File/Put completes, the device stages the firmware internally.
+        During this period (~20-30 s) it reports "system-reboot in progress"
+        and rejects SetPackage requests.  This method retries with backoff
+        until the device is ready or the retry budget is exhausted.
         """
         if not self._session:
             raise RuntimeError("Not connected")
 
-        try:
-            firmware_path = getattr(self, '_uploaded_firmware_path', None)
-            firmware_hash = getattr(self, '_uploaded_firmware_hash', None)
-            if not firmware_path:
-                logger.error("No firmware has been uploaded")
+        firmware_path = getattr(self, '_uploaded_firmware_path', None)
+        firmware_hash = getattr(self, '_uploaded_firmware_hash', None)
+        if not firmware_path:
+            logger.error("No firmware has been uploaded")
+            return False
+
+        # Retry parameters — the device may need up to ~30 s after File/Put
+        # to finish staging firmware before it accepts SetPackage.
+        max_attempts = 6
+        retry_delay = 10  # seconds between attempts
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = await self._send_set_package(firmware_path, firmware_hash)
+                if result is True:
+                    return True
+                if result is None:
+                    # Retryable error (device busy) — wait and retry
+                    if attempt < max_attempts:
+                        logger.info(f"SetPackage attempt {attempt}/{max_attempts} "
+                                    f"rejected (device busy), retrying in {retry_delay}s...")
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error(f"SetPackage failed after {max_attempts} attempts "
+                                     f"(device still busy)")
+                        return False
+                # result is False — permanent error
                 return False
 
-            logger.info(f"Installing firmware {firmware_path} on Tarana at {self.ip}")
+            except asyncio.TimeoutError:
+                logger.error("Firmware installation request timed out")
+                return False
+            except Exception as e:
+                logger.error(f"Failed to initiate firmware installation: {e}")
+                return False
 
-            ws_url = f"{self._ws_url}/gnoi.system.System/SetPackage"
+        return False
 
-            async with self._session.ws_connect(
-                ws_url,
-                protocols=["grpc-websockets"],
-            ) as ws:
-                # MSG 0: auth metadata (binary frame, not text)
-                metadata = build_grpc_websocket_metadata(self.credentials)
-                await ws.send_bytes(metadata)
+    async def _send_set_package(
+        self,
+        firmware_path: str,
+        firmware_hash: Optional[bytes],
+    ) -> Optional[bool]:
+        """Send a single SetPackage request over WebSocket.
 
-                # MSG 1: SetPackage request (filename + activate)
-                set_package_msg = build_gnoi_set_package(
-                    filename=firmware_path,
-                    activate=True
-                )
-                await ws.send_bytes(build_ws_grpc_frame(set_package_msg))
+        Returns:
+            True  — SetPackage succeeded (grpc-status: 0).
+            False — permanent failure (non-retryable gRPC error).
+            None  — device busy / "system-reboot in progress" (retryable).
+        """
+        logger.info(f"Installing firmware {firmware_path} on Tarana at {self.ip}")
 
-                # MSG 2: hash (same MD5 from upload step)
-                if firmware_hash:
-                    hash_msg = build_gnoi_put_hash(3, firmware_hash)
-                    await ws.send_bytes(build_ws_grpc_frame(hash_msg))
+        ws_url = f"{self._ws_url}/gnoi.system.System/SetPackage"
 
-                # MSG 3: end-of-stream signal
-                await ws.send_bytes(b'\x01')
+        async with self._session.ws_connect(
+            ws_url,
+            protocols=["grpc-websockets"],
+        ) as ws:
+            # MSG 0: auth metadata (binary frame, not text)
+            metadata = build_grpc_websocket_metadata(self.credentials)
+            await ws.send_bytes(metadata)
 
-                # Read response
-                logger.info(f"Waiting for SetPackage response from {self.ip}...")
-                try:
-                    for _ in range(10):
-                        response = await asyncio.wait_for(ws.receive(), timeout=60)
-                        if response.type == aiohttp.WSMsgType.BINARY:
-                            logger.debug(f"SetPackage response: {len(response.data)} bytes")
-                        elif response.type == aiohttp.WSMsgType.TEXT:
-                            if "grpc-status: 0" in response.data:
+            # MSG 1: SetPackage request (filename + activate)
+            set_package_msg = build_gnoi_set_package(
+                filename=firmware_path,
+                activate=True
+            )
+            await ws.send_bytes(build_ws_grpc_frame(set_package_msg))
+
+            # MSG 2: hash (same MD5 from upload step)
+            if firmware_hash:
+                hash_msg = build_gnoi_put_hash(3, firmware_hash)
+                await ws.send_bytes(build_ws_grpc_frame(hash_msg))
+
+            # MSG 3: end-of-stream signal
+            await ws.send_bytes(b'\x01')
+
+            # Read response (same binary-pair format as File/Put).
+            logger.info(f"Waiting for SetPackage response from {self.ip}...")
+            try:
+                for _ in range(10):
+                    response = await asyncio.wait_for(ws.receive(), timeout=60)
+                    if response.type == aiohttp.WSMsgType.BINARY:
+                        data = response.data
+                        logger.debug(f"SetPackage response: {len(data)} bytes, "
+                                    f"hex={data[:20].hex()}")
+                        try:
+                            text = data.decode('utf-8', errors='ignore')
+                            if "grpc-status: 0" in text:
                                 logger.info(f"SetPackage succeeded on {self.ip}")
-                                break
-                            elif "grpc-status:" in response.data:
-                                logger.error(f"SetPackage failed: {response.data}")
+                                return True
+                            elif "grpc-status:" in text:
+                                # Check for retryable "device busy" errors
+                                if "reboot in progress" in text or "IsMessageAllowed" in text:
+                                    logger.warning(f"SetPackage rejected (device busy): {text.strip()}")
+                                    return None  # retryable
+                                logger.error(f"SetPackage failed: {text.strip()}")
                                 return False
-                        elif response.type in (aiohttp.WSMsgType.CLOSE,
-                                               aiohttp.WSMsgType.CLOSED):
-                            break
-                except asyncio.TimeoutError:
-                    logger.warning(f"SetPackage response timeout (may still be OK)")
+                        except Exception:
+                            pass
+                    elif response.type in (aiohttp.WSMsgType.CLOSE,
+                                           aiohttp.WSMsgType.CLOSED):
+                        break
+            except asyncio.TimeoutError:
+                logger.warning(f"SetPackage response timeout (may still be OK)")
 
-                return True
-
-        except asyncio.TimeoutError:
-            logger.error("Firmware installation request timed out")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to initiate firmware installation: {e}")
-            return False
+            return True
 
     async def reboot(self) -> bool:
         """Reboot the device using gNOI System.Reboot via gRPC-web HTTP POST.

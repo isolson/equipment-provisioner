@@ -1,0 +1,16 @@
+{
+  "_comment": "Tachyon PTP side-A config template. Add master-side PTP settings from a device config export.",
+  "system": {
+    "hostname": "{{hostname}}",
+    "name": "{{hostname}}"
+  },
+  "wireless": {
+    "radios": {
+      "wlan0": {
+        "vaps": [
+          { "ssid": "{{ssid}}" }
+        ]
+      }
+    }
+  }
+}

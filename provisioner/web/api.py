@@ -54,6 +54,17 @@ class ProvisionResponse(BaseModel):
     message: str
 
 
+class ApplyModeRequest(BaseModel):
+    """Request to apply a device mode (AP or PTP) after provisioning."""
+    mode: str  # "ap" or "ptp"
+    # AP fields
+    tower: Optional[int] = None
+    direction: Optional[str] = None
+    # PTP fields
+    my_tower: Optional[int] = None
+    remote_tower: Optional[int] = None
+
+
 class CredentialOverride(BaseModel):
     """Temporary credential override for a port."""
     port_number: int
@@ -1377,3 +1388,175 @@ async def get_display_status(request: Request):
     status = display.get_status()
     status["available"] = True
     return status
+
+
+# ============================================================================
+# Device Mode Endpoints (AP / PTP)
+# ============================================================================
+
+@router.post("/ports/{port_number}/apply-mode")
+async def apply_device_mode(
+    port_number: int,
+    req: ApplyModeRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """Apply a device mode (AP or PTP) to a provisioned device.
+
+    After standard SM provisioning completes, this endpoint lets the user
+    reconfigure the device as an AP or PTP endpoint.
+    """
+    provisioner = request.app.state.provisioner
+    if not provisioner:
+        raise HTTPException(status_code=503, detail="Provisioner not available")
+
+    port_manager = provisioner.port_manager
+    if not port_manager:
+        raise HTTPException(status_code=503, detail="Port manager not available")
+
+    # Validate port
+    port_status = port_manager.get_port_status()
+    if port_number not in port_status:
+        raise HTTPException(status_code=404, detail="Port not found")
+
+    status = port_status[port_number]
+    if not status["device_detected"]:
+        raise HTTPException(status_code=400, detail="No device detected on port")
+
+    device_type = status["device_type"]
+    device_ip = status["device_ip"]
+
+    if device_type not in ("cambium", "tachyon"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Mode configuration not supported for {device_type}",
+        )
+
+    # Validate mode-specific parameters
+    if req.mode == "ap":
+        if req.tower is None or req.direction is None:
+            raise HTTPException(
+                status_code=400,
+                detail="AP mode requires 'tower' and 'direction'",
+            )
+    elif req.mode == "ptp":
+        if req.my_tower is None or req.remote_tower is None:
+            raise HTTPException(
+                status_code=400,
+                detail="PTP mode requires 'my_tower' and 'remote_tower'",
+            )
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
+
+    # Run config application in background
+    background_tasks.add_task(
+        _run_apply_mode,
+        provisioner,
+        port_number,
+        device_type,
+        device_ip,
+        req,
+    )
+
+    return {"success": True, "message": f"Applying {req.mode} mode on port {port_number}"}
+
+
+@router.get("/ptp-links")
+async def get_ptp_links(request: Request):
+    """Get all active PTP links.
+
+    Returns links with side info so the UI can show PTP-B shortcuts
+    on ports where the paired device's vendor matches.
+    """
+    provisioner = request.app.state.provisioner
+    if not provisioner or not provisioner.port_manager:
+        return {"links": {}}
+
+    links = provisioner.port_manager.get_ptp_links()
+    return {"links": links}
+
+
+async def _run_apply_mode(
+    provisioner,
+    port_number: int,
+    device_type: str,
+    device_ip: str,
+    req: ApplyModeRequest,
+):
+    """Apply device mode in a background task."""
+    from ..mode_config import get_mode_config_manager, make_ptp_link_id
+    from ..fingerprint import identify_device, DeviceType
+    from .websocket import notify_port_change
+
+    port_manager = provisioner.port_manager
+    mcm = get_mode_config_manager()
+
+    try:
+        # Determine mode and naming
+        if req.mode == "ap":
+            mode = "ap"
+            naming = mcm.generate_ap_naming(req.tower, req.direction, device_type)
+            ptp_link_id = None
+        else:
+            # PTP: auto-assign side
+            side = port_manager.get_available_ptp_side(req.my_tower, req.remote_tower)
+            mode = f"ptp-{side}"
+            naming = mcm.generate_ptp_naming(
+                req.my_tower, req.remote_tower, side, device_type,
+            )
+            ptp_link_id = make_ptp_link_id(req.my_tower, req.remote_tower)
+
+        logger.info(
+            f"Applying {mode} to port {port_number} ({device_type}): "
+            f"hostname={naming['hostname']}, ssid={naming['ssid']}"
+        )
+
+        # Load mode template
+        template = mcm.load_template(device_type, mode)
+
+        # Create handler and connect
+        interface = port_manager.get_interface_for_port(port_number)
+        fingerprint = await identify_device(device_ip, mac=None, interface=interface)
+
+        if fingerprint.device_type == DeviceType.UNKNOWN and device_type:
+            fingerprint.device_type = DeviceType(device_type)
+
+        handler = provisioner.handler_manager.get_handler(
+            fingerprint, device_ip, interface=interface,
+        )
+        if not handler:
+            logger.error(f"No handler for {device_type} on port {port_number}")
+            return
+
+        connected = await handler.connect()
+        if not connected:
+            logger.error(f"Failed to connect to {device_type} at {device_ip} for mode config")
+            return
+
+        try:
+            # Apply config: template + naming injection, or just naming if no template
+            if template:
+                rendered = mcm.render_template(template, naming, device_type)
+                success = await handler.apply_config(rendered)
+            else:
+                # No template — just apply hostname/SSID via apply_ap_naming
+                success = await handler.apply_ap_naming(
+                    naming["hostname"], naming["ssid"],
+                )
+
+            if success:
+                logger.info(f"Mode {mode} applied successfully on port {port_number}")
+                port_manager.set_device_mode(
+                    port_number, mode, naming, ptp_link_id,
+                )
+            else:
+                logger.error(f"Failed to apply {mode} config on port {port_number}")
+        finally:
+            await handler.disconnect()
+
+        # Broadcast updated port status
+        port_status_data = port_manager._get_single_port_status(port_number)
+        await notify_port_change(port_number, port_status_data)
+
+    except Exception as e:
+        logger.exception(f"Error applying mode on port {port_number}: {e}")

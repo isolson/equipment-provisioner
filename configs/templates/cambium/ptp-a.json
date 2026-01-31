@@ -1,0 +1,6 @@
+{
+  "_comment": "Cambium PTP side-A config template. Add master/AP-side PTP settings from a device config export.",
+  "wirelessInterfaceSSID": "{{ssid}}",
+  "snmpSystemName": "{{hostname}}",
+  "systemConfigDeviceName": "{{hostname}}"
+}

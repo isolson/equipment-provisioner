@@ -1,0 +1,16 @@
+{
+  "_comment": "Tachyon AP config template. Values with {{placeholders}} are auto-replaced. Add real AP-specific settings from a device config export.",
+  "system": {
+    "hostname": "{{hostname}}",
+    "name": "{{hostname}}"
+  },
+  "wireless": {
+    "radios": {
+      "wlan0": {
+        "vaps": [
+          { "ssid": "{{ssid}}" }
+        ]
+      }
+    }
+  }
+}

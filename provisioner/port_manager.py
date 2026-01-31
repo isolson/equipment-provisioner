@@ -18,7 +18,7 @@ import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Callable, Awaitable, Union
+from typing import Any, Dict, List, Optional, Callable, Awaitable, Union
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +135,11 @@ class PortState:
     provision_attempted: bool = False  # True once provisioning has been attempted (prevents re-trigger)
     expecting_reboot: bool = False  # True during planned reboots (firmware updates)
     provisioning_task: Optional[asyncio.Task] = None  # Reference to active provisioning task for cancellation
+
+    # Post-provisioning mode (None = SM default, "ap", "ptp-a", "ptp-b")
+    device_mode: Optional[str] = None
+    mode_config: Optional[Dict[str, Any]] = None  # Naming params used to configure mode
+    ptp_link_id: Optional[str] = None  # Canonical PTP link ID, e.g. "tw05-tw12"
 
 
 @dataclass
@@ -465,6 +470,7 @@ class PortManager:
                         state.device_ip = None
                         state.ping_failures = 0
                         state.provision_attempted = False  # Reset for next detection
+                        self.clear_device_mode(port_num)
 
             ping_tasks = [
                 ping_check(port_num, config, state)
@@ -775,6 +781,9 @@ class PortManager:
                 "last_result": state.last_result,
                 "last_error": state.last_error,
                 "checklist": state.checklist.to_dict(),
+                "device_mode": state.device_mode,
+                "mode_config": state.mode_config,
+                "ptp_link_id": state.ptp_link_id,
             }
             for port_num, state in self.port_states.items()
         }
@@ -802,6 +811,9 @@ class PortManager:
             "last_result": state.last_result,
             "last_error": state.last_error,
             "checklist": state.checklist.to_dict(),
+            "device_mode": state.device_mode,
+            "mode_config": state.mode_config,
+            "ptp_link_id": state.ptp_link_id,
         }
 
     def _map_switch_port_to_port_num(self, switch_port: str) -> Optional[int]:
@@ -902,6 +914,7 @@ class PortManager:
                     state.provision_attempted = False
                     state.provisioning_ended = None
                     state.checklist.reset()
+                    self.clear_device_mode(port_num)
                     logger.info(f"Port {port_num} fully reset after unexpected unplug")
             elif state.waiting_for_boot:
                 logger.debug(f"Ignoring link down on port {port_num} during boot wait")
@@ -922,6 +935,7 @@ class PortManager:
                 state.last_error = None
                 state.provision_attempted = False  # Reset for next link cycle
                 state.checklist.reset()  # Reset checklist when device disconnects
+                self.clear_device_mode(port_num)
                 logger.info(f"Port {port_num} device disconnected (link down)")
 
         # Immediately broadcast port update via WebSocket
@@ -933,6 +947,104 @@ class PortManager:
             logger.debug(f"Failed to broadcast port update: {e}")
 
         return True
+
+    # ------------------------------------------------------------------
+    # Device mode & PTP link tracking
+    # ------------------------------------------------------------------
+
+    # In-memory PTP link registry.
+    # Maps link_id (e.g. "tw05-tw12") -> {
+    #   "side_a_port": int | None,
+    #   "side_b_port": int | None,
+    #   "device_type": str,
+    #   "my_tower": int,
+    #   "remote_tower": int,
+    # }
+    _ptp_links: Dict[str, Dict[str, Any]] = {}
+
+    def set_device_mode(
+        self,
+        port_num: int,
+        mode: str,
+        mode_config: Dict[str, Any],
+        ptp_link_id: Optional[str] = None,
+    ) -> None:
+        """Set the device mode for a port after mode config is applied.
+
+        Args:
+            port_num: Port number.
+            mode: One of "ap", "ptp-a", "ptp-b".
+            mode_config: Naming parameters used (tower, direction, etc.).
+            ptp_link_id: Canonical PTP link ID (required for PTP modes).
+        """
+        state = self.port_states.get(port_num)
+        if not state:
+            return
+
+        state.device_mode = mode
+        state.mode_config = mode_config
+        state.ptp_link_id = ptp_link_id
+
+        # Update PTP link registry
+        if ptp_link_id and mode in ("ptp-a", "ptp-b"):
+            link = self._ptp_links.setdefault(ptp_link_id, {
+                "side_a_port": None,
+                "side_b_port": None,
+                "device_type": state.device_type,
+                "my_tower": mode_config.get("my_tower"),
+                "remote_tower": mode_config.get("remote_tower"),
+            })
+            if mode == "ptp-a":
+                link["side_a_port"] = port_num
+            else:
+                link["side_b_port"] = port_num
+
+        logger.info(f"Port {port_num} mode set to {mode}"
+                     + (f" (link {ptp_link_id})" if ptp_link_id else ""))
+
+    def clear_device_mode(self, port_num: int) -> None:
+        """Clear mode info for a port (called on disconnect)."""
+        state = self.port_states.get(port_num)
+        if not state:
+            return
+
+        # Clean up PTP link registry
+        if state.ptp_link_id and state.ptp_link_id in self._ptp_links:
+            link = self._ptp_links[state.ptp_link_id]
+            if link.get("side_a_port") == port_num:
+                link["side_a_port"] = None
+            if link.get("side_b_port") == port_num:
+                link["side_b_port"] = None
+            # Remove link entry if both sides are gone
+            if link.get("side_a_port") is None and link.get("side_b_port") is None:
+                del self._ptp_links[state.ptp_link_id]
+
+        state.device_mode = None
+        state.mode_config = None
+        state.ptp_link_id = None
+
+    def get_ptp_link(self, link_id: str) -> Optional[Dict[str, Any]]:
+        """Get PTP link info by link ID."""
+        return self._ptp_links.get(link_id)
+
+    def get_ptp_links(self) -> Dict[str, Dict[str, Any]]:
+        """Get all active PTP links."""
+        return dict(self._ptp_links)
+
+    def get_available_ptp_side(
+        self, my_tower: int, remote_tower: int
+    ) -> str:
+        """Determine which PTP side to assign (auto A or B).
+
+        Returns "a" if no existing link, or "a" side is unoccupied.
+        Returns "b" if side A is already taken for this link.
+        """
+        from .mode_config import make_ptp_link_id
+        link_id = make_ptp_link_id(my_tower, remote_tower)
+        link = self._ptp_links.get(link_id)
+        if link is None or link.get("side_a_port") is None:
+            return "a"
+        return "b"
 
     def get_switch_port_mapping(self) -> Dict[str, int]:
         """Get mapping of MikroTik port names to our port numbers.

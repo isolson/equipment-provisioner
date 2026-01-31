@@ -554,7 +554,13 @@
             }
             const isDone = port.last_result === 'complete' || port.last_result === 'success';
             if (isDone) {
-                return { text: 'COMPLETE', sub: 'Ready to deploy', cls: 'complete', icon: 'check' };
+                let sub = 'Ready to deploy';
+                if (port.device_mode) {
+                    const mc = port.mode_config || {};
+                    if (port.device_mode === 'ap') sub = `AP \u2014 ${mc.hostname || ''}`;
+                    else if (port.device_mode.startsWith('ptp')) sub = `PTP ${mc.side || ''} \u2014 ${mc.hostname || ''}`;
+                }
+                return { text: 'COMPLETE', sub, cls: 'complete', icon: 'check' };
             }
             const loginOk = checklist.login === true;
             const configOk = checklist.config_upload === true || checklist.config_upload === 'skipped';
@@ -678,11 +684,21 @@
                 ` : ''}
             `;
             const isActive = port.provisioning || port.waiting_for_boot;
+            const isDone = port.last_result === 'complete' || port.last_result === 'success';
+            const canApplyMode = isDone && (port.device_type === 'cambium' || port.device_type === 'tachyon');
             document.getElementById('modal-footer').innerHTML = isActive ? `
                 <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
                     Close
                 </button>
             ` : `
+                ${canApplyMode ? `
+                <button onclick="openAPModal(${portNum})" class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm text-white">
+                    Configure as AP
+                </button>
+                <button onclick="openPTPModal(${portNum})" class="flex-1 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium text-sm text-white">
+                    Configure as PTP
+                </button>
+                ` : ''}
                 <button onclick="openProvisionModal(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
                     Retry
                 </button>
@@ -855,6 +871,216 @@
                 </button>
             `;
             document.getElementById('port-modal').classList.remove('hidden');
+        }
+
+        // ================================================================
+        // AP / PTP Mode Modals
+        // ================================================================
+
+        function openAPModal(portNum) {
+            selectedPort = portNum;
+            const port = ports[portNum];
+            const vendor = deviceVendors[port.device_type] || deviceVendors.unknown;
+
+            document.getElementById('modal-title').textContent = `Configure as AP \u2014 Port ${portNum}`;
+            document.getElementById('modal-content').innerHTML = `
+                <div class="space-y-4">
+                    <div class="p-3 bg-gray-50 rounded-lg border border-gray-200">
+                        <div class="font-bold text-lg" style="color: ${vendor.color}">${vendor.name}</div>
+                        <div class="text-sm text-gray-600">${port.device_ip || ''}</div>
+                    </div>
+                    <div>
+                        <label class="text-sm font-medium text-gray-600">Tower Number (1\u201399)</label>
+                        <input type="number" id="ap-tower" min="1" max="99" placeholder="e.g. 5"
+                            class="mt-1 w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+                            oninput="updateAPPreview(${portNum})">
+                    </div>
+                    <div>
+                        <label class="text-sm font-medium text-gray-600">Direction</label>
+                        <div class="mt-1 grid grid-cols-4 gap-2" id="ap-direction-btns">
+                            ${['North','South','East','West'].map(d => `
+                                <button onclick="selectDirection('${d.toLowerCase()}')" data-dir="${d.toLowerCase()}"
+                                    class="py-2 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 transition">
+                                    ${d}
+                                </button>
+                            `).join('')}
+                        </div>
+                    </div>
+                    <div id="ap-preview" class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm hidden">
+                        <div class="font-medium text-blue-800 mb-1">Preview</div>
+                        <div class="text-blue-700">
+                            Hostname: <span id="ap-preview-hostname" class="font-mono">—</span><br>
+                            SSID: <span id="ap-preview-ssid" class="font-mono">—</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.getElementById('modal-footer').innerHTML = `
+                <button id="ap-apply-btn" onclick="applyAPMode(${portNum})" disabled
+                    class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-300 disabled:cursor-not-allowed rounded-lg font-medium text-sm text-white">
+                    Apply AP Config
+                </button>
+                <button onclick="openPortModal(${portNum})" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                    Back
+                </button>
+            `;
+            document.getElementById('port-modal').classList.remove('hidden');
+            // Reset state
+            window._apDirection = null;
+        }
+
+        function selectDirection(dir) {
+            window._apDirection = dir;
+            document.querySelectorAll('#ap-direction-btns button').forEach(btn => {
+                const active = btn.dataset.dir === dir;
+                btn.className = active
+                    ? 'py-2 text-sm font-medium rounded-lg border-2 border-blue-500 bg-blue-50 text-blue-700'
+                    : 'py-2 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 transition';
+            });
+            updateAPPreview(selectedPort);
+        }
+
+        function updateAPPreview(portNum) {
+            const tower = parseInt(document.getElementById('ap-tower')?.value);
+            const dir = window._apDirection;
+            const preview = document.getElementById('ap-preview');
+            const btn = document.getElementById('ap-apply-btn');
+            if (!tower || tower < 1 || tower > 99 || !dir) {
+                preview?.classList.add('hidden');
+                if (btn) btn.disabled = true;
+                return;
+            }
+            const pad = String(tower).padStart(2, '0');
+            const hostname = `tw${pad}-${dir}`;
+            const port = ports[portNum];
+            const ssid = port.device_type === 'tachyon' ? dir.toUpperCase() : hostname;
+            document.getElementById('ap-preview-hostname').textContent = hostname;
+            document.getElementById('ap-preview-ssid').textContent = ssid;
+            preview?.classList.remove('hidden');
+            if (btn) btn.disabled = false;
+        }
+
+        async function applyAPMode(portNum) {
+            const tower = parseInt(document.getElementById('ap-tower').value);
+            const direction = window._apDirection;
+            if (!tower || !direction) return;
+
+            const btn = document.getElementById('ap-apply-btn');
+            if (btn) { btn.disabled = true; btn.textContent = 'Applying...'; }
+
+            try {
+                const res = await fetch(`/api/ports/${portNum}/apply-mode`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: 'ap', tower, direction }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    closeModal();
+                } else {
+                    alert(data.detail || 'Failed to apply AP config');
+                    if (btn) { btn.disabled = false; btn.textContent = 'Apply AP Config'; }
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+                if (btn) { btn.disabled = false; btn.textContent = 'Apply AP Config'; }
+            }
+        }
+
+        function openPTPModal(portNum) {
+            selectedPort = portNum;
+            const port = ports[portNum];
+            const vendor = deviceVendors[port.device_type] || deviceVendors.unknown;
+
+            document.getElementById('modal-title').textContent = `Configure as PTP \u2014 Port ${portNum}`;
+            document.getElementById('modal-content').innerHTML = `
+                <div class="space-y-4">
+                    <div class="p-3 bg-gray-50 rounded-lg border border-gray-200">
+                        <div class="font-bold text-lg" style="color: ${vendor.color}">${vendor.name}</div>
+                        <div class="text-sm text-gray-600">${port.device_ip || ''}</div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="text-sm font-medium text-gray-600">My Tower (1\u201399)</label>
+                            <input type="number" id="ptp-my-tower" min="1" max="99" placeholder="e.g. 5"
+                                class="mt-1 w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+                                oninput="updatePTPPreview(${portNum})">
+                        </div>
+                        <div>
+                            <label class="text-sm font-medium text-gray-600">Remote Tower (1\u201399)</label>
+                            <input type="number" id="ptp-remote-tower" min="1" max="99" placeholder="e.g. 12"
+                                class="mt-1 w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900"
+                                oninput="updatePTPPreview(${portNum})">
+                        </div>
+                    </div>
+                    <div id="ptp-preview" class="p-3 bg-purple-50 border border-purple-200 rounded-lg text-sm hidden">
+                        <div class="font-medium text-purple-800 mb-1">Preview</div>
+                        <div class="text-purple-700">
+                            Side: <span id="ptp-preview-side" class="font-mono font-bold">—</span><br>
+                            Hostname: <span id="ptp-preview-hostname" class="font-mono">—</span><br>
+                            SSID: <span id="ptp-preview-ssid" class="font-mono">—</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.getElementById('modal-footer').innerHTML = `
+                <button id="ptp-apply-btn" onclick="applyPTPMode(${portNum})" disabled
+                    class="flex-1 py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-300 disabled:cursor-not-allowed rounded-lg font-medium text-sm text-white">
+                    Apply PTP Config
+                </button>
+                <button onclick="openPortModal(${portNum})" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                    Back
+                </button>
+            `;
+            document.getElementById('port-modal').classList.remove('hidden');
+        }
+
+        function updatePTPPreview(portNum) {
+            const myTower = parseInt(document.getElementById('ptp-my-tower')?.value);
+            const remoteTower = parseInt(document.getElementById('ptp-remote-tower')?.value);
+            const preview = document.getElementById('ptp-preview');
+            const btn = document.getElementById('ptp-apply-btn');
+            if (!myTower || !remoteTower || myTower < 1 || myTower > 99 || remoteTower < 1 || remoteTower > 99 || myTower === remoteTower) {
+                preview?.classList.add('hidden');
+                if (btn) btn.disabled = true;
+                return;
+            }
+            // Side is auto-assigned by backend; show "auto" for now
+            const myPad = String(myTower).padStart(2, '0');
+            const remotePad = String(remoteTower).padStart(2, '0');
+            const ssid = `tw${myPad}-tw${remotePad}`;
+            document.getElementById('ptp-preview-side').textContent = 'auto (A or B)';
+            document.getElementById('ptp-preview-hostname').textContent = `tw${myPad}?-tw${remotePad}`;
+            document.getElementById('ptp-preview-ssid').textContent = ssid;
+            preview?.classList.remove('hidden');
+            if (btn) btn.disabled = false;
+        }
+
+        async function applyPTPMode(portNum) {
+            const myTower = parseInt(document.getElementById('ptp-my-tower').value);
+            const remoteTower = parseInt(document.getElementById('ptp-remote-tower').value);
+            if (!myTower || !remoteTower) return;
+
+            const btn = document.getElementById('ptp-apply-btn');
+            if (btn) { btn.disabled = true; btn.textContent = 'Applying...'; }
+
+            try {
+                const res = await fetch(`/api/ports/${portNum}/apply-mode`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: 'ptp', my_tower: myTower, remote_tower: remoteTower }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    closeModal();
+                } else {
+                    alert(data.detail || 'Failed to apply PTP config');
+                    if (btn) { btn.disabled = false; btn.textContent = 'Apply PTP Config'; }
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+                if (btn) { btn.disabled = false; btn.textContent = 'Apply PTP Config'; }
+            }
         }
 
         function openCredentialModal(portNum) {

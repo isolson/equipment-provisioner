@@ -24,6 +24,7 @@ from .detector import DeviceDetector, DiscoveredDevice
 from .fingerprint import identify_device, DeviceType
 from .firmware import FirmwareManager
 from .config_store import init_store, get_store
+from .mode_config import init_mode_config_manager
 from .gpio import init_gpio, cleanup_gpio, get_gpio
 from .handler_manager import HandlerManager
 from .notifier import init_notifier, get_notifier
@@ -82,6 +83,9 @@ class Provisioner:
         # Initialize local config/firmware store
         store = init_store(self.config.data.local_path)
         store.ensure_directories()
+
+        # Initialize mode config manager (AP/PTP template loading)
+        init_mode_config_manager(str(store.templates_path))
 
         # Initialize firmware manager
         self.firmware_manager = FirmwareManager(

@@ -14,10 +14,16 @@
 | WebSocket          | File/Put, SetPackage (streaming RPCs) | `ws://<ip>/gnoi.file.File/Put`, etc.      |
 
 - **WebSocket sub-protocol**: `grpc-websockets`
-- **gRPC framing**: 5-byte header per message — `[flag:1][length:4 BE]`
-  - `0x00` = data frame
-  - `0x80` = trailer frame (text: `grpc-status: N\r\n`)
-- **End-of-stream (half-close)**: single byte `0x01` sent after the last data message
+- **WebSocket frame prefix**: Each client→server gRPC message is prefixed with a
+  single byte before the standard gRPC 5-byte header:
+  - `0x00` = data frame (followed by `[flag:1][length:4 BE][protobuf]`)
+  - `0x01` = end-of-stream / half-close (standalone 1-byte message)
+- **Server→client responses** use standard gRPC framing split across pairs of
+  WebSocket binary messages: first the 5-byte header (`[flag:1][length:4 BE]`),
+  then the payload in a separate WS message.
+  - `flag 0x00` = data frame
+  - `flag 0x80` = trailer frame (text: `grpc-status: N\r\n`)
+- **All WebSocket messages are binary** (opcode 2), not text
 
 ---
 
@@ -66,12 +72,12 @@ user confirm gap ~2min, reboot + recovery ~2min).
 
 | Msg # | Direction | Content |
 |-------|-----------|---------|
-| 0     | send      | Auth metadata (binary, 109 bytes) |
-| 1     | send      | gRPC frame: **PutRequest.open** (filename only, no permissions) |
-| 2…N   | send      | gRPC frames: **PutRequest.contents** (64 KB chunks) |
-| N+1   | send      | gRPC frame: **PutRequest.hash** (MD5, hash_type=3) |
-| N+2   | send      | EOS `0x01` |
-| —     | recv      | Response headers, PutResponse (filename echo), trailers `grpc-status: 0` |
+| 0     | send      | Auth metadata (binary, 109 bytes, NO `0x00` prefix — raw header text ending with `\r\n`) |
+| 1     | send      | `0x00` + gRPC frame: **PutRequest.open** (filename only, no permissions) — 41 bytes |
+| 2…N   | send      | `0x00` + gRPC frames: **PutRequest.contents** (64 KB chunks) — 65546 bytes each |
+| N+1   | send      | `0x00` + gRPC frame: **PutRequest.hash** (MD5, hash_type=3) — 28 bytes |
+| N+2   | send      | EOS `0x01` (standalone byte, no gRPC header) |
+| —     | recv      | 3 binary WS message pairs: response headers, PutResponse (filename echo), trailers `grpc-status: 0` |
 
 #### PutRequest.open protobuf (msg 1)
 
@@ -279,3 +285,12 @@ target flips to the other bank (A/B alternation).
 5. **Filename is bare** — `SYS.A3...tbn`, not `/tmp/SYS.A3...tbn`.
 6. **WebSocket auth is binary** — first WS message must be binary (opcode 2),
    not text (opcode 1), containing the credential headers.
+7. **WebSocket gRPC data frames need `0x00` prefix** — unlike gRPC-web over
+   HTTP POST (5-byte header), the `grpc-websockets` protocol prepends `0x00`
+   before each gRPC frame. Missing this byte causes "Cannot write to closing
+   transport" as the server rejects the malformed frames.
+8. **Auth metadata needs trailing `\r\n`** — the metadata string must end with
+   `\r\n` after the last header line (109 bytes total for default creds).
+9. **Server responses are binary pairs** — the server sends each gRPC frame
+   split across two WebSocket binary messages (5-byte header, then payload).
+   There are no TEXT WebSocket frames in the response.

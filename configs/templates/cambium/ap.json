@@ -1,0 +1,6 @@
+{
+  "_comment": "Cambium ePMP AP config template. Values with {{placeholders}} are auto-replaced. Add real AP-specific settings from a device config export.",
+  "wirelessInterfaceSSID": "{{ssid}}",
+  "snmpSystemName": "{{hostname}}",
+  "systemConfigDeviceName": "{{hostname}}"
+}
