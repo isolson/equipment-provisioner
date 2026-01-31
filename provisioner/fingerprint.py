@@ -210,7 +210,7 @@ class DeviceFingerprinter:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    stdout, _ = await proc.communicate()
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
                     # Any HTTP response (even 4xx/5xx) means port is open
                     if proc.returncode == 0 or stdout:
                         return port
@@ -299,7 +299,7 @@ class DeviceFingerprinter:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    stdout, stderr = await proc.communicate()
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout + 5)
 
                     if proc.returncode == 0 and stdout:
                         response = stdout.decode("utf-8", errors="ignore")
@@ -348,7 +348,7 @@ class DeviceFingerprinter:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    stdout, stderr = await proc.communicate()
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout + 5)
                     logger.debug(f"Tachyon API probe result: rc={proc.returncode}, stdout={stdout[:200] if stdout else None}")
 
                     if proc.returncode == 0 and stdout:
@@ -398,7 +398,7 @@ class DeviceFingerprinter:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout + 5)
 
             if proc.returncode == 0 and stdout:
                 response = stdout.decode("utf-8", errors="ignore")
@@ -564,7 +564,7 @@ class DeviceFingerprinter:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    stdout, _ = await proc.communicate()
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
 
                     if proc.returncode == 0 and stdout:
                         content = stdout.decode("utf-8", errors="ignore")

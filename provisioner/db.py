@@ -1,6 +1,8 @@
 """SQLite database for provisioning history and logging."""
 
 import asyncio
+import contextlib
+import logging
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -8,6 +10,8 @@ from typing import Optional, List
 
 import aiosqlite
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 class ProvisioningStatus(str, Enum):
@@ -43,20 +47,43 @@ class ProvisioningRecord(BaseModel):
 class Database:
     """Async SQLite database manager."""
 
+    # Timeout for acquiring the database lock (seconds)
+    LOCK_TIMEOUT = 30
+
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._connection: Optional[aiosqlite.Connection] = None
         self._lock = asyncio.Lock()
 
+    @contextlib.asynccontextmanager
+    async def _timed_lock(self):
+        """Acquire the database lock with a timeout to prevent deadlocks."""
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=self.LOCK_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error(f"Database lock acquisition timed out after {self.LOCK_TIMEOUT}s")
+            raise
+        try:
+            yield
+        finally:
+            self._lock.release()
+
     async def connect(self) -> None:
         """Connect to the database and create tables if needed."""
         # Ensure directory exists
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        db_file = Path(self.db_path)
+        db_file.parent.mkdir(parents=True, exist_ok=True)
 
         self._connection = await aiosqlite.connect(self.db_path)
         self._connection.row_factory = aiosqlite.Row
 
         await self._create_tables()
+
+        # Set restrictive permissions on the database file (owner-only read/write)
+        try:
+            db_file.chmod(0o600)
+        except OSError:
+            pass  # May fail on some filesystems
 
     async def close(self) -> None:
         """Close the database connection."""
@@ -66,7 +93,7 @@ class Database:
 
     async def _create_tables(self) -> None:
         """Create database tables if they don't exist."""
-        async with self._lock:
+        async with self._timed_lock():
             await self._connection.execute("""
                 CREATE TABLE IF NOT EXISTS provisioning_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,7 +150,7 @@ class Database:
 
     async def create_job(self, record: ProvisioningRecord) -> int:
         """Create a new provisioning job record."""
-        async with self._lock:
+        async with self._timed_lock():
             cursor = await self._connection.execute("""
                 INSERT INTO provisioning_jobs
                 (port_number, device_type, device_model, mac_address, ip_address, serial_number,
@@ -164,7 +191,7 @@ class Database:
         set_clause = ", ".join(f"{k} = ?" for k in kwargs.keys())
         values = list(kwargs.values()) + [job_id]
 
-        async with self._lock:
+        async with self._timed_lock():
             await self._connection.execute(
                 f"UPDATE provisioning_jobs SET {set_clause} WHERE id = ?",
                 values
@@ -173,7 +200,7 @@ class Database:
 
     async def get_job(self, job_id: int) -> Optional[ProvisioningRecord]:
         """Get a provisioning job by ID."""
-        async with self._lock:
+        async with self._timed_lock():
             cursor = await self._connection.execute(
                 "SELECT * FROM provisioning_jobs WHERE id = ?",
                 (job_id,)
@@ -186,7 +213,7 @@ class Database:
 
     async def get_recent_jobs(self, limit: int = 50) -> List[ProvisioningRecord]:
         """Get recent provisioning jobs."""
-        async with self._lock:
+        async with self._timed_lock():
             cursor = await self._connection.execute(
                 "SELECT * FROM provisioning_jobs ORDER BY started_at DESC LIMIT ?",
                 (limit,)
@@ -196,7 +223,7 @@ class Database:
 
     async def get_jobs_by_mac(self, mac_address: str) -> List[ProvisioningRecord]:
         """Get all provisioning jobs for a MAC address."""
-        async with self._lock:
+        async with self._timed_lock():
             cursor = await self._connection.execute(
                 "SELECT * FROM provisioning_jobs WHERE mac_address = ? ORDER BY started_at DESC",
                 (mac_address,)
@@ -216,7 +243,7 @@ class Database:
         """Update or insert device inventory record."""
         now = datetime.now().isoformat()
 
-        async with self._lock:
+        async with self._timed_lock():
             # Check if device exists
             cursor = await self._connection.execute(
                 "SELECT mac_address FROM device_inventory WHERE mac_address = ?",

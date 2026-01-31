@@ -346,7 +346,7 @@ class PortManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
 
         if check and proc.returncode != 0:
             raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{stderr.decode()}")
@@ -579,9 +579,9 @@ class PortManager:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await proc.wait()
+            await asyncio.wait_for(proc.wait(), timeout=10)
             return proc.returncode == 0
-        except Exception:
+        except (asyncio.TimeoutError, Exception):
             return False
 
     async def _identify_device_type(
@@ -623,7 +623,7 @@ class PortManager:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    stdout, stderr = await proc.communicate()
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
 
                     if proc.returncode == 0 and stdout:
                         text = stdout.decode("utf-8", errors="ignore")

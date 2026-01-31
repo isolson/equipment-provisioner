@@ -136,11 +136,37 @@ class LoggingConfig(BaseModel):
     db: str = "/var/lib/provisioner/history.db"
 
 
+class FirmwareSourceConfig(BaseModel):
+    """Configuration for a single vendor firmware source."""
+    enabled: bool = True
+    check_interval: int = Field(default=3600, ge=300, le=86400)  # seconds
+    auto_download: bool = False  # False = notify only, True = auto-download
+    channel: str = "release"  # "release", "beta", or "all"
+    include_beta: bool = False  # Convenience toggle: if true, overrides channel to "all"
+    models: list = Field(default_factory=list)  # Empty = all models
+
+    @property
+    def effective_channel(self) -> str:
+        """Resolve the effective channel, respecting include_beta toggle."""
+        if self.include_beta:
+            return "all"
+        return self.channel
+
+
+class FirmwareCheckerConfig(BaseModel):
+    """Automatic firmware checking configuration."""
+    enabled: bool = False  # Disabled by default — opt-in
+    default_check_interval: int = Field(default=3600, ge=300)  # 1 hour
+    default_auto_download: bool = False
+    sources: Dict[str, FirmwareSourceConfig] = Field(default_factory=dict)
+
+
 class FirmwareConfig(BaseModel):
     """Firmware update configuration."""
     dual_bank_update: bool = True
     verify_after_reboot: bool = True
     reboot_wait_timeout: int = Field(default=180, ge=60, le=600)
+    checker: FirmwareCheckerConfig = Field(default_factory=FirmwareCheckerConfig)
 
 
 class AnalyticsConfig(BaseModel):

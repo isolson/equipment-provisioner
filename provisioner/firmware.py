@@ -56,6 +56,13 @@ class FirmwareManager:
 
         logger.warning("No firmware manifest found")
 
+    def reload_manifest(self) -> None:
+        """Reload the firmware manifest from disk.
+
+        Called by FirmwareChecker after downloading new firmware files.
+        """
+        self._load_manifest()
+
     def get_latest_version(self, device_type: str, model: Optional[str] = None) -> Optional[str]:
         """Get the latest firmware version for a device type.
 

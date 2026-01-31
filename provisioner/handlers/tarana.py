@@ -842,7 +842,9 @@ class TaranaHandler(BaseHandler):
                 url
             ]
 
-            logger.info(f"Curl test: {' '.join(cmd[:10])}...")
+            # Log command without credential headers
+            safe_cmd = [c for i, c in enumerate(cmd) if not (cmd[max(0,i-1)] == "-H" and ("user:" in c or "password:" in c))]
+            logger.info(f"Curl test: {' '.join(safe_cmd[:10])}...")
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1347,6 +1349,12 @@ class TaranaHandler(BaseHandler):
             except asyncio.TimeoutError:
                 logger.error("Firmware installation request timed out")
                 return False
+            except (aiohttp.ClientError, ConnectionError, OSError) as e:
+                # Connection drop after sending SetPackage likely means the
+                # device accepted the firmware and is rebooting.  The caller
+                # will wait_for_reboot() and verify the bank version.
+                logger.info(f"SetPackage connection lost (device likely rebooting): {e}")
+                return True
             except Exception as e:
                 logger.error(f"Failed to initiate firmware installation: {e}")
                 return False
@@ -1393,6 +1401,11 @@ class TaranaHandler(BaseHandler):
             await ws.send_bytes(b'\x01')
 
             # Read response (same binary-pair format as File/Put).
+            # The device may reboot automatically after accepting SetPackage
+            # with activate=True, which drops the WebSocket connection before
+            # we receive a clean grpc-status response.  Treat connection drops
+            # during the response phase as success — the request was already
+            # sent and the reboot/verify phases will confirm the outcome.
             logger.info(f"Waiting for SetPackage response from {self.ip}...")
             try:
                 for _ in range(10):
@@ -1420,6 +1433,11 @@ class TaranaHandler(BaseHandler):
                         break
             except asyncio.TimeoutError:
                 logger.warning(f"SetPackage response timeout (may still be OK)")
+            except (aiohttp.ClientError, ConnectionError, OSError):
+                # Device likely rebooted after accepting the firmware —
+                # connection drop is expected when activate=True.
+                logger.info(f"SetPackage connection dropped on {self.ip} "
+                            f"(device likely rebooting after firmware activate)")
 
             return True
 

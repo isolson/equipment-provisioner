@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import json
 import logging
+import logging.handlers
 import signal
 import sys
 from datetime import datetime
@@ -28,6 +29,7 @@ from .mode_config import init_mode_config_manager
 from .gpio import init_gpio, cleanup_gpio, get_gpio
 from .handler_manager import HandlerManager
 from .notifier import init_notifier, get_notifier
+from .firmware_checker import init_firmware_checker, get_firmware_checker
 from .port_manager import PortManager, init_port_manager, DeviceLinkLocalIP, ManagementConfig
 from . import telemetry
 
@@ -93,6 +95,17 @@ class Provisioner:
             firmware_path=str(store.firmware_path),
             manifest_path=str(store.local_path / "manifest.yaml"),
         )
+
+        # Initialize firmware checker (background auto-update checking)
+        self.firmware_checker = None
+        if self.config.firmware.checker.enabled:
+            self.firmware_checker = init_firmware_checker(
+                config=self.config.firmware.checker.model_dump(),
+                firmware_manager=self.firmware_manager,
+                firmware_path=store.firmware_path,
+                notifier=get_notifier(),
+            )
+            logger.info("Firmware checker initialized")
 
         # Initialize handler manager with credentials
         credentials = {
@@ -189,6 +202,10 @@ class Provisioner:
             console.print(f"[green]Provisioner active on {self.config.network.interface}[/green]")
             console.print(f"[dim]Mode: Simple (subnet {self.config.simple_mode.subnet})[/dim]")
 
+        # Start firmware checker if enabled
+        if self.firmware_checker:
+            tasks.append(asyncio.create_task(self.firmware_checker.start()))
+
         console.print("[dim]Waiting for devices...[/dim]")
 
         try:
@@ -206,6 +223,9 @@ class Provisioner:
         if self.port_manager:
             await self.port_manager.stop_monitoring()
             await self.port_manager.cleanup()
+
+        if self.firmware_checker:
+            await self.firmware_checker.stop()
 
         cleanup_gpio()
         await telemetry.close()
@@ -770,7 +790,11 @@ def setup_logging(level: str = "INFO", log_file: Optional[str] = None) -> None:
 
     if log_file:
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file))
+        handlers.append(logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=50 * 1024 * 1024,  # 50 MB per file
+            backupCount=3,
+        ))
 
     logging.basicConfig(
         level=getattr(logging, level.upper()),

@@ -43,13 +43,13 @@ class ConnectionManager:
     async def broadcast(self, message: dict):
         """Broadcast a message to all connected clients."""
         disconnected = []
-        for connection in self.active_connections:
+        for connection in list(self.active_connections):
             try:
                 await connection.send_json(message)
             except Exception as e:
                 logger.debug(f"Failed to broadcast to client: {e}")
                 disconnected.append(connection)
-        
+
         # Clean up disconnected clients
         for conn in disconnected:
             self.disconnect(conn)
@@ -98,6 +98,7 @@ class ConnectionManager:
     
     async def _status_broadcast_loop(self, provisioner, interval: float):
         """Periodically broadcast status updates."""
+        _cleanup_counter = 0
         while self._running:
             try:
                 if self.active_connections and provisioner:
@@ -114,9 +115,24 @@ class ConnectionManager:
                             },
                             "timestamp": datetime.now().isoformat(),
                         })
-                
+
+                # Every 30 cycles (~60s), proactively prune dead connections
+                _cleanup_counter += 1
+                if _cleanup_counter >= 30:
+                    _cleanup_counter = 0
+                    stale = []
+                    for conn in list(self.active_connections):
+                        try:
+                            await conn.send_json({"type": "ping"})
+                        except Exception:
+                            stale.append(conn)
+                    for conn in stale:
+                        self.disconnect(conn)
+                    if stale:
+                        logger.info(f"Cleaned up {len(stale)} stale WebSocket connections")
+
                 await asyncio.sleep(interval)
-                
+
             except asyncio.CancelledError:
                 break
             except Exception as e:

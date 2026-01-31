@@ -651,18 +651,20 @@ class CambiumHandler(BaseHandler):
                 "-c", self._cookie_file, "-b", self._cookie_file,
                 "-X", "POST",
                 "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", f"username={username}&password={password}",
+                "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
                 login_url,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
 
-            logger.info(f"CGI login curl returncode: {proc.returncode}, stdout len: {len(stdout) if stdout else 0}, stderr: {stderr.decode() if stderr else ''}")
+            logger.info(f"CGI login curl returncode: {proc.returncode}, stdout len: {len(stdout) if stdout else 0}")
+            if stderr:
+                logger.debug(f"CGI login curl stderr length: {len(stderr)}")
 
             if proc.returncode == 0 and stdout:
                 response = stdout.decode("utf-8", errors="ignore")
-                logger.info(f"CGI login response: {response[:300]}")
+                logger.debug(f"CGI login response length: {len(response)}")
 
                 # Check for explicit credential rejection
                 rejection_patterns = [
@@ -1655,7 +1657,7 @@ class CambiumHandler(BaseHandler):
                     "--interface", self.interface,
                     "-c", cookie_path, "-b", cookie_path,
                     "-X", "POST",
-                    "-d", f"username={username}&password={password}",
+                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
                     login_url,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -1846,7 +1848,7 @@ class CambiumHandler(BaseHandler):
                     "--interface", self.interface,
                     "-c", cookie_path, "-b", cookie_path,
                     "-X", "POST",
-                    "-d", f"username={username}&password={password}",
+                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
                     login_url,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -2204,7 +2206,7 @@ class CambiumHandler(BaseHandler):
                     "--interface", self.interface,
                     "-c", cookie_path, "-b", cookie_path,
                     "-X", "POST",
-                    "-d", f"username={username}&password={password}",
+                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
                     login_url,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -2466,7 +2468,7 @@ class CambiumHandler(BaseHandler):
                 "-c", self._cookie_file, "-b", self._cookie_file,
                 "-X", "POST",
                 "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", f"username={username}&password={password}",
+                "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
                 login_url,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

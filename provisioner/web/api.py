@@ -326,6 +326,7 @@ async def get_jobs(
     status: Optional[str] = None,
 ):
     """Get provisioning job history."""
+    limit = min(max(limit, 1), 200)
     try:
         from ..db import get_db
         db = await get_db()
@@ -566,10 +567,35 @@ def _get_data_path(request: Request) -> Path:
     return Path("/var/lib/provisioner/repo")
 
 
+VALID_DEVICE_TYPES = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
+
+
+def _validate_device_type(device_type: str) -> str:
+    """Validate device_type is a known type. Raises HTTPException if not."""
+    sanitized = os.path.basename(device_type).lower().strip()
+    if sanitized not in VALID_DEVICE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
+    return sanitized
+
+
+def _sanitize_path_component(name: str) -> str:
+    """Sanitize a single path component (filename or directory name).
+
+    Strips directory traversal and null bytes.
+    """
+    name = os.path.basename(name)
+    name = name.replace("\x00", "")
+    if not name or name in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid path component")
+    return name
+
+
 def _sanitize_filename(filename: str) -> str:
     """Sanitize filename by removing spaces, parentheses, and other problematic chars."""
     # Get just the filename without path
     name = os.path.basename(filename)
+    # Remove null bytes
+    name = name.replace("\x00", "")
     # Remove parentheses and their contents like "(1)"
     name = re.sub(r'\s*\([^)]*\)', '', name)
     # Replace spaces with nothing
@@ -641,6 +667,7 @@ async def upload_firmware(
     device_type: str = Form(...),
 ):
     """Upload a firmware file."""
+    device_type = _validate_device_type(device_type)
     data_path = _get_data_path(request)
     firmware_path = data_path / "firmware" / device_type
     firmware_path.mkdir(parents=True, exist_ok=True)
@@ -680,6 +707,7 @@ async def download_firmware_from_url(
     body: FirmwareUrlRequest,
 ):
     """Download firmware from a URL."""
+    device_type = _validate_device_type(body.device_type)
     data_path = _get_data_path(request)
 
     # Determine filename from URL if not provided
@@ -690,9 +718,11 @@ async def download_firmware_from_url(
             raise HTTPException(status_code=400, detail="Could not determine filename from URL")
 
     # Sanitize
-    safe_filename = os.path.basename(filename)
+    safe_filename = _sanitize_filename(filename)
+    if not safe_filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
 
-    firmware_path = data_path / "firmware" / body.device_type
+    firmware_path = data_path / "firmware" / device_type
     firmware_path.mkdir(parents=True, exist_ok=True)
     dest_path = firmware_path / safe_filename
 
@@ -714,7 +744,7 @@ async def download_firmware_from_url(
             "success": True,
             "message": f"Firmware downloaded: {safe_filename}",
             "firmware": {
-                "device_type": body.device_type,
+                "device_type": device_type,
                 "filename": safe_filename,
                 "version": _extract_version_from_filename(safe_filename),
                 "size": stat.st_size,
@@ -736,6 +766,8 @@ async def delete_firmware(
     filename: str,
 ):
     """Delete a firmware file."""
+    device_type = _validate_device_type(device_type)
+    filename = _sanitize_path_component(filename)
     data_path = _get_data_path(request)
     firmware_path = data_path / "firmware" / device_type / filename
 
@@ -748,6 +780,128 @@ async def delete_firmware(
     except Exception as e:
         logger.error(f"Failed to delete firmware: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Firmware Checker Endpoints (auto-update checking)
+# ============================================================================
+
+
+class FirmwareDownloadRequest(BaseModel):
+    """Request to download a specific discovered firmware."""
+    vendor: str
+    model: str
+    version: str
+
+
+@router.get("/firmware/checker-status")
+async def firmware_checker_status(request: Request):
+    """Get firmware auto-checker status."""
+    from ..firmware_checker import get_firmware_checker
+
+    checker = get_firmware_checker()
+    if not checker:
+        return {"enabled": False, "running": False, "sources": {}, "available_updates": []}
+
+    return checker.get_status()
+
+
+@router.post("/firmware/check-now")
+async def firmware_check_now(request: Request, vendor: Optional[str] = None):
+    """Manually trigger firmware check for new versions.
+
+    Optionally filter by vendor (e.g., ?vendor=tachyon).
+    """
+    from ..firmware_checker import get_firmware_checker
+
+    checker = get_firmware_checker()
+    if not checker:
+        raise HTTPException(status_code=503, detail="Firmware checker not enabled")
+
+    results = await checker.check_now(vendor)
+    return {
+        "updates_found": len(results),
+        "updates": [
+            {
+                "vendor": fw.vendor,
+                "model": fw.model,
+                "version": fw.version,
+                "filename": fw.filename,
+                "download_url": fw.download_url,
+                "channel": fw.channel,
+            }
+            for fw in results
+        ],
+    }
+
+
+@router.post("/firmware/download-update")
+async def firmware_download_update(
+    request: Request,
+    body: FirmwareDownloadRequest,
+):
+    """Download a specific firmware that was found during check."""
+    from ..firmware_checker import get_firmware_checker
+
+    checker = get_firmware_checker()
+    if not checker:
+        raise HTTPException(status_code=503, detail="Firmware checker not enabled")
+
+    success = await checker.download_specific(body.vendor, body.model, body.version)
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Firmware not found in available updates: {body.vendor}/{body.model}/{body.version}",
+        )
+
+    return {"success": True, "message": f"Downloaded {body.vendor} {body.model} {body.version}"}
+
+
+class ChannelUpdateRequest(BaseModel):
+    """Request to update firmware channel for a vendor source."""
+    vendor: str
+    channel: str  # "release", "beta", or "all"
+
+
+@router.post("/firmware/set-channel")
+async def firmware_set_channel(request: Request, body: ChannelUpdateRequest):
+    """Set the firmware channel for a vendor source at runtime.
+
+    Channel options:
+      - "release": stable releases only
+      - "beta": beta releases only
+      - "all": both stable and beta
+    """
+    from ..firmware_checker import get_firmware_checker
+
+    checker = get_firmware_checker()
+    if not checker:
+        raise HTTPException(status_code=503, detail="Firmware checker not enabled")
+
+    if body.channel not in ("release", "beta", "all"):
+        raise HTTPException(status_code=400, detail="Channel must be 'release', 'beta', or 'all'")
+
+    source = checker._sources.get(body.vendor)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"No source configured for vendor: {body.vendor}")
+
+    # Update the source config in-memory
+    if isinstance(source.config, dict):
+        source.config["channel"] = body.channel
+        source.config["include_beta"] = body.channel in ("beta", "all")
+    else:
+        # Pydantic model — replace with updated dict
+        config_dict = source.config.model_dump()
+        config_dict["channel"] = body.channel
+        config_dict["include_beta"] = body.channel in ("beta", "all")
+        source.config = config_dict
+
+    return {
+        "success": True,
+        "vendor": body.vendor,
+        "channel": body.channel,
+        "message": f"Channel set to '{body.channel}' for {body.vendor}",
+    }
 
 
 # ============================================================================
@@ -838,6 +992,8 @@ async def get_config_content(
     filename: str,
 ):
     """Get the content of a config file."""
+    device_type = _sanitize_path_component(device_type)
+    filename = _sanitize_path_component(filename)
     data_path = _get_data_path(request)
 
     if config_type == "template":
@@ -880,6 +1036,7 @@ async def upload_config(
     device_type: str = Form(...),  # Required: cambium, mikrotik, tachyon, tarana
 ):
     """Upload a config file."""
+    device_type = _validate_device_type(device_type)
     data_path = _get_data_path(request)
 
     if config_type == "template":
@@ -939,6 +1096,8 @@ async def update_config_content(
     body: dict,
 ):
     """Update the content of a config file."""
+    device_type = _sanitize_path_component(device_type)
+    filename = _sanitize_path_component(filename)
     data_path = _get_data_path(request)
 
     if config_type == "template":
@@ -987,6 +1146,8 @@ async def delete_config(
     filename: str,
 ):
     """Delete a config file."""
+    device_type = _sanitize_path_component(device_type)
+    filename = _sanitize_path_component(filename)
     logger.info(f"DELETE config: type={config_type}, device={device_type}, file={filename}")
 
     data_path = _get_data_path(request)
@@ -1073,9 +1234,6 @@ BUILTIN_CREDENTIALS = {
         {"username": "ubnt", "password": "ubnt"},
     ],
 }
-
-# Valid device types
-VALID_DEVICE_TYPES = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
 
 
 def _get_credentials_path(request: Request) -> Path:

@@ -106,6 +106,28 @@ firmware:
   # Seconds to wait for device to reboot
   reboot_wait_timeout: 180
 
+  # Automatic firmware checking and downloading
+  checker:
+    enabled: false  # Set to true to enable background firmware checks
+    default_check_interval: 3600  # Check every hour (seconds)
+    default_auto_download: false  # false = notify only, true = auto-download
+
+    sources:
+      tachyon:
+        enabled: true
+        channel: release      # "release", "beta", or "all"
+        include_beta: false   # Shortcut: set true to include beta firmware
+        # models: []  # Empty = all models (tna-30x, tna-303l, tns-100)
+
+      ubiquiti:
+        enabled: false  # Stub — not yet implemented
+        channel: release
+        include_beta: false
+
+      cambium:
+        enabled: false  # Stub — not yet implemented
+        include_beta: false
+
 display:
   # Seconds of no connected devices before display sleeps (0 = disabled)
   sleep_timeout: 300

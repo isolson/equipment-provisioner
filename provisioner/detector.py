@@ -181,11 +181,15 @@ class DeviceDetector:
             ether = Ether(dst="ff:ff:ff:ff:ff:ff")
             packet = ether / arp
 
-            # Send and receive
+            # Send and receive (scapy has its own 3s timeout, but add asyncio
+            # safety timeout to prevent thread pool exhaustion if kernel hangs)
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: srp(packet, timeout=3, iface=self.interface, verbose=False)[0]
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: srp(packet, timeout=3, iface=self.interface, verbose=False)[0]
+                ),
+                timeout=15,
             )
 
             for sent, received in result:
@@ -232,7 +236,7 @@ class DeviceDetector:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            stdout, _ = await proc.communicate()
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
 
             for line in stdout.decode().splitlines():
                 parts = line.split()
@@ -259,9 +263,9 @@ class DeviceDetector:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await proc.wait()
+            await asyncio.wait_for(proc.wait(), timeout=5)
             return proc.returncode == 0
-        except Exception:
+        except (asyncio.TimeoutError, Exception):
             return False
 
     def _is_in_subnet(self, ip: str) -> bool:

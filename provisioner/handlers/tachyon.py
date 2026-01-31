@@ -372,13 +372,13 @@ class TachyonHandler(BaseHandler):
 
                 if proc.returncode == 0:
                     response = stdout.decode("utf-8", errors="ignore")
-                    logger.info(f"Tachyon login response: {response[:200]}")
+                    logger.info(f"Tachyon login response length: {len(response)}")
 
                     # Parse JSON response to check for errors
                     json_data = None
                     try:
                         json_data = json.loads(response)
-                        logger.debug(f"Parsed login JSON: {json_data}")
+                        logger.debug(f"Parsed login JSON keys: {list(json_data.keys()) if isinstance(json_data, dict) else type(json_data).__name__}")
                     except json.JSONDecodeError as e:
                         logger.warning(f"Failed to parse login JSON: {e}")
 
@@ -403,7 +403,7 @@ class TachyonHandler(BaseHandler):
                     logger.info(f"Reading cookies from {cookie_file}")
                     with open(cookie_file, 'r') as f:
                         cookie_content = f.read()
-                    logger.debug(f"Cookie file content: {cookie_content}")
+                    logger.debug(f"Cookie file lines: {len(cookie_content.splitlines())}")
 
                     for line in cookie_content.split("\n"):
                         line = line.strip()
@@ -412,11 +412,11 @@ class TachyonHandler(BaseHandler):
                             if len(parts) >= 7:
                                 # Cookie jar format: domain, flag, path, secure, expiry, name, value
                                 self._cookies[parts[5]] = parts[6]
-                                logger.info(f"Found cookie: {parts[5]}={parts[6][:30]}...")
+                                logger.info(f"Found cookie: {parts[5]}")
 
                     # Extract token from cookies
                     self._api_token = self._cookies.get("token")
-                    logger.info(f"Extracted token: {self._api_token[:30] if self._api_token else 'None'}")
+                    logger.info(f"Extracted token: {'present' if self._api_token else 'None'}")
 
                     if not self._api_token:
                         self.login_error = "Invalid credentials - no session token received"
@@ -425,7 +425,7 @@ class TachyonHandler(BaseHandler):
 
                     self._connected = True
                     self._use_curl = True
-                    logger.info(f"Connected to Tachyon at {self.ip} via {self.interface} (token: {self._api_token[:20]}...)")
+                    logger.info(f"Connected to Tachyon at {self.ip} via {self.interface} (token: present)")
                     return True
                 else:
                     self.login_error = f"Connection failed: {stderr.decode()}"
