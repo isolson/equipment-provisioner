@@ -96,16 +96,14 @@ class Provisioner:
             manifest_path=str(store.local_path / "manifest.yaml"),
         )
 
-        # Initialize firmware checker (background auto-update checking)
-        self.firmware_checker = None
-        if self.config.firmware.checker.enabled:
-            self.firmware_checker = init_firmware_checker(
-                config=self.config.firmware.checker.model_dump(),
-                firmware_manager=self.firmware_manager,
-                firmware_path=store.firmware_path,
-                notifier=get_notifier(),
-            )
-            logger.info("Firmware checker initialized")
+        # Always initialize firmware checker so it can be toggled via API
+        self.firmware_checker = init_firmware_checker(
+            config=self.config.firmware.checker.model_dump(),
+            firmware_manager=self.firmware_manager,
+            firmware_path=store.firmware_path,
+            notifier=get_notifier(),
+        )
+        logger.info("Firmware checker initialized (enabled=%s)", self.config.firmware.checker.enabled)
 
         # Initialize handler manager with credentials
         credentials = {
@@ -202,8 +200,8 @@ class Provisioner:
             console.print(f"[green]Provisioner active on {self.config.network.interface}[/green]")
             console.print(f"[dim]Mode: Simple (subnet {self.config.simple_mode.subnet})[/dim]")
 
-        # Start firmware checker if enabled
-        if self.firmware_checker:
+        # Start firmware checker if enabled in config
+        if self.firmware_checker and self.config.firmware.checker.enabled:
             tasks.append(asyncio.create_task(self.firmware_checker.start()))
 
         console.print("[dim]Waiting for devices...[/dim]")
