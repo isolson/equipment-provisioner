@@ -75,6 +75,15 @@ def create_app(
             "title": title,
         })
 
+    # Firmware management page
+    @app.get("/firmware", response_class=HTMLResponse)
+    async def firmware_page(request: Request):
+        """Serve the firmware management page."""
+        return templates.TemplateResponse("firmware.html", {
+            "request": request,
+            "title": title,
+        })
+
     @app.get("/health")
     async def health_check():
         """Health check endpoint."""

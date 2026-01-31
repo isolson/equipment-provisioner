@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Freshdesk article URLs for each product line
 FIRMWARE_PAGES = {
     "tna-30x": "https://tachyon-networks.freshdesk.com/support/solutions/articles/67000710575-tna-30x-firmware-releases",
-    "tna-303l": "https://tachyon-networks.freshdesk.com/support/solutions/articles/67000745898-tna-303l-firmware-releases",
+    "tna-303l": "https://tachyon-networks.freshdesk.com/support/solutions/articles/67000745898",
     "tns-100": "https://tachyon-networks.freshdesk.com/support/solutions/articles/67000719270-tns-100-firmware-releases",
 }
 
@@ -62,11 +62,12 @@ class TachyonFirmwareSource(BaseFirmwareSource):
         if hasattr(self.config, "effective_channel"):
             channel = self.config.effective_channel
         else:
-            # Dict config: check include_beta toggle, then fall back to channel
-            if self.config.get("include_beta", False):
-                channel = "all"
-            else:
-                channel = self.config.get("channel", "release")
+            channel = self.config.get("channel", "release")
+            if channel == "all":
+                logger.warning("Firmware channel 'all' is deprecated; using 'release'")
+                channel = "release"
+            if channel not in ("release", "beta"):
+                channel = "release"
         model_filter = self.config.get("models", []) if isinstance(self.config, dict) else (self.config.models if hasattr(self.config, "models") else [])
         results = []
 
@@ -98,7 +99,7 @@ class TachyonFirmwareSource(BaseFirmwareSource):
             session: aiohttp session.
             product: Product identifier (tna-30x, tna-303l, tns-100).
             url: Freshdesk article URL.
-            channel: "release", "beta", or "all".
+            channel: "release" or "beta".
 
         Returns:
             List of RemoteFirmwareInfo for each firmware found.
@@ -132,12 +133,11 @@ class TachyonFirmwareSource(BaseFirmwareSource):
             # Determine if this is beta based on page context
             is_beta = self._is_beta(html, download_url)
 
-            # Channel filtering: "all" includes everything
-            if channel != "all":
-                if channel == "release" and is_beta:
-                    continue
-                if channel == "beta" and not is_beta:
-                    continue
+            # Channel filtering
+            if channel == "release" and is_beta:
+                continue
+            if channel == "beta" and not is_beta:
+                continue
 
             firmwares.append(RemoteFirmwareInfo(
                 vendor="tachyon",

@@ -139,26 +139,33 @@ class LoggingConfig(BaseModel):
 class FirmwareSourceConfig(BaseModel):
     """Configuration for a single vendor firmware source."""
     enabled: bool = True
-    check_interval: int = Field(default=3600, ge=300, le=86400)  # seconds
+    check_interval: int = Field(default=86400, ge=300, le=604800)  # seconds (default 24h)
     auto_download: bool = False  # False = notify only, True = auto-download
-    channel: str = "release"  # "release", "beta", or "all"
-    include_beta: bool = False  # Convenience toggle: if true, overrides channel to "all"
+    channel: str = "release"  # "release" or "beta"
+    include_beta: bool = False  # Deprecated: ignored
     models: list = Field(default_factory=list)  # Empty = all models
 
     @property
     def effective_channel(self) -> str:
-        """Resolve the effective channel, respecting include_beta toggle."""
-        if self.include_beta:
-            return "all"
-        return self.channel
+        """Resolve the effective channel."""
+        return self.channel if self.channel in ("release", "beta") else "release"
+
+
+def _default_firmware_sources():
+    """Default firmware sources — Tachyon enabled, others stubbed."""
+    return {
+        "tachyon": FirmwareSourceConfig(enabled=True, auto_download=True),
+        "ubiquiti": FirmwareSourceConfig(enabled=False),
+        "cambium": FirmwareSourceConfig(enabled=False),
+    }
 
 
 class FirmwareCheckerConfig(BaseModel):
     """Automatic firmware checking configuration."""
-    enabled: bool = False  # Disabled by default — opt-in
-    default_check_interval: int = Field(default=3600, ge=300)  # 1 hour
+    enabled: bool = True  # Enabled by default
+    default_check_interval: int = Field(default=86400, ge=300)  # 24 hours
     default_auto_download: bool = False
-    sources: Dict[str, FirmwareSourceConfig] = Field(default_factory=dict)
+    sources: Dict[str, FirmwareSourceConfig] = Field(default_factory=_default_firmware_sources)
 
 
 class FirmwareConfig(BaseModel):

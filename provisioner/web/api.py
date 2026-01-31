@@ -726,6 +726,8 @@ async def download_firmware_from_url(
     firmware_path.mkdir(parents=True, exist_ok=True)
     dest_path = firmware_path / safe_filename
 
+    tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(body.url, timeout=aiohttp.ClientTimeout(total=600)) as response:
@@ -735,10 +737,12 @@ async def download_firmware_from_url(
                         detail=f"Failed to download: HTTP {response.status}"
                     )
 
-                content = await response.read()
-                with open(dest_path, "wb") as f:
-                    f.write(content)
+                with open(tmp_path, "wb") as f:
+                    async for chunk in response.content.iter_chunked(8192):
+                        if chunk:
+                            f.write(chunk)
 
+        tmp_path.rename(dest_path)
         stat = dest_path.stat()
         return {
             "success": True,
@@ -751,11 +755,16 @@ async def download_firmware_from_url(
                 "path": str(dest_path.relative_to(data_path)),
             }
         }
+    except HTTPException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     except aiohttp.ClientError as e:
         logger.error(f"Failed to download firmware: {e}")
+        tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"Download failed: {str(e)}")
     except Exception as e:
         logger.error(f"Failed to save firmware: {e}")
+        tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -816,7 +825,13 @@ async def firmware_check_now(request: Request, vendor: Optional[str] = None):
 
     checker = get_firmware_checker()
     if not checker:
-        raise HTTPException(status_code=503, detail="Firmware checker not enabled")
+        raise HTTPException(status_code=503, detail="Firmware checker not initialized. Restart the provisioner.")
+
+    if not checker._sources:
+        raise HTTPException(
+            status_code=503,
+            detail="No firmware sources loaded. Restart the provisioner to reload sources.",
+        )
 
     results = await checker.check_now(vendor)
     return {
@@ -860,7 +875,7 @@ async def firmware_download_update(
 class ChannelUpdateRequest(BaseModel):
     """Request to update firmware channel for a vendor source."""
     vendor: str
-    channel: str  # "release", "beta", or "all"
+    channel: str  # "release" or "beta"
 
 
 @router.post("/firmware/set-channel")
@@ -870,7 +885,6 @@ async def firmware_set_channel(request: Request, body: ChannelUpdateRequest):
     Channel options:
       - "release": stable releases only
       - "beta": beta releases only
-      - "all": both stable and beta
     """
     from ..firmware_checker import get_firmware_checker
 
@@ -878,8 +892,8 @@ async def firmware_set_channel(request: Request, body: ChannelUpdateRequest):
     if not checker:
         raise HTTPException(status_code=503, detail="Firmware checker not enabled")
 
-    if body.channel not in ("release", "beta", "all"):
-        raise HTTPException(status_code=400, detail="Channel must be 'release', 'beta', or 'all'")
+    if body.channel not in ("release", "beta"):
+        raise HTTPException(status_code=400, detail="Channel must be 'release' or 'beta'")
 
     source = checker._sources.get(body.vendor)
     if not source:
@@ -888,12 +902,12 @@ async def firmware_set_channel(request: Request, body: ChannelUpdateRequest):
     # Update the source config in-memory
     if isinstance(source.config, dict):
         source.config["channel"] = body.channel
-        source.config["include_beta"] = body.channel in ("beta", "all")
+        source.config.pop("include_beta", None)
     else:
         # Pydantic model — replace with updated dict
         config_dict = source.config.model_dump()
         config_dict["channel"] = body.channel
-        config_dict["include_beta"] = body.channel in ("beta", "all")
+        config_dict.pop("include_beta", None)
         source.config = config_dict
 
     return {
@@ -902,6 +916,19 @@ async def firmware_set_channel(request: Request, body: ChannelUpdateRequest):
         "channel": body.channel,
         "message": f"Channel set to '{body.channel}' for {body.vendor}",
     }
+
+
+@router.post("/firmware/checker-toggle")
+async def firmware_checker_toggle(request: Request, enabled: bool = True):
+    """Enable or disable the firmware checker at runtime."""
+    from ..firmware_checker import get_firmware_checker
+
+    checker = get_firmware_checker()
+    if not checker:
+        raise HTTPException(status_code=503, detail="Firmware checker not initialized")
+
+    await checker.set_enabled(enabled)
+    return {"success": True, "enabled": enabled}
 
 
 # ============================================================================

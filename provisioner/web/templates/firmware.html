@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - Firmware</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background: #f5f5f5;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
+        }
+        .vendor-badge {
+            color: white; font-size: 11px; font-weight: 700;
+            padding: 2px 8px; border-radius: 3px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+            white-space: nowrap;
+        }
+        .channel-btn {
+            padding: 4px 10px; font-size: 11px; font-weight: 600;
+            cursor: pointer; transition: all 0.15s;
+            border: none; background: none;
+        }
+        .channel-btn.active {
+            color: white;
+        }
+        .channel-btn:not(.active) {
+            color: #6b7280;
+            background: transparent;
+        }
+        .channel-btn:not(.active):hover {
+            background: #f3f4f6;
+        }
+        .drop-zone {
+            border: 2px dashed #d1d5db;
+            border-radius: 8px;
+            transition: border-color 0.2s, background 0.2s;
+            cursor: pointer;
+        }
+        .drop-zone.dragover {
+            border-color: #3b82f6;
+            background: #eff6ff;
+        }
+        .auto-pill {
+            font-size: 9px; font-weight: 700;
+            padding: 1px 5px; border-radius: 3px;
+            background: #dbeafe; color: #1e40af;
+            text-transform: uppercase; letter-spacing: 0.3px;
+        }
+    </style>
+</head>
+<body class="text-gray-900 min-h-screen flex flex-col">
+
+    <!-- Header -->
+    <header class="bg-white border-b border-gray-300 px-4 py-2 flex items-center justify-between flex-shrink-0">
+        <div class="flex items-center gap-3">
+            <a href="/" class="p-2 rounded-lg hover:bg-gray-100" title="Back to Dashboard">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>
+                </svg>
+            </a>
+            <h1 class="text-lg font-bold text-gray-900">Firmware</h1>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-1 overflow-y-auto p-4 space-y-4 max-w-4xl mx-auto w-full">
+
+        <!-- Firmware Sources / Auto-Checker Panel -->
+        <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <h2 class="text-sm font-bold text-gray-700">Auto-Checker</h2>
+                    <span id="checker-status-dot" class="w-2 h-2 rounded-full bg-gray-300"></span>
+                    <span id="checker-status-text" class="text-xs text-gray-400">Loading...</span>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="text-xs text-gray-400" id="last-refresh"></span>
+                    <button onclick="checkNow()" id="check-now-btn"
+                        class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition">
+                        Check Now
+                    </button>
+                    <div class="cursor-pointer select-none" onclick="toggleChecker()" id="toggle-track"
+                         style="width:36px;height:20px;border-radius:10px;background:#d1d5db;position:relative;transition:background 0.2s;">
+                        <div id="toggle-knob"
+                             style="width:16px;height:16px;border-radius:50%;background:white;position:absolute;top:2px;left:2px;transition:transform 0.2s;box-shadow:0 1px 3px rgba(0,0,0,0.2);"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="sources-list" class="divide-y divide-gray-100">
+                <div class="px-4 py-6 text-center text-sm text-gray-400">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Available Updates -->
+        <div id="updates-section" class="hidden">
+            <div class="bg-blue-50 rounded-xl border border-blue-200 overflow-hidden">
+                <div class="px-4 py-3 border-b border-blue-100">
+                    <h2 class="text-sm font-bold text-blue-800">Available Updates</h2>
+                </div>
+                <div id="updates-list" class="divide-y divide-blue-100"></div>
+            </div>
+        </div>
+
+        <!-- Firmware Files Table -->
+        <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-100">
+                <h2 class="text-sm font-bold text-gray-700">Firmware Files</h2>
+            </div>
+            <div id="firmware-table-container">
+                <div class="px-4 py-6 text-center text-sm text-gray-400">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Manual Upload (compact) -->
+        <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                <h2 class="text-sm font-bold text-gray-700">Manual Upload</h2>
+                <button onclick="toggleUrlInput()" class="text-xs text-blue-600 hover:text-blue-500 font-medium">
+                    Or paste URL
+                </button>
+            </div>
+            <div class="p-4">
+                <div class="flex items-center gap-3 mb-3">
+                    <label class="text-xs text-gray-500 font-medium">Type:</label>
+                    <select id="upload-device-type"
+                        class="text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white text-gray-900">
+                        <option value="cambium">Cambium</option>
+                        <option value="mikrotik">MikroTik</option>
+                        <option value="tachyon">Tachyon</option>
+                        <option value="tarana">Tarana</option>
+                        <option value="ubiquiti">Ubiquiti</option>
+                    </select>
+                </div>
+                <div id="drop-zone" class="drop-zone flex items-center justify-center gap-2 p-4 text-center"
+                     onclick="document.getElementById('file-input').click()"
+                     ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDrop(event)">
+                    <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                    </svg>
+                    <span class="text-sm text-gray-500">Drop firmware file or click to browse</span>
+                </div>
+                <input type="file" id="file-input" class="hidden" accept=".bin,.img,.tbn,.npk,.tar,.gz,.fw"
+                       onchange="handleFileSelect(event)">
+
+                <!-- URL Input (hidden by default) -->
+                <div id="url-input-section" class="hidden mt-3">
+                    <div class="flex gap-2">
+                        <input type="text" id="firmware-url" placeholder="https://example.com/firmware.bin"
+                            class="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white text-gray-900">
+                        <button onclick="downloadFromUrl()" id="url-download-btn"
+                            class="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm font-medium rounded-lg transition">
+                            Download
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
+
+    <script>
+        // State
+        let firmwareFiles = [];
+        let checkerStatus = { enabled: false, running: false, sources: {}, available_updates: [] };
+        let refreshInterval = null;
+
+        const vendorColors = {
+            cambium:  { name: 'Cambium',  color: '#22c55e' },
+            mikrotik: { name: 'MikroTik', color: '#3b82f6' },
+            tachyon:  { name: 'Tachyon',  color: '#a855f7' },
+            tarana:   { name: 'Tarana',   color: '#d97706' },
+            ubiquiti: { name: 'Ubiquiti', color: '#0559C9' },
+        };
+
+        // Init
+        document.addEventListener('DOMContentLoaded', () => {
+            loadAll();
+            refreshInterval = setInterval(loadAll, 30000);
+        });
+
+        async function loadAll() {
+            await Promise.all([loadFirmware(), loadCheckerStatus()]);
+            document.getElementById('last-refresh').textContent =
+                'Updated ' + new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+        }
+
+        async function loadFirmware() {
+            try {
+                const res = await fetch('/api/firmware');
+                firmwareFiles = await res.json();
+                renderFirmwareTable();
+            } catch (e) {
+                console.error('Failed to load firmware:', e);
+            }
+        }
+
+        async function loadCheckerStatus() {
+            try {
+                const res = await fetch('/api/firmware/checker-status');
+                checkerStatus = await res.json();
+                renderCheckerPanel();
+                renderAvailableUpdates();
+            } catch (e) {
+                console.error('Failed to load checker status:', e);
+            }
+        }
+
+        // ============================================================
+        // Render: Checker Panel
+        // ============================================================
+        function renderCheckerPanel() {
+            const dot = document.getElementById('checker-status-dot');
+            const text = document.getElementById('checker-status-text');
+            const track = document.getElementById('toggle-track');
+            const knob = document.getElementById('toggle-knob');
+
+            // Sync toggle visual
+            const isOn = checkerStatus.enabled || checkerStatus.running;
+            track.style.background = isOn ? '#22c55e' : '#d1d5db';
+            knob.style.transform = isOn ? 'translateX(16px)' : 'translateX(0)';
+
+            if (checkerStatus.running) {
+                dot.className = 'w-2 h-2 rounded-full bg-green-500';
+                text.textContent = 'Running';
+                text.className = 'text-xs text-green-600 font-medium';
+            } else if (checkerStatus.enabled) {
+                dot.className = 'w-2 h-2 rounded-full bg-yellow-400';
+                text.textContent = 'Idle';
+                text.className = 'text-xs text-yellow-600 font-medium';
+            } else {
+                dot.className = 'w-2 h-2 rounded-full bg-gray-300';
+                text.textContent = 'Off';
+                text.className = 'text-xs text-gray-400';
+            }
+
+            const container = document.getElementById('sources-list');
+            const sources = checkerStatus.sources || {};
+            const vendors = Object.keys(sources);
+
+            if (vendors.length === 0) {
+                container.innerHTML = '<div class="px-4 py-4 text-center text-sm text-gray-400">No firmware sources configured</div>';
+                return;
+            }
+
+            container.innerHTML = vendors.map(vendor => {
+                const s = sources[vendor];
+                const vc = vendorColors[vendor] || { name: vendor, color: '#6b7280' };
+                const lastCheck = s.last_check ? formatRelativeTime(s.last_check) : 'Never';
+                const channel = s.channel || 'release';
+
+                return `
+                <div class="px-4 py-3 flex items-center gap-3 flex-wrap">
+                    <span class="vendor-badge" style="background:${vc.color}">${vc.name}</span>
+                    <span class="text-xs ${s.enabled ? 'text-green-600' : 'text-gray-400'} font-medium">
+                        ${s.enabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                    <span class="text-xs text-gray-400 ml-auto mr-2">Checked: ${lastCheck}</span>
+                    <div class="flex rounded-lg border border-gray-300 overflow-hidden">
+                        ${renderChannelBtn(vendor, 'release', channel, vc.color)}
+                        ${renderChannelBtn(vendor, 'beta', channel, vc.color)}
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function renderChannelBtn(vendor, value, current, color) {
+            const isActive = current === value;
+            const label = value.charAt(0).toUpperCase() + value.slice(1);
+            const bg = isActive ? color : 'transparent';
+            const cls = isActive ? 'channel-btn active' : 'channel-btn';
+            return `<button class="${cls}" style="${isActive ? 'background:' + color : ''}"
+                        onclick="setChannel('${vendor}','${value}')">${label}</button>`;
+        }
+
+        // ============================================================
+        // Render: Available Updates
+        // ============================================================
+        function renderAvailableUpdates() {
+            const section = document.getElementById('updates-section');
+            const list = document.getElementById('updates-list');
+            const updates = checkerStatus.available_updates || [];
+
+            if (updates.length === 0) {
+                section.classList.add('hidden');
+                return;
+            }
+
+            section.classList.remove('hidden');
+            list.innerHTML = updates.map(u => {
+                const vc = vendorColors[u.vendor] || { name: u.vendor, color: '#6b7280' };
+                const channelPill = u.channel === 'beta'
+                    ? '<span class="text-xs font-bold text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded">beta</span>'
+                    : '';
+                return `
+                <div class="px-4 py-3 flex items-center gap-3">
+                    <span class="vendor-badge" style="background:${vc.color}">${vc.name}</span>
+                    <span class="text-sm font-medium text-gray-900">${u.model}</span>
+                    <span class="text-sm text-gray-600 font-mono">${u.version}</span>
+                    ${channelPill}
+                    <button onclick="downloadUpdate('${u.vendor}','${u.model}','${u.version}')" data-key="${u.vendor}-${u.model}-${u.version}"
+                        class="ml-auto px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition">
+                        Download
+                    </button>
+                </div>`;
+            }).join('');
+        }
+
+        // ============================================================
+        // Render: Firmware Files Table
+        // ============================================================
+        function renderFirmwareTable() {
+            const container = document.getElementById('firmware-table-container');
+
+            if (firmwareFiles.length === 0) {
+                container.innerHTML = '<div class="px-4 py-6 text-center text-sm text-gray-400">No firmware files found</div>';
+                return;
+            }
+
+            // Group by device_type
+            const grouped = {};
+            for (const fw of firmwareFiles) {
+                if (!grouped[fw.device_type]) grouped[fw.device_type] = [];
+                grouped[fw.device_type].push(fw);
+            }
+
+            let html = '<table class="w-full text-sm"><thead>';
+            html += '<tr class="text-xs text-gray-500 text-left">';
+            html += '<th class="px-4 py-2">Vendor</th>';
+            html += '<th class="px-4 py-2">Filename</th>';
+            html += '<th class="px-4 py-2">Version</th>';
+            html += '<th class="px-4 py-2 text-right">Size</th>';
+            html += '<th class="px-4 py-2 text-right">Modified</th>';
+            html += '<th class="px-4 py-2 w-10"></th>';
+            html += '</tr></thead><tbody>';
+
+            for (const deviceType of Object.keys(grouped).sort()) {
+                const files = grouped[deviceType];
+                const vc = vendorColors[deviceType] || { name: deviceType, color: '#6b7280' };
+
+                for (const fw of files) {
+                    html += `
+                    <tr class="border-t border-gray-100 hover:bg-gray-50">
+                        <td class="px-4 py-2">
+                            <span class="vendor-badge" style="background:${vc.color}">${vc.name}</span>
+                        </td>
+                        <td class="px-4 py-2 font-mono text-xs text-gray-800 break-all">${fw.filename}</td>
+                        <td class="px-4 py-2 font-mono text-xs text-gray-700">${fw.version || '-'}</td>
+                        <td class="px-4 py-2 text-xs text-gray-500 text-right whitespace-nowrap">${formatBytes(fw.size)}</td>
+                        <td class="px-4 py-2 text-xs text-gray-400 text-right whitespace-nowrap">${formatRelativeTime(fw.modified)}</td>
+                        <td class="px-4 py-2 text-right">
+                            <button onclick="deleteFirmware('${deviceType}','${fw.filename}')"
+                                class="p-1 rounded hover:bg-red-50 text-gray-400 hover:text-red-600 transition" title="Delete">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                </svg>
+                            </button>
+                        </td>
+                    </tr>`;
+                }
+            }
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        // ============================================================
+        // Actions
+        // ============================================================
+        async function toggleChecker() {
+            const isCurrentlyOn = checkerStatus.enabled || checkerStatus.running;
+            const enabled = !isCurrentlyOn;
+            try {
+                const res = await fetch(`/api/firmware/checker-toggle?enabled=${enabled}`, { method: 'POST' });
+                if (!res.ok) {
+                    const err = await res.json();
+                    showToast(err.detail || 'Toggle failed', 'error');
+                }
+                await loadCheckerStatus();
+            } catch (e) {
+                showToast('Failed to toggle checker', 'error');
+                await loadCheckerStatus();
+            }
+        }
+
+        async function checkNow() {
+            const btn = document.getElementById('check-now-btn');
+            btn.disabled = true;
+            btn.textContent = 'Checking...';
+            try {
+                const res = await fetch('/api/firmware/check-now', { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.detail || 'Check failed', 'error');
+                } else if (data.updates_found > 0) {
+                    showToast(`Found ${data.updates_found} update(s)`, 'success');
+                } else {
+                    showToast('No new updates found', 'info');
+                }
+                await loadAll();
+            } catch (e) {
+                showToast('Check failed: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Check Now';
+            }
+        }
+
+        async function setChannel(vendor, channel) {
+            try {
+                await fetch('/api/firmware/set-channel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ vendor, channel }),
+                });
+                await loadCheckerStatus();
+            } catch (e) {
+                showToast('Failed to set channel', 'error');
+            }
+        }
+
+        async function downloadUpdate(vendor, model, version) {
+            const key = `${vendor}-${model}-${version}`;
+            const btn = document.querySelector(`[data-key="${key}"]`);
+            if (btn) { btn.disabled = true; btn.textContent = 'Downloading...'; }
+            try {
+                const res = await fetch('/api/firmware/download-update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ vendor, model, version }),
+                });
+                if (res.ok) {
+                    showToast(`Downloaded ${vendor} ${model} ${version}`, 'success');
+                    await loadAll();
+                } else {
+                    const err = await res.json();
+                    showToast(err.detail || 'Download failed', 'error');
+                    if (btn) { btn.disabled = false; btn.textContent = 'Download'; }
+                }
+            } catch (e) {
+                showToast('Download failed: ' + e.message, 'error');
+                if (btn) { btn.disabled = false; btn.textContent = 'Download'; }
+            }
+        }
+
+        async function deleteFirmware(deviceType, filename) {
+            if (!confirm(`Delete ${filename}?`)) return;
+            try {
+                const res = await fetch(`/api/firmware/${encodeURIComponent(deviceType)}/${encodeURIComponent(filename)}`, {
+                    method: 'DELETE',
+                });
+                if (res.ok) {
+                    showToast('Deleted ' + filename, 'success');
+                    await loadFirmware();
+                } else {
+                    const err = await res.json();
+                    showToast(err.detail || 'Delete failed', 'error');
+                }
+            } catch (e) {
+                showToast('Delete failed: ' + e.message, 'error');
+            }
+        }
+
+        // ============================================================
+        // Upload
+        // ============================================================
+        function handleDragOver(e) {
+            e.preventDefault();
+            e.currentTarget.classList.add('dragover');
+        }
+
+        function handleDragLeave(e) {
+            e.currentTarget.classList.remove('dragover');
+        }
+
+        function handleDrop(e) {
+            e.preventDefault();
+            e.currentTarget.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) uploadFile(file);
+        }
+
+        function handleFileSelect(e) {
+            const file = e.target.files[0];
+            if (file) uploadFile(file);
+            e.target.value = '';
+        }
+
+        async function uploadFile(file) {
+            const deviceType = document.getElementById('upload-device-type').value;
+            const dropZone = document.getElementById('drop-zone');
+            dropZone.innerHTML = `<span class="text-sm text-blue-600 font-medium">Uploading ${file.name}...</span>`;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('device_type', deviceType);
+
+            try {
+                const res = await fetch('/api/firmware/upload', { method: 'POST', body: formData });
+                if (res.ok) {
+                    showToast('Uploaded ' + file.name, 'success');
+                    await loadFirmware();
+                } else {
+                    const err = await res.json();
+                    showToast(err.detail || 'Upload failed', 'error');
+                }
+            } catch (e) {
+                showToast('Upload failed: ' + e.message, 'error');
+            } finally {
+                dropZone.innerHTML = `
+                    <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                    </svg>
+                    <span class="text-sm text-gray-500">Drop firmware file or click to browse</span>`;
+            }
+        }
+
+        function toggleUrlInput() {
+            document.getElementById('url-input-section').classList.toggle('hidden');
+        }
+
+        async function downloadFromUrl() {
+            const url = document.getElementById('firmware-url').value.trim();
+            if (!url) { showToast('Enter a URL', 'error'); return; }
+            const deviceType = document.getElementById('upload-device-type').value;
+            const btn = document.getElementById('url-download-btn');
+            btn.disabled = true; btn.textContent = 'Downloading...';
+
+            try {
+                const res = await fetch('/api/firmware/url', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, device_type: deviceType }),
+                });
+                if (res.ok) {
+                    showToast('Downloaded firmware from URL', 'success');
+                    document.getElementById('firmware-url').value = '';
+                    await loadFirmware();
+                } else {
+                    const err = await res.json();
+                    showToast(err.detail || 'Download failed', 'error');
+                }
+            } catch (e) {
+                showToast('Download failed: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false; btn.textContent = 'Download';
+            }
+        }
+
+        // ============================================================
+        // Utilities
+        // ============================================================
+        function formatBytes(bytes) {
+            if (!bytes || bytes === 0) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(1024));
+            return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+        }
+
+        function formatRelativeTime(isoString) {
+            if (!isoString) return '-';
+            const date = new Date(isoString);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMins = Math.floor(diffMs / 60000);
+            if (diffMins < 1) return 'just now';
+            if (diffMins < 60) return diffMins + 'm ago';
+            const diffHours = Math.floor(diffMins / 60);
+            if (diffHours < 24) return diffHours + 'h ago';
+            const diffDays = Math.floor(diffHours / 24);
+            if (diffDays < 7) return diffDays + 'd ago';
+            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        }
+
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            const colors = {
+                success: 'bg-green-600', error: 'bg-red-600',
+                warning: 'bg-yellow-600', info: 'bg-blue-600',
+            };
+            toast.className = `${colors[type]} text-white px-4 py-2 rounded-lg shadow-lg text-sm font-medium transform transition-all duration-300 translate-x-full`;
+            toast.textContent = message;
+            container.appendChild(toast);
+            requestAnimationFrame(() => toast.classList.remove('translate-x-full'));
+            setTimeout(() => {
+                toast.classList.add('translate-x-full');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+    </script>
+</body>
+</html>

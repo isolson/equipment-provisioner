@@ -36,6 +36,13 @@ class FirmwareChecker:
         "cambium": CambiumFirmwareSource,
     }
 
+    @staticmethod
+    def _config_value(config: object, key: str, default=None):
+        """Read a config value from dicts or objects."""
+        if isinstance(config, dict):
+            return config.get(key, default)
+        return getattr(config, key, default)
+
     def __init__(
         self,
         config: dict,
@@ -64,9 +71,20 @@ class FirmwareChecker:
         self._available_updates: list[RemoteFirmwareInfo] = []
 
         # Initialize enabled sources
-        sources_config = config.get("sources", {})
+        sources_config = config.get("sources") if isinstance(config, dict) else getattr(config, "sources", {})
+        if not sources_config:
+            try:
+                from .config import _default_firmware_sources
+                sources_config = _default_firmware_sources()
+                logger.warning("Firmware checker sources not configured; using defaults")
+            except Exception as e:
+                logger.error(f"Failed to load default firmware sources: {e}")
+                sources_config = {}
+        if not isinstance(sources_config, dict):
+            logger.warning(f"Invalid firmware sources config type: {type(sources_config)}")
+            sources_config = {}
         for vendor, source_config in sources_config.items():
-            if not source_config.get("enabled", True):
+            if not self._config_value(source_config, "enabled", True):
                 continue
             source_class = self.SOURCE_MAP.get(vendor)
             if source_class:
@@ -97,6 +115,14 @@ class FirmwareChecker:
                 pass
         logger.info("Firmware checker stopped")
 
+    async def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable the checker at runtime."""
+        self.config["enabled"] = enabled
+        if enabled and not self._running:
+            await self.start()
+        elif not enabled and self._running:
+            await self.stop()
+
     async def _check_loop(self) -> None:
         """Main loop: check each vendor on its configured interval."""
         # Initial delay to let the provisioner finish startup
@@ -104,9 +130,10 @@ class FirmwareChecker:
 
         while self._running:
             for vendor, source in self._sources.items():
-                interval = source.config.get(
+                interval = self._config_value(
+                    source.config,
                     "check_interval",
-                    self.config.get("default_check_interval", 3600),
+                    self.config.get("default_check_interval", 86400),
                 )
                 last = self._last_check.get(vendor)
                 if last:
@@ -124,7 +151,12 @@ class FirmwareChecker:
             # Sleep between poll cycles (check if any vendor is due every 60s)
             await asyncio.sleep(60)
 
-    async def _check_vendor(self, vendor: str, source: BaseFirmwareSource) -> None:
+    async def _check_vendor(
+        self,
+        vendor: str,
+        source: BaseFirmwareSource,
+        results: Optional[list[RemoteFirmwareInfo]] = None,
+    ) -> None:
         """Check a single vendor for updates."""
         logger.info(f"Checking {vendor} for firmware updates...")
         remote_list = await source.check_for_updates()
@@ -151,7 +183,11 @@ class FirmwareChecker:
             )
             new_count += 1
 
-            auto_download = source.config.get(
+            if results is not None:
+                self._append_result(results, remote_fw)
+
+            auto_download = self._config_value(
+                source.config,
                 "auto_download",
                 self.config.get("default_auto_download", False),
             )
@@ -159,7 +195,7 @@ class FirmwareChecker:
             if auto_download:
                 await self._download_firmware(vendor, remote_fw, source)
             else:
-                self._available_updates.append(remote_fw)
+                self._add_available_update(remote_fw)
                 await self._notify_update_available(vendor, remote_fw, local_version)
 
         if new_count:
@@ -310,21 +346,29 @@ class FirmwareChecker:
 
         for v, source in sources.items():
             try:
-                remote_list = await source.check_for_updates()
-                for remote_fw in remote_list:
-                    local_version = self.firmware_manager.get_latest_version(
-                        v, remote_fw.model
-                    )
-                    if local_version and self.firmware_manager._compare_versions(
-                        remote_fw.version, local_version
-                    ) <= 0:
-                        continue
-                    results.append(remote_fw)
+                await self._check_vendor(v, source, results=results)
                 self._last_check[v] = datetime.now().isoformat()
             except Exception as e:
                 logger.error(f"Manual firmware check failed for {v}: {e}")
 
         return results
+
+    def _add_available_update(self, remote_fw: RemoteFirmwareInfo) -> None:
+        """Add to available updates if not already present."""
+        key = (remote_fw.vendor, remote_fw.model, remote_fw.version)
+        for fw in self._available_updates:
+            if (fw.vendor, fw.model, fw.version) == key:
+                return
+        self._available_updates.append(remote_fw)
+
+    @staticmethod
+    def _append_result(results: list[RemoteFirmwareInfo], remote_fw: RemoteFirmwareInfo) -> None:
+        """Append result if not already present."""
+        key = (remote_fw.vendor, remote_fw.model, remote_fw.version)
+        for fw in results:
+            if (fw.vendor, fw.model, fw.version) == key:
+                return
+        results.append(remote_fw)
 
     async def download_specific(
         self,
@@ -365,12 +409,18 @@ class FirmwareChecker:
     def _get_source_channel(source: BaseFirmwareSource) -> str:
         """Get the effective channel for a source, handling both dict and model configs."""
         if isinstance(source.config, dict):
-            if source.config.get("include_beta", False):
-                return "all"
-            return source.config.get("channel", "release")
+            channel = source.config.get("channel", "release")
+            if channel == "all":
+                logger.warning("Firmware channel 'all' is deprecated; using 'release'")
+                return "release"
+            return channel if channel in ("release", "beta") else "release"
         if hasattr(source.config, "effective_channel"):
             return source.config.effective_channel
-        return getattr(source.config, "channel", "release")
+        channel = getattr(source.config, "channel", "release")
+        if channel == "all":
+            logger.warning("Firmware channel 'all' is deprecated; using 'release'")
+            return "release"
+        return channel if channel in ("release", "beta") else "release"
 
     def get_status(self) -> dict:
         """Return current status for API."""
@@ -386,7 +436,6 @@ class FirmwareChecker:
                         self.config.get("default_auto_download", False),
                     ) if isinstance(source.config, dict) else getattr(source.config, "auto_download", False),
                     "channel": self._get_source_channel(source),
-                    "include_beta": self._get_source_channel(source) in ("beta", "all"),
                 }
                 for vendor, source in self._sources.items()
             },
