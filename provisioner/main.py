@@ -29,6 +29,7 @@ from .gpio import init_gpio, cleanup_gpio, get_gpio
 from .handler_manager import HandlerManager
 from .notifier import init_notifier, get_notifier
 from .port_manager import PortManager, init_port_manager, DeviceLinkLocalIP, ManagementConfig
+from . import telemetry
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -111,6 +112,10 @@ class Provisioner:
                 "username": self.config.credentials.tarana.username,
                 "password": self.config.credentials.tarana.password,
             },
+            "ubiquiti": {
+                "username": self.config.credentials.ubiquiti.username,
+                "password": self.config.credentials.ubiquiti.password,
+            },
         }
 
         # Load alternate credentials from credentials.json
@@ -160,6 +165,9 @@ class Provisioner:
             )
             self.detector.on_device_discovered(self._on_device_discovered)
 
+        # Initialize telemetry
+        telemetry.init(self.config.analytics)
+
         logger.info("Provisioner initialized successfully")
 
     async def run(self) -> None:
@@ -200,6 +208,7 @@ class Provisioner:
             await self.port_manager.cleanup()
 
         cleanup_gpio()
+        await telemetry.close()
         await close_db()
 
         logger.info("Provisioner stopped")
@@ -515,6 +524,14 @@ class Provisioner:
                     "config": result.config_applied,
                 })
                 await notifier.notify_completed(result)
+
+                await telemetry.emit({
+                    "event": "provisioning_completed",
+                    "device_type": device_type,
+                    "device_model": result.device_info.model if result.device_info else None,
+                    "success": True,
+                })
+
                 logger.info(f"Provisioning completed for {device_type} on port {port_num}")
                 return True
 
@@ -538,6 +555,14 @@ class Provisioner:
                     "needs_credentials": result.needs_credentials,
                 })
                 await notifier.notify_failed(result, device_ip)
+
+                await telemetry.emit({
+                    "event": "provisioning_completed",
+                    "device_type": device_type,
+                    "device_model": result.device_info.model if result.device_info else None,
+                    "success": False,
+                })
+
                 logger.error(f"Provisioning failed for {device_type} on port {port_num}: {result.error_message}")
                 return False
 
@@ -604,6 +629,11 @@ class Provisioner:
                     status=ProvisioningStatus.FAILED,
                     error_message="Could not identify device type",
                 )
+                await telemetry.emit({
+                    "event": "unknown_model_detected",
+                    "device_type": "unknown",
+                    "device_model": None,
+                })
                 return
 
             await db.update_job(

@@ -5,6 +5,7 @@ from .mikrotik import MikrotikHandler
 from .cambium import CambiumHandler
 from .tachyon import TachyonHandler
 from .tarana import TaranaHandler
+from .ubiquiti import UbiquitiHandler
 from .mock import MockHandler
 
 __all__ = [
@@ -14,5 +15,6 @@ __all__ = [
     "CambiumHandler",
     "TachyonHandler",
     "TaranaHandler",
+    "UbiquitiHandler",
     "MockHandler",
 ]

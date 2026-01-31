@@ -39,6 +39,7 @@ class DeviceType(str, Enum):
     CAMBIUM = "cambium"
     TACHYON = "tachyon"
     TARANA = "tarana"
+    UBIQUITI = "ubiquiti"
     UNKNOWN = "unknown"
 
 
@@ -91,6 +92,19 @@ class DeviceFingerprinter:
             (r"tarana", 2),
             (r"Tarana", 2),
             (r"G1\s*(?:Node|Base)", 3),  # G1 Node or G1 Base
+        ],
+        DeviceType.UBIQUITI: [
+            (r"AirOS", 5),
+            (r"airOS", 5),
+            (r"UBNT", 4),
+            (r"ubnt", 3),
+            (r"Ubiquiti", 3),
+            (r"ui\.com", 2),
+            (r"AirMax", 3),
+            (r"airmax", 3),
+            (r"lighttpd", 2),        # Common Ubiquiti web server
+            (r"Wave", 2),
+            (r"login\.cgi", 4),      # airOS login endpoint
         ],
     }
 
@@ -503,6 +517,21 @@ class DeviceFingerprinter:
             if model_match:
                 fingerprint.model = model_match.group(1)
 
+        # Ubiquiti patterns
+        elif fingerprint.device_type == DeviceType.UBIQUITI:
+            version_match = re.search(r'(?:version|firmware)["\']?\s*:\s*["\']?v?(\d+\.\d+(?:\.\d+)?)', body, re.IGNORECASE)
+            if version_match:
+                fingerprint.firmware_version = version_match.group(1)
+
+            model_match = re.search(
+                r'(Rocket\s*\w+|NanoStation\s*\w+|LiteBeam\s*\w+|PowerBeam\s*\w+'
+                r'|NanoBeam\s*\w+|AirGrid\s*\w+|Bullet\s*\w+'
+                r'|Wave\s*(?:AP|Nano|Pico|Pro|LR)\w*)',
+                body, re.IGNORECASE
+            )
+            if model_match:
+                fingerprint.model = model_match.group(1)
+
     async def _fetch_cambium_sku(self, ip: str, fingerprint: DeviceFingerprint) -> None:
         """Fetch Cambium SKU file to get exact model and firmware version.
 
@@ -599,6 +628,8 @@ class DeviceFingerprinter:
                 return (DeviceType.MIKROTIK, None)
             elif "Cambium" in banner_str or "ePMP" in banner_str:
                 return (DeviceType.CAMBIUM, None)
+            elif "UBNT" in banner_str or "dropbear" in banner_str.lower():
+                return (DeviceType.UBIQUITI, None)
 
         except Exception as e:
             logger.debug(f"SSH probe failed for {ip}: {e}")
@@ -642,6 +673,8 @@ class DeviceFingerprinter:
                             return (DeviceType.TACHYON, None)
                         elif "Tarana" in sys_descr:
                             return (DeviceType.TARANA, None)
+                        elif "UBNT" in sys_descr or "Ubiquiti" in sys_descr or "AirOS" in sys_descr:
+                            return (DeviceType.UBIQUITI, None)
 
         except Exception as e:
             logger.debug(f"SNMP probe failed for {ip}: {e}")

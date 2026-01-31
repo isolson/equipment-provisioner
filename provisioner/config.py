@@ -33,6 +33,7 @@ class DeviceIPsConfig(BaseModel):
     cambium: str = "169.254.1.1"
     tachyon: str = "169.254.1.1"
     tarana: str = "169.254.100.1"
+    ubiquiti: str = "192.168.1.20"
     mikrotik: str = "192.168.88.1"
 
 
@@ -81,12 +82,19 @@ class TachyonCredentials(DeviceCredentials):
     password: str = "admin"
 
 
+class UbiquitiCredentials(DeviceCredentials):
+    """Ubiquiti default credentials (ubnt/ubnt)."""
+    username: str = "ubnt"
+    password: str = "ubnt"
+
+
 class CredentialsConfig(BaseModel):
     """All device credentials."""
     cambium: DeviceCredentials = Field(default_factory=CambiumCredentials)
     mikrotik: DeviceCredentials = Field(default_factory=DeviceCredentials)
     tarana: DeviceCredentials = Field(default_factory=DeviceCredentials)
     tachyon: DeviceCredentials = Field(default_factory=TachyonCredentials)
+    ubiquiti: DeviceCredentials = Field(default_factory=UbiquitiCredentials)
 
 
 class NotificationsConfig(BaseModel):
@@ -135,6 +143,23 @@ class FirmwareConfig(BaseModel):
     reboot_wait_timeout: int = Field(default=180, ge=60, le=600)
 
 
+class AnalyticsConfig(BaseModel):
+    """Analytics/telemetry configuration for central event reporting."""
+    enabled: bool = False
+    url: Optional[str] = None
+    site_id: str = "default"
+    api_key: Optional[str] = None
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def expand_env_var(cls, v: Optional[str]) -> Optional[str]:
+        """Expand environment variables."""
+        if v and v.startswith("${") and v.endswith("}"):
+            env_var = v[2:-1]
+            return os.getenv(env_var)
+        return v
+
+
 class Config(BaseModel):
     """Main configuration class."""
     network: NetworkConfig = Field(default_factory=NetworkConfig)
@@ -147,6 +172,7 @@ class Config(BaseModel):
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     firmware: FirmwareConfig = Field(default_factory=FirmwareConfig)
+    analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
 
 
 def expand_env_vars(obj):

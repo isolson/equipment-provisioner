@@ -154,15 +154,17 @@ step_credentials() {
     echo -e "  Press Enter to keep existing values."
     echo ""
 
-    local cambium_pw tarana_pw tachyon_pw
+    local cambium_pw tarana_pw tachyon_pw ubiquiti_pw
 
     cambium_pw=$(prompt_password "Cambium password" "CAMBIUM_PASSWORD")
     tarana_pw=$(prompt_password "Tarana password" "TARANA_PASSWORD")
     tachyon_pw=$(prompt_password "Tachyon password" "TACHYON_PASSWORD")
+    ubiquiti_pw=$(prompt_password "Ubiquiti password" "UBIQUITI_PASSWORD")
 
     [[ -n "$cambium_pw" ]] && set_env_value "CAMBIUM_PASSWORD" "$cambium_pw"
     [[ -n "$tarana_pw" ]] && set_env_value "TARANA_PASSWORD" "$tarana_pw"
     [[ -n "$tachyon_pw" ]] && set_env_value "TACHYON_PASSWORD" "$tachyon_pw"
+    [[ -n "$ubiquiti_pw" ]] && set_env_value "UBIQUITI_PASSWORD" "$ubiquiti_pw"
 
     log_info "Credentials saved to ${ENV_FILE}"
 }

@@ -9,6 +9,7 @@ Architecture:
   - Cambium ePMP: 169.254.1.1
   - Tachyon: 169.254.1.1
   - Tarana: 169.254.100.1
+  - Ubiquiti AirMax/Wave: 192.168.1.20
   - Mikrotik: Various (often 192.168.88.1 or DHCP)
 """
 
@@ -87,11 +88,13 @@ class DeviceLinkLocalIP:
     TACHYON_ALT = "192.168.1.1"  # Some Tachyon devices use this
     TARANA = "169.254.100.1"
     MIKROTIK = "192.168.88.1"  # Mikrotik default, but often uses DHCP
+    UBIQUITI = "192.168.1.20"  # Ubiquiti AirMax and Wave default
 
     # All IPs to probe when detecting device type
     ALL = [
         ("169.254.1.1", ["cambium", "tachyon"]),
         ("192.168.1.1", ["tachyon"]),  # Tachyon alternate IP
+        ("192.168.1.20", ["ubiquiti"]),  # Ubiquiti AirMax/Wave default
         ("169.254.100.1", ["tarana"]),
         ("192.168.88.1", ["mikrotik"]),
     ]
@@ -215,7 +218,7 @@ class PortManager:
                 vlan_id=vlan_id,
                 interface_name=interface_name,
                 local_ip=self.local_ip_base,
-                secondary_ips=["169.254.100.2/24"],  # For Tarana devices at 169.254.100.1
+                secondary_ips=["169.254.100.2/24", "192.168.1.2/24"],  # Tarana at 169.254.100.1, Ubiquiti/Tachyon at 192.168.1.x
             )
             self.ports[port_num] = port_config
             logger.debug(f"Port {port_num} config: {interface_name}, IPs: {self.local_ip_base}, secondary: {port_config.secondary_ips}")
@@ -486,7 +489,8 @@ class PortManager:
                 """Ping device during boot wait to detect when it's up."""
                 # Try known device IPs for boot detection
                 ips_to_try = [
-                    DeviceLinkLocalIP.CAMBIUM,  # 169.254.1.1
+                    DeviceLinkLocalIP.CAMBIUM,   # 169.254.1.1
+                    DeviceLinkLocalIP.UBIQUITI,  # 192.168.1.20
                     DeviceLinkLocalIP.MIKROTIK,  # 192.168.88.1
                     DeviceLinkLocalIP.TARANA,    # 169.254.100.1
                 ]

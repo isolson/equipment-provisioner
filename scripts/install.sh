@@ -188,10 +188,14 @@ CAMBIUM_PASSWORD=your_cambium_password
 MIKROTIK_PASSWORD=your_mikrotik_password
 TARANA_PASSWORD=your_tarana_password
 TACHYON_PASSWORD=your_tachyon_password
+UBIQUITI_PASSWORD=your_ubiquiti_password
 
 # Notification webhooks (optional)
 SLACK_WEBHOOK_URL=
 DISCORD_WEBHOOK_URL=
+
+# Analytics (optional)
+ANALYTICS_API_KEY=
 EOF
         chmod 600 "${ENV_FILE}"
         log_info "Created environment file at ${ENV_FILE}"

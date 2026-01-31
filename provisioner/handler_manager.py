@@ -9,6 +9,7 @@ from .handlers.mikrotik import MikrotikHandler
 from .handlers.cambium import CambiumHandler
 from .handlers.tachyon import TachyonHandler
 from .handlers.tarana import TaranaHandler
+from .handlers.ubiquiti import UbiquitiHandler
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class HandlerManager:
         DeviceType.CAMBIUM: CambiumHandler,
         DeviceType.TACHYON: TachyonHandler,
         DeviceType.TARANA: TaranaHandler,
+        DeviceType.UBIQUITI: UbiquitiHandler,
     }
 
     def __init__(self, credentials: Dict[str, Dict[str, str]],

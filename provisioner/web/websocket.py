@@ -251,9 +251,9 @@ def _get_mock_status() -> dict:
             "6": {
                 "vlan_id": 1996,
                 "link_up": True,
-                "device_detected": False,
-                "device_type": None,
-                "device_ip": None,
+                "device_detected": True,
+                "device_type": "ubiquiti",
+                "device_ip": "192.168.1.20",
                 "provisioning": False,
             },
         },

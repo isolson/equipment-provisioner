@@ -513,7 +513,10 @@ def _get_mock_ports() -> List[PortStatus]:
             port_number=6,
             vlan_id=1996,
             link_up=True,
-            device_detected=False,
+            device_detected=True,
+            device_type="ubiquiti",
+            device_ip="192.168.1.20",
+            device_model="Rocket 5AC",
             provisioning=False,
         ),
     ]
@@ -598,6 +601,8 @@ def _get_device_type_from_filename(filename: str) -> Optional[str]:
         return 'tachyon'
     elif 'tarana' in filename_lower:
         return 'tarana'
+    elif 'ubiquiti' in filename_lower or 'airos' in filename_lower or 'ubnt' in filename_lower:
+        return 'ubiquiti'
     return None
 
 
@@ -1035,6 +1040,7 @@ async def get_device_types():
             {"id": "mikrotik", "name": "MikroTik RouterOS", "extensions": [".npk"]},
             {"id": "tachyon", "name": "Tachyon", "extensions": [".bin", ".img"]},
             {"id": "tarana", "name": "Tarana G1", "extensions": [".img", ".bin"]},
+            {"id": "ubiquiti", "name": "Ubiquiti AirMax/Wave", "extensions": [".bin"]},
         ]
     }
 
@@ -1063,10 +1069,13 @@ BUILTIN_CREDENTIALS = {
     "tarana": [
         {"username": "admin", "password": "admin123"},
     ],
+    "ubiquiti": [
+        {"username": "ubnt", "password": "ubnt"},
+    ],
 }
 
 # Valid device types
-VALID_DEVICE_TYPES = {"cambium", "mikrotik", "tachyon", "tarana"}
+VALID_DEVICE_TYPES = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
 
 
 def _get_credentials_path(request: Request) -> Path:

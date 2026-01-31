@@ -42,6 +42,7 @@ ports:
     cambium: 169.254.1.1
     tachyon: 169.254.1.1
     tarana: 169.254.100.1
+    ubiquiti: 192.168.1.20
     mikrotik: 192.168.88.1  # Default, but often uses DHCP
 
 # Simple mode settings (single port, DHCP-based detection)
@@ -73,6 +74,10 @@ credentials:
   tachyon:
     username: root
     password: "${TACHYON_PASSWORD}"
+
+  ubiquiti:
+    username: ubnt
+    password: "${UBIQUITI_PASSWORD}"
 
 notifications:
   # Slack incoming webhook URL (optional)
@@ -113,6 +118,13 @@ display:
 
   # Fallback to sysfs backlight control
   use_backlight: true
+
+analytics:
+  # Central event reporting (provisioning results, unknown devices)
+  enabled: false
+  url: ""                              # Analytics endpoint URL
+  site_id: "default"                   # Unique identifier for this provisioner
+  api_key: "${ANALYTICS_API_KEY}"      # Optional API key for auth
 
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR
