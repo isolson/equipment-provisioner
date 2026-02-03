@@ -153,6 +153,13 @@ class DeviceFingerprinter:
                 tachyon_result.mac_address = mac
                 return tachyon_result
 
+        # Try Wave public API probe (unauthenticated, returns model)
+        if 80 in open_ports or 443 in open_ports:
+            wave_result = await self._probe_wave_api(ip, 443 in open_ports)
+            if wave_result:
+                wave_result.mac_address = mac
+                return wave_result
+
         # Try HTTP identification
         if 80 in open_ports or 443 in open_ports:
             http_result = await self._probe_http(ip, 443 in open_ports)
@@ -383,6 +390,74 @@ class DeviceFingerprinter:
 
         return None
 
+    async def _probe_wave_api(self, ip: str, try_https: bool = True) -> Optional[DeviceFingerprint]:
+        """Probe for Ubiquiti Wave public API at /api/v1.0/public/device.
+
+        This endpoint is unauthenticated and returns device identification
+        including model, family, and MAC address.
+        """
+        schemes = ["https", "http"] if try_https else ["http"]
+
+        for scheme in schemes:
+            try:
+                url = f"{scheme}://{ip}/api/v1.0/public/device"
+                logger.debug(f"Probing Wave API at {url} via {self.interface}")
+
+                if self.interface:
+                    # Use curl with interface binding
+                    proc = await asyncio.create_subprocess_exec(
+                        "curl", "-s", "-k", "-m", str(int(self.timeout)),
+                        "--interface", self.interface,
+                        url,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.timeout + 5)
+
+                    if proc.returncode == 0 and stdout:
+                        response = stdout.decode("utf-8", errors="ignore")
+                    else:
+                        logger.debug(f"Wave API probe failed for {ip}: rc={proc.returncode}")
+                        continue
+                else:
+                    # Use aiohttp without interface binding
+                    timeout_obj = aiohttp.ClientTimeout(total=self.timeout)
+                    async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+                        async with session.get(url, ssl=False) as resp:
+                            if resp.status != 200:
+                                continue
+                            response = await resp.text()
+
+                # Parse JSON response
+                try:
+                    import json
+                    data = json.loads(response)
+                    ident = data.get("identification", {})
+                    family = ident.get("family", "").lower()
+
+                    # Wave devices have family="wave"
+                    if family == "wave":
+                        model = ident.get("model")  # e.g., "Wave-Nano"
+                        mac = ident.get("mac")
+                        product = ident.get("product")  # e.g., "Wave Nano"
+
+                        logger.info(f"Detected Wave device via public API at {ip}: {model}")
+                        return DeviceFingerprint(
+                            device_type=DeviceType.UBIQUITI,
+                            model=model,
+                            mac_address=mac,
+                            confidence=0.98,
+                        )
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.debug(f"Wave API response parse error: {e}")
+                    continue
+
+            except Exception as e:
+                logger.debug(f"Wave API probe failed for {scheme}://{ip}: {e}")
+                continue
+
+        return None
+
     async def _curl_probe(self, url: str) -> Optional[DeviceFingerprint]:
         """Use curl to probe HTTP with interface binding."""
         if not self.interface:
@@ -523,10 +598,12 @@ class DeviceFingerprinter:
             if version_match:
                 fingerprint.firmware_version = version_match.group(1)
 
+            # Match various Ubiquiti product names including hyphenated Wave models
             model_match = re.search(
-                r'(Rocket\s*\w+|NanoStation\s*\w+|LiteBeam\s*\w+|PowerBeam\s*\w+'
-                r'|NanoBeam\s*\w+|AirGrid\s*\w+|Bullet\s*\w+'
-                r'|Wave\s*(?:AP|Nano|Pico|Pro|LR)\w*)',
+                r'(Rocket[\s-]*\w+|NanoStation[\s-]*\w+|LiteBeam[\s-]*\w+|PowerBeam[\s-]*\w+'
+                r'|NanoBeam[\s-]*\w+|AirGrid[\s-]*\w+|Bullet[\s-]*\w+'
+                r'|Wave[\s-]*(?:AP|Nano|Pico|Pro|LR|Micro)\w*'
+                r'|AF[\s-]*(?:5XHD|60[\s-]*LR|60[\s-]*XR|60[\s-]*HD|11FX)\w*)',
                 body, re.IGNORECASE
             )
             if model_match:

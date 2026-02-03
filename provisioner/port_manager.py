@@ -16,10 +16,11 @@ Architecture:
 import asyncio
 import logging
 import subprocess
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable, Awaitable, Union
+from typing import Any, Dict, List, Optional, Callable, Awaitable, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -573,15 +574,24 @@ class PortManager:
 
     async def _ping_device(self, interface: str, ip: str) -> bool:
         """Ping a device through a specific interface."""
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ping", "-c", "1", "-W", "2", "-I", interface, ip,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await asyncio.wait_for(proc.wait(), timeout=10)
+            await asyncio.wait_for(proc.wait(), timeout=5)
             return proc.returncode == 0
-        except (asyncio.TimeoutError, Exception):
+        except asyncio.TimeoutError:
+            if proc:
+                proc.kill()
+                await proc.wait()  # Reap zombie process
+            return False
+        except Exception:
+            if proc and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
             return False
 
     async def _identify_device_type(
@@ -613,6 +623,7 @@ class PortManager:
         # Fallback: simple HTTP probe with correct priority using curl (interface-bound)
         try:
             for scheme in ["https", "http"]:
+                proc = None
                 try:
                     url = f"{scheme}://{ip}/"
                     proc = await asyncio.create_subprocess_exec(
@@ -623,7 +634,7 @@ class PortManager:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
 
                     if proc.returncode == 0 and stdout:
                         text = stdout.decode("utf-8", errors="ignore")
@@ -641,7 +652,15 @@ class PortManager:
                         if any(x in text_lower for x in ["tarana", "g1 node", "g1 base"]):
                             return "tarana"
 
+                except asyncio.TimeoutError:
+                    if proc and proc.returncode is None:
+                        proc.kill()
+                        await proc.wait()
+                    continue
                 except Exception:
+                    if proc and proc.returncode is None:
+                        proc.kill()
+                        await proc.wait()
                     continue
 
         except Exception as e:
@@ -957,14 +976,10 @@ class PortManager:
     # ------------------------------------------------------------------
 
     # In-memory PTP link registry.
-    # Maps link_id (e.g. "tw05-tw12") -> {
-    #   "side_a_port": int | None,
-    #   "side_b_port": int | None,
-    #   "device_type": str,
-    #   "my_tower": int,
-    #   "remote_tower": int,
-    # }
-    _ptp_links: Dict[str, Dict[str, Any]] = {}
+    # Maps link_id (e.g. "tw05-tw12") -> (data_dict, timestamp)
+    # data_dict contains: side_a_port, side_b_port, device_type, my_tower, remote_tower
+    _ptp_links: Dict[str, Tuple[Dict[str, Any], float]] = {}
+    PTP_LINK_TTL_HOURS = 24  # Cleanup links older than this
 
     def set_device_mode(
         self,
@@ -989,19 +1004,24 @@ class PortManager:
         state.mode_config = mode_config
         state.ptp_link_id = ptp_link_id
 
-        # Update PTP link registry
+        # Update PTP link registry with timestamp
         if ptp_link_id and mode in ("ptp-a", "ptp-b"):
-            link = self._ptp_links.setdefault(ptp_link_id, {
-                "side_a_port": None,
-                "side_b_port": None,
-                "device_type": state.device_type,
-                "my_tower": mode_config.get("my_tower"),
-                "remote_tower": mode_config.get("remote_tower"),
-            })
-            if mode == "ptp-a":
-                link["side_a_port"] = port_num
+            existing = self._ptp_links.get(ptp_link_id)
+            if existing:
+                link_data, _ = existing
             else:
-                link["side_b_port"] = port_num
+                link_data = {
+                    "side_a_port": None,
+                    "side_b_port": None,
+                    "device_type": state.device_type,
+                    "my_tower": mode_config.get("my_tower"),
+                    "remote_tower": mode_config.get("remote_tower"),
+                }
+            if mode == "ptp-a":
+                link_data["side_a_port"] = port_num
+            else:
+                link_data["side_b_port"] = port_num
+            self._ptp_links[ptp_link_id] = (link_data, time.time())
 
         logger.info(f"Port {port_num} mode set to {mode}"
                      + (f" (link {ptp_link_id})" if ptp_link_id else ""))
@@ -1014,14 +1034,17 @@ class PortManager:
 
         # Clean up PTP link registry
         if state.ptp_link_id and state.ptp_link_id in self._ptp_links:
-            link = self._ptp_links[state.ptp_link_id]
-            if link.get("side_a_port") == port_num:
-                link["side_a_port"] = None
-            if link.get("side_b_port") == port_num:
-                link["side_b_port"] = None
+            link_data, ts = self._ptp_links[state.ptp_link_id]
+            if link_data.get("side_a_port") == port_num:
+                link_data["side_a_port"] = None
+            if link_data.get("side_b_port") == port_num:
+                link_data["side_b_port"] = None
             # Remove link entry if both sides are gone
-            if link.get("side_a_port") is None and link.get("side_b_port") is None:
+            if link_data.get("side_a_port") is None and link_data.get("side_b_port") is None:
                 del self._ptp_links[state.ptp_link_id]
+            else:
+                # Update timestamp
+                self._ptp_links[state.ptp_link_id] = (link_data, time.time())
 
         state.device_mode = None
         state.mode_config = None
@@ -1029,11 +1052,12 @@ class PortManager:
 
     def get_ptp_link(self, link_id: str) -> Optional[Dict[str, Any]]:
         """Get PTP link info by link ID."""
-        return self._ptp_links.get(link_id)
+        entry = self._ptp_links.get(link_id)
+        return entry[0] if entry else None
 
     def get_ptp_links(self) -> Dict[str, Dict[str, Any]]:
-        """Get all active PTP links."""
-        return dict(self._ptp_links)
+        """Get all active PTP links (without timestamps)."""
+        return {k: v[0] for k, v in self._ptp_links.items()}
 
     def get_available_ptp_side(
         self, my_tower: int, remote_tower: int
@@ -1045,10 +1069,29 @@ class PortManager:
         """
         from .mode_config import make_ptp_link_id
         link_id = make_ptp_link_id(my_tower, remote_tower)
-        link = self._ptp_links.get(link_id)
-        if link is None or link.get("side_a_port") is None:
+        entry = self._ptp_links.get(link_id)
+        if entry is None or entry[0].get("side_a_port") is None:
             return "a"
         return "b"
+
+    def cleanup_stale_ptp_links(self, max_age_hours: Optional[int] = None) -> int:
+        """Remove PTP link entries older than max_age_hours.
+
+        Args:
+            max_age_hours: Maximum age in hours (default: PTP_LINK_TTL_HOURS)
+
+        Returns:
+            Number of stale entries removed.
+        """
+        if max_age_hours is None:
+            max_age_hours = self.PTP_LINK_TTL_HOURS
+        cutoff = time.time() - (max_age_hours * 3600)
+        stale = [k for k, (_, ts) in self._ptp_links.items() if ts < cutoff]
+        for k in stale:
+            del self._ptp_links[k]
+        if stale:
+            logger.info(f"Cleaned up {len(stale)} stale PTP link entries")
+        return len(stale)
 
     def get_switch_port_mapping(self) -> Dict[str, int]:
         """Get mapping of MikroTik port names to our port numbers.

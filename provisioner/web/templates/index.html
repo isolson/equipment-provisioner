@@ -1102,6 +1102,18 @@
                         <div class="text-sm text-red-700">${port.last_error || 'Default credentials were rejected. Please enter the correct credentials.'}</div>
                     </div>
 
+                    ${port.device_type !== 'tarana' ? `
+                    <div class="p-3 bg-amber-50 border border-amber-300 rounded-lg">
+                        <div class="flex items-center gap-2 text-amber-700 font-medium mb-1">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                            Equipment may need factory reset
+                        </div>
+                        <div class="text-sm text-amber-700">Press and hold the reset button for 10 seconds, then try again.</div>
+                    </div>
+                    ` : ''}
+
                     <div class="p-3 bg-gray-50 rounded-lg border border-gray-200">
                         <div class="font-bold text-lg" style="color: ${vendor.color}">${vendor.name}</div>
                         <div class="text-sm text-gray-600">${port.device_ip || 'Unknown IP'}</div>

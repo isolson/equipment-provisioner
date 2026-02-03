@@ -5,6 +5,7 @@ import logging
 import re
 import socket
 import struct
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from ipaddress import IPv4Network
 from typing import AsyncIterator, Optional, Set, Callable, Awaitable
@@ -37,6 +38,8 @@ class DeviceDetector:
         self._known_devices: Set[str] = set()
         self._running = False
         self._callbacks: list[Callable[[DiscoveredDevice], Awaitable[None]]] = []
+        # Dedicated executor for blocking ARP operations (limit threads)
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="arp")
 
     def on_device_discovered(self, callback: Callable[[DiscoveredDevice], Awaitable[None]]) -> None:
         """Register a callback for when a new device is discovered."""
@@ -64,6 +67,7 @@ class DeviceDetector:
     def stop(self) -> None:
         """Stop monitoring for devices."""
         self._running = False
+        self._executor.shutdown(wait=False)
         logger.info("Device detector stopped")
 
     async def _monitor_link_state(self) -> None:
@@ -181,12 +185,11 @@ class DeviceDetector:
             ether = Ether(dst="ff:ff:ff:ff:ff:ff")
             packet = ether / arp
 
-            # Send and receive (scapy has its own 3s timeout, but add asyncio
-            # safety timeout to prevent thread pool exhaustion if kernel hangs)
+            # Send and receive using dedicated executor to avoid thread pool exhaustion
             loop = asyncio.get_event_loop()
             result = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None,
+                    self._executor,
                     lambda: srp(packet, timeout=3, iface=self.interface, verbose=False)[0]
                 ),
                 timeout=15,
@@ -210,14 +213,10 @@ class DeviceDetector:
 
         # Ping sweep to populate ARP cache
         try:
-            tasks = []
-            for host in self.subnet.hosts():
-                tasks.append(self._ping_host(str(host)))
-
-            # Limit concurrent pings
+            # Limit concurrent pings to avoid spawning too many processes
             semaphore = asyncio.Semaphore(50)
 
-            async def limited_ping(host):
+            async def limited_ping(host: str) -> bool:
                 async with semaphore:
                     return await self._ping_host(host)
 
