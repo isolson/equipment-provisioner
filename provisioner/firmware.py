@@ -189,13 +189,16 @@ class FirmwareManager:
         "tna-303l-65": ["tna-303l", "tna303l"],
         # Tachyon TNS-100 series (subscriber) - uses tns-100 firmware
         "tns-100": ["tns-100", "tns100"],
-        # Ubiquiti Wave series - all use "wave" firmware
-        "wave-nano": ["wave"],
-        "wave-ap": ["wave"],
-        "wave-pico": ["wave"],
-        "wave-pro": ["wave"],
-        "wave-lr": ["wave"],
-        "wave-micro": ["wave"],
+        # Ubiquiti Wave series - mapped to specific firmware variants
+        # GMC (75ba) = GigaBeam Connect: Wave-AP, Wave-Pro, Wave-AP-Micro, Wave-Pico
+        # MGMP (02da) = Mini GigaBeam Micro/Pico: Wave-Nano, Wave-Micro, Wave-LR
+        "wave-pro": ["75ba-wave", "gmc"],
+        "wave-ap": ["75ba-wave", "gmc"],
+        "wave-ap-micro": ["75ba-wave", "gmc"],
+        "wave-pico": ["75ba-wave", "gmc"],
+        "wave-nano": ["02da-wave", "mgmp"],
+        "wave-micro": ["02da-wave", "mgmp"],
+        "wave-lr": ["02da-wave", "mgmp"],
         # Ubiquiti AirMax series
         "rocket": ["airmax"],
         "nanostation": ["airmax"],

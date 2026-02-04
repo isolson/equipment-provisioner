@@ -278,6 +278,7 @@
         let reconnectAttempts = 0;
         const maxReconnectAttempts = 10;
         let portActivityLogs = {};
+        let bootStartTimes = {};  // Track when ports enter booting state
 
         // Display sleep state
         let displaySleeping = false;
@@ -430,6 +431,18 @@
         }
 
         function updatePorts(portsData) {
+            // Track boot start times for stuck device detection
+            for (const [portNum, portData] of Object.entries(portsData)) {
+                if (portData.waiting_for_boot) {
+                    // Record start time if not already tracking
+                    if (!bootStartTimes[portNum]) {
+                        bootStartTimes[portNum] = Date.now();
+                    }
+                } else {
+                    // Clear tracking when no longer booting
+                    delete bootStartTimes[portNum];
+                }
+            }
             ports = portsData;
             renderPorts();
         }
@@ -517,7 +530,7 @@
             return { done, total };
         }
 
-        function getStatusCenterInfo(port) {
+        function getStatusCenterInfo(port, portNum) {
             const checklist = port.checklist || {};
             if (!port.link_up) return { text: 'NO LINK', cls: 'idle', icon: 'dash' };
             if (port.needs_credentials) return { text: 'NEEDS CREDENTIALS', sub: 'Tap to enter password', cls: 'error', icon: 'alert' };
@@ -544,7 +557,15 @@
                 const stepNum = Math.min(prog.done + 1, prog.total);
                 return { text, sub: `Step ${stepNum} of ${prog.total}`, cls: 'active', icon: 'spinner' };
             }
-            if (port.waiting_for_boot) return { text: 'BOOTING', sub: 'Waiting for device...', cls: 'booting', icon: 'spinner' };
+            if (port.waiting_for_boot) {
+                const bootStart = bootStartTimes[portNum];
+                const bootingMinutes = bootStart ? Math.floor((Date.now() - bootStart) / 60000) : 0;
+                // Show reset suggestion after 5 minutes (except for Tarana)
+                if (bootingMinutes >= 5 && port.device_type !== 'tarana') {
+                    return { text: 'BOOTING', sub: 'May need factory reset', cls: 'booting', icon: 'spinner', showResetHint: true };
+                }
+                return { text: 'BOOTING', sub: 'Waiting for device...', cls: 'booting', icon: 'spinner' };
+            }
             if (checklist.firmware_update_1 === 'loading' || checklist.firmware_update_2 === 'loading') {
                 const prog = getStepProgress(port);
                 const stepNum = Math.min(prog.done + 1, prog.total);
@@ -596,7 +617,7 @@
             const model = checklist.model_confirmed || port.device_model;
             const noLink = !port.link_up;
             const hasDevice = port.device_detected || checklist.login;
-            const sc = getStatusCenterInfo(port);
+            const sc = getStatusCenterInfo(port, portNum);
 
             div.className = `port-card rounded-xl p-3 flex flex-col state-${cardState} ${noLink ? 'no-link' : ''}`;
             const clickable = port.device_detected || port.needs_credentials;
@@ -625,6 +646,7 @@
                     ${statusIconSVG(sc.icon, sc.cls)}
                     <div class="status-text-lg s-${sc.cls}">${sc.text}</div>
                     ${sc.sub ? `<div class="status-sub">${sc.sub}</div>` : ''}
+                    ${sc.showResetHint ? `<div class="text-xs text-amber-700 mt-1">Hold reset 10 sec</div>` : ''}
                 </div>
             `;
 

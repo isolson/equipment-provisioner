@@ -336,6 +336,39 @@ snmpwalk -v2c -c mynetwork 192.168.1.20 sysDescr
 2. Check firewall settings on the device
 3. Ensure correct community string
 
+## Firmware Variants
+
+Wave devices use platform-specific firmware. The provisioner maps device models to the correct firmware variant automatically.
+
+### Firmware Mapping
+
+| Model | Firmware | Board ID | File Pattern |
+|-------|----------|----------|--------------|
+| Wave-Pro | GMC | 75ba | `75ba-wave-*.bin` |
+| Wave-AP | GMC | 75ba | `75ba-wave-*.bin` |
+| Wave-AP-Micro | GMC | 75ba | `75ba-wave-*.bin` |
+| Wave-Pico | GMC | 75ba | `75ba-wave-*.bin` |
+| Wave-Nano | MGMP | 02da | `02da-wave-*.bin` |
+| Wave-Micro | MGMP | 02da | `02da-wave-*.bin` |
+| Wave-LR | MGMP | 02da | `02da-wave-*.bin` |
+
+### Important Notes
+
+- **Silent rejection**: The Wave API accepts firmware uploads but silently rejects wrong variants. After reboot, firmware banks will show the old version if wrong firmware was uploaded.
+- **Dual banks**: Wave devices have two firmware banks. The provisioner updates both banks to ensure redundancy.
+- **Verification**: Always check bank versions after firmware update to catch variant mismatches.
+
+### Firmware Download Source
+
+Firmware is available from Ubiquiti's API:
+```
+https://fw-download.ubnt.com/data/{PRODUCT}/{prefix}-wave-{version}-{uuid}.bin
+```
+
+Where PRODUCT is:
+- `GMC` for GigaBeam Connect (Wave-Pro, Wave-AP, Wave-AP-Micro, Wave-Pico)
+- `MGMP` for Mini GigaBeam Micro/Pico (Wave-Nano, Wave-Micro, Wave-LR)
+
 ## References
 
 - [Password management on UBNT airOS (Unimus Forum)](https://forum.unimus.net/viewtopic.php?t=1372)
