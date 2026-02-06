@@ -181,6 +181,21 @@ class Provisioner:
 
         logger.info("Provisioner initialized successfully")
 
+    async def _periodic_cleanup(self) -> None:
+        """Run cleanup every hour to prevent resource accumulation."""
+        while self._running:
+            await asyncio.sleep(3600)  # 1 hour
+            try:
+                cleaned = 0
+                if self.port_manager:
+                    cleaned += self.port_manager.cleanup_stale_ptp_links()
+                if self.firmware_checker:
+                    cleaned += self.firmware_checker._cleanup_old_updates()
+                if cleaned:
+                    logger.info(f"Periodic cleanup completed: {cleaned} stale entries removed")
+            except Exception as e:
+                logger.warning(f"Periodic cleanup error: {e}")
+
     async def run(self) -> None:
         """Start the provisioner main loop."""
         self._running = True
@@ -204,12 +219,21 @@ class Provisioner:
         if self.firmware_checker and self.config.firmware.checker.enabled:
             tasks.append(asyncio.create_task(self.firmware_checker.start()))
 
+        # Start periodic cleanup task to prevent resource accumulation
+        tasks.append(asyncio.create_task(self._periodic_cleanup()))
+
         console.print("[dim]Waiting for devices...[/dim]")
 
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             logger.info("Provisioner stopping...")
+        except Exception as e:
+            logger.error(f"Background task failed: {e}", exc_info=True)
+            # Cancel remaining tasks on failure
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
 
     async def stop(self) -> None:
         """Stop the provisioner."""

@@ -64,6 +64,7 @@ test_curl.txt
 test_firmware_banks.sh
 sync-to-pi.sh
 deploy.sh
+!scripts/deploy.sh
 
 # Firmware files (too large for git, use Git LFS or separate storage)
 firmware/*.bin

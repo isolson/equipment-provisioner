@@ -7,9 +7,10 @@ optionally downloads them, and updates the local manifest.
 import asyncio
 import hashlib
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import aiohttp
 import yaml
@@ -35,6 +36,10 @@ class FirmwareChecker:
         "ubiquiti": UbiquitiFirmwareSource,
         "cambium": CambiumFirmwareSource,
     }
+
+    # Cleanup constants
+    MAX_UPDATE_ENTRIES = 100  # Maximum entries in _available_updates
+    UPDATE_TTL_HOURS = 168    # 7 days
 
     @staticmethod
     def _config_value(config: object, key: str, default=None):
@@ -68,7 +73,8 @@ class FirmwareChecker:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._last_check: Dict[str, Optional[str]] = {}
-        self._available_updates: list[RemoteFirmwareInfo] = []
+        # Store (firmware_info, timestamp) tuples for TTL-based cleanup
+        self._available_updates: List[Tuple[RemoteFirmwareInfo, float]] = []
 
         # Initialize enabled sources
         sources_config = config.get("sources") if isinstance(config, dict) else getattr(config, "sources", {})
@@ -129,6 +135,9 @@ class FirmwareChecker:
         await asyncio.sleep(10)
 
         while self._running:
+            # Cleanup stale entries at start of each cycle
+            self._cleanup_old_updates()
+
             for vendor, source in self._sources.items():
                 interval = self._config_value(
                     source.config,
@@ -237,7 +246,7 @@ class FirmwareChecker:
 
             # Remove from pending updates if it was there
             self._available_updates = [
-                u for u in self._available_updates
+                (u, ts) for u, ts in self._available_updates
                 if not (u.vendor == vendor and u.model == remote_fw.model
                         and u.version == remote_fw.version)
             ]
@@ -356,10 +365,28 @@ class FirmwareChecker:
     def _add_available_update(self, remote_fw: RemoteFirmwareInfo) -> None:
         """Add to available updates if not already present."""
         key = (remote_fw.vendor, remote_fw.model, remote_fw.version)
-        for fw in self._available_updates:
+        for fw, _ in self._available_updates:
             if (fw.vendor, fw.model, fw.version) == key:
                 return
-        self._available_updates.append(remote_fw)
+        self._available_updates.append((remote_fw, time.time()))
+
+    def _cleanup_old_updates(self) -> int:
+        """Remove firmware updates older than UPDATE_TTL_HOURS.
+
+        Returns:
+            Number of entries removed.
+        """
+        cutoff = time.time() - (self.UPDATE_TTL_HOURS * 3600)
+        old_count = len(self._available_updates)
+        # Filter by TTL, then keep only the most recent MAX_UPDATE_ENTRIES
+        self._available_updates = [
+            (fw, ts) for fw, ts in self._available_updates
+            if ts > cutoff
+        ][-self.MAX_UPDATE_ENTRIES:]
+        removed = old_count - len(self._available_updates)
+        if removed:
+            logger.info(f"Cleaned up {removed} stale firmware update entries")
+        return removed
 
     @staticmethod
     def _append_result(results: list[RemoteFirmwareInfo], remote_fw: RemoteFirmwareInfo) -> None:
@@ -388,7 +415,7 @@ class FirmwareChecker:
         """
         # Find in available updates
         target = None
-        for fw in self._available_updates:
+        for fw, _ in self._available_updates:
             if fw.vendor == vendor and fw.model == model and fw.version == version:
                 target = fw
                 break
@@ -448,7 +475,7 @@ class FirmwareChecker:
                     "download_url": fw.download_url,
                     "channel": fw.channel,
                 }
-                for fw in self._available_updates
+                for fw, _ in self._available_updates
             ],
         }
 

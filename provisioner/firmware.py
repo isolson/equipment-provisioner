@@ -145,6 +145,21 @@ class FirmwareManager:
             release_notes=info.get("release_notes"),
         )
 
+    def get_all_firmware_files(self, device_type: str, model: Optional[str] = None) -> list:
+        """Get ALL matching firmware files for a device type, sorted by version (highest first).
+
+        This is useful for retry logic when one firmware file is incompatible with
+        certain hardware variants (e.g., Wave-Nano vs Wave-AP).
+
+        Args:
+            device_type: Device type.
+            model: Optional specific model.
+
+        Returns:
+            List of FirmwareInfo objects, sorted by version (highest first).
+        """
+        return self._find_all_firmware_by_convention(device_type, model)
+
     # Model to firmware filename pattern mapping
     # Maps device models to the firmware filename patterns they accept
     MODEL_FIRMWARE_PATTERNS: Dict[str, list] = {
@@ -174,6 +189,28 @@ class FirmwareManager:
         "tna-303l-65": ["tna-303l", "tna303l"],
         # Tachyon TNS-100 series (subscriber) - uses tns-100 firmware
         "tns-100": ["tns-100", "tns100"],
+        # Ubiquiti Wave series - mapped to specific firmware variants
+        # GMC (75ba) = GigaBeam Connect: Wave-AP, Wave-Pro, Wave-AP-Micro, Wave-Pico
+        # MGMP (02da) = Mini GigaBeam Micro/Pico: Wave-Nano, Wave-Micro, Wave-LR
+        "wave-pro": ["75ba-wave", "gmc"],
+        "wave-ap": ["75ba-wave", "gmc"],
+        "wave-ap-micro": ["75ba-wave", "gmc"],
+        "wave-pico": ["75ba-wave", "gmc"],
+        "wave-nano": ["02da-wave", "mgmp"],
+        "wave-micro": ["02da-wave", "mgmp"],
+        "wave-lr": ["02da-wave", "mgmp"],
+        # Ubiquiti AirMax series
+        "rocket": ["airmax"],
+        "nanostation": ["airmax"],
+        "litebeam": ["airmax"],
+        "powerbeam": ["airmax"],
+        "nanobeam": ["airmax"],
+        # Ubiquiti AirFiber series
+        "af-5xhd": ["airfiber"],
+        "af60-lr": ["airfiber"],
+        "af60-xr": ["airfiber"],
+        "af60-hd": ["airfiber"],
+        "af-11fx": ["airfiber"],
     }
 
     def _find_firmware_by_convention(
@@ -264,6 +301,87 @@ class FirmwareManager:
             filename=best_path.name,
             path=best_path,
         )
+
+    def _find_all_firmware_by_convention(
+        self,
+        device_type: str,
+        model: Optional[str] = None
+    ) -> list:
+        """Find ALL firmware files matching the model pattern.
+
+        Returns all candidates sorted by version (highest first), useful for
+        retry logic when specific hardware variants reject incompatible firmware.
+
+        Args:
+            device_type: Device type.
+            model: Optional model.
+
+        Returns:
+            List of FirmwareInfo objects.
+        """
+        device_dir = self.firmware_path / device_type
+        logger.info(f"Looking for ALL firmware in {device_dir} for model={model}")
+        if not device_dir.exists():
+            logger.warning(f"Firmware directory does not exist: {device_dir}")
+            return []
+
+        firmware_extensions = {'.bin', '.npk', '.img', '.fw', '.tar', '.gz', '.tbn'}
+
+        # Get firmware patterns for this model
+        model_patterns = None
+        if model:
+            model_key = model.lower().replace("cambium ", "").strip()
+            model_patterns = self.MODEL_FIRMWARE_PATTERNS.get(model_key)
+            if not model_patterns and model_key.startswith("epmp ax"):
+                model_patterns = ["epmp-ax", "epmp_ax"]
+            logger.info(f"Model key: '{model_key}', patterns: {model_patterns}")
+
+        # Find all firmware files
+        candidates = []
+        for f in device_dir.iterdir():
+            if f.is_file() and f.suffix.lower() in firmware_extensions:
+                filename_lower = f.name.lower()
+                if model:
+                    if model_patterns:
+                        matches = [p for p in model_patterns if p in filename_lower]
+                        if not matches:
+                            continue
+                    elif model.lower() not in filename_lower:
+                        continue
+                version = self._extract_version_from_filename(f.name)
+                candidates.append((f, version))
+
+        if not candidates:
+            return []
+
+        # Sort by version (highest first)
+        def sort_key(item):
+            path, version = item
+            version_parts = []
+            for part in version.replace("-", ".").replace("_", ".").split("."):
+                try:
+                    version_parts.append(int(part))
+                except ValueError:
+                    version_parts.append(0)
+            while len(version_parts) < 5:
+                version_parts.append(0)
+            return (version_parts, path.stat().st_mtime)
+
+        candidates.sort(key=sort_key, reverse=True)
+
+        # Convert to FirmwareInfo objects
+        result = []
+        for path, version in candidates:
+            result.append(FirmwareInfo(
+                device_type=device_type,
+                model=model,
+                version=version,
+                filename=path.name,
+                path=path,
+            ))
+
+        logger.info(f"Found {len(result)} firmware candidates for {device_type}/{model}")
+        return result
 
     def _extract_version_from_filename(self, filename: str) -> str:
         """Try to extract version from firmware filename.
