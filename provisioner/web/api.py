@@ -35,6 +35,7 @@ class PortStatus(BaseModel):
     device_model: Optional[str] = None
     provisioning: bool = False
     last_activity: Optional[str] = None
+    link_speed: Optional[str] = None
 
 
 class ProvisionRequest(BaseModel):
@@ -126,6 +127,7 @@ async def get_all_ports(request: Request):
             device_type=status["device_type"],
             device_ip=status["device_ip"],
             provisioning=status["provisioning"],
+            link_speed=status.get("link_speed"),
         )
         for port_num, status in port_status.items()
     ]
@@ -157,6 +159,7 @@ async def get_port(port_number: int, request: Request):
         device_type=status["device_type"],
         device_ip=status["device_ip"],
         provisioning=status["provisioning"],
+        link_speed=status.get("link_speed"),
     )
 
 

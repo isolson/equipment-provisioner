@@ -50,8 +50,12 @@ async def test_ping_disconnect_clears_device_metadata():
 
 
 @pytest.mark.asyncio
-async def test_link_down_during_boot_wait_clears_state():
-    """A real link-down event during boot wait should clear stale UI-visible data."""
+async def test_link_down_during_boot_wait_preserves_state():
+    """Link-down during boot wait is treated as autonegotiation flap.
+
+    State should be preserved (boot_wait keeps running) so that when
+    the link renegotiates back up, the boot cycle isn't reset.
+    """
     manager = PortManager(num_ports=1)
     manager._generate_port_configs()
 
@@ -60,32 +64,72 @@ async def test_link_down_during_boot_wait_clears_state():
     state.waiting_for_boot = True
     state.boot_wait_until = 9999999999
     state.boot_ping_responded = False
-    state.device_detected = True
-    state.device_type = "mikrotik"
-    state.device_ip = "192.168.88.1"
-    state.device_model = "hAP ax lite"
-    state.device_mode = "ap"
-    state.mode_config = {"tower": 5}
-    state.last_result = "failed"
-    state.last_error = "Invalid credentials"
-    state.checklist.login = True
-    state.checklist.model_confirmed = "hAP ax lite"
+    state.link_speed = "100Mbps"
 
     handled = await manager.handle_switch_port_event("ether1", link_up=False, speed=None)
     assert handled is True
 
+    # link_up should be False, but boot_wait state should remain intact
+    assert state.link_up is False
+    assert state.waiting_for_boot is True
+    assert state.boot_wait_until == 9999999999
+    assert state.link_speed == "100Mbps"  # preserved from earlier link-up
+
+
+@pytest.mark.asyncio
+async def test_link_renegotiation_during_boot_wait_updates_speed():
+    """Link-down then link-up during boot wait should update speed."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.link_up = True
+    state.waiting_for_boot = True
+    state.boot_wait_until = 9999999999
+    state.link_speed = "100Mbps"
+
+    # Link goes down during autonegotiation
+    await manager.handle_switch_port_event("ether1", link_up=False, speed=None)
+    assert state.link_up is False
+    assert state.waiting_for_boot is True
+
+    # Link comes back up at higher speed
+    await manager.handle_switch_port_event("ether1", link_up=True, speed="1Gbps")
+    assert state.link_up is True
+    assert state.link_speed == "1Gbps"
+    assert state.waiting_for_boot is True  # boot wait still running
+
+
+@pytest.mark.asyncio
+async def test_boot_wait_expiry_clears_state_when_link_down():
+    """If link is still down when boot_wait expires, state should be fully cleared."""
+    import time
+
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.link_up = False  # link went down during boot wait
+    state.waiting_for_boot = True
+    state.boot_wait_until = time.time() - 1  # already expired
+    state.boot_ping_responded = False
+    state.link_speed = "100Mbps"
+
+    async def no_ping(_iface, _ip, **kw):
+        return False
+
+    async def no_detect(_port_num):
+        return None
+
+    manager._ping_device = no_ping  # type: ignore[method-assign]
+    manager._detect_device_on_port = no_detect  # type: ignore[method-assign]
+
+    await manager._check_all_ports_parallel()
+
     assert state.link_up is False
     assert state.waiting_for_boot is False
     assert state.device_detected is False
-    assert state.device_type is None
-    assert state.device_ip is None
-    assert state.device_model is None
-    assert state.device_mode is None
-    assert state.mode_config is None
-    assert state.last_result is None
-    assert state.last_error is None
-    assert state.checklist.login is None
-    assert state.checklist.model_confirmed is None
+    assert state.link_speed is None
 
 
 def test_firmware_banks_initial_is_preserved_across_updates():
