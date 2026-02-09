@@ -20,6 +20,7 @@ from .firmware_sources.base import BaseFirmwareSource, RemoteFirmwareInfo
 from .firmware_sources.tachyon import TachyonFirmwareSource
 from .firmware_sources.ubiquiti import UbiquitiFirmwareSource
 from .firmware_sources.cambium import CambiumFirmwareSource
+from .firmware_sources.mikrotik import MikrotikFirmwareSource
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class FirmwareChecker:
         "tachyon": TachyonFirmwareSource,
         "ubiquiti": UbiquitiFirmwareSource,
         "cambium": CambiumFirmwareSource,
+        "mikrotik": MikrotikFirmwareSource,
     }
 
     # Cleanup constants
@@ -89,6 +91,19 @@ class FirmwareChecker:
         if not isinstance(sources_config, dict):
             logger.warning(f"Invalid firmware sources config type: {type(sources_config)}")
             sources_config = {}
+
+        # Backward compatibility: if user config defines only older vendor keys,
+        # merge in any missing defaults (e.g., newly added sources).
+        try:
+            from .config import _default_firmware_sources
+            default_sources = _default_firmware_sources()
+            for vendor, default_cfg in default_sources.items():
+                if vendor not in sources_config:
+                    sources_config[vendor] = default_cfg
+                    logger.info(f"Added missing firmware source config from defaults: {vendor}")
+        except Exception as e:
+            logger.debug(f"Could not merge default firmware sources: {e}")
+
         for vendor, source_config in sources_config.items():
             if not self._config_value(source_config, "enabled", True):
                 continue
@@ -433,21 +448,56 @@ class FirmwareChecker:
         return True
 
     @staticmethod
-    def _get_source_channel(source: BaseFirmwareSource) -> str:
-        """Get the effective channel for a source, handling both dict and model configs."""
+    def _read_source_channel(source: BaseFirmwareSource) -> str:
+        """Read raw channel string from source config."""
         if isinstance(source.config, dict):
             channel = source.config.get("channel", "release")
-            if channel == "all":
-                logger.warning("Firmware channel 'all' is deprecated; using 'release'")
-                return "release"
-            return channel if channel in ("release", "beta") else "release"
+            if isinstance(channel, str):
+                return channel
+            return "release"
         if hasattr(source.config, "effective_channel"):
             return source.config.effective_channel
         channel = getattr(source.config, "channel", "release")
-        if channel == "all":
-            logger.warning("Firmware channel 'all' is deprecated; using 'release'")
-            return "release"
-        return channel if channel in ("release", "beta") else "release"
+        return channel if isinstance(channel, str) else "release"
+
+    def get_supported_channels(self, vendor: str) -> list[str]:
+        """Get supported channels for a vendor source."""
+        source = self._sources.get(vendor)
+        if not source:
+            return []
+        if hasattr(source, "get_supported_channels"):
+            channels = source.get_supported_channels()
+            if isinstance(channels, list) and channels:
+                return channels
+        return ["release", "beta"]
+
+    def normalize_channel(self, vendor: str, channel: str) -> Optional[str]:
+        """Normalize/validate a channel for the given vendor source."""
+        source = self._sources.get(vendor)
+        if not source:
+            return None
+
+        raw = (channel or "").strip().lower()
+        if raw == "all":
+            logger.warning("Firmware channel 'all' is deprecated; using default channel")
+            raw = ""
+
+        if hasattr(source, "normalize_channel"):
+            normalized = source.normalize_channel(raw)
+        else:
+            normalized = raw or "release"
+
+        supported = self.get_supported_channels(vendor)
+        if normalized in supported:
+            return normalized
+
+        return supported[0] if supported else None
+
+    def _get_source_channel(self, vendor: str, source: BaseFirmwareSource) -> str:
+        """Get effective channel value for API display."""
+        raw = self._read_source_channel(source)
+        normalized = self.normalize_channel(vendor, raw)
+        return normalized or "release"
 
     def get_status(self) -> dict:
         """Return current status for API."""
@@ -462,7 +512,8 @@ class FirmwareChecker:
                         "auto_download",
                         self.config.get("default_auto_download", False),
                     ) if isinstance(source.config, dict) else getattr(source.config, "auto_download", False),
-                    "channel": self._get_source_channel(source),
+                    "channel": self._get_source_channel(vendor, source),
+                    "channel_options": self.get_supported_channels(vendor),
                 }
                 for vendor, source in self._sources.items()
             },

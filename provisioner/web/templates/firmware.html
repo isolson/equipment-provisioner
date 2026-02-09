@@ -252,6 +252,12 @@
                 const vc = vendorColors[vendor] || { name: vendor, color: '#6b7280' };
                 const lastCheck = s.last_check ? formatRelativeTime(s.last_check) : 'Never';
                 const channel = s.channel || 'release';
+                const channelOptions = Array.isArray(s.channel_options) && s.channel_options.length
+                    ? s.channel_options
+                    : ['release', 'beta'];
+                const channelButtons = channelOptions
+                    .map(value => renderChannelBtn(vendor, value, channel, vc.color))
+                    .join('');
 
                 return `
                 <div class="px-4 py-3 flex items-center gap-3 flex-wrap">
@@ -261,8 +267,7 @@
                     </span>
                     <span class="text-xs text-gray-400 ml-auto mr-2">Checked: ${lastCheck}</span>
                     <div class="flex rounded-lg border border-gray-300 overflow-hidden">
-                        ${renderChannelBtn(vendor, 'release', channel, vc.color)}
-                        ${renderChannelBtn(vendor, 'beta', channel, vc.color)}
+                        ${channelButtons}
                     </div>
                 </div>`;
             }).join('');
@@ -270,11 +275,17 @@
 
         function renderChannelBtn(vendor, value, current, color) {
             const isActive = current === value;
-            const label = value.charAt(0).toUpperCase() + value.slice(1);
-            const bg = isActive ? color : 'transparent';
+            const label = channelLabel(value);
             const cls = isActive ? 'channel-btn active' : 'channel-btn';
             return `<button class="${cls}" style="${isActive ? 'background:' + color : ''}"
                         onclick="setChannel('${vendor}','${value}')">${label}</button>`;
+        }
+
+        function channelLabel(value) {
+            if (value === 'long-term') return 'LTS';
+            if (value === 'stable') return 'Stable';
+            if (value === 'testing') return 'Testing';
+            return value.charAt(0).toUpperCase() + value.slice(1);
         }
 
         // ============================================================
@@ -293,9 +304,13 @@
             section.classList.remove('hidden');
             list.innerHTML = updates.map(u => {
                 const vc = vendorColors[u.vendor] || { name: u.vendor, color: '#6b7280' };
-                const channelPill = u.channel === 'beta'
-                    ? '<span class="text-xs font-bold text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded">beta</span>'
-                    : '';
+                const channel = (u.channel || '').toLowerCase();
+                let channelPill = '';
+                if (channel === 'testing' || channel === 'beta') {
+                    channelPill = '<span class="text-xs font-bold text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded">testing</span>';
+                } else if (channel === 'long-term') {
+                    channelPill = '<span class="text-xs font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded">LTS</span>';
+                }
                 return `
                 <div class="px-4 py-3 flex items-center gap-3">
                     <span class="vendor-badge" style="background:${vc.color}">${vc.name}</span>

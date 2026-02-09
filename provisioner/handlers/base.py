@@ -382,6 +382,16 @@ class BaseHandler(ABC):
                 info_str = f"mac:{result.device_info.mac_address or ''}|serial:{result.device_info.serial_number or ''}"
                 await notify("device_info", True, info_str)
 
+            def firmware_lookup_key() -> Optional[str]:
+                """Select best key for model-specific firmware lookup."""
+                if (
+                    self.device_type == "mikrotik"
+                    and result.device_info
+                    and result.device_info.hardware_version
+                ):
+                    return result.device_info.hardware_version
+                return model_name
+
             # Get firmware bank versions and determine which need updates
             bank1_ver = "unknown"
             bank2_ver = "unknown"
@@ -442,6 +452,18 @@ class BaseHandler(ABC):
             else:
                 # Bank 1 needs update
                 if not firmware_path:
+                    lookup_model = firmware_lookup_key()
+                    if firmware_lookup_callback and lookup_model:
+                        _logger.info(f"[PROVISION] No initial firmware path, re-looking up for model {lookup_model}")
+                        new_path, new_version = firmware_lookup_callback(self.device_type, lookup_model)
+                        if new_path:
+                            firmware_path = new_path
+                            expected_firmware = new_version
+                            need_fw1 = (bank1_ver != expected_firmware) if expected_firmware else need_fw1
+                            need_fw2 = (bank2_ver != expected_firmware) if expected_firmware else need_fw2
+                            _logger.info(f"[PROVISION] Re-lookup selected firmware: {firmware_path} ({expected_firmware})")
+
+                if not firmware_path:
                     result.error_message = "No firmware file found for this device model"
                     await notify("firmware_update_1", False, result.error_message)
                     return result
@@ -452,8 +474,9 @@ class BaseHandler(ABC):
                     if not is_valid:
                         # Try to re-lookup firmware with the now-known model
                         if firmware_lookup_callback:
-                            _logger.info(f"[PROVISION] Firmware mismatch, re-looking up for model {model_name}")
-                            new_path, new_version = firmware_lookup_callback(self.device_type, model_name)
+                            lookup_model = firmware_lookup_key()
+                            _logger.info(f"[PROVISION] Firmware mismatch, re-looking up for model {lookup_model}")
+                            new_path, new_version = firmware_lookup_callback(self.device_type, lookup_model)
                             if new_path:
                                 _logger.info(f"[PROVISION] Found correct firmware: {new_path} (version {new_version})")
                                 firmware_path = new_path

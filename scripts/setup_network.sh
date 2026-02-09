@@ -10,8 +10,9 @@
 #   eth0 (untagged): Gets DHCP from router via VLAN 1 (management/internet)
 #   eth0.101-106: VLAN interfaces for provisioning ports
 #
-# Each VLAN interface gets 169.254.1.2/24 to communicate with devices
-# at their link-local addresses (169.254.1.1 for Cambium/Tachyon, etc.)
+# Each VLAN interface gets:
+# - 169.254.1.2/24 for Cambium/Tachyon
+# - 192.168.88.11/32 for MikroTik default subnet access
 
 set -e
 
@@ -20,6 +21,7 @@ INTERFACE="${PROVISIONER_INTERFACE:-eth0}"
 VLAN_START="${PROVISIONER_VLAN_START:-1991}"
 NUM_VLANS="${PROVISIONER_NUM_VLANS:-6}"
 LOCAL_IP="${PROVISIONER_LOCAL_IP:-169.254.1.2}"
+MIKROTIK_LOCAL_IP="${PROVISIONER_MIKROTIK_LOCAL_IP:-192.168.88.11}"
 NETMASK="24"
 
 # Colors
@@ -116,8 +118,10 @@ create_vlan_interfaces() {
         # Assign link-local IP
         # Using the same IP on each VLAN is fine since they're isolated
         ip addr add "${LOCAL_IP}/${NETMASK}" dev "$vlan_iface" 2>/dev/null || true
+        # Add MikroTik /32 source IP on each provisioning VLAN.
+        ip addr add "${MIKROTIK_LOCAL_IP}/32" dev "$vlan_iface" 2>/dev/null || true
 
-        log_info "Configured $vlan_iface with ${LOCAL_IP}/${NETMASK}"
+        log_info "Configured $vlan_iface with ${LOCAL_IP}/${NETMASK}, ${MIKROTIK_LOCAL_IP}/32"
     done
 }
 
@@ -170,6 +174,7 @@ Name=${vlan_iface}
 
 [Network]
 Address=${LOCAL_IP}/${NETMASK}
+Address=${MIKROTIK_LOCAL_IP}/32
 # No gateway - these are isolated provisioning networks
 ConfigureWithoutCarrier=yes
 
@@ -219,6 +224,8 @@ iface ${vlan_iface} inet static
     address ${LOCAL_IP}
     netmask 255.255.255.0
     vlan-raw-device ${INTERFACE}
+    up ip addr add ${MIKROTIK_LOCAL_IP}/32 dev ${vlan_iface} || true
+    down ip addr del ${MIKROTIK_LOCAL_IP}/32 dev ${vlan_iface} || true
 
 EOF
     done
@@ -268,6 +275,7 @@ EOF
       link: ${INTERFACE}
       addresses:
         - ${LOCAL_IP}/${NETMASK}
+        - ${MIKROTIK_LOCAL_IP}/32
 EOF
     done
 

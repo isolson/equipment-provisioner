@@ -195,19 +195,36 @@ class DeviceFingerprinter:
         """Scan common ports to determine which services are available."""
         open_ports = []
 
+        async def check_bound_port(port: int) -> bool:
+            """Check a TCP port using SO_BINDTODEVICE-bound socket."""
+            if not self.interface:
+                return False
+            sock = _create_bound_socket(self.interface)
+            sock.settimeout(2.0)
+            try:
+                result = await asyncio.to_thread(sock.connect_ex, (ip, port))
+                return result == 0
+            except Exception:
+                return False
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
         async def check_port(port: int) -> Optional[int]:
             try:
                 if self.interface:
-                    # Use curl to check port when interface binding is needed
-                    # SO_BINDTODEVICE doesn't work reliably for link-local addresses
-                    scheme = "https" if port == 443 else "http"
-                    if port in (80, 443):
-                        url = f"{scheme}://{ip}:{port}/"
-                    else:
-                        # For non-HTTP ports, try TCP connect via curl's telnet
-                        # Just check if we can reach port 80/443 and infer others
-                        return None
+                    # First try direct TCP port check bound to VLAN interface.
+                    if await check_bound_port(port):
+                        return port
 
+                    # Fallback for HTTP/HTTPS endpoints via curl (follows redirects and
+                    # handles devices with non-standard TLS behavior).
+                    if port not in (80, 443):
+                        return None
+                    scheme = "https" if port == 443 else "http"
+                    url = f"{scheme}://{ip}:{port}/"
                     proc = await asyncio.create_subprocess_exec(
                         "curl", "-s", "-k", "-m", "2",
                         "--interface", self.interface,
@@ -218,8 +235,9 @@ class DeviceFingerprinter:
                         stderr=asyncio.subprocess.PIPE,
                     )
                     stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-                    # Any HTTP response (even 4xx/5xx) means port is open
-                    if proc.returncode == 0 or stdout:
+                    # Any HTTP code except 000 means the service answered.
+                    code = stdout.decode("utf-8", errors="ignore").strip()
+                    if proc.returncode == 0 and code and code != "000":
                         return port
                     return None
                 else:
@@ -687,16 +705,26 @@ class DeviceFingerprinter:
     async def _probe_ssh_banner(self, ip: str) -> Optional[Tuple[DeviceType, Optional[str]]]:
         """Get SSH banner for device identification."""
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(ip, 22),
-                timeout=self.timeout
-            )
+            if self.interface:
+                sock = _create_bound_socket(self.interface)
+                sock.settimeout(self.timeout)
+                try:
+                    await asyncio.to_thread(sock.connect, (ip, 22))
+                    banner = await asyncio.to_thread(sock.recv, 256)
+                finally:
+                    sock.close()
+                banner_str = banner.decode("utf-8", errors="ignore")
+            else:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(ip, 22),
+                    timeout=self.timeout
+                )
 
-            banner = await asyncio.wait_for(reader.read(256), timeout=3.0)
-            banner_str = banner.decode("utf-8", errors="ignore")
+                banner = await asyncio.wait_for(reader.read(256), timeout=3.0)
+                banner_str = banner.decode("utf-8", errors="ignore")
 
-            writer.close()
-            await writer.wait_closed()
+                writer.close()
+                await writer.wait_closed()
 
             logger.debug(f"SSH banner from {ip}: {banner_str}")
 

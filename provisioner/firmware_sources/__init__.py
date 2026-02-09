@@ -4,6 +4,7 @@ from .base import BaseFirmwareSource, RemoteFirmwareInfo
 from .tachyon import TachyonFirmwareSource
 from .ubiquiti import UbiquitiFirmwareSource
 from .cambium import CambiumFirmwareSource
+from .mikrotik import MikrotikFirmwareSource
 
 __all__ = [
     "BaseFirmwareSource",
@@ -11,4 +12,5 @@ __all__ = [
     "TachyonFirmwareSource",
     "UbiquitiFirmwareSource",
     "CambiumFirmwareSource",
+    "MikrotikFirmwareSource",
 ]

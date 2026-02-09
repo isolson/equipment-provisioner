@@ -336,6 +336,70 @@
             };
         }
 
+        function parseFirmwareBanks(raw) {
+            const parts = {};
+            if (!raw || typeof raw !== 'string') return parts;
+            raw.split('|').forEach(p => {
+                const idx = p.indexOf(':');
+                if (idx > 0) {
+                    const k = p.slice(0, idx);
+                    const v = p.slice(idx + 1);
+                    if (k && v) parts[k] = v;
+                }
+            });
+            // Backward-compatible aliases for existing bank payloads.
+            if (parts.bank1 && !parts.software) parts.software = parts.bank1;
+            if (parts.bank2 && !parts.routerboard) parts.routerboard = parts.bank2;
+            return parts;
+        }
+
+        function shortFw(v) {
+            return (v || '').toString().trim().split(' ')[0];
+        }
+
+        function formatFromTo(fromValue, toValue) {
+            const from = shortFw(fromValue);
+            const to = shortFw(toValue);
+            if (!from) return to;
+            if (!to || from === to) return to || from;
+            return `${from} -> ${to}`;
+        }
+
+        function firmwareValueForStep(parts, deviceType, stepKey) {
+            if (stepKey === 'firmware_update_1') {
+                return deviceType === 'mikrotik'
+                    ? (parts.software || parts.bank1 || '')
+                    : (parts.bank1 || '');
+            }
+            if (stepKey === 'firmware_update_2') {
+                return deviceType === 'mikrotik'
+                    ? (parts.routerboard || parts.bank2 || '')
+                    : (parts.bank2 || '');
+            }
+            return '';
+        }
+
+        function firmwareStepLabel(deviceType, key) {
+            if (deviceType === 'mikrotik') {
+                if (key === 'firmware_update_1') return 'Software';
+                if (key === 'firmware_update_2') return 'RouterBOARD';
+            }
+            return key === 'firmware_update_1' ? 'FW Bank 1' : 'FW Bank 2';
+        }
+
+        function firmwareBanksDetail(parts, deviceType) {
+            if (deviceType === 'mikrotik') {
+                const sw = (parts.software || '?').split(' ')[0];
+                const rb = (parts.routerboard || '?').split(' ')[0];
+                return `SW ${sw} / RB ${rb}`;
+            }
+            const v1 = (parts.bank1 || '?').split(' ')[0];
+            const v2 = (parts.bank2 || '?').split(' ')[0];
+            let detail = v1 === v2 ? v1 : `${v1} / ${v2}`;
+            if (parts.active) detail += ` (bank ${parts.active})`;
+            return detail;
+        }
+
         function handleWebSocketMessage(message) {
             switch (message.type) {
                 case 'initial_status':
@@ -351,34 +415,37 @@
                     if (message.data?.checklist && ports[message.port_number]) {
                         const oldCl = ports[message.port_number].checklist || {};
                         const newCl = message.data.checklist;
+                        const deviceType = message.data?.device_type || ports[message.port_number]?.device_type;
                         const pn = message.port_number;
                         if (!portActivityLogs[pn]) portActivityLogs[pn] = [];
                         const now = new Date().toLocaleTimeString('en-US', { hour12: false });
                         const stepNames = { login: 'Login', model_confirmed: 'Model', firmware_banks: 'FW Check',
-                            firmware_update_1: 'FW Bank 1', firmware_update_2: 'FW Bank 2',
+                            firmware_update_1: firmwareStepLabel(deviceType, 'firmware_update_1'),
+                            firmware_update_2: firmwareStepLabel(deviceType, 'firmware_update_2'),
                             config_upload: 'Config', config_verify: 'Verify',
                             reboot: 'Reboot', verify: 'Verify FW' };
                         // Parse FW versions for detail on fw update steps
                         let fwVersions = {};
                         const fwSrc = newCl.firmware_banks || oldCl.firmware_banks;
-                        if (fwSrc) {
-                            fwSrc.split('|').forEach(p => { const [k2,v] = p.split(':'); if(k2&&v) fwVersions[k2]=v; });
-                        }
+                        if (fwSrc) fwVersions = parseFirmwareBanks(fwSrc);
                         for (const key of Object.keys(stepNames)) {
                             if (newCl[key] !== undefined && newCl[key] !== oldCl[key]) {
                                 const state = getIconState(newCl, key);
                                 let detail = '';
                                 if (key === 'model_confirmed' && typeof newCl[key] === 'string') detail = newCl[key];
                                 if (key === 'firmware_banks' && typeof newCl[key] === 'string') {
-                                    const fp = {};
-                                    newCl[key].split('|').forEach(p => { const [k2,v] = p.split(':'); if(k2&&v) fp[k2]=v; });
-                                    const v1 = (fp.bank1 || '?').split(' ')[0];
-                                    const v2 = (fp.bank2 || '?').split(' ')[0];
-                                    detail = v1 === v2 ? v1 : `${v1} / ${v2}`;
-                                    if (fp.active) detail += ` (bank ${fp.active})`;
+                                    detail = firmwareBanksDetail(parseFirmwareBanks(newCl[key]), deviceType);
                                 }
-                                if (key === 'firmware_update_1') detail = fwVersions.bank1 || detail;
-                                if (key === 'firmware_update_2') detail = fwVersions.bank2 || detail;
+                                if (key === 'firmware_update_1') {
+                                    detail = deviceType === 'mikrotik'
+                                        ? (fwVersions.software || fwVersions.bank1 || detail)
+                                        : (fwVersions.bank1 || detail);
+                                }
+                                if (key === 'firmware_update_2') {
+                                    detail = deviceType === 'mikrotik'
+                                        ? (fwVersions.routerboard || fwVersions.bank2 || detail)
+                                        : (fwVersions.bank2 || detail);
+                                }
                                 if (key === 'login' && typeof newCl.mac_address === 'string') detail = newCl.mac_address;
                                 portActivityLogs[pn].push({ time: now, step: stepNames[key], state, detail });
                             }
@@ -423,7 +490,10 @@
                             ports[message.port_number].needs_credentials = true;
                             ports[message.port_number].last_error = message.error || 'Invalid credentials';
                             showToast(`Port ${message.port_number}: Tap to enter credentials`, 'warning');
-                            // Don't auto-open modal - let user tap the port card
+                            // Prompt immediately on auth failures so operators can act quickly.
+                            if (selectedPort === null) {
+                                openCredentialModal(message.port_number);
+                            }
                         }
                         renderPorts();
                     }
@@ -449,7 +519,13 @@
         }
 
         function updateSinglePort(portNumber, data) {
-            ports[portNumber] = { ...ports[portNumber], ...data };
+            const merged = { ...ports[portNumber], ...data };
+            if (merged.link_up === false) {
+                // Clear client-only sticky flags when a device is unplugged.
+                merged.needs_credentials = false;
+                merged.current_step = null;
+            }
+            ports[portNumber] = merged;
             renderPorts();
         }
 
@@ -536,11 +612,13 @@
             if (!port.link_up) return { text: 'NO LINK', cls: 'idle', icon: 'dash' };
             if (port.needs_credentials) return { text: 'NEEDS CREDENTIALS', sub: 'Tap to enter password', cls: 'error', icon: 'alert' };
             if (port.provisioning) {
+                const isMikrotik = port.device_type === 'mikrotik';
                 const stepLabels = {
                     'starting': 'STARTING', 'detecting': 'DETECTING', 'configuring': 'CONFIGURING',
                     'login': 'LOGGING IN', 'model_confirmed': 'DETECTING MODEL',
                     'device_info': 'READING INFO', 'firmware_banks': 'CHECKING FIRMWARE',
-                    'firmware_update_1': 'UPDATING FW 1', 'firmware_update_2': 'UPDATING FW 2',
+                    'firmware_update_1': isMikrotik ? 'UPDATING SOFTWARE' : 'UPDATING FW 1',
+                    'firmware_update_2': isMikrotik ? 'UPDATING ROUTERBOARD' : 'UPDATING FW 2',
                     'config_upload': 'APPLYING CONFIG', 'config_verify': 'VERIFYING CONFIG',
                     'reboot': 'REBOOTING', 'verify': 'VERIFYING FW',
                 };
@@ -617,11 +695,11 @@
             const speed = formatSpeed(port.link_speed);
             const model = checklist.model_confirmed || port.device_model;
             const noLink = !port.link_up;
-            const hasDevice = port.device_detected || checklist.login;
+            const hasDevice = !noLink && (port.device_detected || checklist.login);
             const sc = getStatusCenterInfo(port, portNum);
 
             div.className = `port-card rounded-xl p-3 flex flex-col state-${cardState} ${noLink ? 'no-link' : ''}`;
-            const clickable = port.device_detected || port.needs_credentials;
+            const clickable = !noLink && (port.device_detected || port.needs_credentials);
             div.onclick = () => {
                 if (port.needs_credentials) {
                     openCredentialModal(portNum);
@@ -665,17 +743,25 @@
             const model = checklist.model_confirmed || port.device_model;
 
             // Parse firmware versions
-            let fw1Ver = '', fw2Ver = '', activeBank = '';
-            if (checklist.firmware_banks) {
-                const parts = {};
-                checklist.firmware_banks.split('|').forEach(p => {
-                    const [k, v] = p.split(':');
-                    if (k && v) parts[k] = v;
-                });
-                fw1Ver = parts.bank1 || '';
-                fw2Ver = parts.bank2 || '';
-                activeBank = parts.active || '';
-            }
+            let fw1From = '', fw1To = '', fw2From = '', fw2To = '', activeBank = '';
+            const fwStart = parseFirmwareBanks(checklist.firmware_banks_initial);
+            const fwEnd = parseFirmwareBanks(checklist.firmware_banks);
+            fw1From = firmwareValueForStep(fwStart, port.device_type, 'firmware_update_1');
+            fw1To = firmwareValueForStep(fwEnd, port.device_type, 'firmware_update_1');
+            fw2From = firmwareValueForStep(fwStart, port.device_type, 'firmware_update_2');
+            fw2To = firmwareValueForStep(fwEnd, port.device_type, 'firmware_update_2');
+            activeBank = fwEnd.active || '';
+            const isMikrotik = port.device_type === 'mikrotik';
+            const fw1Label = isMikrotik ? 'Software' : 'FW Bank 1';
+            const fw2Label = isMikrotik ? 'RouterBOARD' : 'FW Bank 2';
+            const fw1Latest = shortFw(fw1To) || shortFw(fw1From);
+            const fw2Latest = shortFw(fw2To) || shortFw(fw2From);
+            const fw1Value = isMikrotik
+                ? fw1Latest
+                : (formatFromTo(fw1From, fw1To) + (activeBank === '1' && shortFw(fw1To) ? ' (active)' : ''));
+            const fw2Value = isMikrotik
+                ? fw2Latest
+                : (formatFromTo(fw2From, fw2To) + (activeBank === '2' && shortFw(fw2To) ? ' (active)' : ''));
 
             document.getElementById('modal-title').textContent = `Port ${portNum} \u2014 ${vendor.name} ${model || ''}`;
 
@@ -685,8 +771,8 @@
             if (serial) infoRows.push(['Serial', serial, 'text-purple-700']);
             if (port.device_ip) infoRows.push(['IP', port.device_ip, 'text-gray-900']);
             if (port.link_speed) infoRows.push(['Link', port.link_speed, 'text-gray-900']);
-            if (fw1Ver) infoRows.push(['FW Bank 1', fw1Ver + (activeBank === '1' ? ' (active)' : ''), 'text-green-700']);
-            if (fw2Ver) infoRows.push(['FW Bank 2', fw2Ver + (activeBank === '2' ? ' (active)' : ''), 'text-green-700']);
+            if (shortFw(fw1To) || shortFw(fw1From)) infoRows.push([fw1Label, fw1Value, 'text-green-700']);
+            if (shortFw(fw2To) || shortFw(fw2From)) infoRows.push([fw2Label, fw2Value, 'text-green-700']);
 
             document.getElementById('modal-content').innerHTML = `
                 <!-- Device summary grid -->
@@ -738,6 +824,7 @@
             const port = ports[portNum];
             const stateIcons = { success: '\u2713', error: '\u2717', loading: '\u25cf', pending: '\u25cb', skipped: '\u2014' };
             const stateColors = { success: '#166534', error: '#991b1b', loading: '#1e40af', pending: '#9ca3af', skipped: '#9ca3af' };
+            const isMikrotik = port?.device_type === 'mikrotik';
 
             function renderEntry(entry) {
                 const icon = stateIcons[entry.state] || '\u25cb';
@@ -755,8 +842,8 @@
             // Steps that never appear in checklist or log are omitted (e.g. reboot when no FW update)
             const allSteps = [
                 ['login', 'Login'], ['model_confirmed', 'Model'], ['firmware_banks', 'FW Check'],
-                ['firmware_update_1', 'FW Bank 1'], ['config_upload', 'Config'], ['config_verify', 'Verify'],
-                ['firmware_update_2', 'FW Bank 2'], ['reboot', 'Reboot'], ['verify', 'Verify FW']
+                ['firmware_update_1', isMikrotik ? 'Software' : 'FW Bank 1'], ['config_upload', 'Config'], ['config_verify', 'Verify'],
+                ['firmware_update_2', isMikrotik ? 'RouterBOARD' : 'FW Bank 2'], ['reboot', 'Reboot'], ['verify', 'Verify FW']
             ];
             const checklist = port?.checklist || {};
             const isActive = port && (port.provisioning || port.waiting_for_boot);
@@ -767,8 +854,8 @@
             if (log) { for (const entry of log) { logByLabel[entry.step] = entry; } }
 
             // Parse FW versions for detail
-            let fwV = {};
-            if (checklist.firmware_banks) { checklist.firmware_banks.split('|').forEach(p => { const [a,b] = p.split(':'); if(a&&b) fwV[a]=b; }); }
+            const fwStart = parseFirmwareBanks(checklist.firmware_banks_initial);
+            const fwEnd = parseFirmwareBanks(checklist.firmware_banks);
 
             let html = '';
             // Render "Started" entry — show as success once any real step has completed
@@ -808,18 +895,38 @@
                 // Build detail text
                 let detail = '';
                 if (key === 'model_confirmed' && typeof checklist[key] === 'string') detail = checklist[key];
-                if (key === 'firmware_update_1') detail = fwV.bank1 || '';
-                if (key === 'firmware_update_2') detail = fwV.bank2 || '';
+                if (key === 'firmware_update_1') {
+                    detail = formatFromTo(
+                        firmwareValueForStep(fwStart, port?.device_type, key),
+                        firmwareValueForStep(fwEnd, port?.device_type, key),
+                    );
+                }
+                if (key === 'firmware_update_2') {
+                    detail = formatFromTo(
+                        firmwareValueForStep(fwStart, port?.device_type, key),
+                        firmwareValueForStep(fwEnd, port?.device_type, key),
+                    );
+                }
                 if (key === 'firmware_banks') {
-                    const v1 = (fwV.bank1 || '?').split(' ')[0];
-                    const v2 = (fwV.bank2 || '?').split(' ')[0];
-                    detail = v1 === v2 ? v1 : `${v1} / ${v2}`;
-                    if (fwV.active) detail += ` (bank ${fwV.active})`;
+                    const startDetail = Object.keys(fwStart).length ? firmwareBanksDetail(fwStart, port?.device_type) : '';
+                    const endDetail = Object.keys(fwEnd).length ? firmwareBanksDetail(fwEnd, port?.device_type) : '';
+                    // Keep FW Check as the original snapshot for the full run.
+                    detail = startDetail || endDetail;
+                }
+                if (key === 'verify') {
+                    // Verify FW shows the latest observed firmware state.
+                    detail = Object.keys(fwEnd).length
+                        ? firmwareBanksDetail(fwEnd, port?.device_type)
+                        : (Object.keys(fwStart).length ? firmwareBanksDetail(fwStart, port?.device_type) : '');
                 }
 
                 // Use logged entry timestamp if available
                 const time = logged ? logged.time : '';
-                if (logged) detail = logged.detail || detail;
+                const preserveComputedFirmwareDetail = (
+                    (key === 'firmware_banks' || key === 'firmware_update_1' || key === 'firmware_update_2')
+                    && !!detail
+                );
+                if (logged && !preserveComputedFirmwareDetail) detail = logged.detail || detail;
 
                 // If active and this is the first pending step after all done ones, show as loading
                 if (isActive && state === 'pending' && !lastLoadingKey) {
@@ -1149,6 +1256,10 @@
                                 class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900">
                             <input type="password" id="custom-password" placeholder="Password"
                                 class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900" autofocus>
+                            <label class="flex items-center gap-2 text-xs text-gray-600">
+                                <input type="checkbox" id="save-credential-default" checked>
+                                Save this credential for future ${vendor.name} devices
+                            </label>
                         </div>
                     </div>
                 </div>
@@ -1169,6 +1280,8 @@
         async function retryWithCredentials(portNum) {
             const username = document.getElementById('custom-username')?.value;
             const password = document.getElementById('custom-password')?.value;
+            const saveDefault = document.getElementById('save-credential-default')?.checked;
+            const port = ports[portNum];
 
             if (!username || !password) {
                 showToast('Please enter username and password', 'error');
@@ -1181,6 +1294,18 @@
             }
 
             try {
+                if (saveDefault && port?.device_type) {
+                    try {
+                        await fetch(`/api/default-credentials/${encodeURIComponent(port.device_type)}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ username, password }),
+                        });
+                    } catch (e) {
+                        console.warn('Failed to save default credential:', e);
+                    }
+                }
+
                 const response = await fetch('/api/provision', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },

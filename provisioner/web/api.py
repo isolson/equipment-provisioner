@@ -875,16 +875,15 @@ async def firmware_download_update(
 class ChannelUpdateRequest(BaseModel):
     """Request to update firmware channel for a vendor source."""
     vendor: str
-    channel: str  # "release" or "beta"
+    channel: str
 
 
 @router.post("/firmware/set-channel")
 async def firmware_set_channel(request: Request, body: ChannelUpdateRequest):
     """Set the firmware channel for a vendor source at runtime.
 
-    Channel options:
-      - "release": stable releases only
-      - "beta": beta releases only
+    Channel options are vendor-specific (for example, MikroTik:
+    "long-term", "stable", "testing").
     """
     from ..firmware_checker import get_firmware_checker
 
@@ -892,29 +891,36 @@ async def firmware_set_channel(request: Request, body: ChannelUpdateRequest):
     if not checker:
         raise HTTPException(status_code=503, detail="Firmware checker not enabled")
 
-    if body.channel not in ("release", "beta"):
-        raise HTTPException(status_code=400, detail="Channel must be 'release' or 'beta'")
-
     source = checker._sources.get(body.vendor)
     if not source:
         raise HTTPException(status_code=404, detail=f"No source configured for vendor: {body.vendor}")
 
+    normalized_channel = checker.normalize_channel(body.vendor, body.channel)
+    supported_channels = checker.get_supported_channels(body.vendor)
+    if not normalized_channel:
+        raise HTTPException(status_code=400, detail=f"Invalid channel '{body.channel}'")
+    if normalized_channel not in supported_channels:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Channel must be one of: {', '.join(supported_channels)}",
+        )
+
     # Update the source config in-memory
     if isinstance(source.config, dict):
-        source.config["channel"] = body.channel
+        source.config["channel"] = normalized_channel
         source.config.pop("include_beta", None)
     else:
         # Pydantic model — replace with updated dict
         config_dict = source.config.model_dump()
-        config_dict["channel"] = body.channel
+        config_dict["channel"] = normalized_channel
         config_dict.pop("include_beta", None)
         source.config = config_dict
 
     return {
         "success": True,
         "vendor": body.vendor,
-        "channel": body.channel,
-        "message": f"Channel set to '{body.channel}' for {body.vendor}",
+        "channel": normalized_channel,
+        "message": f"Channel set to '{normalized_channel}' for {body.vendor}",
     }
 
 

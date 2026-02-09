@@ -141,20 +141,22 @@ class FirmwareSourceConfig(BaseModel):
     enabled: bool = True
     check_interval: int = Field(default=86400, ge=300, le=604800)  # seconds (default 24h)
     auto_download: bool = False  # False = notify only, True = auto-download
-    channel: str = "release"  # "release" or "beta"
+    channel: str = "release"  # Vendor-specific channel (release/beta or long-term/stable/testing)
     include_beta: bool = False  # Deprecated: ignored
     models: list = Field(default_factory=list)  # Empty = all models
 
     @property
     def effective_channel(self) -> str:
         """Resolve the effective channel."""
-        return self.channel if self.channel in ("release", "beta") else "release"
+        valid_channels = {"release", "beta", "long-term", "stable", "testing"}
+        return self.channel if self.channel in valid_channels else "release"
 
 
 def _default_firmware_sources():
     """Default firmware sources — Tachyon enabled, others stubbed."""
     return {
         "tachyon": FirmwareSourceConfig(enabled=True, auto_download=True),
+        "mikrotik": FirmwareSourceConfig(enabled=True, auto_download=True, channel="long-term"),
         "ubiquiti": FirmwareSourceConfig(enabled=False),
         "cambium": FirmwareSourceConfig(enabled=False),
     }

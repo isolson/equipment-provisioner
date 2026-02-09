@@ -77,8 +77,12 @@ class TestConfigDefaults:
 
         # Check default sources
         assert "tachyon" in config.sources
+        assert "mikrotik" in config.sources
         assert config.sources["tachyon"].enabled is True
         assert config.sources["tachyon"].auto_download is True
+        assert config.sources["mikrotik"].enabled is True
+        assert config.sources["mikrotik"].auto_download is True
+        assert config.sources["mikrotik"].channel == "long-term"
 
     def test_full_config_defaults(self):
         """Test full Config can be created with all defaults."""
@@ -300,6 +304,11 @@ class TestFirmwareSourceConfig:
         """Test effective channel returns beta for beta setting."""
         config = FirmwareSourceConfig(channel="beta")
         assert config.effective_channel == "beta"
+
+    def test_effective_channel_long_term(self):
+        """Test effective channel supports MikroTik long-term channel."""
+        config = FirmwareSourceConfig(channel="long-term")
+        assert config.effective_channel == "long-term"
 
     def test_effective_channel_invalid_defaults_to_release(self):
         """Test effective channel defaults to release for invalid values."""

@@ -39,6 +39,8 @@ class ProvisioningChecklist:
     login: Optional[Union[bool, str]] = None
     model_confirmed: Optional[str] = None  # Stores model name on success, None if not done
     config_upload: Optional[Union[bool, str]] = None
+    config_verify: Optional[Union[bool, str]] = None
+    firmware_banks_initial: Optional[str] = None  # First observed firmware banks this run
     firmware_banks: Optional[str] = None  # "bank1:5.10.4|bank2:5.10.4|active:1" - both bank versions
     firmware_update_1: Optional[Union[bool, str]] = None  # First firmware update: None/loading/True/False
     firmware_update_2: Optional[Union[bool, str]] = None  # Second firmware update: None/loading/True/False
@@ -58,6 +60,8 @@ class ProvisioningChecklist:
             "login": self.login,
             "model_confirmed": self.model_confirmed,
             "config_upload": self.config_upload,
+            "config_verify": self.config_verify,
+            "firmware_banks_initial": self.firmware_banks_initial,
             "firmware_banks": self.firmware_banks,
             "firmware_update_1": self.firmware_update_1,
             "firmware_update_2": self.firmware_update_2,
@@ -72,6 +76,8 @@ class ProvisioningChecklist:
         self.login = None
         self.model_confirmed = None
         self.config_upload = None
+        self.config_verify = None
+        self.firmware_banks_initial = None
         self.firmware_banks = None
         self.firmware_update_1 = None
         self.firmware_update_2 = None
@@ -98,6 +104,13 @@ class DeviceLinkLocalIP:
         ("192.168.1.20", ["ubiquiti"]),  # Ubiquiti AirMax/Wave default
         ("169.254.100.1", ["tarana"]),
         ("192.168.88.1", ["mikrotik"]),
+    ]
+
+    # Some MikroTik units may be reset with different default LAN subnets.
+    # We only probe these if standard defaults do not match.
+    MIKROTIK_FALLBACKS = [
+        "192.168.0.1",
+        "10.0.0.1",
     ]
 
 
@@ -219,7 +232,11 @@ class PortManager:
                 vlan_id=vlan_id,
                 interface_name=interface_name,
                 local_ip=self.local_ip_base,
-                secondary_ips=["169.254.100.2/24", "192.168.1.2/24"],  # Tarana at 169.254.100.1, Ubiquiti/Tachyon at 192.168.1.x
+                secondary_ips=[
+                    "169.254.100.2/24",  # Tarana at 169.254.100.1
+                    "192.168.1.2/24",    # Ubiquiti/Tachyon at 192.168.1.x
+                    "192.168.88.11/32",  # Shared MikroTik source IP per provisioning VLAN
+                ],
             )
             self.ports[port_num] = port_config
             logger.debug(f"Port {port_num} config: {interface_name}, IPs: {self.local_ip_base}, secondary: {port_config.secondary_ips}")
@@ -329,6 +346,10 @@ class PortManager:
         # Add secondary IPs for other device types (e.g., Tarana at 169.254.100.x)
         if config.secondary_ips:
             logger.info(f"Adding {len(config.secondary_ips)} secondary IPs to {interface}")
+            # Remove stale MikroTik /32 source IPs so we can safely rotate to per-port values.
+            desired_mikrotik = {ip for ip in config.secondary_ips if ip.startswith("192.168.88.") and ip.endswith("/32")}
+            if desired_mikrotik:
+                await self._prune_stale_mikrotik_source_ips(interface, desired_mikrotik)
             for secondary_ip in config.secondary_ips:
                 try:
                     await self._run_cmd([
@@ -339,6 +360,28 @@ class PortManager:
                     logger.info(f"Added secondary IP {secondary_ip} to {interface}")
                 except Exception as e:
                     logger.error(f"Failed to add secondary IP {secondary_ip} to {interface}: {e}")
+
+    async def _prune_stale_mikrotik_source_ips(self, interface: str, keep: set[str]) -> None:
+        """Delete stale 192.168.88.x/32 addresses on an interface."""
+        try:
+            proc = await self._run_cmd(
+                ["ip", "-4", "-o", "addr", "show", "dev", interface],
+                check=False,
+            )
+            if proc.returncode != 0:
+                return
+            for line in proc.stdout.decode().splitlines():
+                parts = line.split()
+                if "inet" not in parts:
+                    continue
+                cidr = parts[parts.index("inet") + 1]
+                if cidr in keep:
+                    continue
+                if cidr.startswith("192.168.88.") and cidr.endswith("/32"):
+                    await self._run_cmd(["ip", "addr", "del", cidr, "dev", interface], check=False)
+                    logger.info(f"Removed stale MikroTik source IP {cidr} from {interface}")
+        except Exception as e:
+            logger.debug(f"Failed pruning stale MikroTik source IPs on {interface}: {e}")
 
     async def _run_cmd(self, cmd: List[str], check: bool = True) -> subprocess.CompletedProcess:
         """Run a shell command."""
@@ -468,13 +511,7 @@ class PortManager:
                     state.ping_failures += 1
                     if state.ping_failures >= self.PING_FAILURE_THRESHOLD:
                         logger.info(f"Port {port_num} device disconnected (no ping response)")
-                        state.link_up = False
-                        state.device_detected = False
-                        state.device_type = None
-                        state.device_ip = None
-                        state.ping_failures = 0
-                        state.provision_attempted = False  # Reset for next detection
-                        self.clear_device_mode(port_num)
+                        self._clear_port_state_on_disconnect(port_num)
 
             ping_tasks = [
                 ping_check(port_num, config, state)
@@ -570,6 +607,41 @@ class PortManager:
 
                     return
 
+        # Fallback: probe additional common MikroTik LAN defaults only if
+        # standard default probes didn't identify anything.
+        for device_ip in DeviceLinkLocalIP.MIKROTIK_FALLBACKS:
+            ping_result = await self._ping_device(config.interface_name, device_ip)
+            if not ping_result:
+                continue
+
+            logger.info(f"Device responding at MikroTik fallback {device_ip} on port {port_num}")
+            device_type = await self._identify_device_type(
+                config.interface_name,
+                device_ip,
+                ["mikrotik"],
+            )
+            if device_type:
+                state.link_up = True
+                state.device_detected = True
+                state.device_type = device_type
+                state.device_ip = device_ip
+                state.last_seen = asyncio.get_event_loop().time()
+
+                logger.info(f"Detected {device_type} on port {port_num} via fallback IP {device_ip}")
+
+                # Notify callbacks only if provisioning hasn't been attempted yet
+                if not state.provision_attempted:
+                    state.provision_attempted = True
+                    for callback in self._on_device_detected:
+                        try:
+                            await callback(port_num, device_type, device_ip)
+                        except Exception as e:
+                            logger.error(f"Callback error: {e}")
+                else:
+                    logger.debug(f"Port {port_num} provisioning already attempted, skipping callback")
+
+                return
+
         logger.warning(f"No known device detected on port {port_num}")
 
     async def _ping_device(self, interface: str, ip: str) -> bool:
@@ -582,12 +654,34 @@ class PortManager:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(proc.wait(), timeout=5)
-            return proc.returncode == 0
+            if proc.returncode == 0:
+                return True
         except asyncio.TimeoutError:
             if proc:
                 proc.kill()
                 await proc.wait()  # Reap zombie process
-            return False
+        except Exception:
+            if proc and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+
+        # MikroTik devices on 192.168.88.1 may drop ICMP from non-subnet sources;
+        # ARP probing is more reliable for "is it on this VLAN?" detection.
+        if ip == DeviceLinkLocalIP.MIKROTIK:
+            return await self._arp_probe(interface, ip)
+        return False
+
+    async def _arp_probe(self, interface: str, ip: str) -> bool:
+        """Probe IP presence via ARP on a specific interface."""
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "arping", "-c", "1", "-w", "2", "-I", interface, ip,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=5)
+            return proc.returncode == 0
         except Exception:
             if proc and proc.returncode is None:
                 proc.kill()
@@ -727,6 +821,34 @@ class PortManager:
             self.port_states[port_num].expecting_reboot = expecting
             logger.debug(f"Port {port_num} expecting_reboot={expecting}")
 
+    def _clear_port_state_on_disconnect(self, port_num: int) -> None:
+        """Reset transient port/device state after a disconnect."""
+        state = self.port_states.get(port_num)
+        if not state:
+            return
+
+        state.provisioning = False
+        state.provisioning_task = None
+        state.expecting_reboot = False
+        state.link_up = False
+        state.device_detected = False
+        state.device_type = None
+        state.device_ip = None
+        state.device_mac = None
+        state.device_serial = None
+        state.device_model = None
+        state.ping_failures = 0
+        state.link_speed = None
+        state.waiting_for_boot = False
+        state.boot_wait_until = None
+        state.boot_ping_responded = False
+        state.last_result = None
+        state.last_error = None
+        state.provision_attempted = False
+        state.provisioning_ended = None
+        state.checklist.reset()
+        self.clear_device_mode(port_num)
+
     def update_port_device_info(
         self,
         port_num: int,
@@ -769,6 +891,9 @@ class PortManager:
         if port_num in self.port_states:
             state = self.port_states[port_num]
             if hasattr(state.checklist, step):
+                if step == "firmware_banks" and isinstance(status, str):
+                    if not state.checklist.firmware_banks_initial:
+                        state.checklist.firmware_banks_initial = status
                 setattr(state.checklist, step, status)
                 logger.debug(f"Port {port_num} checklist: {step} = {status}")
 
@@ -883,8 +1008,6 @@ class PortManager:
             return False
 
         state = self.port_states[port_num]
-        config = self.ports[port_num]
-
         speed_info = f" at {speed}" if speed else ""
         logger.info(f"Switch event: port {port_num} ({switch_port}) link {'up' if link_up else 'down'}{speed_info}")
 
@@ -907,8 +1030,7 @@ class PortManager:
                 logger.debug(f"Port {port_num} link flap during boot wait, ignoring")
 
         else:
-            # Link went down - only clear state if not provisioning and not waiting for boot
-            # During provisioning or boot wait, devices may cause link flaps
+            # Link went down - clear state unless we're in an expected reboot window.
             if state.provisioning:
                 if state.expecting_reboot:
                     logger.debug(f"Ignoring link down on port {port_num} during expected reboot")
@@ -917,48 +1039,15 @@ class PortManager:
                     logger.warning(f"Unexpected link down on port {port_num} during provisioning — cancelling and resetting")
                     if state.provisioning_task and not state.provisioning_task.done():
                         state.provisioning_task.cancel()
-                    state.provisioning = False
-                    state.provisioning_task = None
-                    state.expecting_reboot = False
-                    state.link_up = False
-                    state.device_detected = False
-                    state.device_type = None
-                    state.device_ip = None
-                    state.device_mac = None
-                    state.device_serial = None
-                    state.device_model = None
-                    state.ping_failures = 0
-                    state.link_speed = None
-                    state.waiting_for_boot = False
-                    state.boot_wait_until = None
-                    state.boot_ping_responded = False
-                    state.last_result = None
-                    state.last_error = None
-                    state.provision_attempted = False
-                    state.provisioning_ended = None
-                    state.checklist.reset()
-                    self.clear_device_mode(port_num)
+                    self._clear_port_state_on_disconnect(port_num)
                     logger.info(f"Port {port_num} fully reset after unexpected unplug")
             elif state.waiting_for_boot:
-                logger.debug(f"Ignoring link down on port {port_num} during boot wait")
+                # If boot wait receives a true link-down event, the device was unplugged.
+                # Clear state immediately so UI doesn't keep stale failed/model data.
+                self._clear_port_state_on_disconnect(port_num)
+                logger.info(f"Port {port_num} device disconnected (link down during boot wait)")
             else:
-                state.link_up = False
-                state.device_detected = False
-                state.device_type = None
-                state.device_ip = None
-                state.device_mac = None
-                state.device_serial = None
-                state.device_model = None
-                state.ping_failures = 0
-                state.link_speed = None
-                state.waiting_for_boot = False
-                state.boot_wait_until = None
-                state.boot_ping_responded = False
-                state.last_result = None
-                state.last_error = None
-                state.provision_attempted = False  # Reset for next link cycle
-                state.checklist.reset()  # Reset checklist when device disconnects
-                self.clear_device_mode(port_num)
+                self._clear_port_state_on_disconnect(port_num)
                 logger.info(f"Port {port_num} device disconnected (link down)")
 
         # Immediately broadcast port update via WebSocket

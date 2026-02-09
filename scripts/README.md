@@ -83,9 +83,10 @@ sudo ./scripts/setup_network.sh cleanup
 | `PROVISIONER_VLAN_START` | `1991` | First VLAN ID |
 | `PROVISIONER_NUM_VLANS` | `6` | Number of provisioning VLANs |
 | `PROVISIONER_LOCAL_IP` | `169.254.1.2` | IP assigned to each VLAN interface |
+| `PROVISIONER_MIKROTIK_LOCAL_IP` | `192.168.88.11` | /32 source IP added to each provisioning VLAN for MikroTik default subnet reachability |
 
 **Creates interfaces:**
-- `eth0.1991` through `eth0.1996` — provisioning ports (169.254.1.2/24 each)
+- `eth0.1991` through `eth0.1996` — provisioning ports (`169.254.1.2/24` and `192.168.88.11/32` each)
 - `eth0.1990` — management VLAN (192.168.88.10/24, for switch webhooks)
 
 ## setup_switch.sh
