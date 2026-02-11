@@ -1,8 +1,10 @@
 """Tests for port manager state transitions."""
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
-from provisioner.port_manager import PortManager
+from provisioner.port_manager import DeviceLinkLocalIP, PortManager
 
 
 @pytest.mark.asyncio
@@ -154,3 +156,112 @@ def test_port_configs_include_mikrotik_secondary_source_ip():
         cfg = manager.ports[port_num]
         assert cfg.secondary_ips is not None
         assert "192.168.88.11/32" in cfg.secondary_ips
+
+
+# ============================================================================
+# MikroTik ARP detection invariants
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_ping_device_uses_arp_not_icmp_for_mikrotik_ip():
+    """192.168.88.1 must use ARP-only detection, never ICMP.
+
+    The pinned /32 management route sends ICMP to the switch (VLAN 1990),
+    not the provisioning VLAN where the device lives.  ARP works at L2
+    and bypasses kernel routing entirely.
+    """
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    arp_calls = []
+
+    async def mock_arp_probe(interface, ip, source_ip=None):
+        arp_calls.append({"interface": interface, "ip": ip, "source_ip": source_ip})
+        return True
+
+    manager._arp_probe = mock_arp_probe  # type: ignore[method-assign]
+
+    # _ping_device for MikroTik IP should call _arp_probe, not spawn ping
+    result = await manager._ping_device("eth0.1992", DeviceLinkLocalIP.MIKROTIK)
+    assert result is True
+    assert len(arp_calls) == 1
+    assert arp_calls[0]["ip"] == "192.168.88.1"
+    assert arp_calls[0]["source_ip"] == "192.168.88.11"
+
+
+@pytest.mark.asyncio
+async def test_ping_device_arp_fallback_false_skips_mikrotik():
+    """With arp_fallback=False, 192.168.88.1 should return False immediately.
+
+    Boot pings use arp_fallback=False for quick liveness checks.  Since
+    ICMP can't reach 192.168.88.1 on provisioning VLANs, and ARP is
+    explicitly disabled, the result must be False.
+    """
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    result = await manager._ping_device("eth0.1992", DeviceLinkLocalIP.MIKROTIK, arp_fallback=False)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_arp_probe_includes_source_ip_in_command():
+    """arping must use -s 192.168.88.11 so the ARP request comes from the same /24.
+
+    Without the correct source IP, arping uses the first address on the
+    interface (169.254.x.x) which MikroTik devices ignore because it's
+    in a different subnet.
+    """
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    captured_cmd = []
+
+    async def mock_create_subprocess_exec(*cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        proc = AsyncMock()
+        proc.returncode = 1  # miss
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=mock_create_subprocess_exec):
+        await manager._arp_probe("eth0.1992", "192.168.88.1", source_ip="192.168.88.11")
+
+    assert "-s" in captured_cmd
+    s_idx = captured_cmd.index("-s")
+    assert captured_cmd[s_idx + 1] == "192.168.88.11"
+    assert "192.168.88.1" in captured_cmd  # target IP at end
+
+
+# ============================================================================
+# API / status field completeness
+# ============================================================================
+
+
+def test_get_single_port_status_includes_link_speed():
+    """link_speed must be present in the status dict returned to the API.
+
+    A missing field here silently breaks the web UI speed display because
+    Pydantic defaults Optional fields to None rather than raising.
+    """
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.link_up = True
+    state.link_speed = "1Gbps"
+
+    status = manager._get_single_port_status(1)
+    assert "link_speed" in status
+    assert status["link_speed"] == "1Gbps"
+
+
+def test_get_single_port_status_link_speed_none_when_unset():
+    """link_speed should be None (not missing) when no speed is known."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    status = manager._get_single_port_status(1)
+    assert "link_speed" in status
+    assert status["link_speed"] is None
