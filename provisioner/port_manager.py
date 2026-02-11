@@ -314,6 +314,20 @@ class PortManager:
         ])
         logger.info(f"Configured management IP {mgmt.ip}/{cidr} on {interface}")
 
+        # Pin a host route for the switch IP via the management interface.
+        # Detection probes ping 192.168.88.1 on provisioning VLANs (looking
+        # for MikroTik devices) which can create kernel route-cache entries
+        # that hijack management traffic away from VLAN 1990.  A pinned /32
+        # route prevents that.
+        if mgmt.switch_ip:
+            await self._run_cmd([
+                "ip", "route", "replace",
+                f"{mgmt.switch_ip}/32",
+                "dev", interface,
+                "src", mgmt.ip,
+            ])
+            logger.info(f"Pinned management route {mgmt.switch_ip}/32 via {interface}")
+
         # Note: We don't set a default route here. The management VLAN is only
         # for switch-to-Pi communication. Internet access comes via DHCP on
         # the base interface (native VLAN).
@@ -467,12 +481,17 @@ class PortManager:
             # Check if waiting for device boot
             if state.waiting_for_boot:
                 if state.boot_wait_until and current_time >= state.boot_wait_until:
-                    # Boot wait is over, ready to detect
-                    logger.info(f"Port {port_num} boot wait complete, starting detection")
+                    # Boot wait is over
                     state.waiting_for_boot = False
                     state.boot_wait_until = None
                     state.boot_ping_responded = False
-                    ports_to_detect.append((port_num, config))
+                    if state.link_up:
+                        logger.info(f"Port {port_num} boot wait complete, starting detection")
+                        ports_to_detect.append((port_num, config))
+                    else:
+                        # Link never came back — device was truly disconnected
+                        logger.info(f"Port {port_num} boot wait complete but no link, clearing state")
+                        self._clear_port_state_on_disconnect(port_num)
                 elif not state.boot_ping_responded:
                     # Still waiting - ping to check if device is up
                     ports_to_boot_ping.append((port_num, config, state))
@@ -533,7 +552,9 @@ class PortManager:
                     DeviceLinkLocalIP.TARANA,    # 169.254.100.1
                 ]
                 for ip in ips_to_try:
-                    if await self._ping_device(config.interface_name, ip):
+                    # Skip ARP fallback during boot ping — we just need a
+                    # quick liveness check, not thorough MikroTik detection.
+                    if await self._ping_device(config.interface_name, ip, arp_fallback=False):
                         # Device responded! Set timer for web server init
                         state.boot_ping_responded = True
                         state.boot_wait_until = time.time() + self.BOOT_WAIT_AFTER_PING
@@ -644,8 +665,18 @@ class PortManager:
 
         logger.warning(f"No known device detected on port {port_num}")
 
-    async def _ping_device(self, interface: str, ip: str) -> bool:
+    async def _ping_device(self, interface: str, ip: str, arp_fallback: bool = True) -> bool:
         """Ping a device through a specific interface."""
+
+        # 192.168.88.1 is both the management switch IP AND the default IP of
+        # factory-reset MikroTik devices.  The pinned /32 management route
+        # sends ICMP to the switch, not the provisioning VLAN.  Use ARP-only
+        # detection for this address — ARP works at L2, bypassing routing.
+        if ip == DeviceLinkLocalIP.MIKROTIK:
+            if arp_fallback:
+                return await self._arp_probe(interface, ip, source_ip="192.168.88.11")
+            return False
+
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -665,28 +696,37 @@ class PortManager:
                 proc.kill()
                 await proc.wait()
 
-        # MikroTik devices on 192.168.88.1 may drop ICMP from non-subnet sources;
-        # ARP probing is more reliable for "is it on this VLAN?" detection.
-        if ip == DeviceLinkLocalIP.MIKROTIK:
-            return await self._arp_probe(interface, ip)
         return False
 
-    async def _arp_probe(self, interface: str, ip: str) -> bool:
+    async def _arp_probe(self, interface: str, ip: str, source_ip: Optional[str] = None) -> bool:
         """Probe IP presence via ARP on a specific interface."""
         proc = None
         try:
+            cmd = ["arping", "-c", "1", "-w", "2", "-I", interface]
+            if source_ip:
+                cmd += ["-s", source_ip]
+            cmd.append(ip)
             proc = await asyncio.create_subprocess_exec(
-                "arping", "-c", "1", "-w", "2", "-I", interface, ip,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.wait(), timeout=5)
-            return proc.returncode == 0
-        except Exception:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+            if proc.returncode == 0:
+                logger.info(f"ARP probe hit: {ip} on {interface}")
+                return True
+            else:
+                logger.debug(
+                    f"ARP probe miss: {ip} on {interface} rc={proc.returncode} "
+                    f"err={stderr.decode().strip()}"
+                )
+        except Exception as e:
+            logger.debug(f"ARP probe error: {ip} on {interface}: {e}")
             if proc and proc.returncode is None:
                 proc.kill()
                 await proc.wait()
             return False
+        return False
 
     async def _identify_device_type(
         self,
@@ -1042,10 +1082,12 @@ class PortManager:
                     self._clear_port_state_on_disconnect(port_num)
                     logger.info(f"Port {port_num} fully reset after unexpected unplug")
             elif state.waiting_for_boot:
-                # If boot wait receives a true link-down event, the device was unplugged.
-                # Clear state immediately so UI doesn't keep stale failed/model data.
-                self._clear_port_state_on_disconnect(port_num)
-                logger.info(f"Port {port_num} device disconnected (link down during boot wait)")
+                # During boot wait, brief link-down events are expected during
+                # ethernet autonegotiation (speed renegotiation).  Don't nuke
+                # state — just mark link as down.  If the link stays down, the
+                # boot_wait timer will expire and clear state at that point.
+                state.link_up = False
+                logger.debug(f"Port {port_num} link down during boot wait, treating as negotiation flap")
             else:
                 self._clear_port_state_on_disconnect(port_num)
                 logger.info(f"Port {port_num} device disconnected (link down)")

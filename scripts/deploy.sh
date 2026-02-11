@@ -23,7 +23,7 @@ rsync -avz --delete \
   ./ "${TARGET_USER}@${TARGET_HOST}:${TARGET_PATH}/"
 
 echo "Restarting provisioner-web service..."
-ssh "${TARGET_USER}@${TARGET_HOST}" 'sudo systemctl restart provisioner-web'
+ssh "${TARGET_USER}@${TARGET_HOST}" 'sudo -n systemctl restart provisioner-web'
 
 echo "Done. Checking service status..."
-ssh "${TARGET_USER}@${TARGET_HOST}" 'sudo systemctl status provisioner-web --no-pager -l | head -20'
+ssh "${TARGET_USER}@${TARGET_HOST}" 'SYSTEMD_PAGER= sudo -n systemctl status provisioner-web' 2>&1 | head -20
