@@ -445,6 +445,13 @@ class Provisioner:
                 fingerprint.model,
             )
 
+            # Check feature flags for per-device-type config application
+            if config_path:
+                flag_name = f"apply_config_{device_type}"
+                if hasattr(self.config.features, flag_name) and not getattr(self.config.features, flag_name):
+                    logger.info(f"Skipping config for {device_type} (feature flag '{flag_name}' is disabled)")
+                    config_path = None
+
             # Check for device-specific override (requires MAC, get it from handler)
             override = None
 
@@ -505,6 +512,7 @@ class Provisioner:
                 on_progress=on_checklist_progress,
                 firmware_lookup_callback=firmware_lookup,
                 custom_credentials=custom_credentials,
+                config_backup=self.config.features.config_backup,
             )
 
             # Update MAC address and serial in checklist and DB if we got device info
@@ -518,25 +526,24 @@ class Provisioner:
                         model=result.device_info.model,
                     )
 
-                # TODO: Re-enable override provisioning when ready
-                # # Now check for override with real MAC
-                # override = sync.get_device_override(result.device_info.mac_address)
-                # if override:
-                #     logger.info(
-                #         f"Found device override for {result.device_info.mac_address}, "
-                #         "applying additional config"
-                #     )
-                #     # Re-apply with override config
-                #     await self.handler_manager.provision_device(
-                #         fingerprint=fingerprint,
-                #         ip=device_ip,
-                #         config=override,
-                #         config_path=None,  # Only apply override
-                #         firmware_path=None,  # Already updated
-                #         expected_firmware=None,
-                #         dual_bank=False,
-                #         interface=interface,
-                #     )
+                # Device override provisioning (gated by feature flag)
+                if self.config.features.device_overrides and result.device_info.mac_address:
+                    override = store.get_device_override(result.device_info.mac_address)
+                    if override:
+                        logger.info(
+                            f"Found device override for {result.device_info.mac_address}, "
+                            "applying additional config"
+                        )
+                        await self.handler_manager.provision_device(
+                            fingerprint=fingerprint,
+                            ip=device_ip,
+                            config=override,
+                            config_path=None,
+                            firmware_path=None,
+                            expected_firmware=None,
+                            dual_bank=False,
+                            interface=interface,
+                        )
 
             # Update job record
             if result.success:
@@ -699,6 +706,13 @@ class Provisioner:
                 fingerprint.model,
             )
 
+            # Check feature flags for per-device-type config application
+            if config_path:
+                flag_name = f"apply_config_{fingerprint.device_type.value}"
+                if hasattr(self.config.features, flag_name) and not getattr(self.config.features, flag_name):
+                    logger.info(f"Skipping config for {fingerprint.device_type.value} (feature flag '{flag_name}' is disabled)")
+                    config_path = None
+
             # Check for device-specific override
             override = store.get_device_override(device.mac_address)
             if override:
@@ -750,6 +764,7 @@ class Provisioner:
                 expected_firmware=expected_firmware,
                 dual_bank=self.config.firmware.dual_bank_update,
                 firmware_lookup_callback=firmware_lookup,
+                config_backup=self.config.features.config_backup,
             )
 
             # Update job record

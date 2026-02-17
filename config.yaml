@@ -96,6 +96,14 @@ gpio:
   yellow_led: 9   # In-progress indicator
   buzzer: 10      # Audio notification
 
+features:
+  # Feature flags — disabled by default until tested
+  mode_config: false            # AP/PTP mode config endpoints (untested)
+  config_backup: false          # Config backup during provisioning (needs storage)
+  device_overrides: false       # MAC-based device overrides (incomplete)
+  apply_config_ubiquiti: false  # Ubiquiti config application (untested)
+  apply_config_tarana: false    # Tarana config application (stub — gNMI Set not implemented)
+
 firmware:
   # Update both firmware banks on dual-bank devices
   dual_bank_update: true

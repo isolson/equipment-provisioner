@@ -11,6 +11,7 @@ from provisioner.config import (
     PortsConfig,
     CredentialsConfig,
     DeviceCredentials,
+    FeaturesConfig,
     FirmwareConfig,
     FirmwareCheckerConfig,
     FirmwareSourceConfig,
@@ -327,3 +328,75 @@ class TestFirmwareSourceConfig:
             FirmwareSourceConfig(check_interval=299)
         with pytest.raises(ValueError):
             FirmwareSourceConfig(check_interval=604801)
+
+
+class TestFeaturesConfig:
+    """Tests for feature flags configuration."""
+
+    def test_all_flags_default_to_false(self):
+        """All feature flags should default to disabled."""
+        config = FeaturesConfig()
+        assert config.mode_config is False
+        assert config.config_backup is False
+        assert config.device_overrides is False
+        assert config.apply_config_ubiquiti is False
+        assert config.apply_config_tarana is False
+
+    def test_flags_can_be_enabled(self):
+        """Feature flags can be set to True."""
+        config = FeaturesConfig(
+            mode_config=True,
+            config_backup=True,
+            device_overrides=True,
+            apply_config_ubiquiti=True,
+            apply_config_tarana=True,
+        )
+        assert config.mode_config is True
+        assert config.config_backup is True
+        assert config.device_overrides is True
+        assert config.apply_config_ubiquiti is True
+        assert config.apply_config_tarana is True
+
+    def test_full_config_includes_features(self):
+        """Config object should include features with defaults."""
+        config = Config()
+        assert hasattr(config, "features")
+        assert config.features.mode_config is False
+        assert config.features.apply_config_ubiquiti is False
+
+    def test_load_config_with_features(self):
+        """Features section loads correctly from YAML."""
+        config_yaml = """
+network:
+  interface: eth0
+
+features:
+  mode_config: true
+  apply_config_ubiquiti: true
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            f.write(config_yaml)
+            config_path = f.name
+
+        try:
+            config = load_config(config_path)
+            assert config.features.mode_config is True
+            assert config.features.apply_config_ubiquiti is True
+            # Unset flags should still default to False
+            assert config.features.config_backup is False
+            assert config.features.device_overrides is False
+            assert config.features.apply_config_tarana is False
+        finally:
+            os.unlink(config_path)
+
+    def test_features_model_dump(self):
+        """Features should serialize correctly for API responses."""
+        config = FeaturesConfig(mode_config=True)
+        dumped = config.model_dump()
+        assert dumped == {
+            "mode_config": True,
+            "config_backup": False,
+            "device_overrides": False,
+            "apply_config_ubiquiti": False,
+            "apply_config_tarana": False,
+        }

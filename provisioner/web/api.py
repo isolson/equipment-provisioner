@@ -431,6 +431,17 @@ async def get_system_status(request: Request):
 
 
 # ============================================================================
+# Feature Flags
+# ============================================================================
+
+@router.get("/features")
+async def get_features():
+    """Get current feature flag state."""
+    from ..config import get_config
+    return get_config().features.model_dump()
+
+
+# ============================================================================
 # Device Detection/Identification
 # ============================================================================
 
@@ -1609,6 +1620,10 @@ async def apply_device_mode(
     After standard SM provisioning completes, this endpoint lets the user
     reconfigure the device as an AP or PTP endpoint.
     """
+    from ..config import get_config
+    if not get_config().features.mode_config:
+        raise HTTPException(status_code=503, detail="Mode configuration is disabled (feature flag)")
+
     provisioner = request.app.state.provisioner
     if not provisioner:
         raise HTTPException(status_code=503, detail="Provisioner not available")
