@@ -1109,8 +1109,8 @@ class TaranaHandler(BaseHandler):
     async def apply_config(self, config: Dict[str, Any]) -> bool:
         """Apply configuration via gNMI Set."""
         # TODO: Implement gNMI Set for config application
-        logger.warning("Config application not yet implemented for Tarana")
-        return True
+        logger.warning("Config application not yet implemented for Tarana — skipping")
+        return False
 
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from file."""

@@ -106,6 +106,7 @@ class HandlerManager:
         on_progress: Optional[Callable[[str, bool, Optional[str]], Awaitable[None]]] = None,
         firmware_lookup_callback: Optional[Callable[[str, str], tuple]] = None,
         custom_credentials: Optional[Dict[str, str]] = None,
+        config_backup: bool = False,
     ) -> ProvisioningResult:
         """Provision a device with configuration and/or firmware.
 
@@ -121,6 +122,7 @@ class HandlerManager:
             firmware_current: If True, firmware is already current (skip updates).
             on_progress: Optional callback for progress updates (step, success, detail).
             firmware_lookup_callback: Callback to re-lookup firmware by (device_type, model).
+            config_backup: Whether to backup config before provisioning (feature flag).
 
         Returns:
             ProvisioningResult with outcome details.
@@ -145,6 +147,7 @@ class HandlerManager:
             firmware_current=firmware_current,
             on_progress=on_progress,
             firmware_lookup_callback=firmware_lookup_callback,
+            config_backup=config_backup,
         )
 
         if result.success:

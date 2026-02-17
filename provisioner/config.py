@@ -178,6 +178,18 @@ class FirmwareConfig(BaseModel):
     checker: FirmwareCheckerConfig = Field(default_factory=FirmwareCheckerConfig)
 
 
+class FeaturesConfig(BaseModel):
+    """Feature flags for untested or incomplete functionality.
+
+    All flags default to False (disabled). Enable as features are tested.
+    """
+    mode_config: bool = False           # AP/PTP mode config endpoints
+    config_backup: bool = False         # Config backup during provisioning
+    device_overrides: bool = False      # MAC-based device override provisioning
+    apply_config_ubiquiti: bool = False # Ubiquiti config application
+    apply_config_tarana: bool = False   # Tarana config application (stub)
+
+
 class AnalyticsConfig(BaseModel):
     """Analytics/telemetry configuration for central event reporting."""
     enabled: bool = False
@@ -207,6 +219,7 @@ class Config(BaseModel):
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     firmware: FirmwareConfig = Field(default_factory=FirmwareConfig)
+    features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
 
 

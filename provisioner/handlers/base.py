@@ -308,6 +308,7 @@ class BaseHandler(ABC):
         firmware_current: bool = False,
         on_progress: Optional[Callable[[str, bool, Optional[str]], Awaitable[None]]] = None,
         firmware_lookup_callback: Optional[Callable[[str, str], tuple]] = None,
+        config_backup: bool = False,
     ) -> ProvisioningResult:
         """Run the full provisioning workflow.
 
@@ -333,6 +334,7 @@ class BaseHandler(ABC):
             on_progress: Callback for UI updates: (step_name, success, detail).
             firmware_lookup_callback: Callback to re-lookup firmware by (device_type, model).
                 Returns tuple of (firmware_path, expected_version) or (None, None).
+            config_backup: Whether to backup config before provisioning (feature flag).
 
         Returns:
             ProvisioningResult with outcome details.
@@ -428,13 +430,15 @@ class BaseHandler(ABC):
                 need_fw1 = False
                 need_fw2 = False
 
-            # TODO: Config backup disabled for now - add storage location before re-enabling
-            # try:
-            #     backup_data = await self.backup_config()
-            #     # Need to save backup_data somewhere...
-            #     result.phases_completed.append(ProvisioningPhase.BACKING_UP)
-            # except Exception:
-            #     pass
+            # Config backup (gated by feature flag)
+            if config_backup:
+                try:
+                    backup_data = await self.backup_config()
+                    result.phases_completed.append(ProvisioningPhase.BACKING_UP)
+                except NotImplementedError:
+                    _logger.debug("Config backup not implemented for this device type")
+                except Exception as e:
+                    _logger.warning(f"Config backup failed: {e}")
 
             # Change password from factory default if requested
             if new_password and self.supports_password_change:
