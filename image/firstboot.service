@@ -1,0 +1,19 @@
+[Unit]
+Description=Provisioner First Boot Setup
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/provisioner/.first-boot
+Before=provisioner.service provisioner-web.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/opt/provisioner/image/first-boot.sh
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

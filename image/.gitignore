@@ -1,0 +1,11 @@
+# Downloaded base images
+.cache/
+
+# Build output
+*.img
+*.img.xz
+*.img.gz
+*.img.zip
+
+# Build working directory
+work/
