@@ -1,8 +1,8 @@
 [Unit]
 Description=Equipment Auto-Provisioner Web Interface
 Documentation=https://github.com/isolson/equipment-provisioner
-After=network-online.target
-Wants=network-online.target
+After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
