@@ -174,9 +174,10 @@ class FirmwareManager:
         "force 300-16": ["epmp-ac", "epmp_ac", "force300", "force-300"],
         "force 300-13": ["epmp-ac", "epmp_ac", "force300", "force-300"],
         "force 300 csm": ["epmp-ac", "epmp_ac", "force300", "force-300"],
-        # Cambium ePMP 3000 series - uses ePMP-NonGPS or ePMP-GPS firmware
-        "epmp 3000": ["epmp-nongps", "epmp-gps", "epmp3000"],
-        "epmp 3000l": ["epmp-nongps", "epmp-gps", "epmp3000"],
+        # Cambium ePMP 3000 series - uses AC firmware
+        "epmp 3000": ["epmp-ac", "epmp_ac"],
+        "epmp 3000l": ["epmp-ac", "epmp_ac"],
+        "epmp 3000 mp": ["epmp-ac", "epmp_ac"],
         # Cambium ePMP 2000/1000 series
         "epmp 2000": ["epmp-nongps", "epmp2000"],
         "epmp 1000": ["epmp1000", "epmp-nongps"],
