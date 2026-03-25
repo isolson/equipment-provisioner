@@ -639,6 +639,7 @@ class DeviceFingerprinter:
             "35": "Force 300-25",
             "38": "Force 300-16",
             "49": "Force 300-19",
+            "62": "ePMP 3000 MP",
             "53544": "ePMP 4518",
             "53545": "ePMP 4525",
             "53264": "ePMP 4600",
