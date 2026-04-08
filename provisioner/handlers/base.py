@@ -584,9 +584,9 @@ class BaseHandler(ABC):
                             await notify("firmware_banks", True, bank_info)
 
                             # Determine which bank to verify based on device behavior
-                            # Devices with update_triggers_reboot write to inactive bank and reboot into it,
-                            # so we should verify the ACTIVE bank, not specifically bank1
-                            if self.update_triggers_reboot:
+                            # Devices that install to the inactive bank and activate it
+                            # should verify the ACTIVE bank, not specifically bank1
+                            if self.verify_active_bank:
                                 # Check the active bank (the one just updated and rebooted into)
                                 active_ver = bank1_ver if active_bank == 1 else bank2_ver
                                 if expected_firmware and active_ver == expected_firmware:
@@ -605,7 +605,7 @@ class BaseHandler(ABC):
                             # Update need_fw2 based on current bank2 state (using normalized versions)
                             # For auto-reboot devices, after FW1 the inactive bank needs update
                             if expected_firmware:
-                                if self.update_triggers_reboot:
+                                if self.verify_active_bank:
                                     # The inactive bank (not active) needs update
                                     inactive_ver = bank2_ver if active_bank == 1 else bank1_ver
                                     need_fw2 = (inactive_ver != expected_firmware)
@@ -708,37 +708,46 @@ class BaseHandler(ABC):
                         return result
                     _logger.info(f"[PROVISION] Firmware update 2 staged")
 
-                    # ================================================================
-                    # PHASE 8: REBOOT #2
-                    # ================================================================
-                    _logger.info(f"[PROVISION] Phase 8: Reboot #2")
-                    await notify("reboot_started", True, None)
-                    # Some devices (e.g., Tachyon) reboot automatically after update_firmware()
-                    if getattr(self, 'update_triggers_reboot', False):
-                        _logger.info(f"[PROVISION] Device reboots automatically after firmware update")
+                    if self.fw2_skips_reboot:
+                        # Device flashed the inactive bank without activating it.
+                        # No reboot needed — preserves auto-discovered state
+                        # (azimuth, location, etc.) on the active bank.
+                        _logger.info(f"[PROVISION] FW2 installed without activation — skipping reboot")
+                        await notify("reboot_started", True, None)
+                        await notify("reboot_ended", True, None)
                     else:
-                        if not await self.reboot():
+                        # ================================================================
+                        # PHASE 8: REBOOT #2
+                        # ================================================================
+                        _logger.info(f"[PROVISION] Phase 8: Reboot #2")
+                        await notify("reboot_started", True, None)
+                        # Some devices (e.g., Tachyon) reboot automatically after update_firmware()
+                        if getattr(self, 'update_triggers_reboot', False):
+                            _logger.info(f"[PROVISION] Device reboots automatically after firmware update")
+                        else:
+                            if not await self.reboot():
+                                await notify("reboot_ended", True, None)
+                                result.error_message = "Failed to reboot device"
+                                await notify("firmware_update_2", False, result.error_message)
+                                return result
+
+                        _logger.info(f"[PROVISION] Waiting for device to come back online...")
+                        if not await self.wait_for_reboot():
                             await notify("reboot_ended", True, None)
-                            result.error_message = "Failed to reboot device"
+                            result.error_message = "Device did not come back online after reboot"
                             await notify("firmware_update_2", False, result.error_message)
                             return result
-
-                    _logger.info(f"[PROVISION] Waiting for device to come back online...")
-                    if not await self.wait_for_reboot():
                         await notify("reboot_ended", True, None)
-                        result.error_message = "Device did not come back online after reboot"
-                        await notify("firmware_update_2", False, result.error_message)
-                        return result
-                    await notify("reboot_ended", True, None)
 
                     # ================================================================
                     # PHASE 9: VERIFY FIRMWARE UPDATE 2
                     # ================================================================
                     _logger.info(f"[PROVISION] Phase 9: Verify firmware update 2")
-                    if not await self.connect():
-                        result.error_message = "Failed to reconnect after reboot"
-                        await notify("firmware_update_2", False, result.error_message)
-                        return result
+                    if not self.fw2_skips_reboot:
+                        if not await self.connect():
+                            result.error_message = "Failed to reconnect after reboot"
+                            await notify("firmware_update_2", False, result.error_message)
+                            return result
 
                     # Check bank 2 has expected firmware
                     fw2_verified = False
@@ -752,7 +761,7 @@ class BaseHandler(ABC):
                             bank1_display = banks.get("bank1_display", bank1_ver)
                             bank2_display = banks.get("bank2_display", bank2_ver)
                             bank_info = f"bank1:{bank1_display}|bank2:{bank2_display}|active:{active_bank}"
-                            _logger.info(f"[PROVISION] After reboot #2, firmware banks: {bank_info}")
+                            _logger.info(f"[PROVISION] After FW2, firmware banks: {bank_info}")
                             await notify("firmware_banks", True, bank_info)
 
                             # For FW2, verify both banks have expected firmware (dual-bank complete)
@@ -760,7 +769,7 @@ class BaseHandler(ABC):
                                 if bank1_ver == expected_firmware and bank2_ver == expected_firmware:
                                     fw2_verified = True
                                     _logger.info(f"[PROVISION] Firmware update 2 verified: both banks={expected_firmware}")
-                                elif self.update_triggers_reboot:
+                                elif self.verify_active_bank:
                                     # For auto-reboot devices, at minimum the active bank should match
                                     active_ver = bank1_ver if active_bank == 1 else bank2_ver
                                     if active_ver == expected_firmware:
@@ -817,5 +826,26 @@ class BaseHandler(ABC):
 
         If True, the provisioning flow will skip the explicit reboot() call
         after update_firmware() since the device reboots on its own.
+        """
+        return False
+
+    @property
+    def verify_active_bank(self) -> bool:
+        """Whether firmware verification should check the active bank.
+
+        Devices that always install to the inactive bank and activate it
+        should return True so verification checks the bank the device
+        actually booted into, rather than assuming bank1.
+        """
+        return self.update_triggers_reboot
+
+    @property
+    def fw2_skips_reboot(self) -> bool:
+        """Whether the second firmware update skips activation and reboot.
+
+        When True, the FW2 update writes firmware to the inactive bank
+        without activating it, so no reboot is needed.  This preserves
+        auto-discovered device state (e.g. azimuth, location) that would
+        be lost if the device switched banks again.
         """
         return False

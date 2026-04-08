@@ -271,6 +271,53 @@ def build_gnmi_get_request(paths: List[List[str]]) -> bytes:
     return encoder.get_bytes()
 
 
+def build_gnmi_set_request(updates: List[Tuple[List[str], Any]]) -> bytes:
+    """Build a gNMI SetRequest message with update operations.
+
+    Args:
+        updates: List of (path_elements, value) tuples.
+            path_elements: e.g. ["radios", "global", "config", "operator-id"]
+            value: int, str, or bool to set.
+
+    gNMI SetRequest proto:
+      Path prefix = 1;
+      repeated Update delete = 2;
+      repeated Update replace = 3;
+      repeated Update update = 4;   // <- we use field 4
+
+    Update proto:
+      Path path = 1;
+      Value value = 2;              // deprecated
+      TypedValue val = 3;           // <- field 3
+
+    TypedValue proto:
+      string string_val = 1;
+      int64 int_val = 2;
+      uint64 uint_val = 3;
+      bool bool_val = 4;
+    """
+    request = ProtobufEncoder()
+    for path_elements, value in updates:
+        path_bytes = build_gnmi_path(path_elements)
+
+        typed_val = ProtobufEncoder()
+        if isinstance(value, bool):
+            typed_val.write_bool(4, value)
+        elif isinstance(value, int):
+            typed_val.write_uint64(3, value)
+        elif isinstance(value, str):
+            typed_val.write_string(1, value)
+        else:
+            raise ValueError(f"Unsupported value type: {type(value)}")
+
+        update = ProtobufEncoder()
+        update.write_embedded(1, path_bytes)
+        update.write_embedded(3, typed_val.get_bytes())
+
+        request.write_embedded(4, update.get_bytes())
+    return request.get_bytes()
+
+
 def build_grpc_web_frame(message: bytes, compressed: bool = False) -> bytes:
     """Build a gRPC-web frame.
 
@@ -660,6 +707,16 @@ class TaranaHandler(BaseHandler):
     # This is the FIRST credential tried on every fresh device plug-in.
     DEFAULT_CREDENTIALS = {"username": "admin", "password": "admin123"}
 
+    @property
+    def verify_active_bank(self) -> bool:
+        """Tarana installs to the inactive bank and activates it."""
+        return True
+
+    @property
+    def fw2_skips_reboot(self) -> bool:
+        """FW2 uses activate=False to avoid losing auto-discovered config."""
+        return True
+
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None,
                  alternate_credentials: list = None):
         # Use Tarana's default IP if the standard link-local is passed
@@ -1025,9 +1082,12 @@ class TaranaHandler(BaseHandler):
         info = DeviceInfo(device_type=self.device_type, ip_address=self.ip)
 
         try:
-            # Use the /system path which returns the full system tree
-            # including state, software/banks, aaa, etc.
-            data = self._device_data or await self._gnmi_get([["system"]])
+            # Query /system (full system tree) and /platform/components
+            # (serial, MAC address, hardware model) together.
+            data = self._device_data or await self._gnmi_get([
+                ["system"],
+                ["platform", "components"],
+            ])
             self._device_data.update(data)
 
             # Extract info from known Tarana gNMI paths
@@ -1051,6 +1111,14 @@ class TaranaHandler(BaseHandler):
                     else:
                         info.model = f"G1 {value}"
 
+                # MAC address from digboard component
+                elif "digboard" in key_lower and "mac-address" in key_lower:
+                    info.mac_address = value
+
+                # Serial from platform component (more reliable than hostname)
+                elif "component[name=sys]" in key_lower and "serial-no" in key_lower:
+                    info.serial_number = value
+
                 # Active bank firmware version from software/banks
                 elif "software/state/active-bank" in key_lower:
                     info.extra["active_bank"] = value
@@ -1069,25 +1137,20 @@ class TaranaHandler(BaseHandler):
             elif "system2" in active_bank:
                 info.firmware_version = info.extra.get("bank2_version", "")
 
-            # If we didn't get firmware from banks, try querying platform
+            # If we didn't get firmware from banks, try platform data
+            # (already fetched in the initial query above)
             if not info.firmware_version:
-                try:
-                    platform_data = await self._gnmi_get([
-                        ["platform", "components", "component[name=sys]"],
-                    ])
-                    self._device_data.update(platform_data)
-                    for key, value in platform_data.items():
-                        if isinstance(value, str) and "version" in key.lower():
-                            info.firmware_version = value
-                            break
-                except Exception:
-                    pass
+                for key, value in data.items():
+                    if isinstance(value, str) and "component[name=sys]" in key.lower() and "version" in key.lower():
+                        info.firmware_version = value
+                        break
 
             # Store raw data for debugging
             info.extra["gnmi_data"] = data
 
             logger.info(f"Tarana device info: model={info.model}, "
-                       f"fw={info.firmware_version}, serial={info.serial_number}")
+                       f"fw={info.firmware_version}, serial={info.serial_number}, "
+                       f"mac={info.mac_address}")
 
         except Exception as e:
             logger.error(f"Failed to get device info: {e}")
@@ -1106,11 +1169,97 @@ class TaranaHandler(BaseHandler):
             logger.error(f"Failed to backup config: {e}")
             raise
 
+    async def _gnmi_set(self, updates: List[Tuple[List[str], Any]]) -> bool:
+        """Execute a gNMI Set request via gRPC-web over HTTP POST.
+
+        Args:
+            updates: List of (path_elements, value) tuples.
+                e.g. [( ["radios","global","config","operator-id"], 1266 )]
+
+        Returns:
+            True if all updates succeeded.
+
+        Raises:
+            RuntimeError: On gRPC-level errors.
+        """
+        if not self._session:
+            raise RuntimeError("Not connected")
+
+        set_request = build_gnmi_set_request(updates)
+        frame = build_grpc_web_frame(set_request)
+
+        url = f"{self._base_url}/gnmi.gNMI/Set"
+        headers = self._get_auth_headers()
+        logger.info(f"gNMI Set request to {url} ({len(updates)} updates)")
+
+        request_timeout = aiohttp.ClientTimeout(total=30)
+
+        async with self._session.post(
+            url, headers=headers, data=frame, timeout=request_timeout,
+        ) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"gNMI Set failed: {response.status} - {error_text}")
+                response.raise_for_status()
+
+            grpc_status_hdr = response.headers.get("Grpc-Status") or response.headers.get("grpc-status")
+            grpc_message_hdr = response.headers.get("Grpc-Message") or response.headers.get("grpc-message")
+            if grpc_status_hdr and grpc_status_hdr != "0":
+                error_msg = grpc_message_hdr or f"gRPC error {grpc_status_hdr}"
+                logger.error(f"gNMI Set failed: grpc-status={grpc_status_hdr}, message={grpc_message_hdr}")
+                raise RuntimeError(f"gRPC error: {error_msg}")
+
+            response_data = await response.read()
+
+            # Check for trailer-level gRPC errors
+            if response_data:
+                offset = 0
+                while offset + 5 <= len(response_data):
+                    flag = response_data[offset]
+                    frame_len = struct.unpack('>I', response_data[offset + 1:offset + 5])[0]
+                    frame_body = response_data[offset + 5:offset + 5 + frame_len]
+                    offset += 5 + frame_len
+                    if flag & 0x80:
+                        trailer_text = frame_body.decode('utf-8', errors='ignore')
+                        for line in trailer_text.split('\r\n'):
+                            line = line.strip()
+                            if line.lower().startswith('grpc-status:'):
+                                try:
+                                    status = int(line.split(':', 1)[1].strip())
+                                    if status != 0:
+                                        raise RuntimeError(f"gNMI Set failed (trailer): {trailer_text.strip()}")
+                                except ValueError:
+                                    pass
+
+            logger.info(f"gNMI Set succeeded")
+            return True
+
     async def apply_config(self, config: Dict[str, Any]) -> bool:
-        """Apply configuration via gNMI Set."""
-        # TODO: Implement gNMI Set for config application
-        logger.warning("Config application not yet implemented for Tarana — skipping")
-        return False
+        """Apply configuration via gNMI Set.
+
+        Supported config keys:
+            operator_id (int): Operator ID for radio manager
+                gNMI path: /radios/global/config/operator-id
+        """
+        updates = []
+
+        if "operator_id" in config:
+            operator_id = int(config["operator_id"])
+            updates.append((
+                ["radios", "global", "config", "operator-id"],
+                operator_id,
+            ))
+            logger.info(f"Setting operator-id to {operator_id}")
+
+        if not updates:
+            logger.info("No Tarana config values to apply")
+            return True
+
+        try:
+            return await self._gnmi_set(updates)
+        except Exception as e:
+            logger.error(f"Failed to apply config: {e}")
+            return False
 
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from file."""
@@ -1302,7 +1451,7 @@ class TaranaHandler(BaseHandler):
            with sub-protocol ``grpc-websockets``.
         2. **MSG 0 (binary):** Auth metadata (same format as File/Put).
         3. **MSG 1 (binary):** ``0x00`` + gRPC frame with SetPackageRequest
-           containing filename + activate=true.
+           containing filename + activate flag.
         4. **MSG 2 (binary):** ``0x00`` + gRPC frame with hash (same MD5
            sent during File/Put).
         5. **MSG 3 (binary):** End-of-stream signal ``0x01``.
@@ -1312,7 +1461,17 @@ class TaranaHandler(BaseHandler):
         During this period (~20-30 s) it reports "system-reboot in progress"
         and rejects SetPackage requests.  This method retries with backoff
         until the device is ready or the retry budget is exhausted.
+
+        For the second bank update (bank=2), activate is set to False so the
+        device writes firmware to the inactive bank without switching to it.
+        This avoids a second reboot that would wipe auto-discovered config
+        values (azimuth, location, etc.).
         """
+        # For bank 2 update, don't activate — just flash the inactive bank.
+        # Activation + reboot would switch banks and lose auto-discovered
+        # radio state (azimuth, location) that the device populates after
+        # booting into the first upgraded bank.
+        activate = (bank != 2)
         if not self._session:
             raise RuntimeError("Not connected")
 
@@ -1329,7 +1488,7 @@ class TaranaHandler(BaseHandler):
 
         for attempt in range(1, max_attempts + 1):
             try:
-                result = await self._send_set_package(firmware_path, firmware_hash)
+                result = await self._send_set_package(firmware_path, firmware_hash, activate=activate)
                 if result is True:
                     return True
                 if result is None:
@@ -1365,6 +1524,7 @@ class TaranaHandler(BaseHandler):
         self,
         firmware_path: str,
         firmware_hash: Optional[bytes],
+        activate: bool = True,
     ) -> Optional[bool]:
         """Send a single SetPackage request over WebSocket.
 
@@ -1373,7 +1533,7 @@ class TaranaHandler(BaseHandler):
             False — permanent failure (non-retryable gRPC error).
             None  — device busy / "system-reboot in progress" (retryable).
         """
-        logger.info(f"Installing firmware {firmware_path} on Tarana at {self.ip}")
+        logger.info(f"Installing firmware {firmware_path} on Tarana at {self.ip} (activate={activate})")
 
         ws_url = f"{self._ws_url}/gnoi.system.System/SetPackage"
 
@@ -1385,10 +1545,10 @@ class TaranaHandler(BaseHandler):
             metadata = build_grpc_websocket_metadata(self.credentials)
             await ws.send_bytes(metadata)
 
-            # MSG 1: SetPackage request (filename + activate)
+            # MSG 1: SetPackage request (filename + activate flag)
             set_package_msg = build_gnoi_set_package(
                 filename=firmware_path,
-                activate=True
+                activate=activate
             )
             await ws.send_bytes(build_ws_grpc_frame(set_package_msg))
 
@@ -1465,28 +1625,60 @@ class TaranaHandler(BaseHandler):
             url = f"{self._base_url}/gnoi.system.System/Reboot"
             headers = self._get_auth_headers()
 
-            logger.info(f"Sending reboot command to {self.ip}")
+            # After SetPackage with activate=True, the device may spend
+            # 30-60s writing firmware to flash.  During this window it
+            # rejects reboot requests with "sw-upgrade in progress".
+            # Retry with backoff until the device is ready.
+            max_attempts = 12
+            retry_delay = 10  # seconds
 
-            try:
-                async with self._session.post(
-                    url,
-                    headers=headers,
-                    data=frame,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as response:
-                    logger.info(f"Reboot response status: {response.status}")
-                    # Check for gRPC success in headers
-                    grpc_status = response.headers.get("Grpc-Status") or response.headers.get("grpc-status")
-                    if grpc_status and grpc_status != "0":
-                        grpc_msg = response.headers.get("Grpc-Message") or response.headers.get("grpc-message")
-                        logger.error(f"Reboot failed: grpc-status={grpc_status}, message={grpc_msg}")
+            for attempt in range(1, max_attempts + 1):
+                logger.info(f"Sending reboot command to {self.ip}"
+                            + (f" (attempt {attempt}/{max_attempts})" if attempt > 1 else ""))
+
+                try:
+                    async with self._session.post(
+                        url,
+                        headers=headers,
+                        data=frame,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as response:
+                        logger.info(f"Reboot response status: {response.status}")
+                        # Check for gRPC success in headers
+                        grpc_status = response.headers.get("Grpc-Status") or response.headers.get("grpc-status")
+                        if grpc_status and grpc_status != "0":
+                            grpc_msg = response.headers.get("Grpc-Message") or response.headers.get("grpc-message", "")
+                            # Retryable: device is still processing a firmware upgrade
+                            if "sw-upgrade in progress" in grpc_msg or "IsMessageAllowed" in grpc_msg:
+                                if attempt < max_attempts:
+                                    logger.info(f"Reboot rejected (sw-upgrade in progress), "
+                                                f"retrying in {retry_delay}s...")
+                                    await asyncio.sleep(retry_delay)
+                                    continue
+                                else:
+                                    logger.error(f"Reboot still rejected after {max_attempts} attempts: {grpc_msg}")
+                                    return False
+                            logger.error(f"Reboot failed: grpc-status={grpc_status}, message={grpc_msg}")
+                            return False
+                        logger.info(f"Reboot command accepted by {self.ip}")
+                        return True
+                except aiohttp.ClientError:
+                    # Connection drop means the device is rebooting
+                    logger.info(f"Reboot sent to {self.ip} (connection dropped, expected)")
+                    return True
+                except asyncio.TimeoutError:
+                    # Timeout likely means device is still flashing, retry
+                    if attempt < max_attempts:
+                        logger.info(f"Reboot request timed out (attempt {attempt}/{max_attempts}), "
+                                    f"retrying in {retry_delay}s...")
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error(f"Reboot timed out after {max_attempts} attempts")
                         return False
-                    logger.info(f"Reboot command accepted by {self.ip}")
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                # Connection drop is expected — device is rebooting
-                logger.info(f"Reboot sent to {self.ip} (connection dropped, expected)")
 
-            return True
+            logger.error(f"Reboot failed: exhausted {max_attempts} attempts")
+            return False
 
         except Exception as e:
             # Connection errors are expected during reboot

@@ -302,9 +302,40 @@ class Provisioner:
             if not cancelled:
                 self.port_manager.mark_port_provisioning(port_num, False, success=success)
 
+            # Push device info to equipment registry on success
+            if success and not cancelled:
+                await self._register_equipment(port_num, device_type)
+
+    async def _register_equipment(self, port_num: int, device_type: str) -> None:
+        """Push device metadata to equipment registry if configured."""
+        registry_url = self.config.equipment_registry.url
+        if not registry_url:
+            return
+
+        state = self.port_manager.port_states.get(port_num)
+        if not state:
+            return
+
+        serial = state.device_serial
+        mac = state.device_mac
+        if not serial and not mac:
+            logger.debug(f"Port {port_num} no serial/MAC available, skipping equipment registration")
+            return
+
+        from .equipment_registry import register_equipment
+        await register_equipment(
+            url=registry_url,
+            api_key=self.config.equipment_registry.api_key,
+            serial=serial or "",
+            mac=mac or "",
+            device_type=device_type,
+            model=state.device_model,
+        )
+
     async def _provision_port_device(
         self, port_num: int, device_type: str, device_ip: str,
         custom_credentials: Optional[Dict[str, str]] = None,
+        provision_request=None,
     ) -> bool:
         """Provision a device detected on a VLAN port.
 
@@ -454,6 +485,19 @@ class Provisioner:
 
             # Check for device-specific override (requires MAC, get it from handler)
             override = None
+
+            # Build device-type-specific config from settings + request overrides
+            if device_type == "tarana":
+                tarana_config = {}
+                # Default operator_id from config.yaml
+                settings_id = getattr(self.config.device_settings.tarana, 'operator_id', None)
+                if settings_id is not None:
+                    tarana_config["operator_id"] = settings_id
+                # Override from provision request (UI)
+                if provision_request and getattr(provision_request, 'operator_id', None) is not None:
+                    tarana_config["operator_id"] = provision_request.operator_id
+                if tarana_config:
+                    override = tarana_config
 
             # Get firmware info
             firmware_info = self.firmware_manager.get_firmware_file(

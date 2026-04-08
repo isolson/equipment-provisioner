@@ -46,6 +46,7 @@ class ProvisionRequest(BaseModel):
     skip_firmware: bool = False
     skip_config: bool = False
     config_override: Optional[Dict[str, Any]] = None
+    operator_id: Optional[int] = None
 
 
 class ProvisionResponse(BaseModel):
@@ -53,6 +54,11 @@ class ProvisionResponse(BaseModel):
     success: bool
     job_id: Optional[int] = None
     message: str
+
+
+class NetinstallRequest(BaseModel):
+    """Request to run Netinstall on a port (MikroTik BOOTP mode)."""
+    port_number: int
 
 
 class ApplyModeRequest(BaseModel):
@@ -171,6 +177,35 @@ async def get_port(port_number: int, request: Request):
 _credential_overrides: Dict[int, CredentialOverride] = {}
 
 
+@router.get("/device-settings")
+async def get_device_settings(request: Request):
+    """Get device-type-specific provisioning settings (defaults for UI)."""
+    provisioner = request.app.state.provisioner
+    if not provisioner:
+        return {}
+    config = provisioner.config
+    return {
+        "tarana": {
+            "operator_id": getattr(config.device_settings.tarana, 'operator_id', None),
+        },
+    }
+
+
+@router.put("/device-settings")
+async def update_device_settings(settings: Dict[str, Any], request: Request):
+    """Update device-type-specific provisioning settings (persists in memory)."""
+    provisioner = request.app.state.provisioner
+    if not provisioner:
+        raise HTTPException(status_code=503, detail="Provisioner not available")
+
+    if "tarana" in settings:
+        tarana = settings["tarana"]
+        if "operator_id" in tarana:
+            provisioner.config.device_settings.tarana.operator_id = tarana["operator_id"]
+
+    return {"success": True}
+
+
 @router.post("/provision", response_model=ProvisionResponse)
 async def provision_device(
     req: ProvisionRequest,
@@ -222,6 +257,186 @@ async def provision_device(
         success=True,
         message=f"Provisioning started for port {req.port_number}",
     )
+
+
+@router.post("/netinstall", response_model=ProvisionResponse)
+async def netinstall_device(
+    req: NetinstallRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """Run Netinstall on a port (MikroTik in BOOTP mode).
+
+    Flashes RouterOS firmware, then boots the device and applies base-flash.rsc
+    for ZTP setup. The device must be in Netinstall/BOOTP mode (reset button
+    held during power-on).
+    """
+    provisioner = request.app.state.provisioner
+    if not provisioner:
+        raise HTTPException(status_code=503, detail="Provisioner not available")
+
+    port_manager = provisioner.port_manager
+    if not port_manager:
+        raise HTTPException(status_code=503, detail="Port manager not available")
+
+    port_status = port_manager.get_port_status()
+    if req.port_number not in port_status:
+        raise HTTPException(status_code=404, detail="Port not found")
+
+    status = port_status[req.port_number]
+    if status.get("provisioning"):
+        raise HTTPException(status_code=409, detail="Port already provisioning")
+
+    background_tasks.add_task(
+        _run_netinstall,
+        provisioner,
+        req.port_number,
+    )
+
+    return ProvisionResponse(
+        success=True,
+        message=f"Netinstall started for port {req.port_number}",
+    )
+
+
+async def _run_netinstall(provisioner, port_number: int):
+    """Run Netinstall + base-flash pipeline in background."""
+    from provisioner.handlers.mikrotik import MikrotikHandler
+    from provisioner.web.websocket import notify_port_change, notify_provisioning_progress
+
+    port_manager = provisioner.port_manager
+    port_manager.mark_port_provisioning(port_number, True)
+
+    state = port_manager.port_states.get(port_number)
+    if state:
+        state.last_result = None
+        state.last_error = None
+
+    interface = port_manager.get_interface_for_port(port_number)
+    config = provisioner.config
+
+    # Find MikroTik firmware
+    firmware_info = provisioner.firmware_manager.get_firmware_file("mikrotik", None)
+    if not firmware_info:
+        logger.error(f"No MikroTik firmware found for Netinstall on port {port_number}")
+        port_manager.mark_port_provisioning(port_number, False, success=False, error="No MikroTik firmware available")
+        return
+
+    # Progress callback for UI
+    async def on_progress(step, success, detail=None):
+        port_manager.update_checklist(port_number, step, detail if detail else success)
+        port_status = port_manager._get_single_port_status(port_number)
+        await notify_port_change(port_number, port_status)
+
+    try:
+        # Step 1: Netinstall
+        handler = MikrotikHandler(
+            ip="192.168.88.1",
+            credentials={"username": "admin", "password": ""},
+            interface=interface,
+        )
+
+        await on_progress("netinstall", "running", "Waiting for device in BOOTP mode...")
+
+        success = await handler.netinstall(
+            firmware_path=str(firmware_info.path),
+            interface=interface,
+            on_progress=on_progress,
+        )
+
+        if not success:
+            port_manager.mark_port_provisioning(port_number, False, success=False, error="Netinstall failed")
+            return
+
+        # Step 2: Wait for device to boot after Netinstall
+        await on_progress("reboot", "running", "Waiting for device to boot...")
+        await asyncio.sleep(10)  # Give device time to start booting
+
+        # Wait for SSH to come up (post-Netinstall: admin/no-password)
+        booted = await handler.wait_for_reboot(timeout=120)
+        if not booted:
+            port_manager.mark_port_provisioning(port_number, False, success=False, error="Device did not boot after Netinstall")
+            return
+        await on_progress("reboot", True, "Device booted")
+
+        # Step 3: Connect and get device info
+        await on_progress("login", "running")
+        if not await handler.connect():
+            port_manager.mark_port_provisioning(port_number, False, success=False, error="Failed to connect after Netinstall")
+            return
+        await on_progress("login", True)
+
+        info = await handler.get_info()
+        await on_progress("device_info", True, f"mac:{info.mac_address or ''}|serial:{info.serial_number or ''}")
+        await on_progress("model_confirmed", True, info.model)
+
+        if info.mac_address or info.serial_number:
+            port_manager.update_port_device_info(
+                port_number,
+                mac=info.mac_address,
+                serial=info.serial_number,
+                model=info.model,
+            )
+
+        # Step 4: Generate and apply base-flash.rsc
+        bootstrap_pass = config.credentials.mikrotik.bootstrap_password
+        ztp_api_url = getattr(config.device_settings.mikrotik, 'ztp_api_url', None) or "https://api.infra.treehouse.mn"
+
+        if not bootstrap_pass:
+            logger.warning("No bootstrap password configured — skipping base-flash")
+            await on_progress("config", False, "No bootstrap password configured")
+            port_manager.mark_port_provisioning(port_number, False, success=False, error="No MIKROTIK_BOOTSTRAP_PASS configured")
+            return
+
+        serial = info.serial_number or "UNKNOWN"
+        script = MikrotikHandler.generate_base_flash_script(
+            serial=serial,
+            role="gateway",
+            bootstrap_pass=bootstrap_pass,
+            ztp_api_url=ztp_api_url,
+        )
+
+        # Write script to temp file and apply
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".rsc", delete=False) as f:
+            f.write(script)
+            script_path = f.name
+
+        try:
+            await on_progress("config", "running", "Applying base-flash.rsc...")
+            success = await handler.apply_config_file(script_path)
+            if success:
+                await on_progress("config", True, "Base flash applied")
+            else:
+                await on_progress("config", False, "Base flash import failed")
+                port_manager.mark_port_provisioning(port_number, False, success=False, error="Base flash failed")
+                return
+        finally:
+            os.unlink(script_path)
+
+        await handler.disconnect()
+
+        # Step 5: Register with equipment registry
+        registry_url = config.equipment_registry.url
+        if registry_url:
+            from provisioner.equipment_registry import register_equipment
+            await register_equipment(
+                url=registry_url,
+                api_key=config.equipment_registry.api_key,
+                serial=serial,
+                mac=info.mac_address or "",
+                device_type="mikrotik",
+                model=info.model,
+                firmware_version=info.firmware_version,
+            )
+
+        await on_progress("complete", True, "ZTP base flash complete")
+        port_manager.mark_port_provisioning(port_number, False, success=True)
+        logger.info(f"Netinstall + base-flash complete on port {port_number}: {serial}")
+
+    except Exception as exc:
+        logger.error(f"Netinstall pipeline failed on port {port_number}: {exc}", exc_info=True)
+        port_manager.mark_port_provisioning(port_number, False, success=False, error=str(exc)[:200])
 
 
 @router.post("/credentials", response_model=Dict[str, str])
@@ -295,6 +510,7 @@ async def _run_provisioning(
             device_type,
             device_ip,
             custom_credentials=custom_credentials,
+            provision_request=req,
         )
 
         # Clear credentials after use

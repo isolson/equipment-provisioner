@@ -150,8 +150,10 @@ class PortState:
     last_error: Optional[str] = None  # Error message if failed
     checklist: ProvisioningChecklist = field(default_factory=ProvisioningChecklist)  # Step-by-step progress
     provision_attempted: bool = False  # True once provisioning has been attempted (prevents re-trigger)
+    last_provisioned_at: Optional[float] = None  # Timestamp of last successful provisioning (survives disconnect)
     expecting_reboot: bool = False  # True during planned reboots (firmware updates)
     provisioning_task: Optional[asyncio.Task] = None  # Reference to active provisioning task for cancellation
+    link_down_grace_task: Optional[asyncio.Task] = None  # Delayed cancel task for link flaps during provisioning
 
     # Post-provisioning mode (None = SM default, "ap", "ptp-a", "ptp-b")
     device_mode: Optional[str] = None
@@ -450,6 +452,9 @@ class PortManager:
 
     # Grace period after provisioning before marking device as disconnected (seconds)
     PROVISIONING_GRACE_PERIOD = 180  # 3 minutes for firmware updates
+    # Cooldown after successful provisioning — suppress auto-reprovision on
+    # watchdog reboots or brief outages (all device types).
+    REPROVISION_COOLDOWN = 1800  # 30 minutes
     # Number of consecutive ping failures before marking device disconnected
     PING_FAILURE_THRESHOLD = 3
     # Maximum time to wait after link-up for device boot (seconds)
@@ -617,12 +622,26 @@ class PortManager:
 
                     # Notify callbacks only if provisioning hasn't been attempted yet
                     if not state.provision_attempted:
-                        state.provision_attempted = True
-                        for callback in self._on_device_detected:
-                            try:
-                                await callback(port_num, device_type, device_ip)
-                            except Exception as e:
-                                logger.error(f"Callback error: {e}")
+                        # Check reprovision cooldown — skip auto-provision if
+                        # this device was successfully provisioned recently
+                        # (e.g. watchdog reboot, brief power cycle).
+                        import time as _time
+                        if (state.last_provisioned_at is not None and
+                                _time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN):
+                            elapsed = int(_time.time() - state.last_provisioned_at)
+                            remaining = int(self.REPROVISION_COOLDOWN - elapsed)
+                            logger.info(
+                                f"Port {port_num} skipping auto-provision "
+                                f"(recently provisioned {elapsed}s ago, cooldown {remaining}s remaining)"
+                            )
+                            state.provision_attempted = True
+                        else:
+                            state.provision_attempted = True
+                            for callback in self._on_device_detected:
+                                try:
+                                    await callback(port_num, device_type, device_ip)
+                                except Exception as e:
+                                    logger.error(f"Callback error: {e}")
                     else:
                         logger.debug(f"Port {port_num} provisioning already attempted, skipping callback")
 
@@ -843,6 +862,7 @@ class PortManager:
                 # Only start grace period for successful provisioning (firmware updates need reboot time)
                 if success:
                     state.provisioning_ended = time.time()
+                    state.last_provisioned_at = time.time()
                     state.last_result = "success"
                     state.last_error = None
                 else:
@@ -870,6 +890,9 @@ class PortManager:
         state.provisioning = False
         state.provisioning_task = None
         state.expecting_reboot = False
+        if state.link_down_grace_task and not state.link_down_grace_task.done():
+            state.link_down_grace_task.cancel()
+        state.link_down_grace_task = None
         state.link_up = False
         state.device_detected = False
         state.device_type = None
@@ -1059,6 +1082,13 @@ class PortManager:
             state.ping_failures = 0
             state.link_speed = speed
 
+            # If provisioning is active and a link-down grace timer is
+            # running, the link came back — cancel the pending cancel.
+            if state.provisioning and state.link_down_grace_task and not state.link_down_grace_task.done():
+                state.link_down_grace_task.cancel()
+                state.link_down_grace_task = None
+                logger.info(f"Port {port_num} link restored during provisioning — cancelled pending cancel")
+
             # Only start boot wait if not currently provisioning, no device detected, and not already waiting
             if not state.provisioning and not state.device_detected and not state.waiting_for_boot:
                 # Start boot wait timer - will ping until device responds, then wait for web init
@@ -1075,12 +1105,18 @@ class PortManager:
                 if state.expecting_reboot:
                     logger.debug(f"Ignoring link down on port {port_num} during expected reboot")
                 else:
-                    # Unexpected link loss during provisioning — device was likely unplugged
-                    logger.warning(f"Unexpected link down on port {port_num} during provisioning — cancelling and resetting")
-                    if state.provisioning_task and not state.provisioning_task.done():
-                        state.provisioning_task.cancel()
-                    self._clear_port_state_on_disconnect(port_num)
-                    logger.info(f"Port {port_num} fully reset after unexpected unplug")
+                    # Brief link flaps are common on some devices (e.g. Tarana
+                    # during firmware upload).  Instead of cancelling immediately,
+                    # wait a few seconds to see if the link comes back.
+                    state.link_up = False
+                    if state.link_down_grace_task and not state.link_down_grace_task.done():
+                        logger.debug(f"Port {port_num} link flap during grace period, ignoring")
+                    else:
+                        logger.info(f"Link down on port {port_num} during provisioning — "
+                                    f"waiting 10s grace period before cancelling")
+                        state.link_down_grace_task = asyncio.ensure_future(
+                            self._delayed_provision_cancel(port_num)
+                        )
             elif state.waiting_for_boot:
                 # During boot wait, brief link-down events are expected during
                 # ethernet autonegotiation (speed renegotiation).  Don't nuke
@@ -1101,6 +1137,34 @@ class PortManager:
             logger.debug(f"Failed to broadcast port update: {e}")
 
         return True
+
+    # ------------------------------------------------------------------
+    # Link-down grace period for provisioning
+    # ------------------------------------------------------------------
+
+    LINK_DOWN_GRACE_SECONDS = 10  # How long to tolerate link loss during provisioning
+
+    async def _delayed_provision_cancel(self, port_num: int) -> None:
+        """Cancel provisioning after a grace period if link stays down."""
+        try:
+            await asyncio.sleep(self.LINK_DOWN_GRACE_SECONDS)
+        except asyncio.CancelledError:
+            # Link came back up — don't cancel provisioning
+            return
+
+        state = self.port_states.get(port_num)
+        if not state or not state.provisioning:
+            return
+        if state.link_up:
+            # Link recovered while we were sleeping (race)
+            return
+
+        logger.warning(f"Port {port_num} link still down after {self.LINK_DOWN_GRACE_SECONDS}s grace period "
+                       f"— cancelling provisioning")
+        if state.provisioning_task and not state.provisioning_task.done():
+            state.provisioning_task.cancel()
+        self._clear_port_state_on_disconnect(port_num)
+        logger.info(f"Port {port_num} fully reset after sustained link loss")
 
     # ------------------------------------------------------------------
     # Device mode & PTP link tracking
