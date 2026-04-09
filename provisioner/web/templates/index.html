@@ -256,6 +256,17 @@
                     <label class="block text-sm font-medium text-gray-600 mb-2">System Status</label>
                     <div class="bg-gray-50 rounded-lg p-3 text-sm border border-gray-200" id="system-status">Loading...</div>
                 </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-600 mb-2">Tarana</label>
+                    <div class="flex items-center gap-2">
+                        <label class="text-sm text-gray-600 whitespace-nowrap">Operator ID</label>
+                        <input type="number" id="settings-operator-id" placeholder="Not set"
+                            class="flex-1 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900">
+                        <button onclick="saveDeviceSettings()" class="px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-medium text-white">
+                            Save
+                        </button>
+                    </div>
+                </div>
                 <div class="space-y-2">
                     <button onclick="triggerGitSync()" class="w-full py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm text-white">
                         Sync GitHub Repository
@@ -305,6 +316,10 @@
             document.getElementById('management-url').textContent = window.location.host;
             // Fetch display config (for sleep timeout)
             fetchDisplayConfig();
+            // Fetch device settings defaults (operator ID, etc.)
+            fetch('/api/device-settings').then(r => r.json()).then(s => {
+                if (s.tarana?.operator_id) window.defaultOperatorId = s.tarana.operator_id;
+            }).catch(() => {});
             connectWebSocket();
         });
 
@@ -809,6 +824,9 @@
                     Configure as PTP
                 </button>
                 ` : ''}
+                <button onclick="startNetinstall(${portNum})" class="flex-1 py-2 bg-orange-600 hover:bg-orange-500 rounded-lg font-medium text-sm text-white">
+                    Netinstall
+                </button>
                 <button onclick="openProvisionModal(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
                     Retry
                 </button>
@@ -981,6 +999,14 @@
                             </label>
                         </div>
                     </div>
+
+                    ${port.device_type === 'tarana' ? `
+                    <div>
+                        <div class="text-sm font-medium text-gray-600 mb-2">Operator ID</div>
+                        <input type="number" id="operator-id" placeholder="Operator ID" value="${window.defaultOperatorId || ''}"
+                            class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900">
+                    </div>
+                    ` : ''}
 
                     <div>
                         <div class="text-sm font-medium text-gray-600 mb-2">Custom Credentials (optional)</div>
@@ -1338,18 +1364,23 @@
             const password = document.getElementById('custom-password')?.value || null;
             const skipFirmware = document.getElementById('skip-firmware')?.checked || false;
             const skipConfig = document.getElementById('skip-config')?.checked || false;
+            const operatorIdEl = document.getElementById('operator-id');
+            const operatorId = operatorIdEl?.value ? parseInt(operatorIdEl.value) : null;
 
             try {
+                const body = {
+                    port_number: portNum,
+                    custom_username: username,
+                    custom_password: password,
+                    skip_firmware: skipFirmware,
+                    skip_config: skipConfig,
+                };
+                if (operatorId !== null) body.operator_id = operatorId;
+
                 const response = await fetch('/api/provision', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        port_number: portNum,
-                        custom_username: username,
-                        custom_password: password,
-                        skip_firmware: skipFirmware,
-                        skip_config: skipConfig,
-                    }),
+                    body: JSON.stringify(body),
                 });
 
                 const data = await response.json();
@@ -1361,6 +1392,28 @@
                 }
             } catch (error) {
                 showToast('Failed to start provisioning', 'error');
+            }
+        }
+
+        async function startNetinstall(portNum) {
+            if (!confirm('Start Netinstall on port ' + portNum + '?\n\nThe device must be in BOOTP mode (reset button held during power-on).')) {
+                return;
+            }
+            try {
+                const response = await fetch('/api/netinstall', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ port_number: portNum }),
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    showToast('Netinstall started', 'success');
+                    closeModal();
+                } else {
+                    showToast(data.detail || 'Failed to start Netinstall', 'error');
+                }
+            } catch (error) {
+                showToast('Failed to start Netinstall', 'error');
             }
         }
 
@@ -1462,10 +1515,34 @@
         function openSettings() {
             document.getElementById('settings-modal').classList.remove('hidden');
             fetchSystemStatus();
+            fetch('/api/device-settings').then(r => r.json()).then(s => {
+                const el = document.getElementById('settings-operator-id');
+                if (el && s.tarana?.operator_id != null) el.value = s.tarana.operator_id;
+            }).catch(() => {});
         }
 
         function closeSettings() {
             document.getElementById('settings-modal').classList.add('hidden');
+        }
+
+        async function saveDeviceSettings() {
+            const el = document.getElementById('settings-operator-id');
+            const operatorId = el?.value ? parseInt(el.value) : null;
+            try {
+                const resp = await fetch('/api/device-settings', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tarana: { operator_id: operatorId } }),
+                });
+                if (resp.ok) {
+                    window.defaultOperatorId = operatorId;
+                    showToast('Settings saved', 'success');
+                } else {
+                    showToast('Failed to save settings', 'error');
+                }
+            } catch (e) {
+                showToast('Failed to save settings', 'error');
+            }
         }
 
         async function fetchSystemStatus() {

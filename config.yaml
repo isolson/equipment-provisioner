@@ -66,6 +66,7 @@ credentials:
   mikrotik:
     username: admin
     password: "${MIKROTIK_PASSWORD}"
+    bootstrap_password: "${MIKROTIK_BOOTSTRAP_PASS}"
 
   tarana:
     username: admin
@@ -102,7 +103,13 @@ features:
   config_backup: false          # Config backup during provisioning (needs storage)
   device_overrides: false       # MAC-based device overrides (incomplete)
   apply_config_ubiquiti: false  # Ubiquiti config application (untested)
-  apply_config_tarana: false    # Tarana config application (stub — gNMI Set not implemented)
+  apply_config_tarana: true     # Tarana config application via gNMI Set
+
+device_settings:
+  tarana:
+    operator_id:                    # Tarana operator ID (set via gNMI on /radios/global/config/operator-id)
+  mikrotik:
+    ztp_api_url:                    # ZTP API base URL (e.g. https://api.infra.treehouse.mn)
 
 firmware:
   # Update both firmware banks on dual-bank devices
@@ -146,6 +153,11 @@ display:
 
   # Fallback to sysfs backlight control
   use_backlight: true
+
+equipment_registry:
+  # POST device metadata (serial, MAC, model, firmware) after successful provisioning
+  url:                                 # e.g. https://api.example.com/ztp/register
+  api_key: "${EQUIPMENT_REGISTRY_API_KEY}"
 
 analytics:
   # Central event reporting (provisioning results, unknown devices)

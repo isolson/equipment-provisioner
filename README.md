@@ -27,6 +27,7 @@ All status updates appear in real-time on the web dashboard. No manual steps aft
 This system is designed to run on a dedicated Linux machine with an attached MikroTik switch:
 
 - **Host Computer** — Raspberry Pi 3B+ or better, OrangePi 3 LTS, or any Linux x86_64 machine
+  - Recommended x86 options: Dell OptiPlex 3050, Dell Wyse 5070, HP EliteDesk 800 G2 (required for MikroTik Netinstall)
   - Optional: 7" touchscreen for bench-top use (designed for 1024×600 displays)
   - Minimum: 1GB RAM, 8GB storage
 

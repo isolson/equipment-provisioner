@@ -60,8 +60,9 @@ class DeviceCredentials(BaseModel):
     username: str = "admin"
     password: str = ""
     backup_password: str = ""  # Backup password to try if primary fails
+    bootstrap_password: str = ""  # Fleet-wide bootstrap password (MikroTik ZTP)
 
-    @field_validator("password", "backup_password", mode="before")
+    @field_validator("password", "backup_password", "bootstrap_password", mode="before")
     @classmethod
     def expand_env_var(cls, v: str) -> str:
         """Expand environment variables in password."""
@@ -190,6 +191,36 @@ class FeaturesConfig(BaseModel):
     apply_config_tarana: bool = False   # Tarana config application (stub)
 
 
+class TaranaDeviceConfig(BaseModel):
+    """Tarana-specific provisioning settings."""
+    operator_id: Optional[int] = None
+
+
+class MikrotikDeviceConfig(BaseModel):
+    """MikroTik-specific provisioning settings."""
+    ztp_api_url: Optional[str] = None  # ZTP API base URL for phone-home script
+
+
+class DeviceSettingsConfig(BaseModel):
+    """Per-device-type provisioning settings."""
+    tarana: TaranaDeviceConfig = Field(default_factory=TaranaDeviceConfig)
+    mikrotik: MikrotikDeviceConfig = Field(default_factory=MikrotikDeviceConfig)
+
+
+class EquipmentRegistryConfig(BaseModel):
+    """Equipment registry — POST device metadata after successful provisioning."""
+    url: Optional[str] = None
+    api_key: Optional[str] = None
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def expand_env_var(cls, v: Optional[str]) -> Optional[str]:
+        if v and v.startswith("${") and v.endswith("}"):
+            env_var = v[2:-1]
+            return os.getenv(env_var)
+        return v
+
+
 class AnalyticsConfig(BaseModel):
     """Analytics/telemetry configuration for central event reporting."""
     enabled: bool = False
@@ -220,6 +251,8 @@ class Config(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     firmware: FirmwareConfig = Field(default_factory=FirmwareConfig)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
+    device_settings: DeviceSettingsConfig = Field(default_factory=DeviceSettingsConfig)
+    equipment_registry: EquipmentRegistryConfig = Field(default_factory=EquipmentRegistryConfig)
     analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
 
 
