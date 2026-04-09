@@ -53,7 +53,7 @@
 <body class="text-gray-900 min-h-screen flex flex-col">
 
     <!-- Header -->
-    <header class="bg-white border-b border-gray-300 px-4 py-2 flex items-center justify-between flex-shrink-0">
+    <header class="bg-white border-b border-gray-300 px-4 py-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between flex-shrink-0">
         <div class="flex items-center gap-3">
             <a href="/" class="p-2 rounded-lg hover:bg-gray-100" title="Back to Dashboard">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -69,13 +69,13 @@
 
         <!-- Firmware Sources / Auto-Checker Panel -->
         <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-                <div class="flex items-center gap-2">
+            <div class="px-4 py-3 border-b border-gray-100 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div class="flex flex-wrap items-center gap-2">
                     <h2 class="text-sm font-bold text-gray-700">Auto-Checker</h2>
                     <span id="checker-status-dot" class="w-2 h-2 rounded-full bg-gray-300"></span>
                     <span id="checker-status-text" class="text-xs text-gray-400">Loading...</span>
                 </div>
-                <div class="flex items-center gap-3">
+                <div class="flex flex-wrap items-center gap-3 sm:justify-end">
                     <span class="text-xs text-gray-400" id="last-refresh"></span>
                     <button onclick="checkNow()" id="check-now-btn"
                         class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition">
@@ -115,17 +115,17 @@
 
         <!-- Manual Upload (compact) -->
         <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+            <div class="px-4 py-3 border-b border-gray-100 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <h2 class="text-sm font-bold text-gray-700">Manual Upload</h2>
                 <button onclick="toggleUrlInput()" class="text-xs text-blue-600 hover:text-blue-500 font-medium">
                     Or paste URL
                 </button>
             </div>
             <div class="p-4">
-                <div class="flex items-center gap-3 mb-3">
+                <div class="flex flex-col gap-3 mb-3 sm:flex-row sm:items-center">
                     <label class="text-xs text-gray-500 font-medium">Type:</label>
                     <select id="upload-device-type"
-                        class="text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white text-gray-900">
+                        class="w-full text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white text-gray-900 sm:w-auto">
                         <option value="cambium">Cambium</option>
                         <option value="mikrotik">MikroTik</option>
                         <option value="tachyon">Tachyon</option>
@@ -146,7 +146,7 @@
 
                 <!-- URL Input (hidden by default) -->
                 <div id="url-input-section" class="hidden mt-3">
-                    <div class="flex gap-2">
+                    <div class="flex flex-col gap-2 sm:flex-row">
                         <input type="text" id="firmware-url" placeholder="https://example.com/firmware.bin"
                             class="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white text-gray-900">
                         <button onclick="downloadFromUrl()" id="url-download-btn"
@@ -260,13 +260,15 @@
                     .join('');
 
                 return `
-                <div class="px-4 py-3 flex items-center gap-3 flex-wrap">
-                    <span class="vendor-badge" style="background:${vc.color}">${vc.name}</span>
-                    <span class="text-xs ${s.enabled ? 'text-green-600' : 'text-gray-400'} font-medium">
-                        ${s.enabled ? 'Enabled' : 'Disabled'}
-                    </span>
-                    <span class="text-xs text-gray-400 ml-auto mr-2">Checked: ${lastCheck}</span>
-                    <div class="flex rounded-lg border border-gray-300 overflow-hidden">
+                <div class="px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center">
+                    <div class="flex flex-wrap items-center gap-3 min-w-0">
+                        <span class="vendor-badge" style="background:${vc.color}">${vc.name}</span>
+                        <span class="text-xs ${s.enabled ? 'text-green-600' : 'text-gray-400'} font-medium">
+                            ${s.enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                        <span class="text-xs text-gray-400">Checked: ${lastCheck}</span>
+                    </div>
+                    <div class="flex rounded-lg border border-gray-300 overflow-hidden sm:ml-auto">
                         ${channelButtons}
                     </div>
                 </div>`;
@@ -312,13 +314,15 @@
                     channelPill = '<span class="text-xs font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded">LTS</span>';
                 }
                 return `
-                <div class="px-4 py-3 flex items-center gap-3">
-                    <span class="vendor-badge" style="background:${vc.color}">${vc.name}</span>
-                    <span class="text-sm font-medium text-gray-900">${u.model}</span>
-                    <span class="text-sm text-gray-600 font-mono">${u.version}</span>
-                    ${channelPill}
+                <div class="px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center">
+                    <div class="flex flex-wrap items-center gap-3 min-w-0">
+                        <span class="vendor-badge" style="background:${vc.color}">${vc.name}</span>
+                        <span class="text-sm font-medium text-gray-900">${u.model}</span>
+                        <span class="text-sm text-gray-600 font-mono">${u.version}</span>
+                        ${channelPill}
+                    </div>
                     <button onclick="downloadUpdate('${u.vendor}','${u.model}','${u.version}')" data-key="${u.vendor}-${u.model}-${u.version}"
-                        class="ml-auto px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition">
+                        class="w-full px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition sm:ml-auto sm:w-auto">
                         Download
                     </button>
                 </div>`;
@@ -343,7 +347,7 @@
                 grouped[fw.device_type].push(fw);
             }
 
-            let html = '<table class="w-full text-sm"><thead>';
+            let html = '<div class="overflow-x-auto"><table class="w-full min-w-[720px] text-sm"><thead>';
             html += '<tr class="text-xs text-gray-500 text-left">';
             html += '<th class="px-4 py-2">Vendor</th>';
             html += '<th class="px-4 py-2">Filename</th>';
@@ -379,7 +383,7 @@
                 }
             }
 
-            html += '</tbody></table>';
+            html += '</tbody></table></div>';
             container.innerHTML = html;
         }
 

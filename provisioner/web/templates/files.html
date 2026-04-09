@@ -43,7 +43,7 @@
 </head>
 <body class="bg-[#f5f5f5] text-gray-900 min-h-screen" style="font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Menlo', monospace;">
     <!-- Header -->
-    <header class="bg-white border-b border-gray-300 px-4 py-3 flex items-center justify-between">
+    <header class="bg-white border-b border-gray-300 px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex items-center gap-4">
             <a href="/" class="text-gray-600 hover:text-gray-900">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -52,8 +52,8 @@
             </a>
             <h1 class="text-xl font-bold">Manage</h1>
         </div>
-        <div class="flex items-center gap-2">
-            <select id="sort-by" onchange="applySort()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm">
+        <div class="w-full sm:w-auto">
+            <select id="sort-by" onchange="applySort()" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm sm:w-auto">
                 <option value="device_type">Sort by Device</option>
                 <option value="name">Sort by Name</option>
                 <option value="type">Sort by Type</option>
@@ -62,9 +62,12 @@
     </header>
 
     <!-- Tabs -->
-    <div class="bg-white border-b border-gray-300 px-4">
-        <div class="flex gap-1">
-            <button onclick="showTab('firmware')" id="tab-firmware" class="px-4 py-3 font-medium border-b-2 border-blue-500 text-blue-600">
+    <div class="bg-white border-b border-gray-300 px-4 overflow-x-auto">
+        <div class="flex w-max min-w-full gap-1 whitespace-nowrap">
+            <button onclick="showTab('setup')" id="tab-setup" class="px-4 py-3 font-medium border-b-2 border-blue-500 text-blue-600">
+                Setup
+            </button>
+            <button onclick="showTab('firmware')" id="tab-firmware" class="px-4 py-3 font-medium border-b-2 border-transparent text-gray-600 hover:text-gray-900">
                 Firmware
             </button>
             <button onclick="showTab('configs')" id="tab-configs" class="px-4 py-3 font-medium border-b-2 border-transparent text-gray-600 hover:text-gray-900">
@@ -79,9 +82,137 @@
     <!-- Main Content -->
     <main class="p-4 space-y-6">
         <!-- ============================================ -->
+        <!-- SETUP SECTION -->
+        <!-- ============================================ -->
+        <div id="section-setup">
+            <div class="bg-white rounded-xl p-4 border border-gray-200">
+                <div class="flex flex-col gap-3 mb-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                        <h2 class="text-lg font-semibold">First-Run Readiness</h2>
+                        <p class="text-sm text-gray-600 mt-1">Checks the host, fleet passwords, templates, firmware inventory, and whether the first eight switch ports match the provisioning layout.</p>
+                    </div>
+                    <button onclick="loadReadiness()" class="touch-btn px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-white">
+                        Refresh
+                    </button>
+                </div>
+                <div id="readiness-summary" class="mb-4 text-gray-500 text-sm">Loading readiness...</div>
+                <div id="readiness-list" class="space-y-3">
+                    <div class="text-gray-400 text-center py-4">Loading...</div>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-xl p-4 border border-gray-200">
+                <h2 class="text-lg font-semibold mb-2">Import Setup Bundle</h2>
+                <p class="text-sm text-gray-600 mb-4">Use one archive to seed another bench. Supported contents: <span class="font-mono">configs/</span>, <span class="font-mono">firmware/</span>, <span class="font-mono">credentials.json</span>, <span class="font-mono">manifest.yaml</span>, and optional <span class="font-mono">settings/config.yaml</span> plus <span class="font-mono">settings/provisioner.env</span>.</p>
+
+                <div class="grid md:grid-cols-2 gap-4 mb-4">
+                    <div class="drop-zone rounded-xl p-6 text-center cursor-pointer"
+                         onclick="document.getElementById('bundle-file-input').click()"
+                         ondragover="handleDragOver(event)"
+                         ondragleave="handleDragLeave(event)"
+                         ondrop="handleBundleDrop(event)">
+                        <input type="file" id="bundle-file-input" class="hidden" accept=".zip,.tar,.tgz,.gz" onchange="importSetupBundle(this.files[0])">
+                        <svg class="w-12 h-12 mx-auto text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                        </svg>
+                        <p class="text-gray-600">Drop setup bundle here</p>
+                        <p class="text-sm text-gray-400">or click to browse</p>
+                    </div>
+
+                    <div class="bg-gray-50 rounded-xl p-4 border border-gray-200 space-y-4">
+                        <label class="flex items-start gap-3">
+                            <input type="checkbox" id="bundle-apply-system" class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                            <span class="text-sm text-gray-700">Also apply bundled <span class="font-mono">config.yaml</span> and <span class="font-mono">provisioner.env</span> to <span class="font-mono">/etc/provisioner/</span>. This usually requires a service restart.</span>
+                        </label>
+
+                        <div>
+                            <h3 class="text-sm font-semibold text-gray-900 mb-2">Expected first 8 switch ports</h3>
+                            <div class="text-sm text-gray-600 space-y-1">
+                                <div><span class="font-mono">ether1-ether6</span>: provisioning ports</div>
+                                <div><span class="font-mono">ether7</span>: WAN or internet uplink</div>
+                                <div><span class="font-mono">ether8</span>: trunk to the host</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="bundle-import-result" class="text-sm text-gray-500">No setup bundle imported yet.</div>
+            </div>
+
+            <div class="bg-white rounded-xl p-4 border border-gray-200">
+                <div class="flex flex-col gap-3 mb-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                        <h2 class="text-lg font-semibold">Export Setup Bundle</h2>
+                        <p class="text-sm text-gray-600 mt-1">Package this bench so the next install can import everything in one shot.</p>
+                    </div>
+                    <button onclick="exportSetupBundle()" class="touch-btn px-4 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-white">
+                        Export Bundle
+                    </button>
+                </div>
+                <label class="flex items-start gap-3">
+                    <input type="checkbox" id="bundle-export-system" class="mt-1 rounded border-gray-300 text-green-600 focus:ring-green-500">
+                    <span class="text-sm text-gray-700">Include <span class="font-mono">/etc/provisioner/config.yaml</span> and <span class="font-mono">/etc/provisioner/provisioner.env</span> in the bundle.</span>
+                </label>
+                <div id="bundle-export-result" class="text-sm text-gray-500 mt-4">No setup bundle exported yet.</div>
+            </div>
+
+            <div class="bg-white rounded-xl p-4 border border-gray-200">
+                <div class="flex flex-col gap-3 mb-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                        <h2 class="text-lg font-semibold">Seed Bundled Templates</h2>
+                        <p class="text-sm text-gray-600 mt-1">Copy the templates shipped in the repo into the live data store on this bench.</p>
+                    </div>
+                    <button onclick="seedBundledTemplates()" class="touch-btn px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-gray-800">
+                        Seed Templates
+                    </button>
+                </div>
+                <label class="flex items-start gap-3">
+                    <input type="checkbox" id="seed-overwrite" class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                    <span class="text-sm text-gray-700">Overwrite any existing live template files with the repo versions.</span>
+                </label>
+                <div id="seed-templates-result" class="text-sm text-gray-500 mt-4">Bundled templates have not been seeded yet.</div>
+            </div>
+
+            <div class="bg-white rounded-xl p-4 border border-gray-200">
+                <h2 class="text-lg font-semibold mb-2">Configure MikroTik Switch</h2>
+                <p class="text-sm text-gray-600 mb-4">Use this when a defaulted MikroTik switch is plugged directly into the host. This applies the first-eight-port layout: <span class="font-mono">ether1-ether6</span> provisioning, <span class="font-mono">ether7</span> WAN, <span class="font-mono">ether8</span> trunk.</p>
+
+                <div class="grid md:grid-cols-4 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm text-gray-600 mb-2">Switch IP</label>
+                        <input type="text" id="switch-ip" value="192.168.88.1"
+                            class="w-full bg-white border border-gray-300 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-600 mb-2">Username</label>
+                        <input type="text" id="switch-username" value="admin"
+                            class="w-full bg-white border border-gray-300 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-600 mb-2">Password</label>
+                        <input type="password" id="switch-password" placeholder="empty for factory default"
+                            class="w-full bg-white border border-gray-300 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none">
+                    </div>
+                    <div class="flex items-end">
+                        <button onclick="configureSwitch()" class="touch-btn w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-white">
+                            Configure Switch
+                        </button>
+                    </div>
+                </div>
+
+                <label class="flex items-start gap-3 mb-4">
+                    <input type="checkbox" id="switch-skip-password" class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                    <span class="text-sm text-gray-700">Keep the current switch password instead of generating a new one.</span>
+                </label>
+
+                <div id="switch-config-result" class="text-sm text-gray-500">No switch configuration run yet.</div>
+            </div>
+        </div>
+
+        <!-- ============================================ -->
         <!-- FIRMWARE SECTION -->
         <!-- ============================================ -->
-        <div id="section-firmware">
+        <div id="section-firmware" class="hidden">
             <!-- Upload Section -->
             <div class="bg-white rounded-xl p-4 mb-6 border border-gray-200">
                 <h2 class="text-lg font-semibold mb-4">Add Firmware</h2>
@@ -262,11 +393,12 @@
     </div>
 
     <script>
-        let currentTab = 'firmware';
+        let currentTab = 'setup';
         let editingConfig = null;
         let currentSort = 'device_type';
 
         // Data caches
+        let readinessData = null;
         let firmwareData = [];
         let configsData = [];
         let credentialsData = [];
@@ -282,6 +414,7 @@
                 console.error('API test failed:', e);
             }
 
+            loadReadiness();
             loadFirmware();
             loadConfigs();
             loadCredentials();
@@ -291,7 +424,7 @@
         function showTab(tab) {
             currentTab = tab;
 
-            ['firmware', 'configs', 'credentials'].forEach(t => {
+            ['setup', 'firmware', 'configs', 'credentials'].forEach(t => {
                 const tabBtn = document.getElementById(`tab-${t}`);
                 const section = document.getElementById(`section-${t}`);
 
@@ -337,10 +470,337 @@
             if (file) uploadConfigFile(file);
         }
 
+        function handleBundleDrop(e) {
+            e.preventDefault();
+            e.currentTarget.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) importSetupBundle(file);
+        }
+
         // Device type badge helper
         function deviceBadge(type) {
             const names = { cambium: 'Cambium', mikrotik: 'MikroTik', tachyon: 'Tachyon', tarana: 'Tarana' };
             return `<span class="px-2 py-0.5 text-xs font-medium rounded badge-${type || 'unknown'}">${names[type] || type || 'Unknown'}</span>`;
+        }
+
+        function readinessBadge(status) {
+            const styles = {
+                ready: 'bg-green-500/15 text-green-700',
+                warning: 'bg-yellow-500/15 text-yellow-700',
+                missing: 'bg-red-500/15 text-red-700',
+                error: 'bg-red-600/15 text-red-800',
+            };
+            return `<span class="px-2 py-0.5 text-xs font-medium rounded ${styles[status] || styles.warning}">${(status || 'unknown').toUpperCase()}</span>`;
+        }
+
+        // ============================================
+        // SETUP READINESS
+        // ============================================
+        async function loadReadiness() {
+            try {
+                const response = await fetch('/api/setup/readiness');
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.detail || 'Failed to load readiness');
+                }
+
+                readinessData = data;
+                renderReadiness(data);
+            } catch (error) {
+                document.getElementById('readiness-summary').innerHTML =
+                    `<span class="text-red-700">Failed to load readiness: ${escapeHtml(error.message || 'unknown error')}</span>`;
+                document.getElementById('readiness-list').innerHTML =
+                    '<div class="text-red-700 text-center py-4">Failed to load readiness checklist</div>';
+            }
+        }
+
+        function renderReadiness(data) {
+            const summary = document.getElementById('readiness-summary');
+            const list = document.getElementById('readiness-list');
+            const counts = data.summary || {};
+
+            summary.innerHTML = `
+                <div class="flex flex-wrap items-center gap-3">
+                    ${readinessBadge(data.status)}
+                    <span>${counts.ready || 0} ready</span>
+                    <span>${counts.warning || 0} warning</span>
+                    <span>${counts.missing || 0} missing</span>
+                    <span>${counts.error || 0} error</span>
+                </div>
+            `;
+
+            list.innerHTML = (data.checks || []).map(check => {
+                const details = renderReadinessDetails(check);
+                return `
+                    <div class="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                        <div class="flex flex-col gap-2 mb-2 sm:flex-row sm:items-start sm:justify-between">
+                            <div>
+                                <div class="font-semibold text-gray-900">${escapeHtml(check.title)}</div>
+                                <div class="text-sm text-gray-600 mt-1">${escapeHtml(check.summary || '')}</div>
+                            </div>
+                            ${readinessBadge(check.status)}
+                        </div>
+                        ${details}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderReadinessDetails(check) {
+            if (check.id === 'mikrotik_switch') {
+                const checks = (check.checks || []).map(item => `
+                    <div class="flex flex-col gap-1 text-sm sm:flex-row sm:items-center sm:justify-between">
+                        <span>${escapeHtml(item.name)}</span>
+                        ${readinessBadge(item.status)}
+                    </div>
+                `).join('');
+
+                const actions = (check.actions || []).map(action => `
+                    <div class="text-sm text-gray-600">${escapeHtml(action)}</div>
+                `).join('');
+
+                return `
+                    <div class="text-sm text-gray-600 space-y-2">
+                        <div>Host: <span class="font-mono">${escapeHtml(check.host || 'n/a')}</span></div>
+                        <div>Identity: <span class="font-mono">${escapeHtml(check.identity || 'unknown')}</span></div>
+                        <div>Board: <span class="font-mono">${escapeHtml(check.board_name || 'unknown')}</span></div>
+                        <div>Version: <span class="font-mono">${escapeHtml(check.version || 'unknown')}</span></div>
+                        <div>Mode: <span class="font-mono">${escapeHtml(check.mode || 'unknown')}</span></div>
+                        <div class="pt-1 space-y-1">${checks || '<div class="text-gray-500">No RouterOS detail checks were available.</div>'}</div>
+                        <div class="pt-2 border-t border-gray-200 space-y-1">${actions}</div>
+                    </div>
+                `;
+            }
+
+            if (check.id === 'credentials') {
+                const rows = (check.details || []).map(item => `
+                    <div class="flex flex-col gap-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+                        <div class="flex items-center gap-2">
+                            ${deviceBadge(item.device_type)}
+                            <span class="font-mono">${escapeHtml(item.username)}</span>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2">
+                            <span class="text-gray-500">${escapeHtml(item.summary)}</span>
+                            ${readinessBadge(item.status)}
+                        </div>
+                    </div>
+                `).join('');
+                return `<div class="space-y-2">${rows}</div>`;
+            }
+
+            if (check.id === 'config_templates' || check.id === 'firmware_inventory') {
+                const rows = (check.details || []).map(item => `
+                    <div class="flex flex-col gap-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+                        <div class="flex items-center gap-2">
+                            ${deviceBadge(item.device_type)}
+                            <span class="text-gray-600">${escapeHtml(item.summary || '')}</span>
+                        </div>
+                        ${readinessBadge(item.status)}
+                    </div>
+                `).join('');
+                return `<div class="space-y-2">${rows}</div>`;
+            }
+
+            if (check.details && typeof check.details === 'object') {
+                return `
+                    <div class="text-sm text-gray-600 space-y-1">
+                        ${Object.entries(check.details).map(([key, value]) => `
+                            <div><span class="text-gray-500">${escapeHtml(key)}:</span> <span class="font-mono">${escapeHtml(String(value))}</span></div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+
+            return '';
+        }
+
+        async function importSetupBundle(file) {
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('apply_system_files', document.getElementById('bundle-apply-system').checked ? 'true' : 'false');
+
+            showToast('Importing setup bundle...', 'info');
+
+            try {
+                const response = await fetch('/api/setup/bundle/import', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await response.json();
+
+                if (!response.ok) {
+                    showToast(data.detail || 'Bundle import failed', 'error');
+                    return;
+                }
+
+                document.getElementById('bundle-import-result').innerHTML = `
+                    <div class="text-gray-700">
+                        <div class="font-semibold">${escapeHtml(data.message)}</div>
+                        <div class="mt-2 text-sm text-gray-600">
+                            Configs: ${data.summary.configs},
+                            Firmware: ${data.summary.firmware},
+                            Credentials: ${data.summary.credentials},
+                            Manifest: ${data.summary.manifest},
+                            System files: ${data.summary.system_files}
+                        </div>
+                        <div class="mt-2 text-sm ${data.restart_required ? 'text-yellow-700' : 'text-gray-600'}">
+                            ${data.restart_required ? 'Config or env files were imported. Restart the service to apply them.' : 'No service restart is required.'}
+                        </div>
+                        ${data.restart_required ? `
+                            <button onclick="restartProvisionerService()" class="mt-3 touch-btn px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-gray-800">
+                                Restart Service
+                            </button>
+                        ` : ''}
+                    </div>
+                `;
+
+                document.getElementById('bundle-file-input').value = '';
+                showToast('Setup bundle imported', 'success');
+                loadReadiness();
+                loadFirmware();
+                loadConfigs();
+                loadCredentials();
+            } catch (error) {
+                showToast('Bundle import failed', 'error');
+            }
+        }
+
+        async function exportSetupBundle() {
+            const includeSystemFiles = document.getElementById('bundle-export-system').checked;
+            const url = `/api/setup/bundle/export?include_system_files=${includeSystemFiles ? 'true' : 'false'}`;
+
+            showToast('Preparing setup bundle...', 'info');
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    const data = await response.json();
+                    showToast(data.detail || 'Bundle export failed', 'error');
+                    return;
+                }
+
+                const blob = await response.blob();
+                const downloadUrl = window.URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                const disposition = response.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename="?([^"]+)"?/);
+                link.href = downloadUrl;
+                link.download = match ? match[1] : 'provisioner-setup-bundle.zip';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                window.URL.revokeObjectURL(downloadUrl);
+
+                document.getElementById('bundle-export-result').textContent =
+                    `Exported ${link.download}${includeSystemFiles ? ' with system files.' : '.'}`;
+                showToast('Setup bundle exported', 'success');
+            } catch (error) {
+                showToast('Bundle export failed', 'error');
+            }
+        }
+
+        async function seedBundledTemplates() {
+            const overwrite = document.getElementById('seed-overwrite').checked;
+
+            showToast('Seeding bundled templates...', 'info');
+
+            try {
+                const response = await fetch('/api/setup/templates/seed', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ overwrite }),
+                });
+                const data = await response.json();
+
+                if (!response.ok) {
+                    showToast(data.detail || 'Template seeding failed', 'error');
+                    return;
+                }
+
+                document.getElementById('seed-templates-result').innerHTML = `
+                    <div class="text-gray-700">
+                        <div class="font-semibold">${escapeHtml(data.message)}</div>
+                        <div class="mt-2 text-sm text-gray-600">
+                            Copied: ${data.copied}, Skipped: ${data.skipped}
+                        </div>
+                    </div>
+                `;
+                showToast('Bundled templates seeded', 'success');
+                loadReadiness();
+                loadConfigs();
+            } catch (error) {
+                showToast('Template seeding failed', 'error');
+            }
+        }
+
+        async function configureSwitch() {
+            const payload = {
+                ip: document.getElementById('switch-ip').value.trim() || '192.168.88.1',
+                username: document.getElementById('switch-username').value.trim() || 'admin',
+                password: document.getElementById('switch-password').value,
+                skip_password_change: document.getElementById('switch-skip-password').checked,
+            };
+
+            showToast('Configuring MikroTik switch...', 'info');
+
+            try {
+                const response = await fetch('/api/setup/switch/configure', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+
+                const data = await response.json();
+                if (!response.ok) {
+                    const detail = data.detail && typeof data.detail === 'object'
+                        ? (data.detail.output || data.detail.message || 'Switch setup failed')
+                        : (data.detail || 'Switch setup failed');
+                    document.getElementById('switch-config-result').innerHTML =
+                        `<div class="text-red-700 whitespace-pre-wrap">${escapeHtml(detail)}</div>`;
+                    showToast('Switch setup failed', 'error');
+                    return;
+                }
+
+                document.getElementById('switch-config-result').innerHTML = `
+                    <div class="text-gray-700">
+                        <div class="font-semibold">${escapeHtml(data.message)}</div>
+                        <div class="mt-2 text-sm text-gray-600 space-y-1">
+                            ${(data.port_map || []).map(line => `<div>${escapeHtml(line)}</div>`).join('')}
+                        </div>
+                        <pre class="mt-3 bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs text-gray-700 overflow-auto max-h-64 whitespace-pre-wrap">${escapeHtml(data.output || '')}</pre>
+                    </div>
+                `;
+                showToast('Switch configured', 'success');
+                loadReadiness();
+            } catch (error) {
+                showToast('Switch setup failed', 'error');
+            }
+        }
+
+        async function restartProvisionerService() {
+            showToast('Scheduling service restart...', 'info');
+
+            try {
+                const response = await fetch('/api/setup/restart-service', {
+                    method: 'POST',
+                });
+                const data = await response.json();
+
+                if (!response.ok) {
+                    showToast(data.detail || 'Service restart failed', 'error');
+                    return;
+                }
+
+                document.getElementById('bundle-import-result').innerHTML += `
+                    <div class="mt-3 text-sm text-yellow-700">Service restart scheduled. The page may disconnect briefly.</div>
+                `;
+                showToast('Service restart scheduled', 'success');
+            } catch (error) {
+                showToast('Service restart failed', 'error');
+            }
         }
 
         // ============================================
@@ -374,16 +834,16 @@
             }
 
             list.innerHTML = sorted.map(fw => `
-                <div class="bg-gray-50 rounded-lg p-3 flex items-center gap-3 border border-gray-200">
+                <div class="bg-gray-50 rounded-lg p-3 flex flex-col gap-3 border border-gray-200 sm:flex-row sm:items-center">
                     <div class="flex-1 min-w-0">
-                        <div class="flex items-center gap-2 mb-1">
+                        <div class="flex flex-wrap items-center gap-2 mb-1">
                             ${deviceBadge(fw.device_type)}
-                            <span class="font-medium truncate">${fw.filename}</span>
+                            <span class="font-medium break-all">${fw.filename}</span>
                         </div>
                         <div class="text-sm text-gray-600">Version: ${fw.version} | ${formatBytes(fw.size)}</div>
                     </div>
                     <button onclick="deleteFirmware('${fw.device_type}', '${fw.filename}')"
-                        class="p-2 text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg" title="Delete">
+                        class="self-end p-2 text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg sm:self-auto" title="Delete">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
                         </svg>
@@ -503,27 +963,29 @@
             }
 
             list.innerHTML = sorted.map(cfg => `
-                <div class="bg-gray-50 rounded-lg p-3 flex items-center gap-3 border border-gray-200">
+                <div class="bg-gray-50 rounded-lg p-3 flex flex-col gap-3 border border-gray-200 sm:flex-row sm:items-center">
                     <div class="flex-1 min-w-0">
-                        <div class="flex items-center gap-2 mb-1">
+                        <div class="flex flex-wrap items-center gap-2 mb-1">
                             ${deviceBadge(cfg.device_type)}
                             <span class="px-2 py-0.5 text-xs font-medium rounded ${cfg.config_type === 'template' ? 'bg-blue-500/20 text-blue-600' : 'bg-purple-500/20 text-purple-600'}">${cfg.config_type}</span>
-                            <span class="font-medium truncate">${cfg.filename}</span>
+                            <span class="font-medium break-all">${cfg.filename}</span>
                         </div>
                         <div class="text-sm text-gray-600">${formatBytes(cfg.size)}</div>
                     </div>
-                    <button onclick="editConfig('${cfg.config_type}', '${cfg.device_type}', '${cfg.filename}')"
-                        class="p-2 text-blue-600 hover:text-blue-500 hover:bg-blue-50 rounded-lg" title="Edit">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
-                        </svg>
-                    </button>
-                    <button onclick="deleteConfig('${cfg.config_type}', '${cfg.device_type}', '${cfg.filename}')"
-                        class="p-2 text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg" title="Delete">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                        </svg>
-                    </button>
+                    <div class="flex items-center gap-1 self-end sm:self-auto">
+                        <button onclick="editConfig('${cfg.config_type}', '${cfg.device_type}', '${cfg.filename}')"
+                            class="p-2 text-blue-600 hover:text-blue-500 hover:bg-blue-50 rounded-lg" title="Edit">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                            </svg>
+                        </button>
+                        <button onclick="deleteConfig('${cfg.config_type}', '${cfg.device_type}', '${cfg.filename}')"
+                            class="p-2 text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg" title="Delete">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                            </svg>
+                        </button>
+                    </div>
                 </div>
             `).join('');
         }
@@ -671,20 +1133,20 @@
             }
 
             list.innerHTML = sorted.map(cred => `
-                <div class="bg-gray-50 rounded-lg p-3 flex items-center gap-3 border border-gray-200 ${cred.is_custom ? '' : 'opacity-60'}">
+                <div class="bg-gray-50 rounded-lg p-3 flex flex-col gap-3 border border-gray-200 sm:flex-row sm:items-center ${cred.is_custom ? '' : 'opacity-60'}">
                     <div class="flex-1 min-w-0">
-                        <div class="flex items-center gap-2 mb-1">
+                        <div class="flex flex-wrap items-center gap-2 mb-1">
                             ${deviceBadge(cred.device_type)}
                             <span class="px-2 py-0.5 text-xs font-medium rounded ${cred.is_custom ? 'badge-custom' : 'badge-default'}">${cred.is_custom ? 'CUSTOM' : 'DEFAULT'}</span>
                         </div>
-                        <div class="flex items-center gap-4">
+                        <div class="flex flex-wrap items-center gap-4">
                             <span class="font-mono text-sm">${escapeHtml(cred.username)}</span>
                             <span class="text-gray-400 text-sm">${cred.password_hint}</span>
                         </div>
                     </div>
                     ${cred.is_custom ? `
                         <button onclick="deleteCredential('${cred.device_type}', ${cred.index})"
-                            class="p-2 text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg" title="Delete">
+                            class="self-end p-2 text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg sm:self-auto" title="Delete">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
                             </svg>

@@ -1,9 +1,8 @@
 """FastAPI web application for Network Provisioner."""
 
-import asyncio
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
@@ -35,11 +34,22 @@ def create_app(
     Returns:
         Configured FastAPI application
     """
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        logger.info("Web interface starting up...")
+        from .websocket import manager
+
+        app.state.ws_manager = manager
+        yield
+        logger.info("Web interface shutting down...")
+
     app = FastAPI(
         title=title,
         description="Web interface for Network Device Auto-Provisioner",
         version="1.0.0",
         debug=debug,
+        lifespan=lifespan,
     )
     
     # Store provisioner instance in app state
@@ -61,7 +71,7 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
         """Serve the main dashboard page."""
-        return templates.TemplateResponse("index.html", {
+        return templates.TemplateResponse(request, "index.html", {
             "request": request,
             "title": title,
         })
@@ -70,7 +80,7 @@ def create_app(
     @app.get("/files", response_class=HTMLResponse)
     async def files_page(request: Request):
         """Serve the files management page for firmware and configs."""
-        return templates.TemplateResponse("files.html", {
+        return templates.TemplateResponse(request, "files.html", {
             "request": request,
             "title": title,
         })
@@ -79,7 +89,7 @@ def create_app(
     @app.get("/firmware", response_class=HTMLResponse)
     async def firmware_page(request: Request):
         """Serve the firmware management page."""
-        return templates.TemplateResponse("firmware.html", {
+        return templates.TemplateResponse(request, "firmware.html", {
             "request": request,
             "title": title,
         })
@@ -88,20 +98,7 @@ def create_app(
     async def health_check():
         """Health check endpoint."""
         return {"status": "healthy"}
-    
-    # Startup event
-    @app.on_event("startup")
-    async def startup_event():
-        logger.info("Web interface starting up...")
-        # Initialize WebSocket manager
-        from .websocket import manager
-        app.state.ws_manager = manager
-    
-    # Shutdown event
-    @app.on_event("shutdown")
-    async def shutdown_event():
-        logger.info("Web interface shutting down...")
-    
+
     return app
 
 

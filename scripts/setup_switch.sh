@@ -632,7 +632,7 @@ main() {
     echo ""
     echo "Next steps:"
     echo "  1. Connect OrangePi to port 8 (trunk)"
-    echo "  2. Connect router/internet to port 1 (WAN)"
+    echo "  2. Connect router/internet to port 7 (WAN)"
     echo "  3. Run: sudo ./scripts/install.sh install"
     echo ""
 

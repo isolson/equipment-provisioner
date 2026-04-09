@@ -6,14 +6,24 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
+
+from ..setup_tools import (
+    build_readiness_report,
+    import_setup_bundle,
+    seed_bundled_templates,
+    write_setup_bundle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -784,6 +794,19 @@ class FirmwareUrlRequest(BaseModel):
     filename: Optional[str] = None  # Auto-detect from URL if not provided
 
 
+class SetupSwitchRequest(BaseModel):
+    """Request to configure a MikroTik provisioning switch."""
+    ip: str = "192.168.88.1"
+    username: str = "admin"
+    password: str = ""
+    skip_password_change: bool = False
+
+
+class SeedTemplatesRequest(BaseModel):
+    """Request to seed bundled templates into the live store."""
+    overwrite: bool = False
+
+
 # ============================================================================
 # Firmware Management Endpoints
 # ============================================================================
@@ -795,6 +818,21 @@ def _get_data_path(request: Request) -> Path:
         return Path(provisioner.config.data.local_path)
     # Fallback to default
     return Path("/var/lib/provisioner/repo")
+
+
+def _get_system_config_path() -> Path:
+    """Get the system config.yaml path."""
+    return Path("/etc/provisioner/config.yaml")
+
+
+def _get_system_env_path() -> Path:
+    """Get the system provisioner.env path."""
+    return Path("/etc/provisioner/provisioner.env")
+
+
+def _get_repo_root() -> Path:
+    """Get the repository root."""
+    return Path(__file__).resolve().parents[2]
 
 
 VALID_DEVICE_TYPES = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
@@ -860,6 +898,193 @@ def _get_device_type_from_filename(filename: str) -> Optional[str]:
     elif 'ubiquiti' in filename_lower or 'airos' in filename_lower or 'ubnt' in filename_lower:
         return 'ubiquiti'
     return None
+
+
+# ============================================================================
+# First-Run Setup Endpoints
+# ============================================================================
+
+
+@router.get("/setup/readiness")
+async def setup_readiness(request: Request):
+    """Return a first-run readiness checklist for the current bench."""
+    provisioner = request.app.state.provisioner
+    if not provisioner or not hasattr(provisioner, "config"):
+        raise HTTPException(status_code=503, detail="Provisioner config not available")
+
+    return build_readiness_report(
+        provisioner.config,
+        _get_data_path(request),
+        config_path=_get_system_config_path(),
+        env_path=_get_system_env_path(),
+    )
+
+
+@router.post("/setup/bundle/import")
+async def setup_bundle_import(
+    request: Request,
+    file: UploadFile = File(...),
+    apply_system_files: bool = Form(False),
+):
+    """Import a setup bundle archive into the local provisioner layout."""
+    data_path = _get_data_path(request)
+    suffix = Path(file.filename or "").suffix or ".bundle"
+    tmp_path: Optional[Path] = None
+
+    try:
+        with NamedTemporaryFile(prefix="provisioner-setup-", suffix=suffix, delete=False) as handle:
+            tmp_path = Path(handle.name)
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+
+        return import_setup_bundle(
+            tmp_path,
+            file.filename or tmp_path.name,
+            data_path=data_path,
+            config_path=_get_system_config_path(),
+            env_path=_get_system_env_path(),
+            apply_system_files=apply_system_files,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Setup bundle import failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        await file.close()
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+@router.get("/setup/bundle/export")
+async def setup_bundle_export(request: Request, include_system_files: bool = False):
+    """Export the current bench state as a portable setup bundle zip."""
+    data_path = _get_data_path(request)
+    download_name = f"provisioner-setup-{datetime.now().date().isoformat()}.zip"
+    with NamedTemporaryFile(prefix="provisioner-export-", suffix=".zip", delete=False) as handle:
+        bundle_path = Path(handle.name)
+
+    try:
+        result = write_setup_bundle(
+            bundle_path,
+            data_path=data_path,
+            config_path=_get_system_config_path(),
+            env_path=_get_system_env_path(),
+            include_system_files=include_system_files,
+        )
+    except Exception as exc:
+        bundle_path.unlink(missing_ok=True)
+        logger.error(f"Setup bundle export failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return FileResponse(
+        path=bundle_path,
+        filename=download_name,
+        media_type="application/zip",
+        background=BackgroundTask(lambda path: Path(path).unlink(missing_ok=True), str(bundle_path)),
+    )
+
+
+@router.post("/setup/switch/configure")
+async def setup_switch_configure(body: SetupSwitchRequest):
+    """Configure a MikroTik switch for the provisioning bench."""
+    script_path = _get_repo_root() / "scripts" / "setup_switch.sh"
+    if not script_path.exists():
+        raise HTTPException(status_code=500, detail="setup_switch.sh not found")
+
+    cmd = [
+        "/bin/bash",
+        str(script_path),
+        "--ip",
+        body.ip,
+        "--username",
+        body.username,
+        "--password",
+        body.password,
+        "--yes",
+    ]
+    if body.skip_password_change:
+        cmd.append("--skip-password-change")
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(_get_repo_root()),
+        )
+        stdout, _ = await proc.communicate()
+    except Exception as exc:
+        logger.error(f"Failed to launch switch setup: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    output = (stdout or b"").decode(errors="replace")
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Switch setup failed",
+                "returncode": proc.returncode,
+                "output": output[-4000:],
+            },
+        )
+
+    return {
+        "success": True,
+        "message": "MikroTik switch configured for the first eight ports",
+        "output": output[-4000:],
+        "port_map": [
+            "ether1-ether6: provisioning VLANs 1991-1996",
+            "ether7: WAN uplink",
+            "ether8: trunk to host",
+        ],
+    }
+
+
+@router.post("/setup/templates/seed")
+async def setup_seed_templates(request: Request, body: SeedTemplatesRequest):
+    """Seed bundled repo templates into the live config store."""
+    try:
+        return seed_bundled_templates(
+            _get_repo_root(),
+            data_path=_get_data_path(request),
+            overwrite=body.overwrite,
+        )
+    except Exception as exc:
+        logger.error(f"Template seeding failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/setup/restart-service")
+async def setup_restart_service():
+    """Restart the provisioner-web systemd service after a short delay."""
+    if not Path("/bin/sh").exists():
+        raise HTTPException(status_code=500, detail="Shell not available for restart")
+
+    try:
+        subprocess.Popen(
+            [
+                "/bin/sh",
+                "-c",
+                "sleep 1; systemctl restart provisioner-web",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        logger.error(f"Failed to schedule service restart: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "success": True,
+        "message": "Provisioner web service restart scheduled",
+    }
 
 
 @router.get("/firmware", response_model=List[FirmwareInfo])
