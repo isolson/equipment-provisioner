@@ -75,6 +75,35 @@ cd /opt/provisioner
 sudo bash scripts/setup.sh
 ```
 
+For the recommended day-0 workflow that minimizes CLI after install, see [docs/FIRST_SETUP_PLAN.md](docs/FIRST_SETUP_PLAN.md).
+
+### First-Time Setup
+
+After `scripts/setup.sh` or the image first-boot wizard finishes:
+
+1. Open `http://<your-host>:8080/files`
+2. Review the `Setup` tab readiness checklist
+3. If you already have a known-good bench, export its setup bundle and import it here
+4. Add any extra fallback credentials your fleet needs
+5. Upload default config templates for each device type you expect to provision
+6. Preload firmware you need locally, especially if the bench may be offline
+7. Validate the station by provisioning one known-good device on port 1
+
+The same `Setup` tab can also:
+
+- seed the repo’s bundled templates into the live data store
+- restart `provisioner-web` after importing `config.yaml` or `provisioner.env`
+
+The main dashboard now shows a readiness banner whenever setup is still incomplete, with a direct link back to `Setup`.
+
+The `Setup` tab also checks the expected MikroTik switch layout for the first eight ports:
+
+- `ether1-ether6` provisioning ports
+- `ether7` WAN or internet uplink
+- `ether8` trunk to the host
+
+If the switch is still factory-default, the same `Setup` tab can run the MikroTik switch configuration flow for that first-eight-port layout.
+
 ---
 
 ## How It Works
@@ -276,14 +305,14 @@ The system automatically downloads firmware from vendor CDNs if needed.
 ![Firmware Page](docs/screenshots/firmware-page.png)
 *Firmware library showing available versions and download status*
 
-The firmware page at `http://<host>:8080/firmware` shows:
+The management UI at `http://<host>:8080/files` lets you seed first-run assets without shell access:
 
-- **Available firmware** — All versions defined in `firmware.yaml`
-- **Local cache** — Firmware files already downloaded to `/opt/provisioner/firmware/`
-- **Download status** — In-progress downloads with progress bars
-- **Manual download** — Download firmware ahead of time to avoid delays during provisioning
+- **Available firmware** — Files already stored under `/var/lib/provisioner/repo/firmware/`
+- **Config templates** — Upload/edit templates under `/var/lib/provisioner/repo/configs/`
+- **Custom credentials** — Add fallback usernames/passwords stored in `credentials.json`
+- **Manual upload or URL download** — Seed the bench ahead of time to avoid delays during provisioning
 
-Firmware files are cached locally. The first device of each model will trigger a download (~50–200MB), but subsequent devices use the cached copy.
+Firmware files are cached locally. Tachyon and MikroTik can auto-download when WAN access is available; for offline benches or slower links, preload the firmware you expect to use before the first provisioning run.
 
 ---
 

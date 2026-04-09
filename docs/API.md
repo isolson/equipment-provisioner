@@ -4,6 +4,89 @@ The provisioner web server exposes a REST API and WebSocket endpoint for monitor
 
 Base URL: `http://<orangepi-ip>:8080/api/v1`
 
+## First-Run Setup
+
+### GET /setup/readiness
+
+Return a first-run readiness checklist for the current bench.
+
+This report covers:
+
+- host config and env files
+- management VLAN interface presence
+- primary and custom credentials
+- default config templates
+- local firmware inventory
+- MikroTik provisioning switch state for the first eight ports
+
+### POST /setup/bundle/import
+
+Import a setup bundle archive into the local provisioner filesystem layout.
+
+Accepted bundle formats:
+
+- `.zip`
+- `.tar`
+- `.tar.gz`
+- `.tgz`
+
+Supported bundle contents:
+
+- `configs/...`
+- `firmware/...`
+- `credentials.json`
+- `manifest.yaml`
+- `settings/config.yaml` or root `config.yaml`
+- `settings/provisioner.env` or root `provisioner.env`
+
+Multipart form fields:
+
+- `file` - the archive
+- `apply_system_files` - `true` to apply bundled `config.yaml` and `provisioner.env` into `/etc/provisioner/`
+
+### GET /setup/bundle/export
+
+Export the current bench state as a portable `.zip` bundle.
+
+Query parameters:
+
+- `include_system_files=true` to include `/etc/provisioner/config.yaml` and `/etc/provisioner/provisioner.env`
+
+### POST /setup/switch/configure
+
+Run the MikroTik provisioning-switch setup flow non-interactively.
+
+This is intended for a directly connected, defaulted MikroTik switch and applies the expected first-eight-port layout:
+
+- `ether1-ether6` provisioning ports
+- `ether7` WAN uplink
+- `ether8` trunk to the host
+
+**Request:**
+```json
+{
+  "ip": "192.168.88.1",
+  "username": "admin",
+  "password": "",
+  "skip_password_change": false
+}
+```
+
+### POST /setup/templates/seed
+
+Copy bundled repo templates from `configs/templates/` into the live data store.
+
+**Request:**
+```json
+{
+  "overwrite": false
+}
+```
+
+### POST /setup/restart-service
+
+Schedule a delayed `systemctl restart provisioner-web` so imported system files can take effect without shell access.
+
 ## Port Status
 
 ### GET /ports

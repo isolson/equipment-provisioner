@@ -162,20 +162,20 @@
         }
     </style>
 </head>
-<body class="text-gray-900 min-h-screen flex flex-col overflow-hidden">
+<body class="text-gray-900 min-h-screen flex flex-col overflow-x-hidden">
     <!-- Sleep Overlay - full screen black, click/touch to wake -->
     <div id="sleep-overlay" onclick="wakeDisplay()"></div>
 
     <!-- Compact Header -->
-    <header class="bg-white border-b border-gray-300 px-4 py-2 flex items-center justify-between flex-shrink-0">
-        <div class="flex items-center gap-3">
+    <header class="bg-white border-b border-gray-300 px-4 py-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between flex-shrink-0">
+        <div class="flex flex-wrap items-center gap-3 min-w-0">
             <div class="w-3 h-3 rounded-full bg-green-500" id="connection-indicator"></div>
             <h1 class="text-lg font-bold text-gray-900">Device Provisioner</h1>
-            <span class="text-xs text-gray-400 font-mono" id="management-url"></span>
+            <span class="text-[11px] text-gray-400 font-mono break-all" id="management-url"></span>
         </div>
-        <div class="flex items-center gap-2">
-            <span class="text-sm text-gray-600 mr-2" id="status-text">Connecting...</span>
-            <a href="/firmware" class="header-btn p-2" title="Firmware">
+        <div class="flex flex-wrap items-center gap-2 sm:justify-end">
+            <span class="text-sm text-gray-600" id="status-text">Connecting...</span>
+            <a href="/files" class="header-btn p-2" title="Manage">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
                 </svg>
@@ -194,13 +194,16 @@
         </div>
     </header>
 
+    <!-- Setup Readiness Banner -->
+    <div id="setup-readiness-banner" class="hidden flex-shrink-0 px-4 py-3 border-b border-gray-300"></div>
+
     <!-- Main Content - 2x4 Port Grid -->
-    <main class="flex-1 p-3 flex items-center justify-center">
+    <main class="flex-1 overflow-y-auto p-3 flex items-start justify-center md:items-center">
         <div class="w-full max-w-[1000px]">
             <!-- Top row: ports 2, 4, 6 (even) -->
-            <div class="grid grid-cols-3 gap-3 mb-3" id="port-row-top"></div>
+            <div class="grid grid-cols-1 gap-3 mb-3 sm:grid-cols-2 lg:grid-cols-3" id="port-row-top"></div>
             <!-- Bottom row: ports 1, 3, 5 (odd) -->
-            <div class="grid grid-cols-3 gap-3" id="port-row-bottom"></div>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3" id="port-row-bottom"></div>
         </div>
     </main>
 
@@ -299,6 +302,7 @@
             sleep_timeout: 300,
             wake_on_connect: true,
         };
+        let readinessRefreshTimer = null;
 
         // Device vendors
         const deviceVendors = {
@@ -320,8 +324,66 @@
             fetch('/api/device-settings').then(r => r.json()).then(s => {
                 if (s.tarana?.operator_id) window.defaultOperatorId = s.tarana.operator_id;
             }).catch(() => {});
+            loadSetupReadiness();
+            readinessRefreshTimer = setInterval(loadSetupReadiness, 60000);
             connectWebSocket();
         });
+
+        function readinessBannerClasses(status) {
+            if (status === 'ready') return 'bg-green-50 text-green-900';
+            if (status === 'warning') return 'bg-yellow-50 text-yellow-900';
+            if (status === 'missing' || status === 'error') return 'bg-red-50 text-red-900';
+            return 'bg-gray-50 text-gray-900';
+        }
+
+        function readinessStatusLabel(status) {
+            return (status || 'unknown').toUpperCase();
+        }
+
+        async function loadSetupReadiness() {
+            try {
+                const response = await fetch('/api/setup/readiness');
+                if (!response.ok) return;
+                const data = await response.json();
+                renderSetupReadinessBanner(data);
+            } catch (error) {
+                console.error('Failed to load setup readiness:', error);
+            }
+        }
+
+        function renderSetupReadinessBanner(data) {
+            const banner = document.getElementById('setup-readiness-banner');
+            if (!banner) return;
+
+            if (!data || data.status === 'ready') {
+                banner.className = 'hidden flex-shrink-0 px-4 py-3 border-b border-gray-300';
+                banner.innerHTML = '';
+                return;
+            }
+
+            const counts = data.summary || {};
+            const switchCheck = (data.checks || []).find(check => check.id === 'mikrotik_switch');
+            const switchSummary = switchCheck ? switchCheck.summary : 'Switch status unavailable.';
+
+            banner.className = `flex-shrink-0 px-4 py-3 border-b border-gray-300 ${readinessBannerClasses(data.status)}`;
+            banner.innerHTML = `
+                <div class="max-w-[1000px] mx-auto flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div class="min-w-0">
+                        <div class="flex flex-wrap items-center gap-3 mb-1">
+                            <span class="text-xs font-bold tracking-wide">${readinessStatusLabel(data.status)}</span>
+                            <span class="text-sm">${counts.warning || 0} warning</span>
+                            <span class="text-sm">${counts.missing || 0} missing</span>
+                            <span class="text-sm">${counts.error || 0} error</span>
+                        </div>
+                        <div class="text-sm font-semibold">Setup is not complete yet.</div>
+                        <div class="text-sm opacity-80">${escapeHtml(switchSummary)}</div>
+                    </div>
+                    <a href="/files" class="px-4 py-2 rounded-lg bg-white/80 hover:bg-white text-sm font-semibold text-gray-900 border border-gray-300 self-start sm:self-auto">
+                        Open Setup
+                    </a>
+                </div>
+            `;
+        }
 
         // WebSocket
         function connectWebSocket() {
