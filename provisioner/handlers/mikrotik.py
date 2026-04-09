@@ -569,6 +569,8 @@ class MikrotikHandler(BaseHandler):
                 return False
 
         except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
             logger.error(f"Netinstall timed out after {self.NETINSTALL_TIMEOUT}s")
             if on_progress:
                 await on_progress("netinstall", False, "Timed out waiting for device")
