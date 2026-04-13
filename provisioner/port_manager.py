@@ -551,10 +551,11 @@ class PortManager:
                 """Ping device during boot wait to detect when it's up."""
                 # Try known device IPs for boot detection
                 ips_to_try = [
-                    DeviceLinkLocalIP.CAMBIUM,   # 169.254.1.1
-                    DeviceLinkLocalIP.UBIQUITI,  # 192.168.1.20
-                    DeviceLinkLocalIP.MIKROTIK,  # 192.168.88.1
-                    DeviceLinkLocalIP.TARANA,    # 169.254.100.1
+                    DeviceLinkLocalIP.CAMBIUM,      # 169.254.1.1
+                    DeviceLinkLocalIP.TACHYON_ALT,  # 192.168.1.1
+                    DeviceLinkLocalIP.UBIQUITI,     # 192.168.1.20
+                    DeviceLinkLocalIP.MIKROTIK,     # 192.168.88.1
+                    DeviceLinkLocalIP.TARANA,       # 169.254.100.1
                 ]
                 for ip in ips_to_try:
                     # Skip ARP fallback during boot ping — we just need a
@@ -883,9 +884,19 @@ class PortManager:
 
     def _clear_port_state_on_disconnect(self, port_num: int) -> None:
         """Reset transient port/device state after a disconnect."""
+        import time
         state = self.port_states.get(port_num)
         if not state:
             return
+
+        # Preserve provisioning result during the grace period.
+        # Devices that change their management network after config apply
+        # (config_after_all_firmware) will drop link, but the provisioning
+        # result should survive so the UI keeps showing "complete".
+        in_grace = (
+            state.provisioning_ended is not None and
+            time.time() - state.provisioning_ended < self.PROVISIONING_GRACE_PERIOD
+        )
 
         state.provisioning = False
         state.provisioning_task = None
@@ -905,12 +916,14 @@ class PortManager:
         state.waiting_for_boot = False
         state.boot_wait_until = None
         state.boot_ping_responded = False
-        state.last_result = None
-        state.last_error = None
-        state.provision_attempted = False
-        state.provisioning_ended = None
-        state.checklist.reset()
-        self.clear_device_mode(port_num)
+
+        if not in_grace:
+            state.last_result = None
+            state.last_error = None
+            state.provision_attempted = False
+            state.provisioning_ended = None
+            state.checklist.reset()
+            self.clear_device_mode(port_num)
 
     def update_port_device_info(
         self,

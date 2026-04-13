@@ -7,7 +7,7 @@ import shutil
 import socket
 import tarfile
 import zipfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -769,7 +769,7 @@ def write_setup_bundle(
                 summary["system_files"] += 1
 
         metadata = {
-            "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "summary": summary,
         }
         archive.writestr("bundle-metadata.json", json.dumps(metadata, indent=2))

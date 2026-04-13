@@ -41,6 +41,9 @@ async def reboot(self) -> bool
 async def get_firmware_version(self) -> str
 ```
 
+### Handler Behavior Properties
+Handlers override properties to control the provisioning flow — do NOT add vendor branching to `base.py`. See `docs/HANDLER_DEVELOPMENT.md` for the full property reference. Key properties: `supports_dual_bank`, `update_triggers_reboot`, `verify_active_bank`, `fw2_skips_reboot`, `config_after_all_firmware`, `supports_password_change`.
+
 ### Device Detection
 - Fingerprinting logic determines device type from HTTP responses, banners, etc.
 - Never assume device type based on IP address alone
@@ -246,8 +249,9 @@ provisioner/
 5. **Losing interface context**: Always pass interface through the call chain
 6. **Small touch targets**: Test button sizes on actual touchscreen
 7. **Vendor-specific code in shared modules**: Keep vendor logic isolated
+8. **Breaking the post-config link-loss pattern**: Devices using `config_after_all_firmware` go unreachable after config apply. The port manager's grace period preserves `last_result`/`checklist`, and the UI checks `last_result` before `link_up`. See `docs/HANDLER_DEVELOPMENT.md` "Post-Config Link Loss" for the full chain
 
 ---
 
-*Last updated: 2026-01-27*
+*Last updated: 2026-04-09*
 *Review this document when making architectural changes or adding new device support.*
