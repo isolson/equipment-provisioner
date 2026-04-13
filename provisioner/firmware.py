@@ -415,8 +415,9 @@ class FirmwareManager:
         #   tna-30x-1.12.3-r54970-... (standard TNA-30x series)
         #   tna-303l-1.12.3-r54970-... (TNA-303L long range)
         #   tns-100-1.12.3-r54970-... (TNS-100 subscriber)
+        #   tns-1.12.8-r54729-20251121-tns-100-... (OpenWrt sysupgrade naming)
         # Extract version (1.12.3) and revision (54970) -> "1.12.3.54970"
-        tachyon_pattern = r'tn[as]-\d+[a-z]?-(\d+\.\d+\.\d+)-r(\d+)'
+        tachyon_pattern = r'tn[as]-(?:\d+[a-z]?-)?(\d+\.\d+\.\d+)-r(\d+)'
         tachyon_match = re.search(tachyon_pattern, filename.lower())
         if tachyon_match:
             version = tachyon_match.group(1)

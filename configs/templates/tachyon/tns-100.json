@@ -1,0 +1,233 @@
+{
+  "network": {
+    "zones": {
+      "wan": {
+        "insecure": true,
+        "mtu": 1500,
+        "management": {
+          "enabled": true,
+          "vlan": 12,
+          "use_zone_ip": true
+        },
+        "mode": "dhcp",
+        "enabled": true,
+        "stp": false,
+        "dhcp": {
+          "enabled_options": {
+            "log_server": true,
+            "ntp_server": true,
+            "timezone_offset": true
+          },
+          "broadcast": false,
+          "custom_dns": false
+        },
+        "name": "Main",
+        "type": "wan",
+        "vlans": [
+          {
+            "id": 12,
+            "name": "Management"
+          },
+          {
+            "id": 101,
+            "name": "Last mile"
+          }
+        ],
+        "dns": [
+          "9.9.9.9",
+          "1.1.1.1"
+        ]
+      }
+    },
+    "routes": [],
+    "portforward": []
+  },
+  "ethernet": {
+    "ports": {
+      "eth0": {
+        "enabled": true,
+        "network": {
+          "management": true,
+          "vlans": {
+            "mgmt_vlan_policy": "trunk",
+            "trunk": [101],
+            "access": [],
+            "native_vlan_policy": "trunk"
+          },
+          "zone": "wan"
+        },
+        "isolation_rules": [],
+        "duplex": "full",
+        "autoneg": true,
+        "mtu": 9018,
+        "poe": false
+      },
+      "eth1": {
+        "enabled": true,
+        "network": {
+          "management": true,
+          "vlans": {
+            "mgmt_vlan_policy": "trunk",
+            "trunk": [],
+            "access": [101],
+            "native_vlan_policy": "trunk"
+          },
+          "zone": "wan"
+        },
+        "isolation_rules": [
+          {"action": "block", "port": "eth2"},
+          {"action": "block", "port": "eth3"},
+          {"action": "block", "port": "eth4"}
+        ],
+        "duplex": "full",
+        "autoneg": true,
+        "mtu": 9018,
+        "poe": true
+      },
+      "eth2": {
+        "enabled": true,
+        "network": {
+          "management": true,
+          "vlans": {
+            "mgmt_vlan_policy": "trunk",
+            "trunk": [],
+            "access": [101],
+            "native_vlan_policy": "trunk"
+          },
+          "zone": "wan"
+        },
+        "isolation_rules": [
+          {"action": "block", "port": "eth1"},
+          {"action": "block", "port": "eth3"},
+          {"action": "block", "port": "eth4"}
+        ],
+        "duplex": "full",
+        "autoneg": true,
+        "mtu": 9018,
+        "poe": true
+      },
+      "eth3": {
+        "enabled": true,
+        "network": {
+          "management": true,
+          "vlans": {
+            "mgmt_vlan_policy": "trunk",
+            "trunk": [],
+            "access": [101],
+            "native_vlan_policy": "trunk"
+          },
+          "zone": "wan"
+        },
+        "isolation_rules": [
+          {"action": "block", "port": "eth1"},
+          {"action": "block", "port": "eth2"},
+          {"action": "block", "port": "eth4"}
+        ],
+        "duplex": "full",
+        "autoneg": true,
+        "mtu": 9018,
+        "poe": true
+      },
+      "eth4": {
+        "enabled": true,
+        "network": {
+          "management": true,
+          "vlans": {
+            "mgmt_vlan_policy": "trunk",
+            "trunk": [],
+            "access": [101],
+            "native_vlan_policy": "trunk"
+          },
+          "zone": "wan"
+        },
+        "isolation_rules": [
+          {"action": "block", "port": "eth1"},
+          {"action": "block", "port": "eth2"},
+          {"action": "block", "port": "eth3"}
+        ],
+        "duplex": "full",
+        "autoneg": true,
+        "mtu": 9018,
+        "poe": true
+      },
+      "eth5": {
+        "enabled": true,
+        "network": {
+          "management": true,
+          "vlans": {
+            "mgmt_vlan_policy": "trunk",
+            "trunk": [101],
+            "access": [],
+            "native_vlan_policy": "trunk"
+          },
+          "zone": "wan"
+        },
+        "mtu": 9018,
+        "autoneg": true,
+        "sfp_1g": false,
+        "isolation_rules": [],
+        "duplex": "full",
+        "poe": false
+      }
+    }
+  },
+  "version": 3,
+  "services": {
+    "snmp": {
+      "enabled": true,
+      "v2": {
+        "ro": {
+          "enabled": true,
+          "community": "public"
+        },
+        "rw": {
+          "enabled": false,
+          "community": "private"
+        }
+      }
+    },
+    "discovery": {
+      "enabled": true,
+      "lldp": true,
+      "mndp": true,
+      "cdp": true,
+      "lldp_server": true
+    },
+    "cloud": {
+      "enabled": false
+    },
+    "ssh": {
+      "enabled": true,
+      "port": 22,
+      "password_login": true
+    },
+    "ntp": {
+      "enabled": true,
+      "servers": [
+        "time.cloudflare.com",
+        "time.google.com"
+      ]
+    },
+    "ping_watchdog": {
+      "enabled": true,
+      "interval": 300,
+      "addresses": [
+        "9.9.9.9",
+        "1.1.1.1"
+      ],
+      "delay": 300,
+      "failure": 3
+    },
+    "updater": {
+      "enabled": false
+    },
+    "remote_syslog": {
+      "enabled": false
+    },
+    "http": {
+      "enabled": true,
+      "port": 80,
+      "port_tls": 443
+    }
+  }
+}

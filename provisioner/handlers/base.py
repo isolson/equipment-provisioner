@@ -626,48 +626,53 @@ class BaseHandler(ABC):
             result.phases_completed.append(ProvisioningPhase.UPLOADING_FIRMWARE)
 
             # ================================================================
-            # PHASE 6: CONFIG APPLY
+            # CONFIG + FW2 PHASE ORDERING
+            # Most devices: Config → Verify → FW2
+            # config_after_all_firmware devices: FW2 → Config (skip verify)
+            #   Used when config changes the management network, making the
+            #   device unreachable for subsequent operations.
             # ================================================================
-            _logger.info(f"[PROVISION] Phase 6: Apply config")
-            _logger.info(f"[PROVISION] Config path: {config_path}, inline config: {bool(config)}")
-            if config or config_path:
-                if config:
-                    _logger.info(f"[PROVISION] Applying inline config with {len(config)} keys")
-                    success = await self.apply_config(config)
+
+            if not self.config_after_all_firmware:
+                # --- DEFAULT ORDER: Config → Verify → FW2 ---
+
+                # PHASE 6: CONFIG APPLY
+                _logger.info(f"[PROVISION] Phase 6: Apply config")
+                _logger.info(f"[PROVISION] Config path: {config_path}, inline config: {bool(config)}")
+                if config or config_path:
+                    if config:
+                        _logger.info(f"[PROVISION] Applying inline config with {len(config)} keys")
+                        success = await self.apply_config(config)
+                    else:
+                        _logger.info(f"[PROVISION] Applying config from file: {config_path}")
+                        success = await self.apply_config_file(config_path)
+
+                    if not success:
+                        result.error_message = "Failed to apply configuration"
+                        await notify("config_upload", False, result.error_message)
+                        return result
+
+                    result.config_applied = config_path or "inline"
+                    result.phases_completed.append(ProvisioningPhase.CONFIGURING)
+                    await notify("config_upload", True, None)
+                    _logger.info(f"[PROVISION] Config applied successfully")
+
+                    # PHASE 6b: CONFIG VERIFICATION
+                    _logger.info(f"[PROVISION] Phase 6b: Verify config applied")
+                    await notify("config_verify", "loading", None)
+
+                    if not await self.verify_config():
+                        result.error_message = "Config verification failed - device may not have applied config correctly"
+                        await notify("config_verify", False, result.error_message)
+                        return result
+
+                    await notify("config_verify", True, None)
+                    _logger.info(f"[PROVISION] Config verification passed")
                 else:
-                    _logger.info(f"[PROVISION] Applying config from file: {config_path}")
-                    success = await self.apply_config_file(config_path)
+                    _logger.info(f"[PROVISION] No config to apply - skipping")
+                    await notify("config_upload", "skipped", "No config specified")
 
-                if not success:
-                    result.error_message = "Failed to apply configuration"
-                    await notify("config_upload", False, result.error_message)
-                    return result
-
-                result.config_applied = config_path or "inline"
-                result.phases_completed.append(ProvisioningPhase.CONFIGURING)
-                await notify("config_upload", True, None)
-                _logger.info(f"[PROVISION] Config applied successfully")
-
-                # ============================================================
-                # PHASE 6b: CONFIG VERIFICATION
-                # ============================================================
-                _logger.info(f"[PROVISION] Phase 6b: Verify config applied")
-                await notify("config_verify", "loading", None)
-
-                if not await self.verify_config():
-                    result.error_message = "Config verification failed - device may not have applied config correctly"
-                    await notify("config_verify", False, result.error_message)
-                    return result
-
-                await notify("config_verify", True, None)
-                _logger.info(f"[PROVISION] Config verification passed")
-            else:
-                _logger.info(f"[PROVISION] No config to apply - skipping")
-                await notify("config_upload", "skipped", "No config specified")
-
-            # ================================================================
             # PHASE 7-9: FIRMWARE UPDATE 2 (bank 2, if dual-bank)
-            # ================================================================
             if dual_bank and self.supports_dual_bank:
                 if not need_fw2:
                     # Bank 2 already at expected version
@@ -716,9 +721,7 @@ class BaseHandler(ABC):
                         await notify("reboot_started", True, None)
                         await notify("reboot_ended", True, None)
                     else:
-                        # ================================================================
                         # PHASE 8: REBOOT #2
-                        # ================================================================
                         _logger.info(f"[PROVISION] Phase 8: Reboot #2")
                         await notify("reboot_started", True, None)
                         # Some devices (e.g., Tachyon) reboot automatically after update_firmware()
@@ -739,9 +742,7 @@ class BaseHandler(ABC):
                             return result
                         await notify("reboot_ended", True, None)
 
-                    # ================================================================
                     # PHASE 9: VERIFY FIRMWARE UPDATE 2
-                    # ================================================================
                     _logger.info(f"[PROVISION] Phase 9: Verify firmware update 2")
                     if not self.fw2_skips_reboot:
                         if not await self.connect():
@@ -790,9 +791,7 @@ class BaseHandler(ABC):
             result.phases_completed.append(ProvisioningPhase.UPDATING_FIRMWARE)
             result.phases_completed.append(ProvisioningPhase.REBOOTING)
 
-            # ================================================================
             # PHASE 10: FINAL VERIFICATION
-            # ================================================================
             _logger.info(f"[PROVISION] Phase 10: Final verification")
             result.new_firmware = await self.get_firmware_version()
             did_firmware_update = need_fw1 or need_fw2
@@ -800,6 +799,49 @@ class BaseHandler(ABC):
                 await notify("reboot", True, None)
                 await notify("verify", True, result.new_firmware)
             result.phases_completed.append(ProvisioningPhase.VERIFYING)
+
+            if self.config_after_all_firmware:
+                # --- DEFERRED CONFIG: apply after all firmware is done ---
+                # Used when config changes the management network, making the
+                # device unreachable for subsequent operations.
+                _logger.info(f"[PROVISION] Applying config after all firmware (config_after_all_firmware=True)")
+                _logger.info(f"[PROVISION] Config path: {config_path}, inline config: {bool(config)}")
+                if config or config_path:
+                    # Ensure fresh session before config apply
+                    _logger.info(f"[PROVISION] Reconnecting before config apply...")
+                    try:
+                        await self.disconnect()
+                    except Exception:
+                        pass
+                    if not await self.connect():
+                        result.error_message = "Failed to reconnect before config apply"
+                        await notify("config_upload", False, result.error_message)
+                        return result
+
+                    if config:
+                        _logger.info(f"[PROVISION] Applying inline config with {len(config)} keys")
+                        success = await self.apply_config(config)
+                    else:
+                        _logger.info(f"[PROVISION] Applying config from file: {config_path}")
+                        success = await self.apply_config_file(config_path)
+
+                    if not success:
+                        result.error_message = "Failed to apply configuration"
+                        await notify("config_upload", False, result.error_message)
+                        return result
+
+                    result.config_applied = config_path or "inline"
+                    result.phases_completed.append(ProvisioningPhase.CONFIGURING)
+                    await notify("config_upload", True, None)
+                    _logger.info(f"[PROVISION] Config applied successfully")
+
+                    # Skip verification — device may be unreachable after config
+                    # changes the management network (VLAN, DHCP mode, etc.)
+                    _logger.info(f"[PROVISION] Config verification skipped — device may be unreachable after config change")
+                    await notify("config_verify", "skipped", "Config applied — verification skipped (device may change networks)")
+                else:
+                    _logger.info(f"[PROVISION] No config to apply - skipping")
+                    await notify("config_upload", "skipped", "No config specified")
 
             result.success = True
             result.phases_completed.append(ProvisioningPhase.COMPLETED)
@@ -838,6 +880,16 @@ class BaseHandler(ABC):
         actually booted into, rather than assuming bank1.
         """
         return self.update_triggers_reboot
+
+    @property
+    def config_after_all_firmware(self) -> bool:
+        """Whether config should be applied after all firmware updates.
+
+        When True, the provisioning flow becomes: FW1 → FW2 → Config (no verify).
+        Used for devices where config changes the management network (VLAN, DHCP),
+        making the device unreachable for subsequent operations.
+        """
+        return False
 
     @property
     def fw2_skips_reboot(self) -> bool:

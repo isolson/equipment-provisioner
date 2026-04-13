@@ -8,13 +8,77 @@ Each vendor handler inherits from `BaseHandler` and implements vendor-specific A
 
 ```
 provisioner/handlers/
-├── base.py          # Base class with common logic
-├── cambium.py       # Cambium Networks (ePMP, cnPilot)
-├── mikrotik.py      # MikroTik RouterOS
-├── tachyon.py       # Tachyon Networks 30x series
-├── tarana.py        # Tarana Wireless
+├── base.py          # Base class with provisioning orchestration + property defaults
+├── cambium.py       # Cambium Networks (ePMP, Force)
+├── mikrotik.py      # MikroTik RouterOS (SSH-based)
+├── tachyon.py       # Tachyon Networks (TNA APs, TNS switches)
+├── tarana.py        # Tarana Wireless (gRPC-web)
+├── ubiquiti.py      # Ubiquiti (Wave + AirOS)
 └── mock.py          # Mock handler for testing
 ```
+
+## Handler Properties (Provisioning Behavior Flags)
+
+BaseHandler defines properties that control the provisioning flow. Override them in your handler to change behavior for your device type. **Only override what you need** — defaults are designed for the common case.
+
+| Property | Default | Effect When True |
+|----------|---------|-----------------|
+| `supports_dual_bank` | `False` | Enables bank 2 firmware update after bank 1 |
+| `supports_password_change` | `False` | Enables password change phase before firmware |
+| `update_triggers_reboot` | `False` | Skips explicit `reboot()` call after `update_firmware()` — device reboots itself |
+| `verify_active_bank` | `= update_triggers_reboot` | FW verification checks the active bank (not hardcoded bank1). Use when device installs to inactive bank then activates it |
+| `fw2_skips_reboot` | `False` | Bank 2 update writes to inactive bank without activating. No reboot after FW2. Preserves auto-discovered state (azimuth, location) |
+| `config_after_all_firmware` | `False` | Moves config apply to AFTER all firmware updates and skips config verification. Use when config changes the management network (VLAN, DHCP), making the device unreachable for further operations |
+
+### Property Combinations by Vendor
+
+| Handler | dual_bank | update_triggers_reboot | verify_active_bank | fw2_skips_reboot | config_after_all_firmware | password_change |
+|---------|-----------|----------------------|-------------------|-----------------|-------------------------|----------------|
+| Cambium | Yes | No | No | No | No | Yes |
+| MikroTik | No | No | No | No | No | No |
+| Tachyon (APs) | Yes | Yes | Yes | No | No | Yes |
+| Tachyon (TNS switches) | Yes | Yes | Yes | No | **Yes** | Yes |
+| Tarana | Yes | No | Yes | **Yes** | No | No |
+| Ubiquiti (Wave) | Yes | No | No | No | No | Yes |
+| Ubiquiti (AirOS) | No | No | No | No | No | No |
+
+### When `config_after_all_firmware` Is True
+
+The provisioning order changes from the default:
+
+```
+DEFAULT:           FW1 → Reboot → Verify → Config → Config Verify → FW2 → Reboot → Verify
+config_after_all:  FW1 → Reboot → Verify → FW2 → Reboot → Verify → Config (no verify)
+```
+
+Config verification is skipped because the device may become unreachable after config changes the management network. The UI shows config_verify as "skipped" with a message explaining why.
+
+**This property can be conditional on model.** For example, Tachyon only enables it for TNS switches (not APs):
+
+```python
+@property
+def config_after_all_firmware(self) -> bool:
+    model = getattr(self._device_info, 'model', '') or ''
+    return model.lower().startswith('tns-')
+```
+
+The property is checked after `get_info()` has populated `self._device_info`, so model data is available.
+
+### Post-Config Link Loss (the "unreachable after config" pattern)
+
+When `config_after_all_firmware` is true, the device typically becomes unreachable after config apply (e.g., it moves to a different VLAN or switches to DHCP). This triggers a chain of events that multiple layers must handle correctly:
+
+1. **Config apply succeeds** — the API call returns success before the device applies network changes
+2. **Internal read-back fails** — `apply_config()` may attempt a read-back verification that times out (this is caught and logged as a warning, not an error)
+3. **Link drops** — the device's network change causes a physical link flap or the device stops responding on the provisioning VLAN
+4. **Port manager preserves result** — `_clear_port_state_on_disconnect()` checks if we're in the 3-minute post-provisioning grace period. If so, it clears device/link state (needed for re-detection) but preserves `last_result`, `checklist`, and `provision_attempted`
+5. **UI shows "COMPLETE"** — `getCardState()` and `getStatusCenterInfo()` check `last_result` before `link_up`, so the completion state survives link-down
+
+**If you modify any of these layers, test with a device that changes networks after config.** A common regression is checking `link_up` or `device_detected` before `last_result` in UI code, which causes the card to show "NO LINK" instead of "COMPLETE".
+
+### When `fw2_skips_reboot` Is True
+
+Bank 2 firmware is written but NOT activated. The device stays on its current bank. This is used when the device has auto-discovered state (e.g., Tarana azimuth/location) that would be lost on bank switch. Both banks end up with the same firmware, but the device doesn't reboot after FW2.
 
 ## Required Methods
 
@@ -98,7 +162,7 @@ Wait for device to come back online after reboot.
 
 ## Provisioning Flow (called by base.py)
 
-The `provision()` method in `base.py` orchestrates the full flow:
+The `provision()` method in `base.py` orchestrates the full flow. The order of config vs FW2 depends on the `config_after_all_firmware` property.
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -106,61 +170,40 @@ The `provision()` method in `base.py` orchestrates the full flow:
 ├─────────────────────────────────────────────────────┤
 │  1. connect()                                       │
 │     └─ notify("login", success, error)              │
-│     └─ WebSocket broadcast → UI shows lock icon     │
 │                                                     │
 │  2. get_info()                                      │
 │     └─ notify("model_confirmed", True, model_name)  │
 │     └─ notify("device_info", True, "mac:XX|serial:YY") │
-│     └─ WebSocket broadcast → UI shows model/MAC     │
 │                                                     │
 │  3. get_firmware_banks() (if supported)             │
 │     └─ notify("firmware_banks", True, "bank1:X|bank2:Y|active:Z") │
-│     └─ WebSocket broadcast → UI shows bank versions │
 │                                                     │
-│  ══════════════ IF FIRMWARE UPDATE NEEDED ══════════ │
+│  ══════════════ BANK 1 FIRMWARE ═══════════════════ │
 │                                                     │
-│  4. BANK 1 UPDATE:                                  │
-│     └─ upload_firmware()                            │
-│     └─ notify("firmware_upload", success, "bank 1") │
-│     └─ update_firmware(bank=1)                      │
-│     └─ notify("firmware_update", success, "bank 1") │
-│     └─ reboot()                                     │
-│     └─ notify("reboot", success, "bank 1")          │
-│     └─ wait_for_reboot()                            │
-│     └─ connect()                                    │
-│     └─ verify firmware version                      │
-│     └─ notify("verify", success, version)           │
+│  4. upload_firmware() → update_firmware(bank=1)     │
+│     └─ reboot() (or auto-reboot if update_triggers_reboot) │
+│     └─ wait_for_reboot() → connect() → verify      │
+│     └─ notify("firmware_update_1", success, version)│
 │                                                     │
-│  5. APPLY CONFIG (after firmware, before bank 2):   │
-│     └─ apply_config() or apply_config_file()        │
-│     └─ notify("config_upload", success, error)      │
-│     └─ WebSocket broadcast → UI shows config icon   │
+│  ══════════════ CONFIG vs FW2 ORDERING ════════════ │
 │                                                     │
-│  6. BANK 2 UPDATE (if dual_bank enabled):           │
-│     └─ upload_firmware()                            │
-│     └─ update_firmware(bank=2)                      │
-│     └─ reboot()                                     │
-│     └─ wait_for_reboot()                            │
-│     └─ connect()                                    │
-│     └─ verify firmware version                      │
+│  IF config_after_all_firmware = False (DEFAULT):    │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  5. Config Apply → Config Verify             │   │
+│  │  6. Bank 2 FW → Reboot → Verify             │   │
+│  └──────────────────────────────────────────────┘   │
 │                                                     │
-│  ══════════════ IF NO FIRMWARE UPDATE ══════════════ │
+│  IF config_after_all_firmware = True:               │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  5. Bank 2 FW → Reboot → Verify             │   │
+│  │  6. Config Apply (verify SKIPPED)            │   │
+│  │     Device may become unreachable here       │   │
+│  └──────────────────────────────────────────────┘   │
 │                                                     │
-│  4. APPLY CONFIG ONLY:                              │
-│     └─ apply_config() or apply_config_file()        │
-│     └─ notify("config_upload", success, error)      │
-│     └─ WebSocket broadcast → UI shows config icon   │
+│  ══════════════ COMPLETION ════════════════════════ │
 │                                                     │
-│  ══════════ SKIPPED STEPS (no firmware/config) ═════ │
-│                                                     │
-│  If no config provided:                             │
-│     └─ notify("config_upload", "skipped", "No config")│
-│                                                     │
-│  If no firmware provided:                           │
-│     └─ notify("firmware_upload", "skipped", ...)    │
-│     └─ notify("firmware_update", "skipped", ...)    │
-│     └─ notify("reboot", "skipped", ...)             │
-│     └─ notify("verify", "skipped", ...)             │
+│  7. Final verification                              │
+│     └─ notify("verify", True, firmware_version)     │
 │                                                     │
 └─────────────────────────────────────────────────────┘
 ```
@@ -172,10 +215,23 @@ This is handled in `main.py`'s `on_checklist_progress` callback which:
 
 ## Firmware Update Flow (Detailed)
 
-**Order is critical:**
-1. Firmware bank 1 → reboot → verify
-2. Config (after first firmware so device has latest code)
-3. Firmware bank 2 → reboot → verify
+### Default Order (most devices)
+
+Config is applied between FW1 and FW2 so the device runs new firmware + new config, and the provisioner can verify config was applied before moving on.
+
+```
+BANK 1 → reboot → verify → CONFIG → verify config → BANK 2 → reboot → verify
+```
+
+### config_after_all_firmware Order (e.g., Tachyon TNS switches)
+
+Config is applied last because it changes the management network (VLAN, DHCP mode), making the device unreachable. Config verification is skipped — the UI shows it as "skipped" with explanation.
+
+```
+BANK 1 → reboot → verify → BANK 2 → reboot → verify → CONFIG (no verify)
+```
+
+### Dual-Bank Firmware Detail
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -185,27 +241,36 @@ This is handled in `main.py`'s `on_checklist_progress` callback which:
 │  ┌─── BANK 1 ───┐                                   │
 │  │ upload_firmware(path)                            │
 │  │ update_firmware(bank=1)                          │
-│  │ reboot()                                         │
+│  │ reboot() [or auto-reboot]                        │
 │  │ wait_for_reboot() ◄── Port may go offline here   │
 │  │ connect()                                        │
 │  │ verify: get_firmware_version() == expected       │
 │  └──────────────┘                                   │
 │         │                                           │
-│         ▼                                           │
-│  ┌─── CONFIG ───┐                                   │
-│  │ apply_config() or apply_config_file()            │
-│  │ (Device now has new firmware + new config)       │
-│  └──────────────┘                                   │
+│    ┌────┴────────────────────────────────────────┐   │
+│    │  IF !config_after_all_firmware:             │   │
+│    │  ┌─── CONFIG ───┐                           │   │
+│    │  │ apply_config() + verify_config()         │   │
+│    │  └──────────────┘                           │   │
+│    └─────────────────────────────────────────────┘   │
 │         │                                           │
 │         ▼                                           │
 │  ┌─── BANK 2 ───┐                                   │
 │  │ upload_firmware(path)                            │
 │  │ update_firmware(bank=2)                          │
-│  │ reboot()                                         │
+│  │ reboot() [unless fw2_skips_reboot]               │
 │  │ wait_for_reboot()                                │
 │  │ connect()                                        │
 │  │ verify: both banks now have same version         │
 │  └──────────────┘                                   │
+│         │                                           │
+│    ┌────┴────────────────────────────────────────┐   │
+│    │  IF config_after_all_firmware:              │   │
+│    │  ┌─── CONFIG (final) ───┐                   │   │
+│    │  │ apply_config() — no verify_config()      │   │
+│    │  │ Device may leave provisioning network    │   │
+│    │  └──────────────────────┘                   │   │
+│    └─────────────────────────────────────────────┘   │
 │                                                     │
 └─────────────────────────────────────────────────────┘
 ```
@@ -404,13 +469,65 @@ print(f"Success: {result.success}, Error: {result.error_message}")
 4. **Not URL-encoding tokens** - Some tokens contain special characters
 5. **Not clearing state between credential attempts** - Old tokens interfere
 
-## Adding a New Handler
+## Adding a New Vendor
 
-1. Create `provisioner/handlers/{vendor}.py`
-2. Inherit from `BaseHandler`
-3. Implement all required methods
-4. Add to `handler_manager.py` HANDLER_MAP
-5. Add default credentials to `config.py`
-6. Create config template directory: `configs/templates/{vendor}/`
-7. Create firmware directory: `firmware/{vendor}/`
-8. Test locally before deploying
+### 1. Handler (`provisioner/handlers/{vendor}.py`)
+
+- Inherit from `BaseHandler`
+- Set `DEFAULT_CREDENTIALS` for factory-default login
+- Implement all required methods (see above)
+- Override only the handler properties that differ from defaults (see table above)
+- If a property depends on model (e.g., switches vs APs from the same vendor), make it conditional on `self._device_info.model` — this is populated before the property is checked
+
+### 2. Device Detection (`provisioner/fingerprint.py`)
+
+- Add to `DeviceType` enum
+- Add HTTP header signatures with appropriate weights (see existing patterns)
+- Add API probe if the device has a distinctive REST endpoint
+- Detection must work on factory-default devices at their default IP
+
+### 3. Boot-Ping Discovery (`provisioner/port_manager.py`)
+
+- Add the vendor's default IP(s) to `DeviceLinkLocalIP` class
+- Add to `DeviceLinkLocalIP.ALL` with vendor tag
+- Add to the boot-ping `ips_to_try` list in `_boot_ping_detect()`
+
+### 4. Handler Registration (`provisioner/handler_manager.py`)
+
+- Add `DeviceType.{VENDOR}: {Vendor}Handler` to `HANDLER_MAP`
+
+### 5. Firmware Matching (`provisioner/firmware.py`)
+
+- Add model-to-filename patterns in `MODEL_FIRMWARE_PATTERNS`
+- Add firmware version extraction regex if the vendor uses non-standard naming
+- Create `firmware/{vendor}/` directory
+
+### 6. Config Templates (`configs/templates/{vendor}/`)
+
+- Create vendor subdirectory
+- Add model-specific templates as `{model}.json` (or `.rsc`, `.yaml`, `.tar`)
+- Add model aliases to `CONFIG_MODEL_ALIASES` in `config_store.py` if needed
+- Template format is vendor-specific — match what the handler's `apply_config_file()` expects
+
+### 7. Testing
+
+- [ ] Device detection works (factory-default state)
+- [ ] Boot-ping finds the device after power-on
+- [ ] Login with default credentials succeeds
+- [ ] `get_info()` returns model, serial, firmware, MAC
+- [ ] `get_firmware_banks()` returns correct bank info (if dual-bank)
+- [ ] Firmware upload and update works
+- [ ] Reboot and reconnection works
+- [ ] Config apply works
+- [ ] Config verify works (or is correctly skipped with `config_after_all_firmware`)
+- [ ] Full provisioning flow completes end-to-end
+- [ ] UI shows all steps correctly (check activity log modal)
+
+### Adding a New Model to an Existing Vendor
+
+If the new model has different provisioning behavior than existing models (e.g., a switch vs AP from the same vendor):
+
+1. Add firmware patterns to `MODEL_FIRMWARE_PATTERNS`
+2. Add config template as `configs/templates/{vendor}/{model}.json`
+3. If the model needs different flow (e.g., `config_after_all_firmware`), make the handler property conditional on model name
+4. Add model alias to `CONFIG_MODEL_ALIASES` if the API-reported model name differs from the template filename

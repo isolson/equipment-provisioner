@@ -77,6 +77,12 @@ class TachyonHandler(BaseHandler):
         """Tachyon devices reboot automatically after POST /update."""
         return True
 
+    @property
+    def config_after_all_firmware(self) -> bool:
+        """TNS switches change management VLAN/DHCP, making device unreachable."""
+        model = getattr(self._device_info, 'model', '') or ''
+        return model.lower().startswith('tns-')
+
     # Firmware pattern mappings for model validation
     MODEL_FIRMWARE_PATTERNS = {
         # TNA-30x standard series uses tna-30x firmware
