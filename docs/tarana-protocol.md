@@ -294,3 +294,25 @@ target flips to the other bank (A/B alternation).
 9. **Server responses are binary pairs** — the server sends each gRPC frame
    split across two WebSocket binary messages (5-byte header, then payload).
    There are no TEXT WebSocket frames in the response.
+10. **Source-IP bind is not enough on the bench Pi** — `port_manager` configures
+    `169.254.100.2/24` on every per-port VLAN sub-interface (`eth0.1991` ..
+    `eth0.1996`), creating six overlapping routes for `169.254.100.0/24`. The
+    kernel resolves a destination of `169.254.100.1` by picking whichever
+    interface matches first (typically `eth0.1991`), so aiohttp's
+    `local_addr=` does not determine the egress VLAN — packets to a Tarana on
+    any port other than port 1 silently go out on the wrong VLAN and are
+    dropped.
+
+    The handler binds each outbound socket to the device's VLAN sub-interface
+    via `SO_BINDTODEVICE` (`_make_vlan_bound_connector` in
+    `provisioner/handlers/tarana.py`), which pins egress per-socket and works
+    under concurrent multi-port provisioning. Requires `CAP_NET_RAW`; the
+    service runs as root.
+
+    Diagnostic check if you suspect it's regressed:
+    ```
+    ip route get 169.254.100.1 from 169.254.100.2
+    ```
+    should show `dev eth0.199N` matching the port the Tarana is plugged into
+    — if it reports a different sub-interface, the kernel is routing to the
+    wrong VLAN and any source-IP-only bind will fail.
