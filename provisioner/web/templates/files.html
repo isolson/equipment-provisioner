@@ -254,6 +254,18 @@
                         </button>
                     </div>
                 </div>
+
+                <!-- Upload Progress -->
+                <div id="fw-upload-progress" class="hidden mt-4 bg-gray-50 rounded-xl p-4 border border-gray-200">
+                    <div class="flex items-center justify-between mb-2 text-sm">
+                        <span id="fw-upload-label" class="font-medium text-gray-700 break-all"></span>
+                        <span id="fw-upload-percent" class="text-gray-600 tabular-nums ml-2">0%</span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                        <div id="fw-upload-bar" class="bg-blue-600 h-2 rounded-full transition-all duration-150" style="width: 0%"></div>
+                    </div>
+                    <div id="fw-upload-detail" class="mt-2 text-xs text-gray-500 tabular-nums"></div>
+                </div>
             </div>
 
             <!-- Firmware List -->
@@ -852,7 +864,7 @@
             `).join('');
         }
 
-        async function uploadFirmwareFile(file) {
+        function uploadFirmwareFile(file) {
             if (!file) return;
 
             const deviceType = document.getElementById('fw-device-type').value;
@@ -860,24 +872,67 @@
             formData.append('file', file);
             formData.append('device_type', deviceType);
 
-            showToast('Uploading firmware...', 'info');
+            const container = document.getElementById('fw-upload-progress');
+            const label = document.getElementById('fw-upload-label');
+            const percent = document.getElementById('fw-upload-percent');
+            const bar = document.getElementById('fw-upload-bar');
+            const detail = document.getElementById('fw-upload-detail');
+            const fileInput = document.getElementById('fw-file-input');
 
-            try {
-                const response = await fetch('/api/firmware/upload', {
-                    method: 'POST',
-                    body: formData,
-                });
-                const data = await response.json();
+            label.textContent = file.name;
+            percent.textContent = '0%';
+            bar.style.width = '0%';
+            bar.classList.remove('bg-red-600', 'bg-green-600');
+            bar.classList.add('bg-blue-600');
+            detail.textContent = `0 / ${formatBytes(file.size)}`;
+            container.classList.remove('hidden');
 
-                if (response.ok) {
-                    showToast(`Firmware uploaded: ${file.name}`, 'success');
+            const startTime = Date.now();
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/firmware/upload');
+
+            xhr.upload.onprogress = (e) => {
+                if (!e.lengthComputable) return;
+                const pct = Math.round((e.loaded / e.total) * 100);
+                const elapsed = Math.max((Date.now() - startTime) / 1000, 0.001);
+                const rate = e.loaded / elapsed;
+                bar.style.width = pct + '%';
+                percent.textContent = pct + '%';
+                detail.textContent = `${formatBytes(e.loaded)} / ${formatBytes(e.total)} · ${formatBytes(rate)}/s`;
+            };
+
+            const finalize = (ok, message) => {
+                if (ok) {
+                    bar.classList.remove('bg-blue-600');
+                    bar.classList.add('bg-green-600');
+                    bar.style.width = '100%';
+                    percent.textContent = '100%';
+                    detail.textContent = 'Upload complete';
+                    showToast(message, 'success');
                     loadFirmware();
+                    setTimeout(() => container.classList.add('hidden'), 2500);
                 } else {
-                    showToast(data.detail || 'Upload failed', 'error');
+                    bar.classList.remove('bg-blue-600');
+                    bar.classList.add('bg-red-600');
+                    detail.textContent = message;
+                    showToast(message, 'error');
                 }
-            } catch (error) {
-                showToast('Upload failed', 'error');
-            }
+                if (fileInput) fileInput.value = '';
+            };
+
+            xhr.onload = () => {
+                let data = {};
+                try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    finalize(true, `Firmware uploaded: ${file.name}`);
+                } else {
+                    finalize(false, data.detail || `Upload failed (HTTP ${xhr.status})`);
+                }
+            };
+            xhr.onerror = () => finalize(false, 'Upload failed: connection error');
+            xhr.onabort = () => finalize(false, 'Upload cancelled');
+
+            xhr.send(formData);
         }
 
         async function downloadFirmwareFromUrl() {

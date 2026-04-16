@@ -1133,11 +1133,20 @@ async def upload_firmware(
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     dest_path = firmware_path / safe_filename
+    tmp_path = dest_path.with_suffix(dest_path.suffix + ".part")
 
     try:
-        with open(dest_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
+        # Stream to a .part file in chunks so memory stays bounded and a partial
+        # upload never leaves a truncated file in place under the real name.
+        bytes_written = 0
+        with open(tmp_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                bytes_written += len(chunk)
+        os.replace(tmp_path, dest_path)
 
         stat = dest_path.stat()
         return {
@@ -1153,6 +1162,11 @@ async def upload_firmware(
         }
     except Exception as e:
         logger.error(f"Failed to upload firmware: {e}")
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=str(e))
 
 
