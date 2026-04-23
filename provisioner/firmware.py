@@ -206,8 +206,10 @@ class FirmwareManager:
         "litebeam": ["airmax"],
         "powerbeam": ["airmax"],
         "nanobeam": ["airmax"],
-        # Ubiquiti AirFiber series
-        "af-5xhd": ["airfiber"],
+        # Ubiquiti AirFiber series. Each AF SKU has its own firmware prefix in
+        # the Ubiquiti manifest; "airfiber" alone is too broad to disambiguate.
+        # 322c = AF-5XHD (LTU PtP, 1.x firmware line, per repo manifest.yaml).
+        "af-5xhd": ["322c-airfiber"],
         "af60-lr": ["airfiber"],
         "af60-xr": ["airfiber"],
         "af60-hd": ["airfiber"],

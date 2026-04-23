@@ -1260,6 +1260,52 @@ async def delete_firmware(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class FirmwareMoveRequest(BaseModel):
+    new_device_type: str
+
+
+@router.post("/firmware/{device_type}/{filename}/move")
+async def move_firmware(
+    request: Request,
+    device_type: str,
+    filename: str,
+    body: FirmwareMoveRequest,
+):
+    """Move a firmware file to a different device-type directory."""
+    src_type = _validate_device_type(device_type)
+    dst_type = _validate_device_type(body.new_device_type)
+    filename = _sanitize_path_component(filename)
+    data_path = _get_data_path(request)
+
+    src_path = data_path / "firmware" / src_type / filename
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail="Firmware file not found")
+
+    if src_type == dst_type:
+        return {"success": True, "message": "No change", "device_type": dst_type}
+
+    dst_dir = data_path / "firmware" / dst_type
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst_path = dst_dir / filename
+
+    if dst_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"{filename} already exists under {dst_type}",
+        )
+
+    try:
+        os.replace(src_path, dst_path)
+        return {
+            "success": True,
+            "message": f"Moved {filename} to {dst_type}",
+            "device_type": dst_type,
+        }
+    except Exception as e:
+        logger.error(f"Failed to move firmware: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============================================================================
 # Firmware Checker Endpoints (auto-update checking)
 # ============================================================================

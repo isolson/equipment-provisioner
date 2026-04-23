@@ -40,7 +40,46 @@ class DeviceType(str, Enum):
     TACHYON = "tachyon"
     TARANA = "tarana"
     UBIQUITI = "ubiquiti"
+    EVOLUTION_DIGITAL = "evolution_digital"
     UNKNOWN = "unknown"
+
+
+# OUI prefixes (uppercase, colon-separated) for refurbished Evolution Digital
+# routers, mapped to the OEM that actually built the hardware. ED resells
+# gear from several ODMs; the OUI is the only reliable signal of which one.
+EVOLUTION_DIGITAL_OUI_VENDORS = {
+    # Kaon Group — confirmed on bench 2026-04-16
+    "24:E4:CE": "Kaon",
+    "84:01:12": "Kaon",
+    # Actiontec — common ED OEM prefixes
+    "00:19:8B": "Actiontec",
+    "00:26:62": "Actiontec",
+    "10:86:8C": "Actiontec",
+    "40:70:09": "Actiontec",
+    "40:B7:F3": "Actiontec",
+    "70:F1:96": "Actiontec",
+    "7C:03:4C": "Actiontec",
+    # Adtran
+    "00:A0:C8": "Adtran",
+    "00:21:7A": "Adtran",
+    "00:02:40": "Adtran",
+}
+
+EVOLUTION_DIGITAL_OUIS = set(EVOLUTION_DIGITAL_OUI_VENDORS.keys())
+
+
+def is_evolution_digital_mac(mac: str) -> bool:
+    """Return True if a MAC address belongs to a known Evolution Digital OUI."""
+    if not mac or len(mac) < 8:
+        return False
+    return mac[:8].upper() in EVOLUTION_DIGITAL_OUIS
+
+
+def evolution_digital_vendor_name(mac: str) -> Optional[str]:
+    """Return the OEM brand (Kaon/Actiontec/Adtran) for a known ED MAC, else None."""
+    if not mac or len(mac) < 8:
+        return None
+    return EVOLUTION_DIGITAL_OUI_VENDORS.get(mac[:8].upper())
 
 
 @dataclass
@@ -121,6 +160,102 @@ class DeviceFingerprinter:
     def __init__(self, timeout: float = 5.0, interface: Optional[str] = None):
         self.timeout = timeout
         self.interface = interface
+
+    async def sniff_for_known_mac(
+        self,
+        interface: str,
+        timeout_sec: int = 8,
+        pi_mac: Optional[str] = None,
+    ) -> Optional[str]:
+        """Passively sniff a VLAN sub-interface for a source MAC matching a
+        known vendor OUI using AF_PACKET raw sockets.
+
+        Used for devices that have no management IP (e.g., Evolution Digital
+        cloud-only routers). Returns the first source MAC seen that matches
+        an OUI allowlist, or None if no match within the timeout.
+
+        Requires CAP_NET_RAW (the provisioner-web service runs with it).
+        We avoid shelling out to tcpdump because Debian-family tcpdump drops
+        privileges to user 'tcpdump' at startup and cannot do so when
+        systemd ambient capabilities are in effect (setuid gets blocked).
+
+        Args:
+            interface: VLAN sub-interface, e.g., "eth0.1991".
+            timeout_sec: How long to sniff before giving up.
+            pi_mac: Pi's own source MAC on this interface, to filter out its
+                own ARP/ping probes. Not required but reduces noise.
+
+        Returns:
+            Colon-separated lowercase MAC string if a match was found, else None.
+        """
+        pi_mac_l = pi_mac.lower() if pi_mac else None
+
+        def _blocking_sniff() -> Tuple[Optional[str], set]:
+            seen: set = set()
+            matched: Optional[str] = None
+            sock = None
+            try:
+                # ETH_P_ALL = 0x0003 — catch every ethertype on the interface.
+                sock = socket.socket(
+                    socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003)
+                )
+                sock.bind((interface, 0))
+                import time as _t
+                deadline = _t.monotonic() + timeout_sec
+                while _t.monotonic() < deadline:
+                    remaining = deadline - _t.monotonic()
+                    if remaining <= 0:
+                        break
+                    sock.settimeout(min(0.5, remaining))
+                    try:
+                        data, _addr = sock.recvfrom(256)
+                    except socket.timeout:
+                        continue
+                    if len(data) < 12:
+                        continue
+                    src = ":".join(f"{b:02x}" for b in data[6:12])
+                    if pi_mac_l and src == pi_mac_l:
+                        continue
+                    seen.add(src)
+                    if matched is None and is_evolution_digital_mac(src):
+                        matched = src
+                        break  # early exit on OUI match
+            except PermissionError:
+                logger.error(
+                    f"Passive sniff on {interface}: missing CAP_NET_RAW "
+                    f"(need to run as root or grant capability)"
+                )
+            except OSError as e:
+                logger.error(f"Passive sniff socket error on {interface}: {e}")
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+            return matched, seen
+
+        loop = asyncio.get_event_loop()
+        try:
+            matched, seen = await loop.run_in_executor(None, _blocking_sniff)
+        except Exception as e:
+            logger.debug(f"Passive MAC sniff failed on {interface}: {e}")
+            return None
+
+        if seen:
+            logger.debug(
+                f"Passive sniff on {interface}: saw {len(seen)} unique src MACs: "
+                f"{sorted(seen)}"
+            )
+        else:
+            logger.debug(
+                f"Passive sniff on {interface}: no frames captured in {timeout_sec}s"
+            )
+        if matched:
+            logger.info(
+                f"Passive fingerprint: matched ED OUI on {interface}: {matched}"
+            )
+        return matched
 
     async def fingerprint(self, ip: str, mac: Optional[str] = None) -> DeviceFingerprint:
         """Fingerprint a device at the given IP address."""

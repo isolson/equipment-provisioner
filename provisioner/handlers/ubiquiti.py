@@ -107,6 +107,31 @@ class UbiquitiHandler(BaseHandler):
         # Wave devices support password change via compose API
         return self._api_style == "wave"
 
+    def validate_firmware_for_model(self, firmware_path: str, model: str) -> tuple:
+        # AirMax / Wave / AirFiber firmware are not cross-compatible. Filenames
+        # contain the family token (e.g. "airfiber-1.5.5") so a substring check
+        # on the model is enough to pick the right family.
+        model_lower = (model or "").lower()
+        if any(t in model_lower for t in ("af-5xhd", "af-11fx", "af60", "airfiber")):
+            family = "airfiber"
+        elif "wave" in model_lower:
+            family = "wave"
+        elif any(t in model_lower for t in (
+            "rocket", "nanostation", "litebeam", "powerbeam",
+            "nanobeam", "airgrid", "bullet",
+        )):
+            family = "airmax"
+        else:
+            return True, ""
+
+        filename = Path(firmware_path).name.lower()
+        if family in filename:
+            return True, ""
+        return False, (
+            f"Firmware mismatch: model {model} requires '{family}' firmware, "
+            f"got '{Path(firmware_path).name}'"
+        )
+
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create permissive SSL context for self-signed device certs."""
         ctx = ssl.create_default_context()

@@ -34,6 +34,7 @@
         .badge-mikrotik { background: #3b82f620; color: #3b82f6; }
         .badge-tachyon { background: #a855f720; color: #a855f7; }
         .badge-tarana { background: #d9770620; color: #d97706; }
+        .badge-ubiquiti { background: #0ea5e920; color: #0ea5e9; }
         .badge-unknown { background: #6b728020; color: #6b7280; }
 
         /* Custom/default badge */
@@ -54,6 +55,7 @@
         </div>
         <div class="w-full sm:w-auto">
             <select id="sort-by" onchange="applySort()" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm sm:w-auto">
+                <option value="newest">Newest First</option>
                 <option value="device_type">Sort by Device</option>
                 <option value="name">Sort by Name</option>
                 <option value="type">Sort by Type</option>
@@ -407,7 +409,7 @@
     <script>
         let currentTab = 'setup';
         let editingConfig = null;
-        let currentSort = 'device_type';
+        let currentSort = 'newest';
 
         // Data caches
         let readinessData = null;
@@ -490,9 +492,30 @@
         }
 
         // Device type badge helper
+        const FW_VENDORS = [
+            { value: 'cambium',  label: 'Cambium' },
+            { value: 'mikrotik', label: 'MikroTik' },
+            { value: 'tachyon',  label: 'Tachyon' },
+            { value: 'tarana',   label: 'Tarana' },
+            { value: 'ubiquiti', label: 'Ubiquiti' },
+        ];
+
         function deviceBadge(type) {
-            const names = { cambium: 'Cambium', mikrotik: 'MikroTik', tachyon: 'Tachyon', tarana: 'Tarana' };
-            return `<span class="px-2 py-0.5 text-xs font-medium rounded badge-${type || 'unknown'}">${names[type] || type || 'Unknown'}</span>`;
+            const match = FW_VENDORS.find(v => v.value === type);
+            const label = match ? match.label : (type || 'Unknown');
+            return `<span class="px-2 py-0.5 text-xs font-medium rounded badge-${type || 'unknown'}">${label}</span>`;
+        }
+
+        function firmwareBadgeSelect(fw) {
+            const current = fw.device_type || '';
+            const opts = FW_VENDORS.map(v =>
+                `<option value="${v.value}" ${v.value === current ? 'selected' : ''}>${v.label}</option>`
+            ).join('');
+            const safeName = fw.filename.replace(/"/g, '&quot;');
+            return `<select
+                onchange="changeFirmwareType('${current}', &quot;${safeName}&quot;, this.value)"
+                class="text-xs font-medium rounded badge-${current || 'unknown'} pl-2 pr-6 py-0.5 border-0 cursor-pointer appearance-none bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 20 20%22 fill=%22currentColor%22><path fill-rule=%22evenodd%22 d=%22M5.23 7.21a.75.75 0 011.06.02L10 11.06l3.71-3.83a.75.75 0 111.08 1.04l-4.25 4.38a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z%22 clip-rule=%22evenodd%22/></svg>')] bg-no-repeat bg-[right_0.25rem_center] bg-[length:1rem_1rem]"
+                title="Change device type">${opts}</select>`;
         }
 
         function readinessBadge(status) {
@@ -843,13 +866,16 @@
                 sorted.sort((a, b) => a.device_type.localeCompare(b.device_type) || a.filename.localeCompare(b.filename));
             } else if (currentSort === 'name') {
                 sorted.sort((a, b) => a.filename.localeCompare(b.filename));
+            } else {
+                // 'newest' (default) and anything unknown — sort by modified desc, then name
+                sorted.sort((a, b) => (b.modified || '').localeCompare(a.modified || '') || a.filename.localeCompare(b.filename));
             }
 
             list.innerHTML = sorted.map(fw => `
                 <div class="bg-gray-50 rounded-lg p-3 flex flex-col gap-3 border border-gray-200 sm:flex-row sm:items-center">
                     <div class="flex-1 min-w-0">
                         <div class="flex flex-wrap items-center gap-2 mb-1">
-                            ${deviceBadge(fw.device_type)}
+                            ${firmwareBadgeSelect(fw)}
                             <span class="font-medium break-all">${fw.filename}</span>
                         </div>
                         <div class="text-sm text-gray-600">Version: ${fw.version} | ${formatBytes(fw.size)}</div>
@@ -862,6 +888,31 @@
                     </button>
                 </div>
             `).join('');
+        }
+
+        async function changeFirmwareType(oldType, filename, newType) {
+            if (!newType || newType === oldType) return;
+            try {
+                const response = await fetch(
+                    `/api/firmware/${encodeURIComponent(oldType)}/${encodeURIComponent(filename)}/move`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ new_device_type: newType }),
+                    }
+                );
+                const data = await response.json();
+                if (response.ok) {
+                    showToast(`Moved ${filename} to ${newType}`, 'success');
+                    loadFirmware();
+                } else {
+                    showToast(data.detail || 'Move failed', 'error');
+                    loadFirmware();
+                }
+            } catch (error) {
+                showToast('Move failed', 'error');
+                loadFirmware();
+            }
         }
 
         function uploadFirmwareFile(file) {
@@ -1007,14 +1058,14 @@
                 return;
             }
 
-            // Sort
+            // Sort — configs have no modified timestamp, so 'newest' falls back to device order
             let sorted = [...configs];
-            if (currentSort === 'device_type') {
-                sorted.sort((a, b) => (a.device_type || '').localeCompare(b.device_type || '') || a.filename.localeCompare(b.filename));
-            } else if (currentSort === 'name') {
+            if (currentSort === 'name') {
                 sorted.sort((a, b) => a.filename.localeCompare(b.filename));
             } else if (currentSort === 'type') {
                 sorted.sort((a, b) => a.config_type.localeCompare(b.config_type) || a.filename.localeCompare(b.filename));
+            } else {
+                sorted.sort((a, b) => (a.device_type || '').localeCompare(b.device_type || '') || a.filename.localeCompare(b.filename));
             }
 
             list.innerHTML = sorted.map(cfg => `
@@ -1177,14 +1228,14 @@
                 return;
             }
 
-            // Sort
+            // Sort — credentials have no modified timestamp, so 'newest' falls back to device order
             let sorted = [...credentials];
-            if (currentSort === 'device_type') {
-                sorted.sort((a, b) => a.device_type.localeCompare(b.device_type) || a.username.localeCompare(b.username));
-            } else if (currentSort === 'name') {
+            if (currentSort === 'name') {
                 sorted.sort((a, b) => a.username.localeCompare(b.username));
             } else if (currentSort === 'type') {
                 sorted.sort((a, b) => (a.is_custom === b.is_custom ? 0 : a.is_custom ? -1 : 1));
+            } else {
+                sorted.sort((a, b) => a.device_type.localeCompare(b.device_type) || a.username.localeCompare(b.username));
             }
 
             list.innerHTML = sorted.map(cred => `

@@ -88,6 +88,7 @@
         .status-icon-lg.s-complete { background: #bbf7d0; color: #14532d; }
         .status-icon-lg.s-error { background: #fecaca; color: #7f1d1d; }
         .status-icon-lg.s-booting { background: #fde68a; color: #78350f; }
+        .status-icon-lg.s-warning { background: #fed7aa; color: #9a3412; }
         .status-icon-lg.s-ready { background: #bbf7d0; color: #14532d; }
         .status-icon-lg.s-idle { background: #e5e7eb; color: #6b7280; }
 
@@ -99,10 +100,45 @@
         .status-text-lg.s-complete { color: #14532d; }
         .status-text-lg.s-error { color: #7f1d1d; }
         .status-text-lg.s-booting { color: #78350f; }
+        .status-text-lg.s-warning { color: #9a3412; }
         .status-text-lg.s-ready { color: #14532d; }
         .status-text-lg.s-idle { color: #6b7280; }
 
         .status-sub { font-size: 14px; color: #374151; font-weight: 500; }
+
+        /* Evolution Digital single-port caution banner */
+        .ed-caution-banner {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #dc2626;
+            color: #ffffff;
+            font-weight: 800;
+            font-size: 11px;
+            letter-spacing: 0.3px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            margin: 4px 0;
+            animation: ed-caution-pulse 1.2s ease-in-out infinite;
+            text-transform: uppercase;
+        }
+        .ed-caution-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #ffffff;
+            color: #dc2626;
+            font-weight: 900;
+            font-size: 13px;
+            flex-shrink: 0;
+        }
+        @keyframes ed-caution-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.8); }
+            50% { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
+        }
 
         @keyframes icon-pulse {
             0%, 100% { opacity: 1; }
@@ -311,6 +347,7 @@
             tachyon: { name: 'Tachyon', color: '#a855f7', defaultUser: 'root' },
             tarana: { name: 'Tarana', color: '#d97706', defaultUser: 'admin' },
             ubiquiti: { name: 'Ubiquiti', color: '#0559C9', defaultUser: 'ubnt' },
+            evolution_digital: { name: 'Evolution', color: '#ec4899', defaultUser: '' },
             unknown: { name: 'Unknown', color: '#6b7280', defaultUser: 'admin' },
         };
 
@@ -620,6 +657,13 @@
 
             if (!port.link_up) return 'idle';
             if (port.provisioning) return 'active';
+            // Evolution Digital passive qualification result lives on the checklist
+            if (port.device_type === 'evolution_digital') {
+                if (checklist.link_qualification === 'PASS') return 'success';
+                if (checklist.link_qualification === 'CAUTION') return 'warning';
+                if (checklist.link_qualification === 'FAIL') return 'error';
+                if (checklist.link_qualification === 'loading') return 'active';
+            }
             // Loading firmware updates
             if (checklist.firmware_update_1 === 'loading' || checklist.firmware_update_2 === 'loading') return 'active';
             // Complete when verify is done
@@ -690,6 +734,19 @@
 
         function getStatusCenterInfo(port, portNum) {
             const checklist = port.checklist || {};
+            // Evolution Digital: passive qualification display overrides generic states
+            if (port.device_type === 'evolution_digital') {
+                const lq = checklist.link_qualification;
+                const reason = checklist.result_reason || '';
+                const flaps = checklist.flap_count ? `${checklist.flap_count} flap${checklist.flap_count === '1' ? '' : 's'}` : '';
+                if (lq === 'PASS') return { text: 'PASS', sub: flaps || reason, cls: 'complete', icon: 'check' };
+                if (lq === 'CAUTION') return { text: 'CAUTION', sub: reason.substring(0, 60) || 'Only 1 LAN port connected', cls: 'warning', icon: 'alert' };
+                if (lq === 'FAIL') return { text: 'FAIL', sub: reason.substring(0, 60) || 'Qualification failed', cls: 'error', icon: 'x' };
+                if (lq === 'loading' || port.provisioning) {
+                    return { text: 'QUALIFYING', sub: 'Watching link for 60s...', cls: 'active', icon: 'spinner' };
+                }
+                if (port.link_up) return { text: 'DETECTED', sub: 'Starting qualification...', cls: 'booting', icon: 'spinner' };
+            }
             // Provisioning result survives link-down (device may have changed networks)
             const isDone = port.last_result === 'complete' || port.last_result === 'success';
             if (isDone) {
@@ -795,6 +852,13 @@
             };
             div.style.cursor = clickable ? 'pointer' : 'default';
 
+            // Evolution Digital — flag routers showing only one port connected.
+            // The tech can't tell from the card alone whether the missing side
+            // is intentional or broken, so we warn loudly.
+            const edCaution =
+                port.device_type === 'evolution_digital' &&
+                checklist.partner_port_connected === false;
+
             div.innerHTML = `
                 <!-- Identity line -->
                 <div class="card-identity">
@@ -805,6 +869,13 @@
                     <span class="port-num-sm">${portNum}</span>
                     ${speed ? `<span class="speed-tag">${speed}</span>` : ''}
                 </div>
+
+                ${edCaution ? `
+                <div class="ed-caution-banner">
+                    <span class="ed-caution-icon">!</span>
+                    <span>ONLY 1 PORT CONNECTED — check 2nd cable</span>
+                </div>
+                ` : ''}
 
                 <!-- Big status center -->
                 <div class="card-status-center s-${sc.cls}">
@@ -882,7 +953,15 @@
             const isActive = port.provisioning || port.waiting_for_boot;
             const isDone = port.last_result === 'complete' || port.last_result === 'success';
             const canApplyMode = isDone && (port.device_type === 'cambium' || port.device_type === 'tachyon');
+            const isEvolutionDigital = port.device_type === 'evolution_digital';
             document.getElementById('modal-footer').innerHTML = isActive ? `
+                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                    Close
+                </button>
+            ` : isEvolutionDigital ? `
+                <button onclick="openProvisionModal(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
+                    Re-qualify
+                </button>
                 <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
                     Close
                 </button>
@@ -911,8 +990,8 @@
         function renderActivityLog(portNum) {
             const log = portActivityLogs[portNum];
             const port = ports[portNum];
-            const stateIcons = { success: '\u2713', error: '\u2717', loading: '\u25cf', pending: '\u25cb', skipped: '\u2014' };
-            const stateColors = { success: '#166534', error: '#991b1b', loading: '#1e40af', pending: '#9ca3af', skipped: '#9ca3af' };
+            const stateIcons = { success: '\u2713', error: '\u2717', loading: '\u25cf', pending: '\u25cb', skipped: '\u2014', warning: '!' };
+            const stateColors = { success: '#166534', error: '#991b1b', loading: '#1e40af', pending: '#9ca3af', skipped: '#9ca3af', warning: '#9a3412' };
             const isMikrotik = port?.device_type === 'mikrotik';
 
             function renderEntry(entry) {
@@ -925,6 +1004,39 @@
                     <span class="log-step" style="color:${color};${entry.state === 'loading' ? 'font-weight:600;' : ''}">${entry.step}</span>
                     ${entry.detail ? `<span class="log-detail">${entry.detail}</span>` : ''}
                 </div>`;
+            }
+
+            // Evolution Digital: passive qualification has a short, bespoke
+            // step list — render it inline rather than threading ED fields
+            // through the firmware/config step machinery.
+            if (port?.device_type === 'evolution_digital') {
+                const cl = port.checklist || {};
+                const lq = cl.link_qualification;
+                const qualState =
+                    lq === 'PASS' ? 'success' :
+                    lq === 'CAUTION' ? 'warning' :
+                    lq === 'FAIL' ? 'error' :
+                    lq === 'loading' ? 'loading' : 'pending';
+                let html = '';
+                html += renderEntry({ step: 'Detected (MAC)', state: cl.mac_address ? 'success' : 'pending', detail: cl.mac_address || '', time: '' });
+                html += renderEntry({ step: 'OUI', state: cl.vendor_oui ? 'success' : 'pending', detail: cl.vendor_oui || '', time: '' });
+                html += renderEntry({
+                    step: 'Partner port',
+                    state: cl.partner_port_connected === true ? 'success' : cl.partner_port_connected === false ? 'error' : 'pending',
+                    detail: cl.partner_port_connected === true ? 'both LAN ports up' :
+                            cl.partner_port_connected === false ? 'only 1 LAN port up' : '',
+                    time: '',
+                });
+                html += renderEntry({
+                    step: 'Link qualification',
+                    state: qualState,
+                    detail: cl.result_reason || (qualState === 'loading' ? 'watching 60s window...' : ''),
+                    time: '',
+                });
+                if (cl.flap_count !== undefined && cl.flap_count !== null && cl.flap_count !== '') {
+                    html += renderEntry({ step: 'Flap count', state: 'success', detail: cl.flap_count, time: '' });
+                }
+                return html;
             }
 
             // Build unified list in canonical provisioning order

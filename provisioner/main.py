@@ -155,6 +155,8 @@ class Provisioner:
                     netmask=mgmt.netmask,
                     switch_ip=getattr(mgmt, 'switch_ip', None) or getattr(mgmt, 'gateway', None),
                     vlan=mgmt.vlan,
+                    switch_username=self.config.credentials.mikrotik.username,
+                    switch_password=self.config.credentials.mikrotik.password,
                 )
 
             self.port_manager = init_port_manager(
@@ -205,6 +207,7 @@ class Provisioner:
 
         if self._use_vlan_mode:
             tasks.append(asyncio.create_task(self.port_manager.start_monitoring()))
+            tasks.append(asyncio.create_task(self.port_manager.start_switch_reconcile_loop()))
             logger.info(f"Provisioner running - monitoring {self.config.ports.num_ports} ports")
             console.print(f"[green]Provisioner active on {self.config.network.interface}[/green]")
             console.print(f"[dim]Mode: VLAN ({self.config.ports.num_ports} ports)[/dim]")
@@ -255,13 +258,24 @@ class Provisioner:
 
         logger.info("Provisioner stopped")
 
-    async def _on_port_device_detected(self, port_num: int, device_type: str, device_ip: str) -> None:
+    async def _on_port_device_detected(
+        self,
+        port_num: int,
+        device_type: str,
+        device_ip: Optional[str],
+    ) -> None:
         """Handle device detected on a VLAN port.
 
         Spawns provisioning as a separate task so it can be cancelled
         if the device is unexpectedly unplugged.
+
+        device_ip may be None for passively-detected vendors (Evolution
+        Digital), which are identified by MAC OUI and have no management IP.
         """
-        logger.info(f"Device detected on port {port_num}: {device_type} at {device_ip}")
+        logger.info(
+            f"Device detected on port {port_num}: {device_type}"
+            f"{' at ' + device_ip if device_ip else ' (passive/no-IP)'}"
+        )
 
         # Wake display if configured
         from .display import get_display
@@ -280,8 +294,13 @@ class Provisioner:
         if port_num in self.port_manager.port_states:
             self.port_manager.port_states[port_num].provisioning_task = task
 
-    async def _run_port_provisioning(self, port_num: int, device_type: str, device_ip: str) -> None:
-        """Run provisioning for a port device as a cancellable task."""
+    async def _run_port_provisioning(
+        self, port_num: int, device_type: str, device_ip: Optional[str]
+    ) -> None:
+        """Run provisioning for a port device as a cancellable task.
+
+        device_ip may be None for passively-detected vendors (Evolution Digital).
+        """
         self.port_manager.mark_port_provisioning(port_num, True)
         cancelled = False
 
@@ -333,13 +352,16 @@ class Provisioner:
         )
 
     async def _provision_port_device(
-        self, port_num: int, device_type: str, device_ip: str,
+        self, port_num: int, device_type: str, device_ip: Optional[str],
         custom_credentials: Optional[Dict[str, str]] = None,
         provision_request=None,
     ) -> bool:
         """Provision a device detected on a VLAN port.
 
         Unlike _provision_device, we already know the device type from port detection.
+
+        device_ip may be None for passively-detected vendors (Evolution Digital)
+        which are identified only by MAC OUI and have no management IP.
         """
         from .db import get_db
         from .web.websocket import (
@@ -359,6 +381,11 @@ class Provisioner:
 
         # Reset checklist for new provisioning attempt
         self.port_manager.reset_checklist(port_num)
+
+        # Passive vendors (Evolution Digital refurb routers) have no IP and
+        # no login — dispatch to a dedicated flow that observes link/MAC only.
+        if device_type == "evolution_digital":
+            return await self._provision_evolution_digital(port_num, interface)
 
         # Create job record first (needed for progress notifications)
         record = ProvisioningRecord(
@@ -674,6 +701,150 @@ class Provisioner:
             from .handlers.base import ProvisioningResult
             result = ProvisioningResult(success=False, error_message=str(e))
             await notifier.notify_failed(result, device_ip)
+            return False
+
+    async def _provision_evolution_digital(
+        self,
+        port_num: int,
+        interface: Optional[str],
+    ) -> bool:
+        """Passive qualification flow for Evolution Digital refurb routers.
+
+        No login, no firmware, no config — observe link behaviour over a
+        short watch window, classify CLEAN/BURST/DEFECT, and report PASS/FAIL.
+        """
+        from .db import get_db
+        from .handlers.evolution_digital import EvolutionDigitalHandler
+        from .web.websocket import (
+            notify_provisioning_started,
+            notify_provisioning_progress,
+            notify_provisioning_completed,
+            notify_port_change,
+        )
+
+        notifier = get_notifier()
+        db = await get_db()
+
+        state = self.port_manager.port_states.get(port_num)
+        mac = state.device_mac if state else None
+
+        record = ProvisioningRecord(
+            port_number=port_num,
+            device_type="evolution_digital",
+            mac_address=mac or "unknown",
+            ip_address="",
+            status=ProvisioningStatus.STARTED,
+            started_at=datetime.now(),
+        )
+        job_id = await db.create_job(record)
+
+        async def on_progress(step: str, status, detail: Optional[str] = None):
+            """Forward handler progress into the port's checklist + UI."""
+            await notify_provisioning_progress(port_num, job_id, step)
+            if step == "device_info" and detail:
+                _mac = None
+                for part in detail.split("|"):
+                    if part.startswith("mac:") and part[4:]:
+                        _mac = part[4:]
+                if _mac:
+                    self.port_manager.update_port_device_info(port_num, mac=_mac)
+                port_status = self.port_manager._get_single_port_status(port_num)
+                await notify_port_change(port_num, port_status)
+                return
+            # Steps whose display value is the detail string (vendor brand,
+            # flap count, reason text). Status is just a "fired" bit for these.
+            detail_steps = {"model_confirmed", "vendor_oui", "flap_count", "result_reason"}
+            if step in detail_steps:
+                self.port_manager.update_checklist(port_num, step, detail or "")
+            else:
+                self.port_manager.update_checklist(port_num, step, status)
+            port_status = self.port_manager._get_single_port_status(port_num)
+            await notify_port_change(port_num, port_status)
+
+        try:
+            await notify_provisioning_started(port_num, "evolution_digital", job_id)
+            await notifier.notify_started(
+                ip="(no-ip)",
+                device_type="evolution_digital",
+                mac=mac or "unknown",
+            )
+
+            handler = EvolutionDigitalHandler(
+                port_manager=self.port_manager,
+                port_num=port_num,
+                interface=interface,
+            )
+            result = await handler.provision(on_progress=on_progress)
+
+            status_str = ProvisioningStatus.COMPLETED if result.passed else ProvisioningStatus.FAILED
+            await db.update_job(
+                job_id,
+                status=status_str,
+                mac_address=result.primary_mac or "unknown",
+                error_message=None if result.passed else result.reason,
+                config_applied=None,
+                completed_at=datetime.now(),
+            )
+
+            await notify_provisioning_completed(
+                port_num,
+                job_id,
+                result.passed,
+                {
+                    "device_type": "evolution_digital",
+                    "verdict": result.verdict,
+                    "reason": result.reason,
+                    "flap_count": result.flap_count,
+                    "partner_port_connected": result.partner_port_connected,
+                    "vendor_oui": result.vendor_oui,
+                    "vendor_name": result.vendor_name,
+                    "caution": result.caution,
+                    "mac": result.primary_mac,
+                },
+            )
+
+            from .handlers.base import ProvisioningResult, DeviceInfo
+            pr = ProvisioningResult(
+                success=result.passed,
+                device_info=DeviceInfo(
+                    device_type="evolution_digital",
+                    mac_address=result.primary_mac,
+                    model="Evolution Digital",
+                ),
+                error_message=None if result.passed else result.reason,
+            )
+            if result.passed:
+                await notifier.notify_completed(pr)
+            else:
+                await notifier.notify_failed(pr, None)
+
+            await telemetry.emit({
+                "event": "provisioning_completed",
+                "device_type": "evolution_digital",
+                "device_model": "Evolution Digital",
+                "success": result.passed,
+                "verdict": result.verdict,
+                "flap_count": result.flap_count,
+                "partner_port_connected": result.partner_port_connected,
+            })
+
+            logger.info(
+                f"ED qualification port {port_num}: "
+                f"verdict={result.verdict} passed={result.passed} "
+                f"partner={result.partner_port_connected} flaps={result.flap_count} "
+                f"reason={result.reason}"
+            )
+            return result.passed
+
+        except Exception as e:
+            logger.exception(f"ED qualification error on port {port_num}")
+            await db.update_job(
+                job_id,
+                status=ProvisioningStatus.FAILED,
+                error_message=str(e),
+                completed_at=datetime.now(),
+            )
+            await notify_provisioning_completed(port_num, job_id, False, {"error": str(e)})
             return False
 
     async def _on_device_discovered(self, device: DiscoveredDevice) -> None:

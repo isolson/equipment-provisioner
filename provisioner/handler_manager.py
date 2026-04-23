@@ -17,7 +17,10 @@ logger = logging.getLogger(__name__)
 class HandlerManager:
     """Manages device handlers and routes provisioning requests."""
 
-    # Map device types to handler classes
+    # Map device types to handler classes.
+    # NOTE: Evolution Digital is intentionally absent — it runs a passive
+    # qualification flow that needs port_manager cross-port access and is
+    # dispatched directly from main.py._provision_evolution_digital.
     HANDLER_MAP: Dict[DeviceType, Type[BaseHandler]] = {
         DeviceType.MIKROTIK: MikrotikHandler,
         DeviceType.CAMBIUM: CambiumHandler,
