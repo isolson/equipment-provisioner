@@ -20,8 +20,18 @@ link-local IP (169.254.100.1).  Two transports are used:
 Networking
 ----------
 * Device IP is always **169.254.100.1** (Tarana-specific link-local).
-* The provisioner host must be reachable at **169.254.100.2** on the
-  same VLAN interface so that aiohttp can ``local_addr``-bind correctly.
+* The provisioner host has ``169.254.100.2/24`` configured on **every**
+  per-port VLAN sub-interface (``eth0.1991`` .. ``eth0.1996``), so the
+  same bench-top address works regardless of which port the Tarana is
+  plugged into.  Because the subnet is duplicated across six interfaces,
+  the kernel has six overlapping routes for ``169.254.100.0/24`` and a
+  plain source-IP bind (aiohttp's ``local_addr=``) does **not** pick the
+  correct egress interface — packets get tagged with whichever VLAN
+  matches first (typically ``eth0.1991``) and never reach a Tarana on
+  any other port.  Every outbound TCP socket is therefore bound to the
+  device's specific VLAN sub-interface via ``SO_BINDTODEVICE``
+  (see ``_make_vlan_bound_connector``).  This is per-socket, so multiple
+  Taranas on different ports can be provisioned concurrently.
 * If the generic ``169.254.1.1`` is passed in, the handler silently
   rewrites it to ``169.254.100.1``.
 
@@ -83,6 +93,7 @@ The following gNMI paths are used and are known to work on G1 firmware
 
 import asyncio
 import logging
+import socket
 import struct
 import io
 from pathlib import Path
@@ -93,6 +104,50 @@ import aiohttp
 from .base import BaseHandler, DeviceInfo
 
 logger = logging.getLogger(__name__)
+
+
+# Source IP the Tarana handler binds on the Pi. Configured by port_manager on
+# every per-port VLAN sub-interface (see `PortConfig.secondary_ips`).
+_TARANA_HOST_IP = "169.254.100.2"
+
+
+def _make_vlan_bound_connector(interface: Optional[str]) -> aiohttp.TCPConnector:
+    """Build an aiohttp TCPConnector whose outbound sockets are bound to a
+    specific VLAN sub-interface via ``SO_BINDTODEVICE``.
+
+    Why this exists — ``port_manager`` adds ``169.254.100.2/24`` to every
+    per-port VLAN sub-interface (``eth0.1991`` .. ``eth0.1996``) so the same
+    bench-top source address can reach a Tarana on any port.  That means the
+    kernel has six overlapping routes for ``169.254.100.0/24``; binding only
+    the source IP (aiohttp's ``local_addr=``) does not determine the egress
+    interface, so packets get tagged with whichever VLAN matches first
+    (typically ``eth0.1991``) and never reach a Tarana on another port.
+    ``SO_BINDTODEVICE`` pins egress per-socket, so multiple handlers on
+    different ports can run concurrently without touching global routing
+    state.
+
+    Requires ``CAP_NET_RAW`` — the provisioner service runs as root.
+
+    If ``interface`` is ``None`` (direct-call / test contexts with no VLAN
+    pinning needed), returns a plain connector with source-IP binding only.
+    """
+    if not interface:
+        return aiohttp.TCPConnector(ssl=False)
+
+    iface_bytes = interface.encode()
+
+    def _factory(addr_info):
+        family, type_, proto, _canonname, _sockaddr = addr_info
+        sock = socket.socket(family=family, type=type_, proto=proto)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface_bytes)
+            sock.bind((_TARANA_HOST_IP, 0))
+        except Exception:
+            sock.close()
+            raise
+        return sock
+
+    return aiohttp.TCPConnector(ssl=False, socket_factory=_factory)
 
 
 # =============================================================================
@@ -815,12 +870,13 @@ class TaranaHandler(BaseHandler):
                     sock_read=None,   # no idle-read cap (upload is write-only)
                 )
 
-                local_addr = None
                 if self.interface:
-                    local_addr = ("169.254.100.2", 0)
-                    logger.info(f"Tarana: binding to local address {local_addr[0]} for interface {self.interface}")
+                    logger.info(
+                        f"Tarana: binding socket to interface {self.interface} "
+                        f"(source {_TARANA_HOST_IP}) via SO_BINDTODEVICE"
+                    )
 
-                connector = aiohttp.TCPConnector(ssl=False, local_addr=local_addr)
+                connector = _make_vlan_bound_connector(self.interface)
                 self._session = aiohttp.ClientSession(
                     connector=connector,
                     timeout=timeout
@@ -1778,8 +1834,7 @@ class TaranaHandler(BaseHandler):
         while asyncio.get_event_loop().time() - start_time < timeout:
             try:
                 # Try a simple gNMI request
-                local_addr = ("169.254.100.2", 0) if self.interface else None
-                connector = aiohttp.TCPConnector(ssl=False, local_addr=local_addr)
+                connector = _make_vlan_bound_connector(self.interface)
                 async with aiohttp.ClientSession(connector=connector) as session:
                     url = f"{self._base_url}/gnmi.gNMI/Get"
 

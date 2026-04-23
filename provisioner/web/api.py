@@ -1133,11 +1133,20 @@ async def upload_firmware(
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     dest_path = firmware_path / safe_filename
+    tmp_path = dest_path.with_suffix(dest_path.suffix + ".part")
 
     try:
-        with open(dest_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
+        # Stream to a .part file in chunks so memory stays bounded and a partial
+        # upload never leaves a truncated file in place under the real name.
+        bytes_written = 0
+        with open(tmp_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                bytes_written += len(chunk)
+        os.replace(tmp_path, dest_path)
 
         stat = dest_path.stat()
         return {
@@ -1153,6 +1162,11 @@ async def upload_firmware(
         }
     except Exception as e:
         logger.error(f"Failed to upload firmware: {e}")
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1243,6 +1257,52 @@ async def delete_firmware(
         return {"success": True, "message": f"Deleted {filename}"}
     except Exception as e:
         logger.error(f"Failed to delete firmware: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class FirmwareMoveRequest(BaseModel):
+    new_device_type: str
+
+
+@router.post("/firmware/{device_type}/{filename}/move")
+async def move_firmware(
+    request: Request,
+    device_type: str,
+    filename: str,
+    body: FirmwareMoveRequest,
+):
+    """Move a firmware file to a different device-type directory."""
+    src_type = _validate_device_type(device_type)
+    dst_type = _validate_device_type(body.new_device_type)
+    filename = _sanitize_path_component(filename)
+    data_path = _get_data_path(request)
+
+    src_path = data_path / "firmware" / src_type / filename
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail="Firmware file not found")
+
+    if src_type == dst_type:
+        return {"success": True, "message": "No change", "device_type": dst_type}
+
+    dst_dir = data_path / "firmware" / dst_type
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst_path = dst_dir / filename
+
+    if dst_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"{filename} already exists under {dst_type}",
+        )
+
+    try:
+        os.replace(src_path, dst_path)
+        return {
+            "success": True,
+            "message": f"Moved {filename} to {dst_type}",
+            "device_type": dst_type,
+        }
+    except Exception as e:
+        logger.error(f"Failed to move firmware: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

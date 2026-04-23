@@ -14,13 +14,14 @@ Architecture:
 """
 
 import asyncio
+import collections
 import logging
 import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable, Awaitable, Tuple, Union
+from typing import Any, Deque, Dict, List, Optional, Callable, Awaitable, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,14 @@ class ProvisioningChecklist:
     reboot: Optional[Union[bool, str]] = None
     verify: Optional[Union[bool, str]] = None
 
+    # Evolution Digital passive-qualification fields.  Populated only for ED
+    # refurb router qualification runs (no firmware/config flow).
+    link_qualification: Optional[Union[bool, str]] = None  # "loading" | "PASS" | "FAIL"
+    flap_count: Optional[str] = None  # String count rendered in UI
+    partner_port_connected: Optional[bool] = None  # Drives the red caution banner
+    result_reason: Optional[str] = None  # Human-readable verdict summary
+    vendor_oui: Optional[str] = None  # Upper-case "XX:XX:XX" prefix
+
     # Device identifiers discovered during provisioning
     mac_address: Optional[str] = None
     serial_number: Optional[str] = None
@@ -67,6 +76,11 @@ class ProvisioningChecklist:
             "firmware_update_2": self.firmware_update_2,
             "reboot": self.reboot,
             "verify": self.verify,
+            "link_qualification": self.link_qualification,
+            "flap_count": self.flap_count,
+            "partner_port_connected": self.partner_port_connected,
+            "result_reason": self.result_reason,
+            "vendor_oui": self.vendor_oui,
             "mac_address": self.mac_address,
             "serial_number": self.serial_number,
         }
@@ -83,6 +97,11 @@ class ProvisioningChecklist:
         self.firmware_update_2 = None
         self.reboot = None
         self.verify = None
+        self.link_qualification = None
+        self.flap_count = None
+        self.partner_port_connected = None
+        self.result_reason = None
+        self.vendor_oui = None
         self.mac_address = None
         self.serial_number = None
         self._device_fingerprint = None
@@ -160,6 +179,13 @@ class PortState:
     mode_config: Optional[Dict[str, Any]] = None  # Naming params used to configure mode
     ptp_link_id: Optional[str] = None  # Canonical PTP link ID, e.g. "tw05-tw12"
 
+    # Rolling buffer of (timestamp, link_up: bool, speed: Optional[str]) events
+    # recorded on every switch-port webhook. Used by the passive Evolution
+    # Digital handler to analyse flap patterns during refurb-qualification.
+    link_events: Deque[Tuple[float, bool, Optional[str]]] = field(
+        default_factory=lambda: collections.deque(maxlen=50)
+    )
+
 
 @dataclass
 class ManagementConfig:
@@ -169,6 +195,10 @@ class ManagementConfig:
     netmask: str = "255.255.255.0"
     switch_ip: Optional[str] = "192.168.88.1"  # Switch's IP on VLAN 1990 (for reference only)
     vlan: Optional[int] = 1990  # Management VLAN (tagged on trunk)
+    # Credentials used by the reconcile loop to query the switch directly.
+    # Optional — reconcile is disabled if either is missing.
+    switch_username: Optional[str] = None
+    switch_password: Optional[str] = None
 
 
 class PortManager:
@@ -216,8 +246,9 @@ class PortManager:
         self.ports: Dict[int, PortConfig] = {}
         self.port_states: Dict[int, PortState] = {}
 
-        # Callbacks
-        self._on_device_detected: List[Callable[[int, str, str], Awaitable[None]]] = []
+        # Callbacks. device_ip may be None for vendors detected passively
+        # (e.g., Evolution Digital), which have no reachable management IP.
+        self._on_device_detected: List[Callable[[int, str, Optional[str]], Awaitable[None]]] = []
 
         self._running = False
         self._initialized = False
@@ -426,11 +457,14 @@ class PortManager:
 
     def on_device_detected(
         self,
-        callback: Callable[[int, str, str], Awaitable[None]]
+        callback: Callable[[int, str, Optional[str]], Awaitable[None]]
     ) -> None:
         """Register callback for device detection.
 
-        Callback receives: (port_number, device_type, device_ip)
+        Callback receives: (port_number, device_type, device_ip).
+        device_ip may be None for passively-detected vendors (e.g., Evolution
+        Digital) that have no reachable management IP. Callers should read
+        device_mac from port_states[port_number] when ip is None.
         """
         self._on_device_detected.append(callback)
 
@@ -449,6 +483,104 @@ class PortManager:
     async def stop_monitoring(self) -> None:
         """Stop port monitoring."""
         self._running = False
+
+    # Interval between switch-state reconciles. The MikroTik port-monitor
+    # script only fires on *edge changes* and keeps its own lastState globals,
+    # so if either side restarts or a transition is dropped, the provisioner
+    # and switch can desync. This loop closes that gap.
+    SWITCH_RECONCILE_INTERVAL_SEC = 15
+
+    async def start_switch_reconcile_loop(self) -> None:
+        """Periodically query the MikroTik switch and correct drifted link state.
+
+        Webhooks from the switch remain authoritative for fast updates; this
+        loop just catches missed edges.
+        """
+        mgmt = self.management
+        if not mgmt.switch_ip or not mgmt.switch_username or not mgmt.switch_password:
+            logger.info("Switch reconcile disabled: missing switch credentials")
+            return
+        try:
+            import librouteros  # type: ignore  # noqa: F401
+        except ImportError:
+            logger.warning("Switch reconcile disabled: librouteros not installed")
+            return
+
+        logger.info(
+            f"Starting switch-state reconcile loop "
+            f"(every {self.SWITCH_RECONCILE_INTERVAL_SEC}s against {mgmt.switch_ip})"
+        )
+        while self._running:
+            try:
+                await self._reconcile_with_switch()
+            except Exception as e:
+                logger.debug(f"Switch reconcile iteration failed: {e}")
+            await asyncio.sleep(self.SWITCH_RECONCILE_INTERVAL_SEC)
+
+    async def _reconcile_with_switch(self) -> None:
+        """Query switch for running state and re-feed missed link events."""
+        import librouteros  # type: ignore
+        mgmt = self.management
+
+        def _fetch() -> Dict[str, bool]:
+            api = librouteros.connect(
+                host=mgmt.switch_ip,
+                username=mgmt.switch_username,
+                password=mgmt.switch_password,
+                timeout=3.0,
+            )
+            running: Dict[str, bool] = {}
+            try:
+                for row in api.path("/interface/ethernet").select():
+                    name = str(row.get("name", ""))
+                    if name.startswith("ether"):
+                        running[name] = bool(row.get("running", False))
+            finally:
+                try:
+                    api.close()
+                except Exception:
+                    pass
+            return running
+
+        loop = asyncio.get_event_loop()
+        running = await loop.run_in_executor(None, _fetch)
+        if not running:
+            return
+
+        for switch_port, is_running in running.items():
+            port_num = self._map_switch_port_to_port_num(switch_port)
+            if port_num is None or port_num not in self.port_states:
+                continue
+            state = self.port_states[port_num]
+            # Don't interfere with a port that is actively provisioning —
+            # the grace-period logic in handle_switch_port_event handles
+            # expected reboots and flaps during that window.
+            if state.provisioning:
+                continue
+            if state.link_up == is_running:
+                continue
+            logger.info(
+                f"Switch reconcile: port {port_num} drift — "
+                f"provisioner had link_up={state.link_up}, switch reports running={is_running}"
+            )
+            await self.handle_switch_port_event(
+                switch_port=switch_port,
+                link_up=is_running,
+                speed=None,
+            )
+            # If reconcile just drove the link down, the grace period used
+            # by _clear_port_state_on_disconnect preserved last_result /
+            # checklist for a 3-min "device changed networks" window. That
+            # grace only makes sense for webhook-driven disconnects; when
+            # the switch itself reports no link, nothing is plugged in and
+            # the lingering "COMPLETE" state is misleading.
+            if not is_running:
+                state.last_result = None
+                state.last_error = None
+                state.provision_attempted = False
+                state.provisioning_ended = None
+                state.checklist.reset()
+                self.clear_device_mode(port_num)
 
     # Grace period after provisioning before marking device as disconnected (seconds)
     PROVISIONING_GRACE_PERIOD = 180  # 3 minutes for firmware updates
@@ -599,6 +731,19 @@ class PortManager:
         ips_to_try = [ip for ip, _ in DeviceLinkLocalIP.ALL]
         logger.info(f"Detecting device on port {port_num} ({config.interface_name}), trying IPs: {ips_to_try}")
 
+        # Passive fingerprint FIRST: Evolution Digital refurb routers answer
+        # ARP for 169.254.100.1 on their LAN side (same address Tarana uses),
+        # so a pure IP probe mis-classifies them as Tarana. Sniff the VLAN
+        # briefly for an ED OUI before any IP probe; if seen, short-circuit
+        # to ED qualification. Real Tarana MACs aren't in the ED allowlist,
+        # so genuine Tarana devices fall through unchanged.
+        try:
+            await self._try_passive_detection(port_num, config, state, timeout_sec=4)
+            if state.device_detected:
+                return
+        except Exception as e:
+            logger.debug(f"Passive detection on port {port_num} failed: {e}")
+
         # Try each known device IP
         for device_ip, possible_types in DeviceLinkLocalIP.ALL:
             ping_result = await self._ping_device(config.interface_name, device_ip)
@@ -684,6 +829,80 @@ class PortManager:
                 return
 
         logger.warning(f"No known device detected on port {port_num}")
+
+    async def _try_passive_detection(
+        self,
+        port_num: int,
+        config: PortConfig,
+        state: PortState,
+        timeout_sec: int = 8,
+    ) -> None:
+        """Passive MAC-based fingerprint for vendors with no management IP.
+
+        Currently matches Evolution Digital refurb routers by OUI allowlist.
+        """
+        from .fingerprint import DeviceFingerprinter, DeviceType, is_evolution_digital_mac
+
+        # Read the Pi's MAC on this VLAN once so tcpdump can filter it out.
+        pi_mac = None
+        try:
+            with open(f"/sys/class/net/{config.interface_name}/address", "r") as f:
+                pi_mac = f.read().strip() or None
+        except OSError:
+            pass
+
+        fp = DeviceFingerprinter(interface=config.interface_name)
+        mac = await fp.sniff_for_known_mac(
+            interface=config.interface_name,
+            timeout_sec=timeout_sec,
+            pi_mac=pi_mac,
+        )
+        if not mac:
+            return
+
+        # We only match Evolution Digital for now — sniff_for_known_mac
+        # already restricts to the ED OUI allowlist.
+        if not is_evolution_digital_mac(mac):
+            return
+
+        device_type = DeviceType.EVOLUTION_DIGITAL.value
+        state.link_up = True
+        state.device_detected = True
+        state.device_type = device_type
+        state.device_ip = None
+        state.device_mac = mac
+        state.checklist.mac_address = mac
+        state.last_seen = asyncio.get_event_loop().time()
+
+        logger.info(
+            f"Passive-detected {device_type} on port {port_num} "
+            f"(MAC {mac}, no IP probe)"
+        )
+
+        if state.provision_attempted:
+            logger.debug(
+                f"Port {port_num} provisioning already attempted, skipping callback"
+            )
+            return
+
+        import time as _time
+        if (state.last_provisioned_at is not None and
+                _time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN):
+            elapsed = int(_time.time() - state.last_provisioned_at)
+            remaining = int(self.REPROVISION_COOLDOWN - elapsed)
+            logger.info(
+                f"Port {port_num} skipping auto-qualification "
+                f"(recently qualified {elapsed}s ago, cooldown {remaining}s remaining)"
+            )
+            state.provision_attempted = True
+            return
+
+        state.provision_attempted = True
+        for callback in self._on_device_detected:
+            try:
+                await callback(port_num, device_type, None)
+            except Exception as e:
+                logger.error(f"Callback error: {e}")
 
     async def _ping_device(self, interface: str, ip: str, arp_fallback: bool = True) -> bool:
         """Ping a device through a specific interface."""
@@ -984,6 +1203,24 @@ class PortManager:
             state.checklist.reset()
             logger.debug(f"Port {port_num} checklist reset")
 
+    def get_link_events_since(
+        self,
+        port_num: int,
+        since_ts: float,
+    ) -> List[Tuple[float, bool, Optional[str]]]:
+        """Return the list of (timestamp, link_up, speed) events recorded on
+        the given port at or after `since_ts`.
+
+        Used by the Evolution Digital handler to analyse flap patterns during
+        a bench-qualification watch window. The buffer is bounded per-port,
+        so long windows may miss the earliest events — callers should use
+        windows <= a few minutes.
+        """
+        state = self.port_states.get(port_num)
+        if not state:
+            return []
+        return [evt for evt in state.link_events if evt[0] >= since_ts]
+
     def get_port_status(self) -> Dict[int, Dict]:
         """Get status of all ports."""
         import time
@@ -1088,6 +1325,10 @@ class PortManager:
         logger.info(f"Switch event: port {port_num} ({switch_port}) link {'up' if link_up else 'down'}{speed_info}")
 
         import time
+
+        # Record the raw event in the per-port flap buffer before any state
+        # mutation. Used by the Evolution Digital passive qualifier.
+        state.link_events.append((time.time(), link_up, speed))
 
         if link_up:
             # Link came up - mark link up and start boot wait
