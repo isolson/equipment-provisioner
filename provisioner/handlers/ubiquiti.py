@@ -92,6 +92,10 @@ class UbiquitiHandler(BaseHandler):
         self._api_style: Optional[str] = None  # "airos" or "wave" once detected
         self.login_error: Optional[str] = None
         self._last_uploaded_firmware: Optional[str] = None  # Track for retry on FIRMWARE_INCOMPATIBLE
+        # Wave reports upgrade "finished" after upload, but actually applies firmware across
+        # one or two reboots. Stash the target so get_firmware_banks can wait for the live
+        # version to catch up before verification reads stale old-firmware values.
+        self._pending_fw_version: Optional[str] = None
 
     @property
     def device_type(self) -> str:
@@ -553,20 +557,44 @@ class UbiquitiHandler(BaseHandler):
         Wave devices have dual banks internally but only expose the running
         firmware version to users. Returns the same version for both banks.
 
+        If an upgrade was just staged (self._pending_fw_version is set), poll
+        the device-info endpoint until the live firmware matches — Wave reports
+        "finished" on upload but the actual apply continues across one or two
+        reboots, so a fresh read immediately after reconnect can still show the
+        old version.
+
         Returns:
             Dict with bank1, bank2, and active bank info.
         """
         if self._api_style != "wave":
             return {"bank1": "unknown", "bank2": "unknown", "active": 1}
 
-        # Get current firmware version from device info
+        pending = self._pending_fw_version
+        poll_timeout = 180 if pending else 0
+        poll_interval = 5
+        deadline = asyncio.get_event_loop().time() + poll_timeout
+
         fw_version = "unknown"
-        if self._device_info and self._device_info.firmware_version:
-            fw_version = self._device_info.firmware_version
-        else:
-            # Fetch fresh info if not cached
+        while True:
             info = await self.get_info()
             fw_version = info.firmware_version or "unknown"
+
+            if not pending or fw_version == pending:
+                break
+            if asyncio.get_event_loop().time() >= deadline:
+                logger.warning(
+                    f"[FIRMWARE] Timed out waiting for {self.ip} firmware to "
+                    f"settle at {pending} (still reporting {fw_version})"
+                )
+                break
+            logger.info(
+                f"[FIRMWARE] Device at {self.ip} still reports {fw_version}, "
+                f"waiting for {pending}..."
+            )
+            await asyncio.sleep(poll_interval)
+
+        if pending and fw_version == pending:
+            self._pending_fw_version = None
 
         # Wave only exposes one version - report it for both banks
         # The base handler will see both banks match expected and skip updates
@@ -1236,6 +1264,8 @@ class UbiquitiHandler(BaseHandler):
                         if status == "finished":
                             version = data.get("metadata", {}).get("version", "unknown")
                             logger.info(f"[FIRMWARE] Update complete: {version}")
+                            if version and version != "unknown":
+                                self._pending_fw_version = version
                             return True
 
                         if status == "failed" and failure_reason == "FIRMWARE_INCOMPATIBLE":
@@ -1316,6 +1346,8 @@ class UbiquitiHandler(BaseHandler):
                     if status == "finished":
                         version = data.get("metadata", {}).get("version", "unknown")
                         logger.info(f"[FIRMWARE] Update complete: {version}")
+                        if version and version != "unknown":
+                            self._pending_fw_version = version
                         return True
 
                     if status == "failed" and failure_reason == "FIRMWARE_INCOMPATIBLE":
