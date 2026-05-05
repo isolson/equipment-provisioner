@@ -51,6 +51,7 @@ EVOLUTION_DIGITAL_OUI_VENDORS = {
     # Kaon Group — confirmed on bench 2026-04-16
     "24:E4:CE": "Kaon",
     "84:01:12": "Kaon",
+    "18:34:AF": "Kaon",  # 1840AP, confirmed on bench 2026-05-05
     # Actiontec — common ED OEM prefixes
     "00:19:8B": "Actiontec",
     "00:26:62": "Actiontec",
@@ -243,12 +244,14 @@ class DeviceFingerprinter:
             return None
 
         if seen:
-            logger.debug(
+            level = logging.DEBUG if matched else logging.INFO
+            logger.log(
+                level,
                 f"Passive sniff on {interface}: saw {len(seen)} unique src MACs: "
-                f"{sorted(seen)}"
+                f"{sorted(seen)}",
             )
         else:
-            logger.debug(
+            logger.info(
                 f"Passive sniff on {interface}: no frames captured in {timeout_sec}s"
             )
         if matched:
