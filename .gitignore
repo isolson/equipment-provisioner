@@ -78,3 +78,6 @@ firmware/**/*.npk
 /var/
 /data/
 history.db
+
+# Claude Code workspace state
+.claude/

@@ -210,6 +210,56 @@ class TestDeviceDetailsExtraction:
         assert "Rocket" in fingerprint.model
 
 
+class TestEvolutionDigitalOUI:
+    """Tests for the Evolution Digital OUI allowlist used by passive sniff."""
+
+    def test_known_kaon_oui_matches(self):
+        from provisioner.fingerprint import is_evolution_digital_mac, evolution_digital_vendor_name
+        assert is_evolution_digital_mac("84:01:12:42:95:fe") is True
+        assert evolution_digital_vendor_name("84:01:12:42:95:fe") == "Kaon"
+
+    def test_kaon_1840ap_oui_resolves_to_kaon_not_adtran(self):
+        """OUI 18:34:AF belongs to the Kaon-built ED 1840AP refurb router.
+
+        The OUI was first added under "Adtran" by mistake (the model number
+        looks Adtran-ish). The hardware itself is Kaon, and the bench unit
+        with MAC 18:34:af:ab:b3:3f is a 1840AP. Misclassifying it would
+        surface the wrong OEM brand in the UI's model slot.
+        """
+        from provisioner.fingerprint import is_evolution_digital_mac, evolution_digital_vendor_name
+        assert is_evolution_digital_mac("18:34:af:ab:b3:3f") is True
+        assert evolution_digital_vendor_name("18:34:af:ab:b3:3f") == "Kaon"
+        assert evolution_digital_vendor_name("18:34:AF:00:00:01") == "Kaon"
+
+    def test_known_actiontec_oui_matches(self):
+        from provisioner.fingerprint import is_evolution_digital_mac, evolution_digital_vendor_name
+        assert is_evolution_digital_mac("70:f1:96:aa:bb:cc") is True
+        assert evolution_digital_vendor_name("70:f1:96:aa:bb:cc") == "Actiontec"
+
+    def test_known_adtran_oui_matches(self):
+        from provisioner.fingerprint import is_evolution_digital_mac, evolution_digital_vendor_name
+        assert is_evolution_digital_mac("00:a0:c8:11:22:33") is True
+        assert evolution_digital_vendor_name("00:a0:c8:11:22:33") == "Adtran"
+
+    def test_match_is_case_insensitive(self):
+        from provisioner.fingerprint import is_evolution_digital_mac
+        # OUI table is uppercase; raw frame source MACs come through lowercase.
+        assert is_evolution_digital_mac("84:01:12:00:00:01") is True
+        assert is_evolution_digital_mac("84:01:12:00:00:01".upper()) is True
+
+    def test_unknown_oui_does_not_match(self):
+        from provisioner.fingerprint import is_evolution_digital_mac, evolution_digital_vendor_name
+        # Real MAC seen on bench (China Hualu Group) — not an ED router.
+        assert is_evolution_digital_mac("2c:c8:1b:be:de:60") is False
+        assert evolution_digital_vendor_name("2c:c8:1b:be:de:60") is None
+
+    def test_short_or_empty_input_does_not_match(self):
+        from provisioner.fingerprint import is_evolution_digital_mac, evolution_digital_vendor_name
+        assert is_evolution_digital_mac("") is False
+        assert is_evolution_digital_mac("84:01") is False
+        assert evolution_digital_vendor_name("") is None
+
+
 class TestDeviceTypeEnum:
     """Tests for DeviceType enum values."""
 
@@ -220,6 +270,7 @@ class TestDeviceTypeEnum:
         assert DeviceType.TACHYON.value == "tachyon"
         assert DeviceType.TARANA.value == "tarana"
         assert DeviceType.UBIQUITI.value == "ubiquiti"
+        assert DeviceType.EVOLUTION_DIGITAL.value == "evolution_digital"
         assert DeviceType.UNKNOWN.value == "unknown"
 
     def test_device_type_is_string_enum(self):

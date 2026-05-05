@@ -141,24 +141,33 @@ class EvolutionDigitalHandler:
         )
         await asyncio.sleep(SETTLE_SECONDS)
 
+        # Initial partner check — may be None if the other port's passive
+        # sniff hasn't completed yet (a 10s sniff on a flapping ED router
+        # can finish well after this port's own 5s settle).
         partner_port = self._get_partner_port()
-        partner_present = partner_port is not None
 
         own_state = self.port_manager.port_states.get(self.port_num)
         if not own_state:
-            return "DEFECT", "port state missing", 0, partner_present
+            return "DEFECT", "port state missing", 0, False
         if not own_state.link_up:
-            return "DEFECT", "link down at window start", 0, partner_present
+            return "DEFECT", "link down at window start", 0, partner_port is not None
         if own_state.link_speed and own_state.link_speed != REQUIRED_LINK_SPEED:
             return (
                 "DEFECT",
                 f"link at {own_state.link_speed}, needs {REQUIRED_LINK_SPEED}",
                 0,
-                partner_present,
+                partner_port is not None,
             )
 
         t0 = time.time()
         await asyncio.sleep(WATCH_WINDOW_SECONDS)
+
+        # Re-check partner after the watch window. If the partner port got
+        # detected mid-window, the two ports should still classify symmetrically
+        # — otherwise whichever port qualified first would land on CAUTION
+        # (passed-but-solo) while the second lands on PASS.
+        partner_port = self._get_partner_port() or partner_port
+        partner_present = partner_port is not None
 
         own_events = self.port_manager.get_link_events_since(self.port_num, t0)
         partner_events: List[Tuple[float, bool, Optional[str]]] = []

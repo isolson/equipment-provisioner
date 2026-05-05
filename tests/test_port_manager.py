@@ -265,3 +265,150 @@ def test_get_single_port_status_link_speed_none_when_unset():
     status = manager._get_single_port_status(1)
     assert "link_speed" in status
     assert status["link_speed"] is None
+
+
+@pytest.mark.asyncio
+async def test_passive_detection_sniff_timeout_at_least_10s():
+    """Detection sniff window must be wide enough to cover ED router flap gaps.
+
+    ED Plume routers retry cloud-registration ~every 146s with brief link
+    drops. A 4s sniff window often coincided with a flap, captured zero
+    frames, and detection failed. The sniff window stays >=10s so we still
+    catch a frame between flaps.
+    """
+    manager = PortManager(num_ports=6)
+    manager._generate_port_configs()
+
+    captured_timeouts = []
+
+    async def fake_passive(port_num, config, state, timeout_sec):
+        captured_timeouts.append(timeout_sec)
+
+    async def fake_ping(*_args, **_kwargs):
+        return False
+
+    manager._try_passive_detection = fake_passive  # type: ignore[method-assign]
+    manager._ping_device = fake_ping  # type: ignore[method-assign]
+
+    await manager._detect_device_on_port(3)
+
+    assert captured_timeouts, "expected passive sniff to be invoked"
+    assert all(t >= 10 for t in captured_timeouts), (
+        f"sniff timeouts must be >=10s, got {captured_timeouts}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_passive_detection_skips_when_switch_link_down():
+    """Sniff must not run on a VLAN sub-interface whose switch port is down.
+
+    The MikroTik switch can flood/leak broadcast frames across VLANs, so a
+    cable plugged into ether5 may surface its source MAC on eth0.1992 too.
+    Without this guard, passive detection would phantom-mark ports 1/2/4/6
+    as "detected ED router" with link_up=True even though no cable is
+    physically connected to those switch ports.
+    """
+    manager = PortManager(num_ports=6)
+    manager._generate_port_configs()
+
+    sniff_calls = []
+
+    async def fake_sniff(self, interface, timeout_sec, pi_mac=None):
+        sniff_calls.append(interface)
+        return "84:01:12:42:95:fe"  # would match ED if we got here
+
+    config = manager.ports[2]
+    state = manager.port_states[2]
+    state.link_up = False  # switch never reported link-up for port 2
+
+    with patch(
+        "provisioner.fingerprint.DeviceFingerprinter.sniff_for_known_mac",
+        new=fake_sniff,
+    ):
+        await manager._try_passive_detection(2, config, state, timeout_sec=10)
+
+    assert sniff_calls == [], "must not sniff when switch link is down"
+    assert state.device_detected is False
+    assert state.device_type is None
+    assert state.device_mac is None
+
+
+@pytest.mark.asyncio
+async def test_passive_detection_does_not_force_link_up():
+    """A sniff match must not promote link_up from False to True.
+
+    Link state is owned by switch events. Passive detection only confirms
+    *what* is on a port whose switch already reports link-up — it must not
+    invent a link-up state from a stray VLAN-tagged frame.
+    """
+    manager = PortManager(num_ports=6)
+    manager._generate_port_configs()
+
+    async def fake_sniff(self, interface, timeout_sec, pi_mac=None):
+        return "84:01:12:42:95:fe"
+
+    config = manager.ports[2]
+    state = manager.port_states[2]
+    state.link_up = False
+
+    with patch(
+        "provisioner.fingerprint.DeviceFingerprinter.sniff_for_known_mac",
+        new=fake_sniff,
+    ):
+        await manager._try_passive_detection(2, config, state, timeout_sec=10)
+
+    assert state.link_up is False, "passive detection must not force link_up"
+
+
+@pytest.mark.asyncio
+async def test_passive_detection_discards_match_if_link_drops_during_sniff():
+    """If the link goes down while we're sniffing, drop any match we got.
+
+    The frame may have been leaked from another VLAN before the link-down
+    event arrived, so we shouldn't promote a port that's no longer up.
+    """
+    manager = PortManager(num_ports=6)
+    manager._generate_port_configs()
+
+    config = manager.ports[3]
+    state = manager.port_states[3]
+    state.link_up = True  # switch reports link is up at sniff start
+
+    async def fake_sniff(self, interface, timeout_sec, pi_mac=None):
+        # Simulate a link-down event arriving while we were blocked.
+        state.link_up = False
+        return "84:01:12:42:95:fe"
+
+    with patch(
+        "provisioner.fingerprint.DeviceFingerprinter.sniff_for_known_mac",
+        new=fake_sniff,
+    ):
+        await manager._try_passive_detection(3, config, state, timeout_sec=10)
+
+    assert state.device_detected is False
+    assert state.device_type is None
+    assert state.device_mac is None
+
+
+@pytest.mark.asyncio
+async def test_passive_detection_marks_detected_when_link_up_and_match():
+    """Happy path: switch link is up and sniff caught an ED MAC."""
+    manager = PortManager(num_ports=6)
+    manager._generate_port_configs()
+
+    config = manager.ports[5]
+    state = manager.port_states[5]
+    state.link_up = True
+
+    async def fake_sniff(self, interface, timeout_sec, pi_mac=None):
+        return "84:01:12:42:95:fe"
+
+    with patch(
+        "provisioner.fingerprint.DeviceFingerprinter.sniff_for_known_mac",
+        new=fake_sniff,
+    ):
+        await manager._try_passive_detection(5, config, state, timeout_sec=10)
+
+    assert state.device_detected is True
+    assert state.device_type == "evolution_digital"
+    assert state.device_mac == "84:01:12:42:95:fe"

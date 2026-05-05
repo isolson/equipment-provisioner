@@ -739,7 +739,10 @@ class PortManager:
         # to ED qualification. Real Tarana MACs aren't in the ED allowlist,
         # so genuine Tarana devices fall through unchanged.
         try:
-            await self._try_passive_detection(port_num, config, state, timeout_sec=4)
+            # 10s window: ED routers retry cloud-registration ~every 146s with
+            # brief link drops; a 4s sniff often coincided with a flap and
+            # captured zero frames before another OUI ever transmitted.
+            await self._try_passive_detection(port_num, config, state, timeout_sec=10)
             if state.device_detected:
                 return
         except Exception as e:
@@ -863,6 +866,14 @@ class PortManager:
         """
         from .fingerprint import DeviceFingerprinter, DeviceType, is_evolution_digital_mac
 
+        # Don't sniff (or trust frames from) a port whose switch hasn't
+        # reported link-up. A misconfigured switch — or a router transmitting
+        # tagged frames on multiple VLANs — can leak the device's MAC onto
+        # other VLAN sub-interfaces, which previously created phantom
+        # "detected" entries on ports that had no cable plugged in.
+        if not state.link_up:
+            return
+
         # Read the Pi's MAC on this VLAN once so tcpdump can filter it out.
         pi_mac = None
         try:
@@ -885,8 +896,16 @@ class PortManager:
         if not is_evolution_digital_mac(mac):
             return
 
+        # Re-check link_up after the (potentially long) sniff window — the
+        # switch may have signalled a link-down while we were blocked.
+        if not state.link_up:
+            logger.info(
+                f"Port {port_num} link went down during passive sniff; "
+                f"discarding match for {mac}"
+            )
+            return
+
         device_type = DeviceType.EVOLUTION_DIGITAL.value
-        state.link_up = True
         state.device_detected = True
         state.device_type = device_type
         state.device_ip = None
