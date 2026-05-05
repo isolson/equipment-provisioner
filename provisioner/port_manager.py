@@ -170,6 +170,7 @@ class PortState:
     checklist: ProvisioningChecklist = field(default_factory=ProvisioningChecklist)  # Step-by-step progress
     provision_attempted: bool = False  # True once provisioning has been attempted (prevents re-trigger)
     last_provisioned_at: Optional[float] = None  # Timestamp of last successful provisioning (survives disconnect)
+    last_provisioned_mac: Optional[str] = None  # MAC of the last successfully provisioned device — cooldown is bypassed when a different MAC appears
     expecting_reboot: bool = False  # True during planned reboots (firmware updates)
     provisioning_task: Optional[asyncio.Task] = None  # Reference to active provisioning task for cancellation
     link_down_grace_task: Optional[asyncio.Task] = None  # Delayed cancel task for link flaps during provisioning
@@ -770,10 +771,23 @@ class PortManager:
                     if not state.provision_attempted:
                         # Check reprovision cooldown — skip auto-provision if
                         # this device was successfully provisioned recently
-                        # (e.g. watchdog reboot, brief power cycle).
+                        # (e.g. watchdog reboot, brief power cycle). A MAC
+                        # change means a different physical device; bypass
+                        # the cooldown in that case.
                         import time as _time
-                        if (state.last_provisioned_at is not None and
-                                _time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN):
+                        current_mac = await self._lookup_neighbor_mac(config.interface_name, device_ip)
+                        if current_mac:
+                            state.device_mac = current_mac
+                        in_cooldown = (
+                            state.last_provisioned_at is not None
+                            and _time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN
+                        )
+                        same_device = (
+                            state.last_provisioned_mac is None
+                            or current_mac is None
+                            or current_mac == state.last_provisioned_mac
+                        )
+                        if in_cooldown and same_device:
                             elapsed = int(_time.time() - state.last_provisioned_at)
                             remaining = int(self.REPROVISION_COOLDOWN - elapsed)
                             logger.info(
@@ -782,6 +796,12 @@ class PortManager:
                             )
                             state.provision_attempted = True
                         else:
+                            if in_cooldown and not same_device:
+                                logger.info(
+                                    f"Port {port_num} new device ({current_mac}) replaced "
+                                    f"previously provisioned {state.last_provisioned_mac} — "
+                                    f"bypassing cooldown"
+                                )
                             state.provision_attempted = True
                             for callback in self._on_device_detected:
                                 try:
@@ -886,8 +906,15 @@ class PortManager:
             return
 
         import time as _time
-        if (state.last_provisioned_at is not None and
-                _time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN):
+        in_cooldown = (
+            state.last_provisioned_at is not None
+            and _time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN
+        )
+        same_device = (
+            state.last_provisioned_mac is None
+            or mac.lower() == state.last_provisioned_mac.lower()
+        )
+        if in_cooldown and same_device:
             elapsed = int(_time.time() - state.last_provisioned_at)
             remaining = int(self.REPROVISION_COOLDOWN - elapsed)
             logger.info(
@@ -896,6 +923,11 @@ class PortManager:
             )
             state.provision_attempted = True
             return
+        if in_cooldown and not same_device:
+            logger.info(
+                f"Port {port_num} new device ({mac}) replaced previously "
+                f"qualified {state.last_provisioned_mac} — bypassing cooldown"
+            )
 
         state.provision_attempted = True
         for callback in self._on_device_detected:
@@ -903,6 +935,36 @@ class PortManager:
                 await callback(port_num, device_type, None)
             except Exception as e:
                 logger.error(f"Callback error: {e}")
+
+    async def _lookup_neighbor_mac(self, interface: str, ip: str) -> Optional[str]:
+        """Look up a device's MAC from the kernel neighbor table.
+
+        Called right after a successful ping so the entry should be fresh.
+        Returns None if the neighbor is missing, FAILED, or has no lladdr.
+        """
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ip", "neigh", "show", "dev", interface, ip,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2)
+            line = stdout.decode("utf-8", errors="ignore").strip()
+            if not line or "FAILED" in line or "INCOMPLETE" in line:
+                return None
+            tokens = line.split()
+            if "lladdr" in tokens:
+                mac = tokens[tokens.index("lladdr") + 1].lower()
+                if mac and mac != "00:00:00:00:00:00":
+                    return mac
+        except asyncio.TimeoutError:
+            if proc:
+                proc.kill()
+                await proc.wait()
+        except Exception as e:
+            logger.debug(f"Neighbor lookup failed for {ip} on {interface}: {e}")
+        return None
 
     async def _ping_device(self, interface: str, ip: str, arp_fallback: bool = True) -> bool:
         """Ping a device through a specific interface."""
@@ -1083,6 +1145,7 @@ class PortManager:
                 if success:
                     state.provisioning_ended = time.time()
                     state.last_provisioned_at = time.time()
+                    state.last_provisioned_mac = state.device_mac
                     state.last_result = "success"
                     state.last_error = None
                 else:
