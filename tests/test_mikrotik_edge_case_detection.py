@@ -1,6 +1,7 @@
 """Tests for MikroTik detection edge cases and handler safety."""
 
 import asyncio
+from typing import Optional
 
 from provisioner.port_manager import PortManager
 
@@ -59,7 +60,7 @@ def test_mikrotik_fallback_detects_non_default_ip() -> None:
         ping_attempts.append(ip)
         return ip == "192.168.0.1"
 
-    async def fake_identify(_iface: str, ip: str, _possible_types: list[str]) -> str | None:
+    async def fake_identify(_iface: str, ip: str, _possible_types: list[str]) -> Optional[str]:
         if ip == "192.168.0.1":
             return "mikrotik"
         return None
