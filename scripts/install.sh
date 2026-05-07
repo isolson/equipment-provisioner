@@ -53,8 +53,10 @@ install_system_deps() {
             python3-venv \
             python3-dev \
             git \
+            curl \
             libffi-dev \
             libssl-dev \
+            libcap2-bin \
             build-essential \
             net-tools \
             iproute2 \
@@ -184,11 +186,11 @@ create_env_file() {
 # Edit this file with your actual credentials
 
 # Device passwords
-CAMBIUM_PASSWORD=your_cambium_password
-MIKROTIK_PASSWORD=your_mikrotik_password
-TARANA_PASSWORD=your_tarana_password
-TACHYON_PASSWORD=your_tachyon_password
-UBIQUITI_PASSWORD=your_ubiquiti_password
+CAMBIUM_PASSWORD=
+MIKROTIK_PASSWORD=
+TARANA_PASSWORD=
+TACHYON_PASSWORD=
+UBIQUITI_PASSWORD=
 
 # Notification webhooks (optional)
 SLACK_WEBHOOK_URL=
@@ -298,7 +300,8 @@ print_summary() {
     log_info "Installation complete!"
     echo ""
     # Show current IP since DHCP may have renewed
-    CURRENT_IP=$(ip -br addr show eth0 2>/dev/null | awk '{print $3}' | cut -d/ -f1)
+    SUMMARY_IFACE="${PROVISIONER_INTERFACE:-eth0}"
+    CURRENT_IP=$(ip -br addr show "${SUMMARY_IFACE}" 2>/dev/null | awk '{print $3}' | cut -d/ -f1)
     if [[ -n "$CURRENT_IP" ]]; then
         log_warn "NOTE: DHCP lease may have renewed during network setup"
         log_warn "Current IP address: ${CURRENT_IP}"
