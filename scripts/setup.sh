@@ -469,6 +469,12 @@ main() {
     detect_interface
 
     run_step step_install        || { log_error "Installation failed"; exit 1; }
+    # install.sh's copy_files() just laid down config.yaml from the repo
+    # template (which ships `interface: eth0`). Re-sync to the detected NIC
+    # so the Python runtime binds to the right interface from the first boot.
+    if [[ -f "${CONFIG_DIR}/config.yaml" ]]; then
+        sed -i "s/^  interface:.*/  interface: ${INTERFACE}/" "${CONFIG_DIR}/config.yaml" || true
+    fi
     run_step step_credentials    || log_warn "Skipped credentials — edit ${ENV_FILE} later"
     run_step step_prep_network   || { log_error "Network prep failed"; exit 1; }
     run_step step_wait_switch    || log_warn "Skipped switch wait"
