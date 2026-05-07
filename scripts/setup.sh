@@ -24,8 +24,9 @@ ENV_FILE="${CONFIG_DIR}/provisioner.env"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LOG_FILE="/var/log/provisioner-setup.log"
-INTERFACE="eth0"
-MGMT_VLAN_IFACE="${INTERFACE}.1990"
+# INTERFACE / MGMT_VLAN_IFACE are set by detect_interface() once we're root
+INTERFACE=""
+MGMT_VLAN_IFACE=""
 SWITCH_DEFAULT_IP="192.168.88.1"
 PI_MGMT_IP="192.168.88.10"
 
@@ -51,6 +52,40 @@ check_root() {
     if [[ $EUID -ne 0 ]]; then
         echo -e "${RED}Error: This script must be run as root (use sudo)${NC}"
         exit 1
+    fi
+}
+
+# Pick the primary wired ethernet interface. Mirrors image/first-boot.sh.
+# Honors $PROVISIONER_INTERFACE if set (caller override).
+detect_interface() {
+    if [[ -n "$PROVISIONER_INTERFACE" ]]; then
+        INTERFACE="$PROVISIONER_INTERFACE"
+    else
+        for dev in /sys/class/net/*; do
+            local devname
+            devname=$(basename "$dev")
+            [[ "$devname" == "lo" ]] && continue
+            [[ -d "$dev/wireless" ]] && continue
+            [[ -f "$dev/type" ]] && [[ "$(cat "$dev/type")" == "1" ]] || continue
+            case "$devname" in
+                eth*|end*|enp*|eno*|ens*) INTERFACE="$devname"; break ;;
+            esac
+            [[ -z "$INTERFACE" ]] && INTERFACE="$devname"
+        done
+    fi
+    if [[ -z "$INTERFACE" ]]; then
+        log_error "Could not auto-detect an ethernet interface."
+        ip -br link show
+        exit 1
+    fi
+    MGMT_VLAN_IFACE="${INTERFACE}.1990"
+    export PROVISIONER_INTERFACE="$INTERFACE"
+    log_info "Using ethernet interface: ${INTERFACE}"
+
+    # Keep config.yaml in sync so the Python runtime uses the right NIC
+    local cfg="${CONFIG_DIR}/config.yaml"
+    if [[ -f "$cfg" ]]; then
+        sed -i "s/^  interface:.*/  interface: ${INTERFACE}/" "$cfg" || true
     fi
 }
 
@@ -175,21 +210,33 @@ step_credentials() {
 step_prep_network() {
     log_step "[3/7] Preparing network for switch detection"
 
+    # Refuse to fake success if the interface doesn't exist
+    if ! ip link show "$INTERFACE" &>/dev/null; then
+        log_error "Interface ${INTERFACE} not found"
+        echo "  Available interfaces:"
+        ip -br link show | sed 's/^/    /'
+        return 1
+    fi
+
     # If the management VLAN already has the right IP, skip
     if ip addr show "$MGMT_VLAN_IFACE" 2>/dev/null | grep -q "${PI_MGMT_IP}"; then
         log_info "Management VLAN ${MGMT_VLAN_IFACE} already has ${PI_MGMT_IP} — skipping"
         return 0
     fi
 
-    # Ensure eth0 is up
-    ip link set "$INTERFACE" up 2>/dev/null || true
+    if ! ip link set "$INTERFACE" up; then
+        log_error "Failed to bring ${INTERFACE} up"
+        return 1
+    fi
 
     # Add temporary IP so we can reach the switch at its factory default
-    if ip addr show "$INTERFACE" 2>/dev/null | grep -q "${PI_MGMT_IP}"; then
+    if ip addr show "$INTERFACE" | grep -q "${PI_MGMT_IP}"; then
         log_info "Temporary IP ${PI_MGMT_IP} already on ${INTERFACE}"
-    else
-        ip addr add "${PI_MGMT_IP}/24" dev "$INTERFACE" 2>/dev/null || true
+    elif ip addr add "${PI_MGMT_IP}/24" dev "$INTERFACE"; then
         log_info "Added temporary ${PI_MGMT_IP}/24 on ${INTERFACE}"
+    else
+        log_error "Could not add ${PI_MGMT_IP}/24 to ${INTERFACE}"
+        return 1
     fi
 
     log_detail "This lets us reach the switch at ${SWITCH_DEFAULT_IP} before VLANs are active."
@@ -208,7 +255,7 @@ step_wait_switch() {
     fi
 
     echo ""
-    echo -e "  Plug your MikroTik switch into the OrangePi ethernet port now."
+    echo -e "  Plug your MikroTik switch into this server's ${INTERFACE} port now."
     echo -e "  Scanning for switch at ${SWITCH_DEFAULT_IP}..."
     echo ""
 
@@ -238,7 +285,7 @@ step_wait_switch() {
     echo ""
     echo "  Make sure:"
     echo "    - The switch is powered on"
-    echo "    - An ethernet cable connects the switch to the OrangePi"
+    echo "    - An ethernet cable connects the switch to this server"
     echo "    - The switch is at factory defaults (192.168.88.1)"
     echo ""
     return 1
@@ -395,7 +442,7 @@ step_start_services() {
     echo -e "  ${GREEN}${BOLD}║${NC}                                          ${GREEN}${BOLD}║${NC}"
     echo -e "  ${GREEN}${BOLD}║${NC}  Port 1-6   Provisioning devices         ${GREEN}${BOLD}║${NC}"
     echo -e "  ${GREEN}${BOLD}║${NC}  Port 7     WAN / Internet               ${GREEN}${BOLD}║${NC}"
-    echo -e "  ${GREEN}${BOLD}║${NC}  Port 8     OrangePi (trunk)             ${GREEN}${BOLD}║${NC}"
+    echo -e "  ${GREEN}${BOLD}║${NC}  Port 8     Server uplink (trunk)        ${GREEN}${BOLD}║${NC}"
     echo -e "  ${GREEN}${BOLD}║${NC}                                          ${GREEN}${BOLD}║${NC}"
     echo -e "  ${GREEN}${BOLD}║${NC}  Plug devices into ports 1-6 to start.   ${GREEN}${BOLD}║${NC}"
     echo -e "  ${GREEN}${BOLD}╚══════════════════════════════════════════╝${NC}"
@@ -419,7 +466,15 @@ main() {
     echo -e "${DIM}  Log: ${LOG_FILE}${NC}"
     echo ""
 
+    detect_interface
+
     run_step step_install        || { log_error "Installation failed"; exit 1; }
+    # install.sh's copy_files() just laid down config.yaml from the repo
+    # template (which ships `interface: eth0`). Re-sync to the detected NIC
+    # so the Python runtime binds to the right interface from the first boot.
+    if [[ -f "${CONFIG_DIR}/config.yaml" ]]; then
+        sed -i "s/^  interface:.*/  interface: ${INTERFACE}/" "${CONFIG_DIR}/config.yaml" || true
+    fi
     run_step step_credentials    || log_warn "Skipped credentials — edit ${ENV_FILE} later"
     run_step step_prep_network   || { log_error "Network prep failed"; exit 1; }
     run_step step_wait_switch    || log_warn "Skipped switch wait"

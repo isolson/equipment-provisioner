@@ -1,11 +1,11 @@
 #!/bin/bash
-# Deploy provisioner to the Pi at 192.168.1.120
+# Deploy provisioner code to the running provisioner host.
 # Usage: ./scripts/deploy.sh
 
 set -e
 
-TARGET_HOST="192.168.10.120"
-TARGET_USER="orangepi"
+TARGET_HOST="${PROVISIONER_HOST:-192.168.10.158}"
+TARGET_USER="${PROVISIONER_USER:-serveradmin}"
 TARGET_PATH="/opt/provisioner"
 
 echo "Deploying to ${TARGET_USER}@${TARGET_HOST}:${TARGET_PATH}..."

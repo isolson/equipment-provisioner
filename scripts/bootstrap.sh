@@ -36,5 +36,13 @@ else
     git clone "$REPO_URL" "$INSTALL_DIR"
 fi
 
-# Hand off to the unified setup script
-exec bash "${INSTALL_DIR}/scripts/setup.sh"
+# Hand off to the unified setup script.
+# When invoked via `curl ... | sudo bash`, our stdin is the curl pipe (the
+# script itself), so any `read` in setup.sh would hit EOF and the retry loops
+# would spin forever. Re-open stdin from /dev/tty when one is available so the
+# wizard can prompt the user.
+if [ ! -t 0 ] && [ -e /dev/tty ]; then
+    exec bash "${INSTALL_DIR}/scripts/setup.sh" < /dev/tty
+else
+    exec bash "${INSTALL_DIR}/scripts/setup.sh"
+fi

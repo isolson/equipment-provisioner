@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Network Device Auto-Provisioner Installation Script
-# For OrangePi and similar ARM Linux devices
+# Runs on x86_64 Linux (Debian/Ubuntu) or ARM (OrangePi/RPi).
 #
 
 set -e
@@ -53,8 +53,10 @@ install_system_deps() {
             python3-venv \
             python3-dev \
             git \
+            curl \
             libffi-dev \
             libssl-dev \
+            libcap2-bin \
             build-essential \
             net-tools \
             iproute2 \
@@ -184,11 +186,11 @@ create_env_file() {
 # Edit this file with your actual credentials
 
 # Device passwords
-CAMBIUM_PASSWORD=your_cambium_password
-MIKROTIK_PASSWORD=your_mikrotik_password
-TARANA_PASSWORD=your_tarana_password
-TACHYON_PASSWORD=your_tachyon_password
-UBIQUITI_PASSWORD=your_ubiquiti_password
+CAMBIUM_PASSWORD=
+MIKROTIK_PASSWORD=
+TARANA_PASSWORD=
+TACHYON_PASSWORD=
+UBIQUITI_PASSWORD=
 
 # Notification webhooks (optional)
 SLACK_WEBHOOK_URL=
@@ -298,7 +300,8 @@ print_summary() {
     log_info "Installation complete!"
     echo ""
     # Show current IP since DHCP may have renewed
-    CURRENT_IP=$(ip -br addr show eth0 2>/dev/null | awk '{print $3}' | cut -d/ -f1)
+    SUMMARY_IFACE="${PROVISIONER_INTERFACE:-eth0}"
+    CURRENT_IP=$(ip -br addr show "${SUMMARY_IFACE}" 2>/dev/null | awk '{print $3}' | cut -d/ -f1)
     if [[ -n "$CURRENT_IP" ]]; then
         log_warn "NOTE: DHCP lease may have renewed during network setup"
         log_warn "Current IP address: ${CURRENT_IP}"
@@ -316,7 +319,7 @@ print_summary() {
     echo "  1. Configure your Mikrotik switch:"
     echo "     - Import configs/templates/mikrotik_switch_provisioner.rsc"
     echo "     - Or manually configure VLANs 1991-1996 on ports 1-6, WAN on port 7, trunk on port 8"
-    echo "  2. Connect OrangePi to switch port 8 (trunk port)"
+    echo "  2. Connect this server to switch port 8 (trunk port)"
     echo "  3. Connect router/internet to switch port 7 (WAN port)"
     echo "  4. Edit ${CONFIG_DIR}/config.yaml with your settings"
     echo "  5. Edit ${CONFIG_DIR}/provisioner.env with your credentials"
@@ -331,7 +334,7 @@ print_summary() {
     echo "  Port 5 (ether5): Provisioning - VLAN 1995"
     echo "  Port 6 (ether6): Provisioning - VLAN 1996"
     echo "  Port 7 (ether7): WAN/Internet uplink"
-    echo "  Port 8 (ether8): Trunk to OrangePi"
+    echo "  Port 8 (ether8): Trunk to provisioner host"
     echo ""
 }
 
