@@ -291,7 +291,7 @@ echo -e "  ${GREEN}${BOLD}║${NC}  Web UI:  ${CYAN}http://${PI_IP}:8080${NC}$(p
 echo -e "  ${GREEN}${BOLD}║${NC}                                          ${GREEN}${BOLD}║${NC}"
 echo -e "  ${GREEN}${BOLD}║${NC}  Port 1-6   Provisioning devices         ${GREEN}${BOLD}║${NC}"
 echo -e "  ${GREEN}${BOLD}║${NC}  Port 7     WAN / Internet               ${GREEN}${BOLD}║${NC}"
-echo -e "  ${GREEN}${BOLD}║${NC}  Port 8     OrangePi (trunk)             ${GREEN}${BOLD}║${NC}"
+echo -e "  ${GREEN}${BOLD}║${NC}  Port 8     Server uplink (trunk)        ${GREEN}${BOLD}║${NC}"
 echo -e "  ${GREEN}${BOLD}║${NC}                                          ${GREEN}${BOLD}║${NC}"
 echo -e "  ${GREEN}${BOLD}║${NC}  Plug devices into ports 1-6 to start.   ${GREEN}${BOLD}║${NC}"
 echo -e "  ${GREEN}${BOLD}╚══════════════════════════════════════════╝${NC}"
