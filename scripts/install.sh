@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Network Device Auto-Provisioner Installation Script
-# For OrangePi and similar ARM Linux devices
+# Runs on x86_64 Linux (Debian/Ubuntu) or ARM (OrangePi/RPi).
 #
 
 set -e
@@ -319,7 +319,7 @@ print_summary() {
     echo "  1. Configure your Mikrotik switch:"
     echo "     - Import configs/templates/mikrotik_switch_provisioner.rsc"
     echo "     - Or manually configure VLANs 1991-1996 on ports 1-6, WAN on port 7, trunk on port 8"
-    echo "  2. Connect OrangePi to switch port 8 (trunk port)"
+    echo "  2. Connect this server to switch port 8 (trunk port)"
     echo "  3. Connect router/internet to switch port 7 (WAN port)"
     echo "  4. Edit ${CONFIG_DIR}/config.yaml with your settings"
     echo "  5. Edit ${CONFIG_DIR}/provisioner.env with your credentials"
@@ -334,7 +334,7 @@ print_summary() {
     echo "  Port 5 (ether5): Provisioning - VLAN 1995"
     echo "  Port 6 (ether6): Provisioning - VLAN 1996"
     echo "  Port 7 (ether7): WAN/Internet uplink"
-    echo "  Port 8 (ether8): Trunk to OrangePi"
+    echo "  Port 8 (ether8): Trunk to provisioner host"
     echo ""
 }
 

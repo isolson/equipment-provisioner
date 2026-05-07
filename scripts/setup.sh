@@ -81,6 +81,12 @@ detect_interface() {
     MGMT_VLAN_IFACE="${INTERFACE}.1990"
     export PROVISIONER_INTERFACE="$INTERFACE"
     log_info "Using ethernet interface: ${INTERFACE}"
+
+    # Keep config.yaml in sync so the Python runtime uses the right NIC
+    local cfg="${CONFIG_DIR}/config.yaml"
+    if [[ -f "$cfg" ]]; then
+        sed -i "s/^  interface:.*/  interface: ${INTERFACE}/" "$cfg" || true
+    fi
 }
 
 # Read a value from the existing .env file
