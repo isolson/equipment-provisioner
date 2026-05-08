@@ -1,0 +1,12 @@
+/var/log/provisioner.log
+/var/log/provisioner-setup.log
+/var/log/provisioner-firstboot.log
+{
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

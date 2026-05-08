@@ -97,25 +97,31 @@ read_env_value() {
     fi
 }
 
-# Prompt for a password, showing masked current value
+# Prompt for a password, showing masked current value.
+# Stdout is captured by the caller via $(prompt_password ...), so any visual
+# output (the trailing newline after the silent password input, the prompt
+# itself) MUST go to stderr — otherwise it leaks into the captured value as
+# a leading newline, which then breaks `sed -i` in set_env_value.
 prompt_password() {
     local label=$1
     local env_key=$2
-    local current
+    local current value
     current=$(read_env_value "$env_key")
+    # Treat legacy stub values as empty
+    [[ "$current" == "your_"* ]] && current=""
 
-    if [[ -n "$current" && "$current" != "your_"* ]]; then
+    if [[ -n "$current" ]]; then
         local masked="${current:0:2}$(printf '*%.0s' $(seq 1 $((${#current} - 2))))"
         read -rsp "  ${label} [${masked}]: " value
     else
         read -rsp "  ${label}: " value
     fi
-    echo ""
+    echo "" >&2
 
     if [[ -n "$value" ]]; then
-        echo "$value"
+        printf '%s' "$value"
     else
-        echo "$current"
+        printf '%s' "$current"
     fi
 }
 
@@ -189,17 +195,19 @@ step_credentials() {
     echo -e "  Press Enter to keep existing values."
     echo ""
 
-    local cambium_pw tarana_pw tachyon_pw ubiquiti_pw
+    local cambium_pw tarana_pw tachyon_pw ubiquiti_pw mikrotik_pw
 
     cambium_pw=$(prompt_password "Cambium password" "CAMBIUM_PASSWORD")
     tarana_pw=$(prompt_password "Tarana password" "TARANA_PASSWORD")
     tachyon_pw=$(prompt_password "Tachyon password" "TACHYON_PASSWORD")
     ubiquiti_pw=$(prompt_password "Ubiquiti password" "UBIQUITI_PASSWORD")
+    mikrotik_pw=$(prompt_password "MikroTik password" "MIKROTIK_PASSWORD")
 
-    [[ -n "$cambium_pw" ]] && set_env_value "CAMBIUM_PASSWORD" "$cambium_pw"
-    [[ -n "$tarana_pw" ]] && set_env_value "TARANA_PASSWORD" "$tarana_pw"
-    [[ -n "$tachyon_pw" ]] && set_env_value "TACHYON_PASSWORD" "$tachyon_pw"
+    [[ -n "$cambium_pw" ]]  && set_env_value "CAMBIUM_PASSWORD" "$cambium_pw"
+    [[ -n "$tarana_pw" ]]   && set_env_value "TARANA_PASSWORD" "$tarana_pw"
+    [[ -n "$tachyon_pw" ]]  && set_env_value "TACHYON_PASSWORD" "$tachyon_pw"
     [[ -n "$ubiquiti_pw" ]] && set_env_value "UBIQUITI_PASSWORD" "$ubiquiti_pw"
+    [[ -n "$mikrotik_pw" ]] && set_env_value "MIKROTIK_PASSWORD" "$mikrotik_pw"
 
     log_info "Credentials saved to ${ENV_FILE}"
 }

@@ -160,6 +160,12 @@ copy_files() {
     # Copy systemd services
     cp "${INSTALL_DIR}/systemd/provisioner.service" "/etc/systemd/system/${SERVICE_NAME}.service"
     cp "${INSTALL_DIR}/systemd/provisioner-web.service" "/etc/systemd/system/${SERVICE_NAME}-web.service"
+
+    # Install logrotate config (idempotent: replace if shipped version changes)
+    if [[ -f "${INSTALL_DIR}/systemd/provisioner.logrotate" ]]; then
+        cp "${INSTALL_DIR}/systemd/provisioner.logrotate" /etc/logrotate.d/provisioner
+        chmod 644 /etc/logrotate.d/provisioner
+    fi
 }
 
 # Create Python virtual environment and install dependencies
@@ -402,8 +408,15 @@ xset -dpms
 # Hide cursor after 3 seconds of inactivity
 unclutter -idle 3 -root &
 
-# Wait for network and web server
-sleep 5
+# Wait for the web service to be ready before launching the browser.
+# Without this, on a slow boot Chromium loads before provisioner-web is up
+# and lands on its default error page (which the kiosk can't escape from).
+for i in \$(seq 1 60); do
+    if curl -fsS -o /dev/null --max-time 2 http://localhost:8080/; then
+        break
+    fi
+    sleep 1
+done
 
 # Start Chromium in kiosk mode
 ${CHROMIUM_BIN} \\
@@ -455,6 +468,11 @@ AUTOLOGIN
 BROWSER="${CHROMIUM_BIN}"
 while true; do
     if ! pgrep -x "\${BROWSER}" > /dev/null && ! pgrep -x "chromium" > /dev/null; then
+        # Wait for web service to be ready before re-launching
+        for i in \$(seq 1 30); do
+            curl -fsS -o /dev/null --max-time 2 http://localhost:8080/ && break
+            sleep 1
+        done
         sudo -u kiosk DISPLAY=:0 \${BROWSER} \\
             --kiosk \\
             --noerrdialogs \\
