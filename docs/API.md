@@ -164,6 +164,41 @@ Only `port_number` is required. All other fields are optional.
 - `409` — Port already provisioning
 - `503` — Provisioner not available
 
+### POST /netinstall
+
+Run MikroTik Netinstall on a port. Used when the device is in BOOTP / Netinstall
+listening mode (reset button held during power-on). Flashes RouterOS firmware,
+then SSHes in and applies the base-flash configuration.
+
+This endpoint is also called automatically by the per-port BOOTP sniffer when
+a device is detected in Netinstall mode, so for normal usage the tech does not
+need to invoke it directly. See [docs/mikrotik-netinstall.md](mikrotik-netinstall.md).
+
+**Request:**
+```json
+{
+  "port_number": 5
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "job_id": null,
+  "message": "Netinstall started for port 5"
+}
+```
+
+The request returns immediately; the Netinstall pipeline runs in the background
+(typical duration: 2–4 minutes). Progress is surfaced via the same checklist /
+websocket events as other provisioning operations.
+
+**Errors:**
+- `404` — Port not found
+- `409` — Port already provisioning
+- `503` — Provisioner not available
+
 ## Credentials
 
 ### POST /credentials
