@@ -322,12 +322,21 @@ class MikrotikHandler(BaseHandler):
         return self._normalize_version(resource.get("version")) or "unknown"
 
     async def wait_for_reboot(self, timeout: int = 180) -> bool:
-        """Wait for device to reboot and accept SSH again."""
+        """Wait for device to reboot and accept SSH again.
+
+        Distinguishes "network down" (connection-refused / timeout — device
+        rebooting) from "network up, auth failed" (PermissionDenied — device
+        booted but credentials are wrong). The latter means the device IS
+        back; we just can't log in, so we surface a different failure note.
+        """
+        import asyncssh
+
         logger.info(f"Waiting for {self.ip} to come back online...")
         await asyncio.sleep(3)
 
         start = asyncio.get_event_loop().time()
         saw_offline = False
+        last_auth_failure = False
 
         while asyncio.get_event_loop().time() - start < timeout:
             try:
@@ -343,12 +352,25 @@ class MikrotikHandler(BaseHandler):
                 if saw_offline or elapsed >= 20:
                     logger.info(f"{self.ip} is back online")
                     return True
+            except asyncssh.PermissionDenied:
+                # Device is reachable but our credentials don't work. That's
+                # a "back online" signal for connectivity purposes, but the
+                # caller will still fail at the next step (connect()). Track
+                # so the timeout message can be more informative.
+                last_auth_failure = True
+                saw_offline = True
             except Exception:
                 saw_offline = True
 
             await asyncio.sleep(5)
 
-        logger.error(f"{self.ip} did not come back online within {timeout}s")
+        if last_auth_failure:
+            logger.error(
+                f"{self.ip} is reachable but rejected credentials within {timeout}s "
+                f"(user={self.credentials.get('username')!r}) — check post-flash auth setup"
+            )
+        else:
+            logger.error(f"{self.ip} did not come back online within {timeout}s")
         return False
 
     def _credential_candidates(self) -> list[Dict[str, str]]:
@@ -509,13 +531,31 @@ class MikrotikHandler(BaseHandler):
     NETINSTALL_TIMEOUT = 300  # 5 minutes
     # netinstall-cli requires the client IP to live in a subnet on the bound
     # interface. Per-port VLAN interfaces only carry 192.168.88.11/32 (port
-    # isolation), which fails that check. We add a transient /24 on an unused
-    # range around the call so there's no collision with the management VLAN's
-    # 192.168.88.0/24. Cleared in a finally block so the iface stays clean.
-    NETINSTALL_HOST_ADDR = "10.255.5.11/24"
-    NETINSTALL_CLIENT_IP = "10.255.5.1"
+    # isolation), which fails that check. We add a transient /24 in unused
+    # 10.255.<vlan>.0/24 space — derived from the VLAN id so that concurrent
+    # Netinstalls on different ports get distinct subnets and don't share a
+    # kernel route. No collision with management VLAN's 192.168.88.0/24.
+    # Cleared in a finally block so the iface stays clean.
+    NETINSTALL_HOST_ADDR_FMT = "10.255.{octet}.11/24"
+    NETINSTALL_CLIENT_IP_FMT = "10.255.{octet}.1"
 
     BOOTSTRAP_USER = "fleet-bootstrap"
+
+    @classmethod
+    def _netinstall_octet_for_interface(cls, interface: str) -> int:
+        """Derive a unique /24 octet (0-255) per VLAN sub-interface.
+
+        eno1.1995 → 1995 → 1995 mod 256 = 203
+        Distinct for any two VLAN IDs ≤ 255 apart, which covers all per-port
+        VLANs we currently provision.
+        """
+        if "." not in interface:
+            return 5  # legacy fallback for non-VLAN callers
+        try:
+            vlan = int(interface.rsplit(".", 1)[1])
+        except ValueError:
+            return 5
+        return vlan % 256
 
     async def netinstall(
         self,
@@ -553,11 +593,16 @@ class MikrotikHandler(BaseHandler):
             logger.error(f"Firmware files not found: {missing}")
             return False
 
+        octet = self._netinstall_octet_for_interface(interface)
+        host_addr = self.NETINSTALL_HOST_ADDR_FMT.format(octet=octet)
+        client_ip = self.NETINSTALL_CLIENT_IP_FMT.format(octet=octet)
+
         cmd = [
             self.NETINSTALL_CLI,
             "-i", interface,
-            "-a", self.NETINSTALL_CLIENT_IP,
+            "-a", client_ip,
             "-r",
+            "-c",  # allow concurrent netinstall servers across ports
         ]
 
         userscript_path: Optional[str] = None
@@ -596,7 +641,7 @@ class MikrotikHandler(BaseHandler):
         if on_progress:
             await on_progress("netinstall", "running", "Waiting for device in BOOTP mode...")
 
-        addr_added = await self._add_netinstall_addr(interface)
+        addr_added = await self._add_netinstall_addr(interface, host_addr)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -636,17 +681,17 @@ class MikrotikHandler(BaseHandler):
             return False
         finally:
             if addr_added:
-                await self._remove_netinstall_addr(interface)
+                await self._remove_netinstall_addr(interface, host_addr)
             if userscript_path:
                 try:
                     os.unlink(userscript_path)
                 except OSError:
                     pass
 
-    async def _add_netinstall_addr(self, interface: str) -> bool:
+    async def _add_netinstall_addr(self, interface: str, host_addr: str) -> bool:
         """Add the transient /24 needed by netinstall-cli's subnet check."""
         proc = await asyncio.create_subprocess_exec(
-            "ip", "addr", "add", self.NETINSTALL_HOST_ADDR, "dev", interface,
+            "ip", "addr", "add", host_addr, "dev", interface,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -657,19 +702,19 @@ class MikrotikHandler(BaseHandler):
         if "File exists" in err:
             # Leftover from an aborted prior run; keep it and reuse.
             return True
-        logger.error(f"Failed to add {self.NETINSTALL_HOST_ADDR} to {interface}: {err}")
+        logger.error(f"Failed to add {host_addr} to {interface}: {err}")
         return False
 
-    async def _remove_netinstall_addr(self, interface: str) -> None:
+    async def _remove_netinstall_addr(self, interface: str, host_addr: str) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "ip", "addr", "del", self.NETINSTALL_HOST_ADDR, "dev", interface,
+            "ip", "addr", "del", host_addr, "dev", interface,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             logger.warning(
-                f"Failed to remove {self.NETINSTALL_HOST_ADDR} from {interface}: "
+                f"Failed to remove {host_addr} from {interface}: "
                 f"{stderr.decode().strip()}"
             )
 

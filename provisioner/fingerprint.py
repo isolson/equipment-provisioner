@@ -260,6 +260,44 @@ class DeviceFingerprinter:
             )
         return matched
 
+    @staticmethod
+    def parse_bootp_request_mac(frame: bytes) -> Optional[str]:
+        """Return BOOTP client MAC from a raw Ethernet/IPv4/UDP/BOOTP frame, or None.
+
+        Pulled out of the sniff loop so it can be unit-tested with crafted frames.
+        Matches op=1 (BOOTREQUEST), htype=1 (Ethernet), hlen=6 (MAC),
+        UDP src=68 dst=67, ethertype IPv4.
+        """
+        # Ethernet (14) + IPv4 (≥20) + UDP (8) + BOOTP (≥44) = ≥86
+        if len(frame) < 86:
+            return None
+        # Ethertype IPv4
+        if frame[12:14] != b"\x08\x00":
+            return None
+        # IPv4 header length
+        ihl = (frame[14] & 0x0F) * 4
+        if ihl < 20:
+            return None
+        # Protocol = UDP (17)
+        if frame[14 + 9] != 17:
+            return None
+        udp_off = 14 + ihl
+        if len(frame) < udp_off + 8 + 44:
+            return None
+        src_port = int.from_bytes(frame[udp_off:udp_off + 2], "big")
+        dst_port = int.from_bytes(frame[udp_off + 2:udp_off + 4], "big")
+        # BOOTP client → server traffic
+        if src_port != 68 or dst_port != 67:
+            return None
+        bootp_off = udp_off + 8
+        # op=1 (BOOTREQUEST), htype=1 (Ethernet), hlen=6 (MAC)
+        if frame[bootp_off] != 1 or frame[bootp_off + 1] != 1 or frame[bootp_off + 2] != 6:
+            return None
+        chaddr = frame[bootp_off + 28:bootp_off + 28 + 6]
+        if len(chaddr) != 6 or chaddr == b"\x00" * 6:
+            return None
+        return ":".join(f"{b:02x}" for b in chaddr)
+
     async def sniff_for_bootp_request(
         self,
         interface: str,
@@ -269,8 +307,7 @@ class DeviceFingerprinter:
 
         A MikroTik device in Netinstall/BOOTP listening mode broadcasts BOOTP
         request packets (op=1) from 0.0.0.0:68 to 255.255.255.255:67. The
-        device's MAC appears in the BOOTP `chaddr` field. We parse the L2/L3/L4
-        headers manually rather than depend on scapy at runtime.
+        device's MAC appears in the BOOTP `chaddr` field.
 
         Returns the client MAC (colon-separated lowercase) of the first
         BOOTP request seen, or None if nothing matched within the timeout.
@@ -294,36 +331,9 @@ class DeviceFingerprinter:
                         data, _addr = sock.recvfrom(1500)
                     except socket.timeout:
                         continue
-
-                    # Ethernet (14) + IPv4 (≥20) + UDP (8) + BOOTP (≥44) = ≥86
-                    if len(data) < 86:
-                        continue
-                    # Ethertype IPv4
-                    if data[12:14] != b"\x08\x00":
-                        continue
-                    # IPv4 header
-                    ihl = (data[14] & 0x0F) * 4
-                    if ihl < 20:
-                        continue
-                    # Protocol = UDP (17)
-                    if data[14 + 9] != 17:
-                        continue
-                    udp_off = 14 + ihl
-                    if len(data) < udp_off + 8 + 44:
-                        continue
-                    src_port = int.from_bytes(data[udp_off:udp_off + 2], "big")
-                    dst_port = int.from_bytes(data[udp_off + 2:udp_off + 4], "big")
-                    # BOOTP client → server traffic
-                    if src_port != 68 or dst_port != 67:
-                        continue
-                    bootp_off = udp_off + 8
-                    # op=1 (BOOTREQUEST), htype=1 (Ethernet), hlen=6 (MAC)
-                    if data[bootp_off] != 1 or data[bootp_off + 1] != 1 or data[bootp_off + 2] != 6:
-                        continue
-                    chaddr = data[bootp_off + 28:bootp_off + 28 + 6]
-                    if len(chaddr) != 6 or chaddr == b"\x00" * 6:
-                        continue
-                    return ":".join(f"{b:02x}" for b in chaddr)
+                    mac = DeviceFingerprinter.parse_bootp_request_mac(data)
+                    if mac is not None:
+                        return mac
             except PermissionError:
                 logger.error(
                     f"BOOTP sniff on {interface}: missing CAP_NET_RAW "
