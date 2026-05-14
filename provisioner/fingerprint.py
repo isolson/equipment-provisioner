@@ -260,6 +260,92 @@ class DeviceFingerprinter:
             )
         return matched
 
+    async def sniff_for_bootp_request(
+        self,
+        interface: str,
+        timeout_sec: int = 30,
+    ) -> Optional[str]:
+        """Sniff a VLAN sub-interface for a BOOTP request (MikroTik Netinstall).
+
+        A MikroTik device in Netinstall/BOOTP listening mode broadcasts BOOTP
+        request packets (op=1) from 0.0.0.0:68 to 255.255.255.255:67. The
+        device's MAC appears in the BOOTP `chaddr` field. We parse the L2/L3/L4
+        headers manually rather than depend on scapy at runtime.
+
+        Returns the client MAC (colon-separated lowercase) of the first
+        BOOTP request seen, or None if nothing matched within the timeout.
+        Requires CAP_NET_RAW.
+        """
+        def _blocking_sniff() -> Optional[str]:
+            sock = None
+            try:
+                sock = socket.socket(
+                    socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003)
+                )
+                sock.bind((interface, 0))
+                import time as _t
+                deadline = _t.monotonic() + timeout_sec
+                while _t.monotonic() < deadline:
+                    remaining = deadline - _t.monotonic()
+                    if remaining <= 0:
+                        break
+                    sock.settimeout(min(0.5, remaining))
+                    try:
+                        data, _addr = sock.recvfrom(1500)
+                    except socket.timeout:
+                        continue
+
+                    # Ethernet (14) + IPv4 (≥20) + UDP (8) + BOOTP (≥44) = ≥86
+                    if len(data) < 86:
+                        continue
+                    # Ethertype IPv4
+                    if data[12:14] != b"\x08\x00":
+                        continue
+                    # IPv4 header
+                    ihl = (data[14] & 0x0F) * 4
+                    if ihl < 20:
+                        continue
+                    # Protocol = UDP (17)
+                    if data[14 + 9] != 17:
+                        continue
+                    udp_off = 14 + ihl
+                    if len(data) < udp_off + 8 + 44:
+                        continue
+                    src_port = int.from_bytes(data[udp_off:udp_off + 2], "big")
+                    dst_port = int.from_bytes(data[udp_off + 2:udp_off + 4], "big")
+                    # BOOTP client → server traffic
+                    if src_port != 68 or dst_port != 67:
+                        continue
+                    bootp_off = udp_off + 8
+                    # op=1 (BOOTREQUEST), htype=1 (Ethernet), hlen=6 (MAC)
+                    if data[bootp_off] != 1 or data[bootp_off + 1] != 1 or data[bootp_off + 2] != 6:
+                        continue
+                    chaddr = data[bootp_off + 28:bootp_off + 28 + 6]
+                    if len(chaddr) != 6 or chaddr == b"\x00" * 6:
+                        continue
+                    return ":".join(f"{b:02x}" for b in chaddr)
+            except PermissionError:
+                logger.error(
+                    f"BOOTP sniff on {interface}: missing CAP_NET_RAW "
+                    f"(need to run as root or grant capability)"
+                )
+            except OSError as e:
+                logger.error(f"BOOTP sniff socket error on {interface}: {e}")
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+            return None
+
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(None, _blocking_sniff)
+        except Exception as e:
+            logger.debug(f"BOOTP sniff failed on {interface}: {e}")
+            return None
+
     async def fingerprint(self, ip: str, mac: Optional[str] = None) -> DeviceFingerprint:
         """Fingerprint a device at the given IP address."""
         if self.interface:
