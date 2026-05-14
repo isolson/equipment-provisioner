@@ -541,6 +541,22 @@ class MikrotikHandler(BaseHandler):
 
     BOOTSTRAP_USER = "fleet-bootstrap"
 
+    @staticmethod
+    def _escape_routeros_string(value: str) -> str:
+        """Escape a value for embedding inside a RouterOS double-quoted string.
+
+        Inside `"..."`, RouterOS interprets `$name` as variable substitution
+        and `[cmd]` as command substitution, in addition to `\\` and `"` as
+        escape characters. A literal value must escape all four.
+        """
+        return (
+            value
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("$", "\\$")
+            .replace("[", "\\[")
+        )
+
     @classmethod
     def _netinstall_octet_for_interface(cls, interface: str) -> int:
         """Derive a unique /24 octet (0-255) per VLAN sub-interface.
@@ -607,7 +623,7 @@ class MikrotikHandler(BaseHandler):
 
         userscript_path: Optional[str] = None
         if bootstrap_password:
-            escaped = bootstrap_password.replace("\\", "\\\\").replace('"', '\\"')
+            escaped = self._escape_routeros_string(bootstrap_password)
             # `-s` REPLACES default-config, so we must explicitly bring up
             # the management IP (192.168.88.1) and a bridge over all ether
             # ports, otherwise the device boots with no L3 and the
@@ -641,9 +657,19 @@ class MikrotikHandler(BaseHandler):
         if on_progress:
             await on_progress("netinstall", "running", "Waiting for device in BOOTP mode...")
 
-        addr_added = await self._add_netinstall_addr(interface, host_addr)
-
+        addr_added = False
         try:
+            addr_added = await self._add_netinstall_addr(interface, host_addr)
+            if not addr_added:
+                # Subnet check inside netinstall-cli would reject `-a` with a
+                # confusing error otherwise; surface the underlying failure.
+                logger.error(
+                    f"Aborting Netinstall on {interface}: could not assign {host_addr}"
+                )
+                if on_progress:
+                    await on_progress("netinstall", False, "Failed to assign install IP")
+                return False
+
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -743,8 +769,7 @@ class MikrotikHandler(BaseHandler):
         role_abbrev = "ext" if role == "extender" else "gw"
         device_name = f"fleet-{role_abbrev}-{serial}"
 
-        # Escape for RouterOS string embedding
-        bp = bootstrap_pass.replace("\\", "\\\\").replace('"', '\\"')
+        bp = MikrotikHandler._escape_routeros_string(bootstrap_pass)
         api_url = ztp_api_url.rstrip("/")
 
         return f"""\

@@ -282,3 +282,46 @@ async def test_listener_skips_when_provision_already_attempted_same_mac(manager,
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
     assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_listener_skips_after_recent_failed_fire(manager, monkeypatch):
+    """A recent BOOTP fire (e.g. a Netinstall failure that left no
+    last_provisioned_mac) must throttle the next attempt — without this
+    a stuck device would re-trigger every BOOTP_SNIFF_WINDOW_SEC."""
+    fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:01"])
+    monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
+
+    fired = []
+    manager.on_device_in_bootp(AsyncMock(side_effect=lambda p, m: fired.append(m)))
+
+    state = manager.port_states[1]
+    # Simulate: previous Netinstall fired, failed, and reset provision_attempted.
+    # last_provisioned_at/_mac stayed None (failure path), but last_bootp_fired_at
+    # was set when the previous fire happened a moment ago.
+    state.last_bootp_fired_at = time.time() - 5
+
+    await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
+
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_listener_refires_after_retry_cooldown_expires(manager, monkeypatch):
+    fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:01"])
+    monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
+
+    fired = []
+
+    async def cb(port_num, mac):
+        fired.append((port_num, mac))
+
+    manager.on_device_in_bootp(cb)
+
+    state = manager.port_states[1]
+    # Older than BOOTP_RETRY_COOLDOWN_SEC — retry should be allowed.
+    state.last_bootp_fired_at = time.time() - manager.BOOTP_RETRY_COOLDOWN_SEC - 1
+
+    await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
+
+    assert fired == [(1, "aa:bb:cc:00:00:01")]

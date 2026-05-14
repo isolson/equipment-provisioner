@@ -269,6 +269,37 @@ async def provision_device(
     )
 
 
+_NPK_NAME_RE = re.compile(r"^routeros-([\d.]+)-([a-z0-9]+)\.npk$", re.IGNORECASE)
+
+
+def _select_latest_npk_per_arch(mikrotik_fw_dir: Path) -> List[str]:
+    """Return one .npk path per RouterOS arch, picking the newest version.
+
+    Filenames follow `routeros-<version>-<arch>.npk`. Files that don't match
+    that pattern are passed through unchanged so unconventional names (e.g.
+    pre-release builds) still reach netinstall-cli.
+    """
+    by_arch: Dict[str, tuple] = {}
+    unmatched: List[Path] = []
+    for path in mikrotik_fw_dir.glob("*.npk"):
+        match = _NPK_NAME_RE.match(path.name)
+        if not match:
+            unmatched.append(path)
+            continue
+        version_str, arch = match.group(1), match.group(2).lower()
+        try:
+            version_tuple = tuple(int(part) for part in version_str.split("."))
+        except ValueError:
+            unmatched.append(path)
+            continue
+        existing = by_arch.get(arch)
+        if existing is None or version_tuple > existing[0]:
+            by_arch[arch] = (version_tuple, path)
+    selected = [str(entry[1]) for entry in by_arch.values()]
+    selected.extend(str(p) for p in unmatched)
+    return sorted(selected)
+
+
 @router.post("/netinstall", response_model=ProvisionResponse)
 async def netinstall_device(
     req: NetinstallRequest,
@@ -327,8 +358,11 @@ async def _run_netinstall(provisioner, port_number: int):
 
     # Device is in BOOTP mode — arch unknown. Pass every .npk we have so
     # netinstall-cli can match the arch from the BOOTP request itself.
+    # When multiple versions of the same arch are present (e.g. mid-upgrade),
+    # netinstall-cli's choice between them is unspecified, so collapse to the
+    # newest version per arch before handing the list off.
     mikrotik_fw_dir = provisioner.firmware_manager.firmware_path / "mikrotik"
-    npks = sorted(str(p) for p in mikrotik_fw_dir.glob("*.npk"))
+    npks = _select_latest_npk_per_arch(mikrotik_fw_dir)
     if not npks:
         logger.error(f"No MikroTik firmware found for Netinstall on port {port_number} (looked in {mikrotik_fw_dir})")
         port_manager.mark_port_provisioning(port_number, False, success=False, error="No MikroTik firmware available")
