@@ -325,10 +325,12 @@ async def _run_netinstall(provisioner, port_number: int):
     interface = port_manager.get_interface_for_port(port_number)
     config = provisioner.config
 
-    # Find MikroTik firmware
-    firmware_info = provisioner.firmware_manager.get_firmware_file("mikrotik", None)
-    if not firmware_info:
-        logger.error(f"No MikroTik firmware found for Netinstall on port {port_number}")
+    # Device is in BOOTP mode — arch unknown. Pass every .npk we have so
+    # netinstall-cli can match the arch from the BOOTP request itself.
+    mikrotik_fw_dir = provisioner.firmware_manager.firmware_path / "mikrotik"
+    npks = sorted(str(p) for p in mikrotik_fw_dir.glob("*.npk"))
+    if not npks:
+        logger.error(f"No MikroTik firmware found for Netinstall on port {port_number} (looked in {mikrotik_fw_dir})")
         port_manager.mark_port_provisioning(port_number, False, success=False, error="No MikroTik firmware available")
         return
 
@@ -338,19 +340,29 @@ async def _run_netinstall(provisioner, port_number: int):
         port_status = port_manager._get_single_port_status(port_number)
         await notify_port_change(port_number, port_status)
 
+    # Bootstrap password must exist before we even start — netinstall-cli's
+    # -s user-script bakes it into admin so the post-flash login works.
+    # RouterOS 7.20+ no longer accepts admin/empty even after `-r`.
+    bootstrap_pass = config.credentials.mikrotik.bootstrap_password
+    if not bootstrap_pass:
+        logger.error("No MIKROTIK_BOOTSTRAP_PASS configured — cannot run Netinstall")
+        port_manager.mark_port_provisioning(port_number, False, success=False, error="No MIKROTIK_BOOTSTRAP_PASS configured")
+        return
+
     try:
-        # Step 1: Netinstall
+        # Step 1: Netinstall (with -s user-script that creates fleet-bootstrap user)
         handler = MikrotikHandler(
             ip="192.168.88.1",
-            credentials={"username": "admin", "password": ""},
+            credentials={"username": MikrotikHandler.BOOTSTRAP_USER, "password": bootstrap_pass},
             interface=interface,
         )
 
         await on_progress("netinstall", "running", "Waiting for device in BOOTP mode...")
 
         success = await handler.netinstall(
-            firmware_path=str(firmware_info.path),
+            firmware_paths=npks,
             interface=interface,
+            bootstrap_password=bootstrap_pass,
             on_progress=on_progress,
         )
 
@@ -358,12 +370,13 @@ async def _run_netinstall(provisioner, port_number: int):
             port_manager.mark_port_provisioning(port_number, False, success=False, error="Netinstall failed")
             return
 
-        # Step 2: Wait for device to boot after Netinstall
+        # Step 2: Wait for device to boot after Netinstall.
+        # First boot is slow (RouterBOOT + RouterOS init + SSH server start);
+        # 240s observed needed in practice on hAP ax2.
         await on_progress("reboot", "running", "Waiting for device to boot...")
-        await asyncio.sleep(10)  # Give device time to start booting
+        await asyncio.sleep(10)
 
-        # Wait for SSH to come up (post-Netinstall: admin/no-password)
-        booted = await handler.wait_for_reboot(timeout=120)
+        booted = await handler.wait_for_reboot(timeout=240)
         if not booted:
             port_manager.mark_port_provisioning(port_number, False, success=False, error="Device did not boot after Netinstall")
             return
@@ -389,14 +402,7 @@ async def _run_netinstall(provisioner, port_number: int):
             )
 
         # Step 4: Generate and apply base-flash.rsc
-        bootstrap_pass = config.credentials.mikrotik.bootstrap_password
         ztp_api_url = getattr(config.device_settings.mikrotik, 'ztp_api_url', None) or "https://api.infra.treehouse.mn"
-
-        if not bootstrap_pass:
-            logger.warning("No bootstrap password configured — skipping base-flash")
-            await on_progress("config", False, "No bootstrap password configured")
-            port_manager.mark_port_provisioning(port_number, False, success=False, error="No MIKROTIK_BOOTSTRAP_PASS configured")
-            return
 
         serial = info.serial_number or "UNKNOWN"
         script = MikrotikHandler.generate_base_flash_script(

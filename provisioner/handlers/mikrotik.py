@@ -3,10 +3,12 @@
 import asyncio
 import ipaddress
 import logging
+import os
 import re
 import socket
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .base import BaseHandler, DeviceInfo
 
@@ -505,12 +507,21 @@ class MikrotikHandler(BaseHandler):
 
     NETINSTALL_CLI = "/opt/provisioner/tools/netinstall-cli"
     NETINSTALL_TIMEOUT = 300  # 5 minutes
+    # netinstall-cli requires the client IP to live in a subnet on the bound
+    # interface. Per-port VLAN interfaces only carry 192.168.88.11/32 (port
+    # isolation), which fails that check. We add a transient /24 on an unused
+    # range around the call so there's no collision with the management VLAN's
+    # 192.168.88.0/24. Cleared in a finally block so the iface stays clean.
+    NETINSTALL_HOST_ADDR = "10.255.5.11/24"
+    NETINSTALL_CLIENT_IP = "10.255.5.1"
+
+    BOOTSTRAP_USER = "fleet-bootstrap"
 
     async def netinstall(
         self,
-        firmware_path: str,
+        firmware_paths: List[str],
         interface: str,
-        assign_ip: str = "192.168.88.1",
+        bootstrap_password: Optional[str] = None,
         on_progress=None,
     ) -> bool:
         """Flash a MikroTik device in BOOTP/Netinstall mode.
@@ -519,30 +530,73 @@ class MikrotikHandler(BaseHandler):
         Runs netinstall-cli to flash RouterOS firmware onto the device.
 
         Args:
-            firmware_path: Path to the RouterOS .npk file
+            firmware_paths: All RouterOS .npk files to offer. netinstall-cli picks
+                the arch matching the BOOTP request, so pass every arch you have.
             interface: VLAN interface to use (e.g. eth0.1991)
-            assign_ip: IP address to assign to the device during install
+            bootstrap_password: If set, runs a -s user-script after install that
+                creates a non-admin user (fleet-bootstrap) with this password.
+                Required for RouterOS 7.20+ where default-config admin sits in
+                a 'must change password on first login' state that prevents SSH
+                login even after /user/set on admin.
             on_progress: Optional async callback for progress updates
         """
         if not Path(self.NETINSTALL_CLI).exists():
             logger.error(f"netinstall-cli not found at {self.NETINSTALL_CLI}")
             return False
 
-        if not Path(firmware_path).exists():
-            logger.error(f"Firmware file not found: {firmware_path}")
+        if not firmware_paths:
+            logger.error("No firmware paths provided to netinstall")
+            return False
+
+        missing = [p for p in firmware_paths if not Path(p).exists()]
+        if missing:
+            logger.error(f"Firmware files not found: {missing}")
             return False
 
         cmd = [
             self.NETINSTALL_CLI,
             "-i", interface,
-            "-r",  # Reset configuration
-            "-a", assign_ip,
-            firmware_path,
+            "-a", self.NETINSTALL_CLIENT_IP,
+            "-r",
         ]
 
-        logger.info(f"Starting Netinstall on {interface}: {' '.join(cmd)}")
+        userscript_path: Optional[str] = None
+        if bootstrap_password:
+            escaped = bootstrap_password.replace("\\", "\\\\").replace('"', '\\"')
+            # `-s` REPLACES default-config, so we must explicitly bring up
+            # the management IP (192.168.88.1) and a bridge over all ether
+            # ports, otherwise the device boots with no L3 and the
+            # provisioner can't reach it post-flash. The /user/add gets us a
+            # login that bypasses RouterOS 7.20+ admin-first-login lockout.
+            script_body = (
+                ':do {/interface/bridge/remove [find name=bridge-bootstrap]} on-error={}\n'
+                '/interface/bridge/add name=bridge-bootstrap comment=netinstall-bootstrap\n'
+                ':foreach iface in=[/interface/ethernet/find] do={\n'
+                '    :do {/interface/bridge/port/add bridge=bridge-bootstrap interface=$iface} on-error={}\n'
+                '}\n'
+                ':do {/ip/address/remove [find comment=netinstall-bootstrap]} on-error={}\n'
+                '/ip/address/add address=192.168.88.1/24 interface=bridge-bootstrap comment=netinstall-bootstrap\n'
+                f':do {{/user/remove [find name="{self.BOOTSTRAP_USER}"]}} on-error={{}}\n'
+                f'/user/add name="{self.BOOTSTRAP_USER}" password="{escaped}" group=full\n'
+                f':log info "ZTP: {self.BOOTSTRAP_USER} user + bridge-bootstrap created by netinstall user-script"\n'
+            )
+            fd = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".rsc", prefix="netinstall-userscript-", delete=False
+            )
+            fd.write(script_body)
+            fd.close()
+            userscript_path = fd.name
+            cmd.extend(["-s", userscript_path])
+
+        cmd.extend(firmware_paths)
+
+        # Redact -s contents from logged cmd; keep paths.
+        loggable = " ".join(cmd)
+        logger.info(f"Starting Netinstall on {interface}: {loggable}")
         if on_progress:
             await on_progress("netinstall", "running", "Waiting for device in BOOTP mode...")
+
+        addr_added = await self._add_netinstall_addr(interface)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -580,6 +634,44 @@ class MikrotikHandler(BaseHandler):
             if on_progress:
                 await on_progress("netinstall", False, str(exc)[:100])
             return False
+        finally:
+            if addr_added:
+                await self._remove_netinstall_addr(interface)
+            if userscript_path:
+                try:
+                    os.unlink(userscript_path)
+                except OSError:
+                    pass
+
+    async def _add_netinstall_addr(self, interface: str) -> bool:
+        """Add the transient /24 needed by netinstall-cli's subnet check."""
+        proc = await asyncio.create_subprocess_exec(
+            "ip", "addr", "add", self.NETINSTALL_HOST_ADDR, "dev", interface,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            return True
+        err = stderr.decode().strip()
+        if "File exists" in err:
+            # Leftover from an aborted prior run; keep it and reuse.
+            return True
+        logger.error(f"Failed to add {self.NETINSTALL_HOST_ADDR} to {interface}: {err}")
+        return False
+
+    async def _remove_netinstall_addr(self, interface: str) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            "ip", "addr", "del", self.NETINSTALL_HOST_ADDR, "dev", interface,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.warning(
+                f"Failed to remove {self.NETINSTALL_HOST_ADDR} from {interface}: "
+                f"{stderr.decode().strip()}"
+            )
 
     # ------------------------------------------------------------------
     # ZTP base-flash script generation
@@ -618,9 +710,12 @@ class MikrotikHandler(BaseHandler):
 /system/identity/set name={device_name}
 
 # ── Bootstrap user ─────────────────────────────────────────────────────
+# fleet-bootstrap was already created by netinstall's -s user-script with the
+# same password, and we're currently logged in as fleet-bootstrap (so we can't
+# remove ourselves). Just ensure the password is current and that any leftover
+# 'admin' (e.g. from a re-import on a previously-configured device) is gone.
 :do {{/user/remove [find name=admin]}} on-error={{}}
-:do {{/user/remove [find name=fleet-bootstrap]}} on-error={{}}
-/user/add name=fleet-bootstrap password="{bp}" group=full
+/user/set [find name=fleet-bootstrap] password="{bp}" group=full
 
 # ── Disable unnecessary services ───────────────────────────────────────
 /ip/service/set telnet disabled=yes
@@ -633,6 +728,12 @@ class MikrotikHandler(BaseHandler):
 /ip/service/set winbox disabled=no
 
 # ── Network: DHCP client on ether1 (WAN) ──────────────────────────────
+# Note: ether1 is currently a slave of bridge-bootstrap (set up by netinstall
+# -s). Adding a DHCP client here will succeed at command level even if DHCP
+# doesn't get a lease while ether1 is bridged; the eventual customer config
+# (delivered via phone-home) is responsible for converting to the real
+# WAN/LAN topology and tearing down bridge-bootstrap. Tearing it down here
+# would kill our own SSH session mid-import.
 :do {{/ip/dhcp-client/remove [find interface=ether1]}} on-error={{}}
 /ip/dhcp-client/add interface=ether1 disabled=no add-default-route=yes use-peer-dns=no
 /ip/dns/set servers=1.1.1.1,1.0.0.1
@@ -640,178 +741,19 @@ class MikrotikHandler(BaseHandler):
 # ── Disable WiFi (customer config enables it) ─────────────────────────
 :do {{/interface/wifi/set [find] disabled=yes}} on-error={{}}
 
-# ── Phone-home script ─────────────────────────────────────────────────
-:do {{/system/script/remove [find name=phone-home]}} on-error={{}}
-:do {{/system/scheduler/remove [find name=phone-home-boot]}} on-error={{}}
-:do {{/system/scheduler/remove [find name=phone-home-periodic]}} on-error={{}}
+# Note: Phone-home script + schedulers + /tool/fetch are gated by RouterOS 7.x
+# device-mode (default `home` mode blocks scheduler, fetch, and
+# dont-require-permissions scripts). They are intentionally omitted here.
+# Until device-mode is set to `advanced` (which currently requires physical
+# reset-button confirmation, or RouterOS 7.22+ netinstall -sm flag), the
+# provisioner will manage post-base-flash steps over SSH using
+# fleet-bootstrap credentials rather than relying on device-side phone-home.
+#
+# Note: /system/default-configuration/set (factory-reset recovery hook) was a
+# RouterOS 6 feature and is not available in 7.x. If a device is hard-reset in
+# the field, it falls back to the RouterOS factory default-config and will
+# need a fresh netinstall to re-join the fleet.
 
-/system/script/add name=phone-home dont-require-permissions=yes source={{
-:local ztpUrl "{api_url}/ztp/mikrotik"
-:local maxWait 120
-:local retryDelays {{5; 10; 20; 40; 60}}
-
-:local serial [/system/routerboard/get serial-number]
-:local identity [/system/identity/get name]
-
-:local role "gateway"
-:if ([:find $identity "fleet-ext-" -1] = 0 || [:find $identity "reset-ext-" -1] = 0) do={{
-    :set role "extender"
-}}
-
-:local wanIp ""
-:local waited 0
-:while ($wanIp = "" && $waited < $maxWait) do={{
-    :do {{
-        :set wanIp [/ip/address/get [find interface=ether1 dynamic=yes] address]
-        :set wanIp [:pick $wanIp 0 [:find $wanIp "/"]]
-    }} on-error={{
-        :set wanIp ""
-    }}
-    :if ($wanIp = "") do={{
-        :delay 5s
-        :set waited ($waited + 5)
-    }}
-}}
-
-:if ($wanIp = "") do={{
-    :log warning "ZTP: No WAN IP after $maxWait seconds, aborting"
-    :error "No WAN IP"
-}}
-
-:local mac [/interface/ethernet/get [find name=ether1] mac-address]
-
-:local upstreamIp ""
-:do {{
-    :set upstreamIp [/ip/route/get [find dst-address="0.0.0.0/0" active=yes] gateway]
-}} on-error={{
-    :log warning "ZTP: Could not determine default gateway"
-}}
-
-:local configHash ""
-:do {{
-    :local note [/system/note/get note]
-    :if ([:find $note "config_hash=" -1] >= 0) do={{
-        :local start ([:find $note "config_hash=" -1] + 12)
-        :set configHash [:pick $note $start ($start + 16)]
-    }}
-}} on-error={{}}
-
-:local hashField ""
-:if ($configHash != "") do={{
-    :set hashField ",\\"config_hash\\":\\"$configHash\\""
-}}
-
-:local jsonBody "{{\\\"serial\\\":\\\"$serial\\\",\\\"mac\\\":\\\"$mac\\\",\\\"wan_ip\\\":\\\"$wanIp\\\",\\\"role\\\":\\\"$role\\\",\\\"upstream_device_ip\\\":\\\"$upstreamIp\\\"$hashField}}"
-
-:local fetchOk false
-:local attempt 0
-:local responseFile "ztp-response.json"
-
-:foreach delay in=$retryDelays do={{
-    :set attempt ($attempt + 1)
-    :if (!$fetchOk) do={{
-        :do {{
-            /tool/fetch url="$ztpUrl/checkin" \\
-                http-method=post \\
-                http-header-field="Content-Type: application/json" \\
-                http-data=$jsonBody \\
-                output=file \\
-                dst-path=$responseFile
-            :set fetchOk true
-        }} on-error={{
-            :log info "ZTP: Checkin attempt $attempt failed, retrying in ${{delay}}s"
-            :delay ($delay . "s")
-        }}
-    }}
-}}
-
-:if (!$fetchOk) do={{
-    :log error "ZTP: All checkin attempts failed"
-    :error "Checkin failed"
-}}
-
-:local responseData [/file/get $responseFile contents]
-/file/remove $responseFile
-
-:local parsed [:deserialize from=json $responseData]
-:local action ($parsed->"action")
-:local configReady ($parsed->"config_ready")
-:local configUrl ($parsed->"config_url")
-
-:log info "ZTP: action=$action config_ready=$configReady"
-
-:if ($configReady != true) do={{
-    :log info "ZTP: Config not ready ($action), will retry next run"
-    :return
-}}
-
-:if ([:len $configUrl] = 0) do={{
-    :log error "ZTP: config_ready=true but no config_url"
-    :error "Missing config_url"
-}}
-
-:local fullConfigUrl ""
-:if ([:find $configUrl "http" -1] = 0) do={{
-    :set fullConfigUrl $configUrl
-}} else={{
-    :set fullConfigUrl "{api_url}$configUrl"
-}}
-
-:local configFile "ztp-config.rsc"
-
-:do {{
-    /tool/fetch url=$fullConfigUrl output=file dst-path=$configFile
-}} on-error={{
-    :log error "ZTP: Config download failed"
-    :error "Config download failed"
-}}
-
-:log info "ZTP: Importing config..."
-:do {{
-    /import file-name=$configFile
-    :log info "ZTP: Config imported successfully"
-}} on-error={{
-    :log error "ZTP: Config import failed"
-}}
-
-:do {{/file/remove $configFile}} on-error={{}}
-:log info "ZTP: Provisioning complete for serial=$serial"
-}}
-
-# ── Schedulers ─────────────────────────────────────────────────────────
-/system/scheduler/add name=phone-home-boot on-event="/system/script/run phone-home" \\
-    start-time=startup interval=0
-/system/scheduler/add name=phone-home-periodic on-event="/system/script/run phone-home" \\
-    interval=6h
-
-# ── Default configuration (factory-reset recovery) ────────────────────
-/system/default-configuration/set script="\\
-:local serial [/system/routerboard/get serial-number]\\r\\n\\
-:local deviceName \\"reset-{role_abbrev}-\\$serial\\"\\r\\n\\
-/system/identity/set name=\\$deviceName\\r\\n\\
-:do {{/user/remove [find name=admin]}} on-error={{}}\\r\\n\\
-:do {{/user/remove [find name=fleet-bootstrap]}} on-error={{}}\\r\\n\\
-/user/add name=fleet-bootstrap password=\\"{bp}\\" group=full\\r\\n\\
-/ip/service/set telnet disabled=yes\\r\\n\\
-/ip/service/set ftp disabled=yes\\r\\n\\
-/ip/service/set www disabled=yes\\r\\n\\
-/ip/service/set api disabled=yes\\r\\n\\
-/ip/service/set api-ssl disabled=yes\\r\\n\\
-/tool/bandwidth-server/set enabled=no\\r\\n\\
-:do {{/ip/dhcp-client/remove [find interface=ether1]}} on-error={{}}\\r\\n\\
-/ip/dhcp-client/add interface=ether1 disabled=no add-default-route=yes use-peer-dns=no\\r\\n\\
-/ip/dns/set servers=1.1.1.1,1.0.0.1\\r\\n\\
-:do {{/interface/wifi/set [find] disabled=yes}} on-error={{}}\\r\\n\\
-:log warning \\"RESET RECOVERY: Device \\$serial recovered from factory reset. Fetching bootstrap...\\"\\r\\n\\
-:delay 30s\\r\\n\\
-:do {{\\r\\n\\
-    /tool/fetch url=\\"{api_url}/ztp/mikrotik/recovery-bootstrap.rsc\\" dst-path=recovery.rsc\\r\\n\\
-    /import file-name=recovery.rsc\\r\\n\\
-    /file/remove recovery.rsc\\r\\n\\
-}} on-error={{\\r\\n\\
-    :log error \\"RESET RECOVERY: Could not fetch bootstrap. Will retry on next boot via scheduler.\\"\\r\\n\\
-}}\\r\\n\\
-"
 
 :log info "ZTP: Base flash complete. Identity={device_name}, role={role}, serial={serial}"
 :log info "ZTP: Device ready for field deployment."
