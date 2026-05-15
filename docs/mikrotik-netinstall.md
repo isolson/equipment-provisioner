@@ -49,7 +49,8 @@ override / debug control but is not part of the normal happy path.
                        │    1. Add transient 10.255.<vlan%256>.11/24     │
                        │       to port VLAN (cleanup in finally)         │
                        │    2. netinstall-cli -i <vlan> -a <client-ip>   │
-                       │       -r -c -sm advanced -s <userscript> <npks> │
+                       │       -r -c -sm <modescript> -s <userscript>    │
+                       │       <npks>                                    │
                        │    3. Wait up to 240s for SSH                   │
                        │    4. SSH in as fleet-bootstrap                 │
                        │    5. Read RouterBOARD serial; abort if missing │
@@ -75,7 +76,7 @@ base-flash; the provisioner is forbidden from authoring its own.
 | Contract step | Code path |
 |---|---|
 | 1. Flash RouterOS | `MikrotikHandler.netinstall()` in `provisioner/handlers/mikrotik.py` |
-| 2. `device-mode=advanced` | `-sm advanced` flag in `netinstall()` cmd (requires `netinstall-cli` 7.22+) |
+| 2. `device-mode=advanced` | `MODE_SCRIPT_BODY` (`/system/device-mode update mode=advanced`) written to a temp file, passed as `-sm <path>` to `netinstall-cli` (requires 7.22+) |
 | 3. `GET /ztp/mikrotik/base-flash.rsc` | `MikrotikHandler.fetch_base_flash()` |
 | 4. Prepend `:local` parameters | `MikrotikHandler.build_import_script()` |
 | 5. `/import` over SSH | `MikrotikHandler.apply_config_file()` |

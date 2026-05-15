@@ -90,6 +90,36 @@ def _patch_session(status: int, body: str) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# MODE_SCRIPT_BODY (passed to `netinstall-cli -sm`)
+# ---------------------------------------------------------------------------
+
+
+class TestModeScriptBody:
+    """The -sm flag (netinstall-cli 7.22+) takes a *file path* to a
+    RouterScript that sets device-mode on first boot. Format confirmed
+    against the tikoci/netinstall Makefile, which is the reference
+    implementation cited by the netinstall-cli 7.22 changelog.
+    """
+
+    def test_is_single_line_device_mode_update_advanced(self):
+        body = MikrotikHandler.MODE_SCRIPT_BODY
+        assert body.strip() == "/system/device-mode update mode=advanced"
+
+    def test_ends_with_newline(self):
+        # netinstall-cli reads the file as text — single trailing newline
+        # matches the tikoci reference (`printf '%s\n'`).
+        assert MikrotikHandler.MODE_SCRIPT_BODY.endswith("\n")
+
+    def test_does_not_use_subcommand_slash_form(self):
+        # `/system/device-mode/update` (with a slash before `update`) is the
+        # confirmation-required interactive form. The netinstall mode-script
+        # context wants the space-separated form so it can bypass
+        # confirmation — getting this wrong leaves the device in `home`
+        # mode after install.
+        assert "/system/device-mode/update" not in MikrotikHandler.MODE_SCRIPT_BODY
+
+
+# ---------------------------------------------------------------------------
 # build_import_script
 # ---------------------------------------------------------------------------
 

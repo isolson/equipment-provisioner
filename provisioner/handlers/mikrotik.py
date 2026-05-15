@@ -556,6 +556,14 @@ class MikrotikHandler(BaseHandler):
 
     BOOTSTRAP_USER = "fleet-bootstrap"
 
+    # `-sm <modescript>` (netinstall-cli 7.22+) takes a file path to a
+    # RouterScript that runs once on first boot, before the device is
+    # network-accessible. We use it to set device-mode=advanced so that the
+    # canonical base-flash's scheduler / `/tool/fetch` /
+    # `dont-require-permissions=yes` constructs are permitted. Format
+    # confirmed against tikoci/netinstall reference implementation.
+    MODE_SCRIPT_BODY = "/system/device-mode update mode=advanced\n"
+
     @staticmethod
     def _escape_routeros_string(value: str) -> str:
         """Escape a value for embedding inside a RouterOS double-quoted string.
@@ -634,13 +642,20 @@ class MikrotikHandler(BaseHandler):
             "-a", client_ip,
             "-r",
             "-c",  # allow concurrent netinstall servers across ports
-            # `-sm advanced` requires netinstall-cli 7.22+. Older binaries will
-            # reject it and abort the run — surface that as a "tool too old"
-            # error to the operator rather than silently falling back to home
-            # mode (which would leave the device unable to run phone-home,
-            # schedulers, or /tool/fetch and break the contract downstream).
-            "-sm", "advanced",
         ]
+
+        # `-sm` requires netinstall-cli 7.22+. Older binaries will reject
+        # the flag and abort the run — surface that as a "tool too old"
+        # error rather than silently leaving the device in `home` mode
+        # (which would break the canonical base-flash downstream).
+        modescript_path: Optional[str] = None
+        fd = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".rsc", prefix="netinstall-modescript-", delete=False
+        )
+        fd.write(self.MODE_SCRIPT_BODY)
+        fd.close()
+        modescript_path = fd.name
+        cmd.extend(["-sm", modescript_path])
 
         userscript_path: Optional[str] = None
         if bootstrap_password:
@@ -729,11 +744,12 @@ class MikrotikHandler(BaseHandler):
         finally:
             if addr_added:
                 await self._remove_netinstall_addr(interface, host_addr)
-            if userscript_path:
-                try:
-                    os.unlink(userscript_path)
-                except OSError:
-                    pass
+            for path in (userscript_path, modescript_path):
+                if path:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
 
     async def _add_netinstall_addr(self, interface: str, host_addr: str) -> bool:
         """Add the transient /24 needed by netinstall-cli's subnet check."""
