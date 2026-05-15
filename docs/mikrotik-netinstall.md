@@ -90,7 +90,7 @@ non-obvious blockers:
 
 | Layer | Quirk | Fix |
 |---|---|---|
-| `netinstall-cli` arch selection | Device is in BOOTP, model not yet known | Pass *all* arch `.npk`s; cli picks correct one from BOOTP request |
+| `netinstall-cli` arch selection | Device is in BOOTP, model not yet known | Pass the latest RouterOS `.npk` plus required extra packages per arch; cli picks the matching arch from BOOTP |
 | `netinstall-cli` interface check | Port-VLAN interfaces only have `192.168.88.11/32` (port isolation), no subnet | Add transient `10.255.<vlan%256>.11/24` around the call, cleaned up in `finally` |
 | `netinstall-cli` concurrent runs | Default disallows simultaneous instances | Pass `-c` flag |
 | Capability bounding set | Default systemd unit blocks `CAP_NET_BIND_SERVICE` → can't bind UDP/67 even as root | Added to `provisioner-web.service` |
@@ -112,7 +112,8 @@ produces:
   (boot + 5-min adaptive)
 - DHCP clients on `ether1`, `sfp-sfpplus1`, `ether2`–`ether5` (option 60 =
   `Treehouse-CPE`)
-- `/system/default-configuration/set` populated for factory-reset recovery
+- Factory-reset recovery via the custom default Configure script installed by
+  Netinstall
 - Services trimmed: telnet/ftp/www/api/api-ssl disabled; ssh + winbox enabled
 - `wifi2` configured for `th-ext-join` (disabled until role-detection enables)
 
@@ -157,6 +158,9 @@ The provisioner host must:
   Note: 7.22.x is on the **stable** channel, not the **long-term** channel
   (latest LTS at the time of writing is 7.21.4). The contract requires this
   trade-off — the LTS path lacks the `-sm` flag.
+- Include `wifi-qcom-<version>-<arch>.npk` for WiFi 6 MikroTik models such as
+  hAP ax S. RouterOS installs without radio drivers if only the `routeros`
+  package is present.
 - Run `provisioner-web.service` with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`
   in both `CapabilityBoundingSet` and `AmbientCapabilities`.
 - Set the following in `/etc/provisioner/provisioner.env`:

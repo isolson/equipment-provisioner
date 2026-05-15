@@ -269,35 +269,60 @@ async def provision_device(
     )
 
 
-_NPK_NAME_RE = re.compile(r"^routeros-([\d.]+)-([a-z0-9]+)\.npk$", re.IGNORECASE)
+_NPK_NAME_RE = re.compile(
+    r"^(?P<package>routeros|wifi-qcom|wifi-qcom-ac|wireless)-"
+    r"(?:(?P<arch_first>[a-z0-9_]+)-(?P<version_after_arch>\d+(?:\.\d+)+)|"
+    r"(?P<version_first>\d+(?:\.\d+)+)-(?P<arch_after_version>[a-z0-9_]+))"
+    r"\.npk$",
+    re.IGNORECASE,
+)
+_NPK_PACKAGE_ORDER = {
+    "routeros": 0,
+    "wifi-qcom": 10,
+    "wifi-qcom-ac": 11,
+    "wireless": 12,
+}
 
 
 def _select_latest_npk_per_arch(mikrotik_fw_dir: Path) -> List[str]:
-    """Return one .npk path per RouterOS arch, picking the newest version.
+    """Return one .npk path per package/arch, picking the newest version.
 
-    Filenames follow `routeros-<version>-<arch>.npk`. Files that don't match
-    that pattern are passed through unchanged so unconventional names (e.g.
-    pre-release builds) still reach netinstall-cli.
+    MikroTik has used both `routeros-<arch>-<version>.npk` and
+    `routeros-<version>-<arch>.npk`; extra packages such as `wifi-qcom` use
+    `<package>-<version>-<arch>.npk`. Files that don't match are passed
+    through unchanged so unconventional names still reach netinstall-cli.
     """
-    by_arch: Dict[str, tuple] = {}
+    selected_by_package_arch: Dict[tuple[str, str], tuple] = {}
     unmatched: List[Path] = []
     for path in mikrotik_fw_dir.glob("*.npk"):
         match = _NPK_NAME_RE.match(path.name)
         if not match:
             unmatched.append(path)
             continue
-        version_str, arch = match.group(1), match.group(2).lower()
+        package = match.group("package").lower()
+        version_str = match.group("version_after_arch") or match.group("version_first")
+        arch = (match.group("arch_first") or match.group("arch_after_version")).lower()
         try:
             version_tuple = tuple(int(part) for part in version_str.split("."))
         except ValueError:
             unmatched.append(path)
             continue
-        existing = by_arch.get(arch)
+        key = (package, arch)
+        existing = selected_by_package_arch.get(key)
         if existing is None or version_tuple > existing[0]:
-            by_arch[arch] = (version_tuple, path)
-    selected = [str(entry[1]) for entry in by_arch.values()]
-    selected.extend(str(p) for p in unmatched)
-    return sorted(selected)
+            selected_by_package_arch[key] = (version_tuple, path)
+
+    ordered = sorted(
+        selected_by_package_arch.items(),
+        key=lambda item: (
+            _NPK_PACKAGE_ORDER.get(item[0][0], 99),
+            item[0][1],
+            item[1][1].name,
+        ),
+    )
+    selected = [str(entry[1][1]) for entry in ordered]
+    selected.extend(str(p) for p in sorted(unmatched))
+    return selected
 
 
 @router.post("/netinstall", response_model=ProvisionResponse)

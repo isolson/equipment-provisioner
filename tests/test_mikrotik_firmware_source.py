@@ -27,6 +27,32 @@ async def test_mikrotik_source_defaults_to_long_term_channel(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_mikrotik_source_includes_wifi_qcom_for_ax_architectures(monkeypatch):
+    source = MikrotikFirmwareSource({"channel": "stable", "models": ["arm", "mipsbe"]})
+
+    async def fake_fetch(_session, channel):
+        assert channel == "stable"
+        return "7.22.2", "2026-05-01"
+
+    async def fake_exists(_session, url):
+        return (
+            "routeros-arm-7.22.2.npk" in url
+            or "routeros-mipsbe-7.22.2.npk" in url
+            or "wifi-qcom-7.22.2-arm.npk" in url
+        )
+
+    monkeypatch.setattr(source, "_fetch_latest_version", fake_fetch)
+    monkeypatch.setattr(source, "_firmware_url_exists", fake_exists)
+
+    updates = await source.check_for_updates()
+
+    filenames = {update.filename for update in updates}
+    assert "routeros-arm-7.22.2.npk" in filenames
+    assert "routeros-mipsbe-7.22.2.npk" in filenames
+    assert "wifi-qcom-7.22.2-arm.npk" in filenames
+
+
+@pytest.mark.asyncio
 async def test_mikrotik_source_accepts_lts_alias(monkeypatch):
     source = MikrotikFirmwareSource({"channel": "lts", "models": ["arm64"]})
 
@@ -42,9 +68,12 @@ async def test_mikrotik_source_accepts_lts_alias(monkeypatch):
 
     updates = await source.check_for_updates()
 
-    assert len(updates) == 1
-    assert updates[0].model == "arm64"
-    assert updates[0].channel == "long-term"
+    assert {update.filename for update in updates} == {
+        "routeros-arm64-7.20.8.npk",
+        "wifi-qcom-7.20.8-arm64.npk",
+    }
+    assert all(update.model == "arm64" for update in updates)
+    assert all(update.channel == "long-term" for update in updates)
 
 
 @pytest.mark.asyncio
@@ -66,4 +95,3 @@ async def test_mikrotik_source_maps_release_alias_to_stable(monkeypatch):
     assert len(updates) == 1
     assert updates[0].model == "arm64"
     assert updates[0].channel == "stable"
-
