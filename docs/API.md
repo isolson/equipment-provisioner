@@ -167,8 +167,11 @@ Only `port_number` is required. All other fields are optional.
 ### POST /netinstall
 
 Run MikroTik Netinstall on a port. Used when the device is in BOOTP / Netinstall
-listening mode (reset button held during power-on). Flashes RouterOS firmware,
-then SSHes in and applies the base-flash configuration.
+listening mode (reset button held during power-on). Implements the
+equipment-provisioner contract: flash RouterOS → fetch canonical base-flash
+from `<ztp_api_url>/ztp/mikrotik/base-flash.rsc` → `/import` → verify
+`/system/note` contains `base_flash_version=universal-v1` → `POST
+<ztp_api_url>/ztp/mikrotik/register`.
 
 This endpoint is also called automatically by the per-port BOOTP sniffer when
 a device is detected in Netinstall mode, so for normal usage the tech does not

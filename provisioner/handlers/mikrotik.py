@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import aiohttp
+
 from .base import BaseHandler, DeviceInfo
 
 logger = logging.getLogger(__name__)
@@ -160,6 +162,19 @@ class MikrotikHandler(BaseHandler):
             info.serial_number = routerboard.get("serial-number")
             info.extra["current_firmware"] = routerboard.get("current-firmware")
             info.extra["upgrade_firmware"] = routerboard.get("upgrade-firmware")
+
+        # Same fallback pattern as architecture/version above: the bridge-bootstrap
+        # topology + as-value parsing can drop serial-number on some firmwares;
+        # the direct getter is always reliable. Contract registration requires
+        # a real serial — UNKNOWN must never reach the wifi-api.
+        if not info.serial_number:
+            fallback_serial = (
+                await self._run_command(
+                    ":put [/system/routerboard/get serial-number]", allow_failure=True
+                )
+            ).strip()
+            if fallback_serial:
+                info.serial_number = fallback_serial
 
         mac = await self._run_command(
             ":put [/interface ethernet get [find default-name=ether1] mac-address]",
@@ -619,6 +634,12 @@ class MikrotikHandler(BaseHandler):
             "-a", client_ip,
             "-r",
             "-c",  # allow concurrent netinstall servers across ports
+            # `-sm advanced` requires netinstall-cli 7.22+. Older binaries will
+            # reject it and abort the run — surface that as a "tool too old"
+            # error to the operator rather than silently falling back to home
+            # mode (which would leave the device unable to run phone-home,
+            # schedulers, or /tool/fetch and break the contract downstream).
+            "-sm", "advanced",
         ]
 
         userscript_path: Optional[str] = None
@@ -745,89 +766,73 @@ class MikrotikHandler(BaseHandler):
             )
 
     # ------------------------------------------------------------------
-    # ZTP base-flash script generation
+    # ZTP base-flash (fetch canonical script + verify post-import note)
     # ------------------------------------------------------------------
+    #
+    # The provisioner does NOT author a base-flash. The canonical script
+    # lives at GET <ztp_api_url>/ztp/mikrotik/base-flash.rsc on the wifi
+    # service and owns phone-home, schedulers, default-configuration
+    # recovery, and role self-detection. Our job is fetch -> prepend the
+    # per-device :local parameters -> /import -> verify -> register.
+
+    BASE_FLASH_PATH = "/ztp/mikrotik/base-flash.rsc"
+    BASE_FLASH_VERSION = "universal-v1"
+    BASE_FLASH_FETCH_TIMEOUT = 15  # seconds
 
     @staticmethod
-    def generate_base_flash_script(
-        serial: str,
-        role: str = "gateway",
-        bootstrap_pass: str = "",
-        ztp_api_url: str = "https://api.infra.treehouse.mn",
-    ) -> str:
-        """Generate a parameterized base-flash.rsc for MikroTik ZTP.
+    async def fetch_base_flash(ztp_api_url: str) -> str:
+        """Fetch the canonical base-flash.rsc from the wifi-api.
 
-        This script sets up the device for zero-touch field deployment:
-        - Sets system identity to fleet-{role}-{serial}
-        - Creates fleet-bootstrap user with shared password
-        - Disables unnecessary services
-        - Enables DHCP on ether1 (WAN)
-        - Embeds phone-home script that contacts the ZTP API
-        - Sets up schedulers for boot + periodic phone-home
-        - Stores factory-reset recovery in NVRAM
+        Per contract: plain-text RouterScript, no auth, no secrets. Fetched
+        per install so version drift is impossible — no caching.
         """
-        role_abbrev = "ext" if role == "extender" else "gw"
-        device_name = f"fleet-{role_abbrev}-{serial}"
+        url = ztp_api_url.rstrip("/") + MikrotikHandler.BASE_FLASH_PATH
+        timeout = aiohttp.ClientTimeout(total=MikrotikHandler.BASE_FLASH_FETCH_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"base-flash fetch {url} returned {resp.status}: {body[:200]}"
+                    )
+                return await resp.text()
 
+    @staticmethod
+    def build_import_script(
+        serial: str,
+        bootstrap_pass: str,
+        base_flash_body: str,
+        onboarding_pass: Optional[str] = None,
+    ) -> str:
+        """Prepend per-device `:local` declarations to the canonical script.
+
+        The canonical script consumes `$serial`, `$bootstrapPass`, and
+        `$onboardingPass`. Per contract, onboarding-pass defaults to the
+        bootstrap pass.
+        """
         bp = MikrotikHandler._escape_routeros_string(bootstrap_pass)
-        api_url = ztp_api_url.rstrip("/")
+        op = MikrotikHandler._escape_routeros_string(onboarding_pass or bootstrap_pass)
+        ser = MikrotikHandler._escape_routeros_string(serial)
+        prelude = (
+            f':local serial "{ser}"\n'
+            f':local bootstrapPass "{bp}"\n'
+            f':local onboardingPass "{op}"\n'
+        )
+        return prelude + base_flash_body
 
-        return f"""\
-# MikroTik ZTP Base Flash — generated by network-provisioner
-# Device: {device_name} | Serial: {serial} | Role: {role}
+    async def verify_base_flash_applied(self) -> bool:
+        """Verify post-import that the canonical base-flash actually ran.
 
-# ── System identity ────────────────────────────────────────────────────
-/system/identity/set name={device_name}
-
-# ── Bootstrap user ─────────────────────────────────────────────────────
-# fleet-bootstrap was already created by netinstall's -s user-script with the
-# same password, and we're currently logged in as fleet-bootstrap (so we can't
-# remove ourselves). Just ensure the password is current and that any leftover
-# 'admin' (e.g. from a re-import on a previously-configured device) is gone.
-:do {{/user/remove [find name=admin]}} on-error={{}}
-/user/set [find name=fleet-bootstrap] password="{bp}" group=full
-
-# ── Disable unnecessary services ───────────────────────────────────────
-/ip/service/set telnet disabled=yes
-/ip/service/set ftp disabled=yes
-/ip/service/set www disabled=yes
-/ip/service/set api disabled=yes
-/ip/service/set api-ssl disabled=yes
-/tool/bandwidth-server/set enabled=no
-/ip/service/set ssh disabled=no
-/ip/service/set winbox disabled=no
-
-# ── Network: DHCP client on ether1 (WAN) ──────────────────────────────
-# Note: ether1 is currently a slave of bridge-bootstrap (set up by netinstall
-# -s). Adding a DHCP client here will succeed at command level even if DHCP
-# doesn't get a lease while ether1 is bridged; the eventual customer config
-# (delivered via phone-home) is responsible for converting to the real
-# WAN/LAN topology and tearing down bridge-bootstrap. Tearing it down here
-# would kill our own SSH session mid-import.
-:do {{/ip/dhcp-client/remove [find interface=ether1]}} on-error={{}}
-/ip/dhcp-client/add interface=ether1 disabled=no add-default-route=yes use-peer-dns=no
-/ip/dns/set servers=1.1.1.1,1.0.0.1
-
-# ── Disable WiFi (customer config enables it) ─────────────────────────
-:do {{/interface/wifi/set [find] disabled=yes}} on-error={{}}
-
-# Note: Phone-home script + schedulers + /tool/fetch are gated by RouterOS 7.x
-# device-mode (default `home` mode blocks scheduler, fetch, and
-# dont-require-permissions scripts). They are intentionally omitted here.
-# Until device-mode is set to `advanced` (which currently requires physical
-# reset-button confirmation, or RouterOS 7.22+ netinstall -sm flag), the
-# provisioner will manage post-base-flash steps over SSH using
-# fleet-bootstrap credentials rather than relying on device-side phone-home.
-#
-# Note: /system/default-configuration/set (factory-reset recovery hook) was a
-# RouterOS 6 feature and is not available in 7.x. If a device is hard-reset in
-# the field, it falls back to the RouterOS factory default-config and will
-# need a fresh netinstall to re-join the fleet.
-
-
-:log info "ZTP: Base flash complete. Identity={device_name}, role={role}, serial={serial}"
-:log info "ZTP: Device ready for field deployment."
-"""
+        Reads `/system/note/get note` and checks for the
+        `base_flash_version=universal-v1` marker the canonical script writes.
+        Per contract: absence means the script did not run cleanly and
+        registration must be skipped.
+        """
+        note = await self._run_command(
+            "/system/note/get note", allow_failure=True
+        )
+        marker = f"base_flash_version={self.BASE_FLASH_VERSION}"
+        return marker in (note or "")
 
     @staticmethod
     def _parse_kv_output(output: str) -> Dict[str, str]:

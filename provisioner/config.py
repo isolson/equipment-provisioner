@@ -198,7 +198,16 @@ class TaranaDeviceConfig(BaseModel):
 
 class MikrotikDeviceConfig(BaseModel):
     """MikroTik-specific provisioning settings."""
-    ztp_api_url: Optional[str] = None  # ZTP API base URL for phone-home script
+    ztp_api_url: Optional[str] = None  # ZTP API base URL (wifi-api ZTP service)
+    ztp_api_key: Optional[str] = None  # API key for POST /ztp/mikrotik/register
+
+    @field_validator("ztp_api_key", mode="before")
+    @classmethod
+    def expand_env_var(cls, v: Optional[str]) -> Optional[str]:
+        if v and v.startswith("${") and v.endswith("}"):
+            env_var = v[2:-1]
+            return os.environ.get(env_var, "")
+        return v
 
 
 class DeviceSettingsConfig(BaseModel):

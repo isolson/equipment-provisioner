@@ -49,13 +49,38 @@ override / debug control but is not part of the normal happy path.
                        │    1. Add transient 10.255.<vlan%256>.11/24     │
                        │       to port VLAN (cleanup in finally)         │
                        │    2. netinstall-cli -i <vlan> -a <client-ip>   │
-                       │       -r -c -s <userscript> <all .npks>         │
+                       │       -r -c -sm advanced -s <userscript> <npks> │
                        │    3. Wait up to 240s for SSH                   │
                        │    4. SSH in as fleet-bootstrap                 │
-                       │    5. /import base-flash.rsc                    │
-                       │    6. Mark provisioning complete                │
+                       │    5. Read RouterBOARD serial; abort if missing │
+                       │    6. GET <ztp_api_url>/ztp/mikrotik/           │
+                       │       base-flash.rsc (canonical, no auth)       │
+                       │    7. Prepend :local serial / bootstrapPass /   │
+                       │       onboardingPass; /import combined script   │
+                       │    8. Verify /system/note contains              │
+                       │       base_flash_version=universal-v1           │
+                       │    9. POST <ztp_api_url>/ztp/mikrotik/register  │
+                       │       with X-API-Key (contract payload)         │
                        └─────────────────────────────────────────────────┘
 ```
+
+## Contract compliance
+
+This pipeline implements the equipment-provisioner contract. The provisioner's
+job is *only* flash → fetch canonical base-flash → /import → verify → register.
+Everything else (phone-home, role detection, customer config delivery,
+factory-reset recovery) is **device-side** logic baked in by the canonical
+base-flash; the provisioner is forbidden from authoring its own.
+
+| Contract step | Code path |
+|---|---|
+| 1. Flash RouterOS | `MikrotikHandler.netinstall()` in `provisioner/handlers/mikrotik.py` |
+| 2. `device-mode=advanced` | `-sm advanced` flag in `netinstall()` cmd (requires `netinstall-cli` 7.22+) |
+| 3. `GET /ztp/mikrotik/base-flash.rsc` | `MikrotikHandler.fetch_base_flash()` |
+| 4. Prepend `:local` parameters | `MikrotikHandler.build_import_script()` |
+| 5. `/import` over SSH | `MikrotikHandler.apply_config_file()` |
+| 6. Verify `base_flash_version=universal-v1` | `MikrotikHandler.verify_base_flash_applied()` |
+| 7. `POST /ztp/mikrotik/register` | `equipment_registry.register_mikrotik()` |
 
 ## Critical RouterOS 7.20+ quirks
 
@@ -70,22 +95,25 @@ non-obvious blockers:
 | Capability bounding set | Default systemd unit blocks `CAP_NET_BIND_SERVICE` → can't bind UDP/67 even as root | Added to `provisioner-web.service` |
 | Default `admin` post-reset | RouterOS 7.20+ keeps `admin` in "must change password on first login" — `/user/set` doesn't lift it | `-s` user-script creates a non-admin `fleet-bootstrap` user with a known password |
 | `-s` replaces default-config | The user-script IS the entire first-boot script; default RouterOS config does NOT run on top | `-s` script also builds `bridge-bootstrap` + assigns `192.168.88.1/24` so post-flash SSH is reachable |
-| `device-mode = home` (default) | Blocks `/system/scheduler/add`, `/tool/fetch`, `dont-require-permissions=yes` scripts | Base-flash uses only `home`-allowed operations; phone-home/ZTP fetch deferred until `advanced` mode is feasible (see "Future work") |
+| `device-mode = home` (default) | Blocks `/system/scheduler/add`, `/tool/fetch`, `dont-require-permissions=yes` scripts that the canonical base-flash requires | `netinstall-cli -sm advanced` sets `device-mode=advanced` non-interactively at install time (requires `netinstall-cli` 7.22+) |
 
 ## What ends up on the device
 
-After a successful Netinstall + base-flash:
+Defined by the canonical base-flash on the wifi-api, not by the provisioner.
+The provisioner only verifies the post-condition `/system/note` contains
+`base_flash_version=universal-v1`. Per the contract, the canonical script
+produces:
 
-- Identity: `fleet-gw-<serial>` (or `fleet-ext-<serial>` for extenders)
-- User `fleet-bootstrap` with password from `MIKROTIK_BOOTSTRAP_PASS`
-  (and *no* `admin` user)
-- Services trimmed: telnet/ftp/www/api/api-ssl disabled, ssh + winbox enabled
-- DHCP client on ether1 (WAN)
-- DNS: 1.1.1.1, 1.0.0.1
-- WiFi disabled
-- All physical ether ports bridged into `bridge-bootstrap` (a transient
-  topology; the eventual customer config is responsible for splitting
-  into WAN + LAN bridges)
+- Identity `fleet-init-<serial>` (device renames itself to `fleet-gw-<serial>`
+  or `fleet-ext-<serial>` on first successful phone-home)
+- `fleet-bootstrap` user with `$bootstrapPass`; no `admin` user
+- `phone-home` script with `dont-require-permissions=yes` + two schedulers
+  (boot + 5-min adaptive)
+- DHCP clients on `ether1`, `sfp-sfpplus1`, `ether2`–`ether5` (option 60 =
+  `Treehouse-CPE`)
+- `/system/default-configuration/set` populated for factory-reset recovery
+- Services trimmed: telnet/ftp/www/api/api-ssl disabled; ssh + winbox enabled
+- `wifi2` configured for `th-ext-join` (disabled until role-detection enables)
 
 ## Idempotency / safety
 
@@ -119,27 +147,23 @@ The provisioner host must:
 
 - Run x86_64 — `netinstall-cli` is a 32-bit i386 binary; ARM hosts won't
   work even under QEMU (raw packet socket emulation fails).
-- Have `netinstall-cli` installed at `/opt/provisioner/tools/netinstall-cli`,
-  matching the RouterOS version of the `.npk` files in
-  `/var/lib/provisioner/repo/firmware/mikrotik/`.
+- Have `netinstall-cli` **7.22 or newer** installed at
+  `/opt/provisioner/tools/netinstall-cli`. The `-sm advanced` flag was added
+  in 7.22; older binaries will reject the flag and abort. The .npk RouterOS
+  packages in `/var/lib/provisioner/repo/firmware/mikrotik/` should also be
+  7.22+ so the `advanced`-mode constructs in the canonical base-flash
+  (scheduler, `/tool/fetch`, `dont-require-permissions=yes`) actually run.
+  Note: 7.22.x is on the **stable** channel, not the **long-term** channel
+  (latest LTS at the time of writing is 7.21.4). The contract requires this
+  trade-off — the LTS path lacks the `-sm` flag.
 - Run `provisioner-web.service` with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`
   in both `CapabilityBoundingSet` and `AmbientCapabilities`.
-- Set `MIKROTIK_BOOTSTRAP_PASS` in `/etc/provisioner/provisioner.env`.
-
-## Future work
-
-Two follow-ups deliberately deferred to keep the auto-trigger flow simple:
-
-1. **Phone-home / ZTP checkin.** Originally the device was supposed to
-   periodically `tool/fetch` a customer config from the ZTP API. This needs
-   `device-mode=advanced` (RouterOS 7.x default `home` blocks scheduler and
-   fetch). Switching to `advanced` currently requires either physical
-   reset-button confirmation within 5 min, or RouterOS 7.22+ + the
-   `netinstall-cli -sm` flag to set mode at install time. Until either is
-   available, the provisioner pushes customer config over SSH itself using
-   the `fleet-bootstrap` credentials.
-
-2. **Factory-reset recovery hook.** `/system/default-configuration/set` was a
-   RouterOS 6 feature and was removed in 7.x. A device hard-reset in the
-   field now falls back to MikroTik factory default-config and needs a
-   fresh Netinstall to rejoin the fleet.
+- Set the following in `/etc/provisioner/provisioner.env`:
+  - `MIKROTIK_BOOTSTRAP_PASS` — operator-controlled fleet password used both
+    by netinstall's `-s` user-script and by the canonical base-flash's
+    `$bootstrapPass`. Must match the wifi-side stored value. Avoid `$`,
+    backtick, `;`, `{`, `}`, and newline (RouterScript misinterprets them).
+  - `MIKROTIK_ZTP_API_KEY` — `X-API-Key` for `POST /ztp/mikrotik/register`.
+- Have `device_settings.mikrotik.ztp_api_url` set in `config.yaml` to the
+  wifi-api base URL (e.g. `https://api.infra.treehouse.mn`). The provisioner
+  hard-fails registration if this is unset rather than guessing a default.

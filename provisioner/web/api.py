@@ -435,54 +435,99 @@ async def _run_netinstall(provisioner, port_number: int):
                 model=info.model,
             )
 
-        # Step 4: Generate and apply base-flash.rsc
-        ztp_api_url = getattr(config.device_settings.mikrotik, 'ztp_api_url', None) or "https://api.infra.treehouse.mn"
+        # Contract registration requires a real serial; refuse to continue
+        # rather than POST `UNKNOWN` to the wifi-api and pollute the registry.
+        serial = info.serial_number
+        if not serial or serial.upper() == "UNKNOWN":
+            await on_progress("config", False, "No serial — cannot register")
+            port_manager.mark_port_provisioning(
+                port_number, False, success=False,
+                error="Could not read RouterBOARD serial; refusing to register",
+            )
+            return
 
-        serial = info.serial_number or "UNKNOWN"
-        script = MikrotikHandler.generate_base_flash_script(
+        ztp_api_url = getattr(config.device_settings.mikrotik, 'ztp_api_url', None)
+        if not ztp_api_url:
+            await on_progress("config", False, "ztp_api_url not configured")
+            port_manager.mark_port_provisioning(
+                port_number, False, success=False,
+                error="device_settings.mikrotik.ztp_api_url not configured",
+            )
+            return
+
+        # Step 4: Fetch canonical base-flash, prepend per-device params, /import.
+        await on_progress("config", "running", "Fetching canonical base-flash.rsc...")
+        try:
+            base_body = await MikrotikHandler.fetch_base_flash(ztp_api_url)
+        except Exception as exc:
+            await on_progress("config", False, f"Fetch failed: {str(exc)[:100]}")
+            port_manager.mark_port_provisioning(
+                port_number, False, success=False,
+                error=f"base-flash fetch failed: {exc}",
+            )
+            return
+
+        script = MikrotikHandler.build_import_script(
             serial=serial,
-            role="gateway",
             bootstrap_pass=bootstrap_pass,
-            ztp_api_url=ztp_api_url,
+            base_flash_body=base_body,
         )
 
-        # Write script to temp file and apply
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".rsc", delete=False) as f:
+        with NamedTemporaryFile(mode="w", suffix=".rsc", delete=False) as f:
             f.write(script)
             script_path = f.name
 
         try:
-            await on_progress("config", "running", "Applying base-flash.rsc...")
-            success = await handler.apply_config_file(script_path)
-            if success:
-                await on_progress("config", True, "Base flash applied")
-            else:
-                await on_progress("config", False, "Base flash import failed")
-                port_manager.mark_port_provisioning(port_number, False, success=False, error="Base flash failed")
+            await on_progress("config", "running", "Applying canonical base-flash...")
+            applied = await handler.apply_config_file(script_path)
+            if not applied:
+                await on_progress("config", False, "Base flash /import failed")
+                port_manager.mark_port_provisioning(
+                    port_number, False, success=False, error="Base flash /import failed"
+                )
                 return
         finally:
             os.unlink(script_path)
 
+        # Step 5: Verify the canonical script wrote its marker into /system/note.
+        # Absence here means the script half-ran (e.g. permission failure on
+        # advanced-mode-only commands) — never claim success.
+        verified = await handler.verify_base_flash_applied()
+        if not verified:
+            await on_progress("config", False, "base_flash_version marker missing")
+            port_manager.mark_port_provisioning(
+                port_number, False, success=False,
+                error=f"/system/note missing base_flash_version={MikrotikHandler.BASE_FLASH_VERSION}",
+            )
+            return
+        await on_progress("config", True, f"base-flash verified ({MikrotikHandler.BASE_FLASH_VERSION})")
+
         await handler.disconnect()
 
-        # Step 5: Register with equipment registry
-        registry_url = config.equipment_registry.url
-        if registry_url:
-            from provisioner.equipment_registry import register_equipment
-            await register_equipment(
-                url=registry_url,
-                api_key=config.equipment_registry.api_key,
+        # Step 6: Register with the wifi-api. Contract endpoint, contract payload.
+        from provisioner.equipment_registry import register_mikrotik
+        ztp_api_key = getattr(config.device_settings.mikrotik, 'ztp_api_key', None)
+        try:
+            await register_mikrotik(
+                ztp_api_url=ztp_api_url,
+                api_key=ztp_api_key,
                 serial=serial,
                 mac=info.mac_address or "",
-                device_type="mikrotik",
-                model=info.model,
-                firmware_version=info.firmware_version,
+                model=info.model or "",
+                firmware_version=info.firmware_version or "",
+                base_flash_version=MikrotikHandler.BASE_FLASH_VERSION,
             )
+        except Exception as exc:
+            await on_progress("register", False, str(exc)[:100])
+            port_manager.mark_port_provisioning(
+                port_number, False, success=False,
+                error=f"wifi-api register failed: {exc}",
+            )
+            return
 
-        await on_progress("complete", True, "ZTP base flash complete")
+        await on_progress("complete", True, "ZTP base flash + register complete")
         port_manager.mark_port_provisioning(port_number, False, success=True)
-        logger.info(f"Netinstall + base-flash complete on port {port_number}: {serial}")
+        logger.info(f"Netinstall + base-flash + register complete on port {port_number}: {serial}")
 
     except Exception as exc:
         logger.error(f"Netinstall pipeline failed on port {port_number}: {exc}", exc_info=True)
