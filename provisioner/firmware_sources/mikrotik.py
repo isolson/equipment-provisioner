@@ -37,6 +37,11 @@ class MikrotikFirmwareSource(BaseFirmwareSource):
         "x86",
         "x86_64",
     )
+    DEFAULT_EXTRA_PACKAGES = {
+        # WiFi 6 devices such as hAP ax S need this driver package alongside
+        # the RouterOS system package after Netinstall.
+        "wifi-qcom": ("arm", "arm64"),
+    }
 
     def normalize_channel(self, channel: Optional[str]) -> str:
         """Normalize channel with backward-compatible aliases."""
@@ -95,10 +100,30 @@ class MikrotikFirmwareSource(BaseFirmwareSource):
                 logger.warning("Could not resolve latest MikroTik version for channel '%s'", channel)
                 return []
 
-            tasks = [
-                self._build_firmware_info(session, channel, version, architecture, release_date)
-                for architecture in architectures
-            ]
+            tasks = []
+            for architecture in architectures:
+                tasks.append(
+                    self._build_firmware_info(
+                        session,
+                        channel,
+                        version,
+                        architecture,
+                        release_date,
+                        package="routeros",
+                    )
+                )
+                for package, package_architectures in self.DEFAULT_EXTRA_PACKAGES.items():
+                    if architecture in package_architectures:
+                        tasks.append(
+                            self._build_firmware_info(
+                                session,
+                                channel,
+                                version,
+                                architecture,
+                                release_date,
+                                package=package,
+                            )
+                        )
             resolved = await asyncio.gather(*tasks, return_exceptions=True)
 
         results: list[RemoteFirmwareInfo] = []
@@ -124,9 +149,14 @@ class MikrotikFirmwareSource(BaseFirmwareSource):
         version: str,
         architecture: str,
         release_date: Optional[str],
+        *,
+        package: str,
     ) -> Optional[RemoteFirmwareInfo]:
         """Build one firmware entry if the package exists."""
-        filename = f"routeros-{architecture}-{version}.npk"
+        if package == "routeros":
+            filename = f"routeros-{architecture}-{version}.npk"
+        else:
+            filename = f"{package}-{version}-{architecture}.npk"
         url = DOWNLOAD_URL.format(version=version, filename=filename)
 
         exists = await self._firmware_url_exists(session, url)
@@ -142,7 +172,7 @@ class MikrotikFirmwareSource(BaseFirmwareSource):
             filename=filename,
             release_date=release_date,
             channel=channel,
-            extra={"architecture": architecture},
+            extra={"architecture": architecture, "package": package},
         )
 
     async def _fetch_latest_version(
