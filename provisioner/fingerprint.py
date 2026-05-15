@@ -260,6 +260,102 @@ class DeviceFingerprinter:
             )
         return matched
 
+    @staticmethod
+    def parse_bootp_request_mac(frame: bytes) -> Optional[str]:
+        """Return BOOTP client MAC from a raw Ethernet/IPv4/UDP/BOOTP frame, or None.
+
+        Pulled out of the sniff loop so it can be unit-tested with crafted frames.
+        Matches op=1 (BOOTREQUEST), htype=1 (Ethernet), hlen=6 (MAC),
+        UDP src=68 dst=67, ethertype IPv4.
+        """
+        # Ethernet (14) + IPv4 (≥20) + UDP (8) + BOOTP (≥44) = ≥86
+        if len(frame) < 86:
+            return None
+        # Ethertype IPv4
+        if frame[12:14] != b"\x08\x00":
+            return None
+        # IPv4 header length
+        ihl = (frame[14] & 0x0F) * 4
+        if ihl < 20:
+            return None
+        # Protocol = UDP (17)
+        if frame[14 + 9] != 17:
+            return None
+        udp_off = 14 + ihl
+        if len(frame) < udp_off + 8 + 44:
+            return None
+        src_port = int.from_bytes(frame[udp_off:udp_off + 2], "big")
+        dst_port = int.from_bytes(frame[udp_off + 2:udp_off + 4], "big")
+        # BOOTP client → server traffic
+        if src_port != 68 or dst_port != 67:
+            return None
+        bootp_off = udp_off + 8
+        # op=1 (BOOTREQUEST), htype=1 (Ethernet), hlen=6 (MAC)
+        if frame[bootp_off] != 1 or frame[bootp_off + 1] != 1 or frame[bootp_off + 2] != 6:
+            return None
+        chaddr = frame[bootp_off + 28:bootp_off + 28 + 6]
+        if len(chaddr) != 6 or chaddr == b"\x00" * 6:
+            return None
+        return ":".join(f"{b:02x}" for b in chaddr)
+
+    async def sniff_for_bootp_request(
+        self,
+        interface: str,
+        timeout_sec: int = 30,
+    ) -> Optional[str]:
+        """Sniff a VLAN sub-interface for a BOOTP request (MikroTik Netinstall).
+
+        A MikroTik device in Netinstall/BOOTP listening mode broadcasts BOOTP
+        request packets (op=1) from 0.0.0.0:68 to 255.255.255.255:67. The
+        device's MAC appears in the BOOTP `chaddr` field.
+
+        Returns the client MAC (colon-separated lowercase) of the first
+        BOOTP request seen, or None if nothing matched within the timeout.
+        Requires CAP_NET_RAW.
+        """
+        def _blocking_sniff() -> Optional[str]:
+            sock = None
+            try:
+                sock = socket.socket(
+                    socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003)
+                )
+                sock.bind((interface, 0))
+                import time as _t
+                deadline = _t.monotonic() + timeout_sec
+                while _t.monotonic() < deadline:
+                    remaining = deadline - _t.monotonic()
+                    if remaining <= 0:
+                        break
+                    sock.settimeout(min(0.5, remaining))
+                    try:
+                        data, _addr = sock.recvfrom(1500)
+                    except socket.timeout:
+                        continue
+                    mac = DeviceFingerprinter.parse_bootp_request_mac(data)
+                    if mac is not None:
+                        return mac
+            except PermissionError:
+                logger.error(
+                    f"BOOTP sniff on {interface}: missing CAP_NET_RAW "
+                    f"(need to run as root or grant capability)"
+                )
+            except OSError as e:
+                logger.error(f"BOOTP sniff socket error on {interface}: {e}")
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+            return None
+
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(None, _blocking_sniff)
+        except Exception as e:
+            logger.debug(f"BOOTP sniff failed on {interface}: {e}")
+            return None
+
     async def fingerprint(self, ip: str, mac: Optional[str] = None) -> DeviceFingerprint:
         """Fingerprint a device at the given IP address."""
         if self.interface:

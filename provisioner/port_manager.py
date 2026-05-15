@@ -171,6 +171,7 @@ class PortState:
     provision_attempted: bool = False  # True once provisioning has been attempted (prevents re-trigger)
     last_provisioned_at: Optional[float] = None  # Timestamp of last successful provisioning (survives disconnect)
     last_provisioned_mac: Optional[str] = None  # MAC of the last successfully provisioned device — cooldown is bypassed when a different MAC appears
+    last_bootp_fired_at: Optional[float] = None  # Timestamp of last BOOTP-triggered Netinstall fire — gates short retry cooldown regardless of outcome
     expecting_reboot: bool = False  # True during planned reboots (firmware updates)
     provisioning_task: Optional[asyncio.Task] = None  # Reference to active provisioning task for cancellation
     link_down_grace_task: Optional[asyncio.Task] = None  # Delayed cancel task for link flaps during provisioning
@@ -250,6 +251,13 @@ class PortManager:
         # Callbacks. device_ip may be None for vendors detected passively
         # (e.g., Evolution Digital), which have no reachable management IP.
         self._on_device_detected: List[Callable[[int, str, Optional[str]], Awaitable[None]]] = []
+
+        # Callback fired when a MikroTik device transmits a BOOTP request on a
+        # port VLAN (i.e. is sitting in Netinstall listening mode). Receives
+        # (port_number, client_mac). Used to auto-trigger Netinstall without
+        # the tech having to click the UI button.
+        self._on_device_in_bootp: List[Callable[[int, str], Awaitable[None]]] = []
+        self._bootp_listener_tasks: Dict[int, asyncio.Task] = {}
 
         self._running = False
         self._initialized = False
@@ -468,6 +476,158 @@ class PortManager:
         device_mac from port_states[port_number] when ip is None.
         """
         self._on_device_detected.append(callback)
+
+    def on_device_in_bootp(
+        self,
+        callback: Callable[[int, str], Awaitable[None]]
+    ) -> None:
+        """Register callback for "MikroTik device in BOOTP / Netinstall mode".
+
+        Callback receives: (port_number, client_mac). Fired when the per-port
+        BOOTP sniffer captures a BOOTP request frame, after the same
+        provisioning-attempted / reprovision-cooldown gates that
+        on_device_detected uses.
+        """
+        self._on_device_in_bootp.append(callback)
+
+    BOOTP_SNIFF_WINDOW_SEC = 60
+    # Minimum interval between BOOTP-triggered fires on the same port. Guards
+    # against tight retry loops if Netinstall keeps failing (e.g. firmware
+    # arch mismatch) — without this, a stuck device would re-trigger every
+    # BOOTP_SNIFF_WINDOW_SEC. Success path also has REPROVISION_COOLDOWN.
+    BOOTP_RETRY_COOLDOWN_SEC = 300
+
+    async def start_bootp_listeners(self) -> None:
+        """Spawn one long-running BOOTP sniffer per enabled port.
+
+        Each task loops on `sniff_for_bootp_request` with a short window,
+        firing the registered callbacks (gated by provisioning state and
+        reprovision cooldown) on every captured request. Devices in BOOTP
+        mode retransmit roughly every second, so any window that brackets
+        the listening period will catch at least one frame.
+        """
+        from .fingerprint import DeviceFingerprinter
+        for port_num, config in self.ports.items():
+            if not config.enabled:
+                continue
+            if port_num in self._bootp_listener_tasks:
+                continue
+            task = asyncio.create_task(
+                self._bootp_listener_loop(port_num, config.interface_name)
+            )
+            self._bootp_listener_tasks[port_num] = task
+            logger.info(f"BOOTP listener started for port {port_num} ({config.interface_name})")
+
+    async def _bootp_listener_loop(self, port_num: int, interface: str) -> None:
+        """Sniff for BOOTP requests on a single port VLAN until shutdown.
+
+        On every captured client MAC, applies the same idempotency gates as
+        `_detect_device_on_port`:
+          - port not already provisioning
+          - `provision_attempted` not set, OR a different MAC arrived
+          - not within `REPROVISION_COOLDOWN` of last successful provision
+            (cooldown bypassed if the MAC differs from last_provisioned_mac)
+        """
+        from .fingerprint import DeviceFingerprinter
+
+        fp = DeviceFingerprinter(interface=interface)
+        while self._running:
+            try:
+                mac = await fp.sniff_for_bootp_request(
+                    interface=interface,
+                    timeout_sec=self.BOOTP_SNIFF_WINDOW_SEC,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"BOOTP sniff error on port {port_num}: {e}")
+                await asyncio.sleep(2)
+                continue
+
+            if not mac:
+                continue
+
+            state = self.port_states.get(port_num)
+            if state is None:
+                continue
+
+            if state.provisioning:
+                logger.debug(
+                    f"Port {port_num} BOOTP from {mac} ignored — provisioning in flight"
+                )
+                continue
+
+            # Short cooldown between fires regardless of outcome. Closes the
+            # gap where a failed Netinstall leaves last_provisioned_at/_mac
+            # unset and the success-path cooldown below can't apply.
+            if (
+                state.last_bootp_fired_at is not None
+                and time.time() - state.last_bootp_fired_at < self.BOOTP_RETRY_COOLDOWN_SEC
+            ):
+                elapsed = int(time.time() - state.last_bootp_fired_at)
+                remaining = int(self.BOOTP_RETRY_COOLDOWN_SEC - elapsed)
+                logger.info(
+                    f"Auto-Netinstall: BOOTP from {mac} on port {port_num} ignored — "
+                    f"last attempt {elapsed}s ago, retry cooldown {remaining}s remaining"
+                )
+                continue
+
+            if state.provision_attempted:
+                # Already tried for the current device — only fire again if
+                # the BOOTP MAC differs from what we last attempted.
+                if state.last_provisioned_mac and mac.lower() == state.last_provisioned_mac.lower():
+                    logger.debug(
+                        f"Port {port_num} BOOTP from {mac} ignored — provision already attempted "
+                        f"for this MAC"
+                    )
+                    continue
+                # Different MAC means a new device — reset attempted flag.
+                state.provision_attempted = False
+
+            in_cooldown = (
+                state.last_provisioned_at is not None
+                and time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN
+            )
+            same_device = (
+                state.last_provisioned_mac is None
+                or mac.lower() == state.last_provisioned_mac.lower()
+            )
+            if in_cooldown and same_device:
+                elapsed = int(time.time() - state.last_provisioned_at)
+                remaining = int(self.REPROVISION_COOLDOWN - elapsed)
+                logger.info(
+                    f"Auto-Netinstall: BOOTP request from {mac} on port {port_num} ignored — "
+                    f"recently provisioned {elapsed}s ago, cooldown {remaining}s remaining"
+                )
+                state.provision_attempted = True
+                continue
+            if in_cooldown and not same_device:
+                logger.info(
+                    f"Auto-Netinstall: BOOTP from new MAC {mac} on port {port_num} "
+                    f"(previously provisioned {state.last_provisioned_mac}) — bypassing cooldown"
+                )
+
+            logger.info(
+                f"Auto-Netinstall: BOOTP request from {mac} on port {port_num} — firing callbacks"
+            )
+            state.provision_attempted = True
+            state.last_bootp_fired_at = time.time()
+            for callback in self._on_device_in_bootp:
+                try:
+                    await callback(port_num, mac)
+                except Exception as e:
+                    logger.error(f"BOOTP callback error on port {port_num}: {e}")
+
+    async def stop_bootp_listeners(self) -> None:
+        """Cancel any running BOOTP listener tasks."""
+        for port_num, task in list(self._bootp_listener_tasks.items()):
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        self._bootp_listener_tasks.clear()
 
     async def start_monitoring(self) -> None:
         """Start monitoring ports for new devices."""
@@ -1222,6 +1382,7 @@ class PortManager:
             state.last_result = None
             state.last_error = None
             state.provision_attempted = False
+            state.last_bootp_fired_at = None
             state.provisioning_ended = None
             state.checklist.reset()
             self.clear_device_mode(port_num)

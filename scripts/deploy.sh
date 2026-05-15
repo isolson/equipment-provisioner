@@ -20,6 +20,8 @@ rsync -avz --delete \
   --exclude='*.har' \
   --exclude='.context' \
   --exclude='firmware/' \
+  --exclude='tools/' \
+  --exclude='restart-kiosk.sh' \
   ./ "${TARGET_USER}@${TARGET_HOST}:${TARGET_PATH}/"
 
 echo "Restarting provisioner-web service..."

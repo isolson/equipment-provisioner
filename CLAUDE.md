@@ -25,6 +25,7 @@ The default order is preferred for most devices. Only use `config_after_all_firm
 - Read `docs/HANDLER_DEVELOPMENT.md` for the handler property reference and provisioning flow
 - Read `STANDARDS.md` for interface binding, VLAN isolation, and UI requirements
 - Read `docs/cambium-config.md` before touching Cambium code — endpoints must be confirmed on hardware
+- Read `docs/mikrotik-netinstall.md` before touching MikroTik Netinstall / BOOTP auto-trigger code — covers the RouterOS 7.20+ quirks (device-mode, `-s` replacing default-config, admin first-login lockout) that took multiple iterations to discover
 - The Pi runs **Python 3.9** — do not use 3.10+ features (match/case, `X | Y` union types, `datetime.UTC`, `str.removeprefix`)
 - Test on real hardware when possible. There is no simulator for most vendors.
 

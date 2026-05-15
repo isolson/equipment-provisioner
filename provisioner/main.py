@@ -168,6 +168,7 @@ class Provisioner:
             )
             await self.port_manager.setup()
             self.port_manager.on_device_detected(self._on_port_device_detected)
+            self.port_manager.on_device_in_bootp(self._on_port_device_in_bootp)
         else:
             # Simple mode: use ARP detector
             self.detector = DeviceDetector(
@@ -208,6 +209,7 @@ class Provisioner:
         if self._use_vlan_mode:
             tasks.append(asyncio.create_task(self.port_manager.start_monitoring()))
             tasks.append(asyncio.create_task(self.port_manager.start_switch_reconcile_loop()))
+            await self.port_manager.start_bootp_listeners()
             logger.info(f"Provisioner running - monitoring {self.config.ports.num_ports} ports")
             console.print(f"[green]Provisioner active on {self.config.network.interface}[/green]")
             console.print(f"[dim]Mode: VLAN ({self.config.ports.num_ports} ports)[/dim]")
@@ -246,6 +248,7 @@ class Provisioner:
             self.detector.stop()
 
         if self.port_manager:
+            await self.port_manager.stop_bootp_listeners()
             await self.port_manager.stop_monitoring()
             await self.port_manager.cleanup()
 
@@ -257,6 +260,33 @@ class Provisioner:
         await close_db()
 
         logger.info("Provisioner stopped")
+
+    async def _on_port_device_in_bootp(self, port_num: int, mac: str) -> None:
+        """Handle a MikroTik device entering BOOTP/Netinstall mode.
+
+        Fired by port_manager's BOOTP sniffer (after the same idempotency
+        gates that _on_port_device_detected uses). Runs the same Netinstall
+        pipeline the manual UI button triggers via /api/netinstall.
+        """
+        from .web.api import _run_netinstall
+
+        logger.info(
+            f"Auto-Netinstall triggered on port {port_num} for {mac} — starting pipeline"
+        )
+
+        # Wake display if configured, same as device-detected path.
+        from .display import get_display
+        display = get_display()
+        if display and display.wake_on_connect and display.is_sleeping():
+            await display.wake()
+            from .web.websocket import notify_display_state
+            await notify_display_state(sleeping=False)
+
+        # Run as a cancellable task; mirror _on_port_device_detected behavior
+        # so unexpected unplug during the long Netinstall window cleans up.
+        task = asyncio.create_task(_run_netinstall(self, port_num))
+        if port_num in self.port_manager.port_states:
+            self.port_manager.port_states[port_num].provisioning_task = task
 
     async def _on_port_device_detected(
         self,
