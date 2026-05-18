@@ -527,9 +527,22 @@ async def _run_netinstall(provisioner, port_number: int):
             return
         await on_progress("config", True, f"base-flash verified ({MikrotikHandler.BASE_FLASH_VERSION})")
 
+        # Step 6: Verify the installed base-flash can actually reach ZTP once
+        # the router is moved to an internet uplink. This catches RouterOS
+        # device-mode blocks and missing phone-home artifacts before register.
+        ztp_ready, ztp_detail = await handler.verify_ztp_ready(serial)
+        if not ztp_ready:
+            await on_progress("ztp_ready", False, ztp_detail)
+            port_manager.mark_port_provisioning(
+                port_number, False, success=False,
+                error=f"ZTP readiness check failed: {ztp_detail}",
+            )
+            return
+        await on_progress("ztp_ready", True, ztp_detail)
+
         await handler.disconnect()
 
-        # Step 6: Register with the wifi-api. Contract endpoint, contract payload.
+        # Step 7: Register with the wifi-api. Contract endpoint, contract payload.
         from provisioner.equipment_registry import register_mikrotik
         ztp_api_key = getattr(config.device_settings.mikrotik, 'ztp_api_key', None)
         try:

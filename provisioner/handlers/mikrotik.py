@@ -850,6 +850,75 @@ class MikrotikHandler(BaseHandler):
         marker = f"base_flash_version={self.BASE_FLASH_VERSION}"
         return marker in (note or "")
 
+    async def verify_ztp_ready(self, expected_serial: str) -> tuple[bool, str]:
+        """Verify the post-Netinstall device can phone home after handoff.
+
+        The note marker proves the script reached the end. These checks prove
+        the RouterOS features and artifacts required for first internet
+        contact are present before we register the device as provisioned.
+        """
+        mode_output = await self._run_command(
+            "/system/device-mode/print", allow_failure=True
+        )
+        device_mode = self._parse_kv_output(mode_output)
+        fetch = device_mode.get("fetch", "").lower()
+        scheduler = device_mode.get("scheduler", "").lower()
+        mode = device_mode.get("mode", "").lower() or "unknown"
+
+        if fetch != "yes" or scheduler != "yes":
+            return (
+                False,
+                "device-mode blocks ZTP: mode=%s fetch=%s scheduler=%s"
+                % (mode, fetch or "unknown", scheduler or "unknown"),
+            )
+
+        note = await self._run_command("/system/note/get note", allow_failure=True)
+        marker = f"base_flash_version={self.BASE_FLASH_VERSION}"
+        if marker not in (note or ""):
+            return False, f"missing {marker} marker"
+
+        identity = (
+            await self._run_command(
+                ":put [/system/identity/get name]", allow_failure=True
+            )
+        ).strip()
+        allowed_prefixes = ("fleet-init-", "fleet-gw-", "fleet-ext-", "fleet-rtr-")
+        if not identity.startswith(allowed_prefixes) or expected_serial not in identity:
+            return False, f"unexpected identity after base-flash: {identity or 'empty'}"
+
+        phone_home_count = await self._run_count(
+            "/system/script/find name=phone-home"
+        )
+        if phone_home_count < 1:
+            return False, "missing phone-home script"
+
+        boot_scheduler_count = await self._run_count(
+            "/system/scheduler/find name=phone-home-boot"
+        )
+        adaptive_scheduler_count = await self._run_count(
+            "/system/scheduler/find name=phone-home-adaptive"
+        )
+        if boot_scheduler_count < 1 or adaptive_scheduler_count < 1:
+            return False, "missing phone-home scheduler"
+
+        dhcp_probe_count = await self._run_count(
+            "/ip/dhcp-client/find comment=th-wan-probe"
+        )
+        if dhcp_probe_count < 1:
+            return False, "missing WAN DHCP probe clients"
+
+        return True, "ZTP-ready: device-mode, phone-home, schedulers, WAN probes verified"
+
+    async def _run_count(self, routeros_find_command: str) -> int:
+        """Run a RouterOS find expression and return the result count."""
+        output = await self._run_command(
+            f":put [:len [{routeros_find_command}]]", allow_failure=True
+        )
+        try:
+            return int((output or "0").strip())
+        except ValueError:
+            return 0
+
     @staticmethod
     def _parse_kv_output(output: str) -> Dict[str, str]:
         """Parse RouterOS print/as-value output into a key/value map."""
