@@ -257,6 +257,96 @@ class TestVerifyBaseFlashApplied:
 
 
 # ---------------------------------------------------------------------------
+# verify_ztp_ready
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyZtpReady:
+    def _mock_ztp_ready_commands(
+        self,
+        *,
+        device_mode: str = "mode: advanced\nfetch: yes\nscheduler: yes\n",
+        note: str = "base_flash_version=universal-v1 serial=HBE0001",
+        identity: str = "fleet-init-HBE0001",
+        phone_home: str = "1",
+        boot_scheduler: str = "1",
+        adaptive_scheduler: str = "1",
+        dhcp_probes: str = "5",
+    ):
+        async def run(command: str, allow_failure: bool = False) -> str:
+            if command == "/system/device-mode/print":
+                return device_mode
+            if command == "/system/note/get note":
+                return note
+            if command == ":put [/system/identity/get name]":
+                return identity
+            if "script/find name=phone-home" in command:
+                return phone_home
+            if "scheduler/find name=phone-home-boot" in command:
+                return boot_scheduler
+            if "scheduler/find name=phone-home-adaptive" in command:
+                return adaptive_scheduler
+            if "dhcp-client/find comment=th-wan-probe" in command:
+                return dhcp_probes
+            return ""
+
+        return AsyncMock(side_effect=run)
+
+    async def test_true_when_device_can_phone_home_after_handoff(self):
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands()
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is True
+        assert "ZTP-ready" in detail
+
+    async def test_allows_identity_after_role_self_detection(self):
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands(
+            identity="fleet-gw-HBE0001",
+        )
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is True
+        assert "ZTP-ready" in detail
+
+    async def test_false_when_device_mode_blocks_fetch_or_scheduler(self):
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands(
+            device_mode="mode: home\nfetch: no\nscheduler: no\n",
+        )
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is False
+        assert "device-mode blocks ZTP" in detail
+
+    async def test_false_when_phone_home_scheduler_missing(self):
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands(
+            adaptive_scheduler="0",
+        )
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is False
+        assert detail == "missing phone-home scheduler"
+
+    async def test_false_when_identity_does_not_match_serial(self):
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands(
+            identity="MikroTik",
+        )
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is False
+        assert "unexpected identity" in detail
+
+
+# ---------------------------------------------------------------------------
 # register_mikrotik
 # ---------------------------------------------------------------------------
 
