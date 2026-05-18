@@ -172,6 +172,7 @@ class PortState:
     last_provisioned_at: Optional[float] = None  # Timestamp of last successful provisioning (survives disconnect)
     last_provisioned_mac: Optional[str] = None  # MAC of the last successfully provisioned device — cooldown is bypassed when a different MAC appears
     last_bootp_fired_at: Optional[float] = None  # Timestamp of last BOOTP-triggered Netinstall fire — gates short retry cooldown regardless of outcome
+    last_bootp_fired_mac: Optional[str] = None  # MAC from the last BOOTP-triggered Netinstall fire
     expecting_reboot: bool = False  # True during planned reboots (firmware updates)
     provisioning_task: Optional[asyncio.Task] = None  # Reference to active provisioning task for cancellation
     link_down_grace_task: Optional[asyncio.Task] = None  # Delayed cancel task for link flaps during provisioning
@@ -491,12 +492,6 @@ class PortManager:
         self._on_device_in_bootp.append(callback)
 
     BOOTP_SNIFF_WINDOW_SEC = 60
-    # Minimum interval between BOOTP-triggered fires on the same port. Guards
-    # against tight retry loops if Netinstall keeps failing (e.g. firmware
-    # arch mismatch) — without this, a stuck device would re-trigger every
-    # BOOTP_SNIFF_WINDOW_SEC. Success path also has REPROVISION_COOLDOWN.
-    BOOTP_RETRY_COOLDOWN_SEC = 300
-
     async def start_bootp_listeners(self) -> None:
         """Spawn one long-running BOOTP sniffer per enabled port.
 
@@ -557,18 +552,20 @@ class PortManager:
                 )
                 continue
 
-            # Short cooldown between fires regardless of outcome. Closes the
-            # gap where a failed Netinstall leaves last_provisioned_at/_mac
-            # unset and the success-path cooldown below can't apply.
+            # If the same unit is still advertising BOOTP after a fired
+            # Netinstall, do not automatically reflash it again. Require a
+            # physical remove/reinsert (which clears port state) or a
+            # different MAC. This prevents a stuck reset/BOOTP unit from
+            # looping destructive flash attempts.
             if (
                 state.last_bootp_fired_at is not None
-                and time.time() - state.last_bootp_fired_at < self.BOOTP_RETRY_COOLDOWN_SEC
+                and state.last_bootp_fired_mac is not None
+                and mac.lower() == state.last_bootp_fired_mac.lower()
             ):
                 elapsed = int(time.time() - state.last_bootp_fired_at)
-                remaining = int(self.BOOTP_RETRY_COOLDOWN_SEC - elapsed)
                 logger.info(
                     f"Auto-Netinstall: BOOTP from {mac} on port {port_num} ignored — "
-                    f"last attempt {elapsed}s ago, retry cooldown {remaining}s remaining"
+                    f"already attempted {elapsed}s ago; remove/reinsert device before retry"
                 )
                 continue
 
@@ -612,6 +609,7 @@ class PortManager:
             )
             state.provision_attempted = True
             state.last_bootp_fired_at = time.time()
+            state.last_bootp_fired_mac = mac
             for callback in self._on_device_in_bootp:
                 try:
                     await callback(port_num, mac)
@@ -1383,6 +1381,7 @@ class PortManager:
             state.last_error = None
             state.provision_attempted = False
             state.last_bootp_fired_at = None
+            state.last_bootp_fired_mac = None
             state.provisioning_ended = None
             state.checklist.reset()
             self.clear_device_mode(port_num)
