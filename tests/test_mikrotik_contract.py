@@ -256,6 +256,25 @@ class TestVerifyBaseFlashApplied:
         assert await h.verify_base_flash_applied() is False
 
 
+class TestWaitForBaseFlashApplied:
+    async def test_waits_until_marker_is_visible(self):
+        h = _handler()
+        h.verify_base_flash_applied = AsyncMock(side_effect=[False, False, True])
+
+        with patch("asyncio.sleep", new=AsyncMock()) as sleep:
+            assert await h.wait_for_base_flash_applied(timeout=30, interval=2) is True
+
+        assert h.verify_base_flash_applied.await_count == 3
+        sleep.assert_awaited()
+
+    async def test_false_after_timeout(self):
+        h = _handler()
+        h.verify_base_flash_applied = AsyncMock(return_value=False)
+
+        assert await h.wait_for_base_flash_applied(timeout=0, interval=0) is False
+        h.verify_base_flash_applied.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # verify_ztp_ready
 # ---------------------------------------------------------------------------

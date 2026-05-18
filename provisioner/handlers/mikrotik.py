@@ -850,6 +850,24 @@ class MikrotikHandler(BaseHandler):
         marker = f"base_flash_version={self.BASE_FLASH_VERSION}"
         return marker in (note or "")
 
+    async def wait_for_base_flash_applied(
+        self, timeout: float = 45.0, interval: float = 2.0
+    ) -> bool:
+        """Wait for RouterOS to finish applying the imported base-flash script.
+
+        On RouterOS 7.22, `/import file-name=...` can return before all
+        imported commands are visible to follow-up SSH reads. Polling the note
+        marker avoids falsely failing a device that is still applying the
+        script.
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            if await self.verify_base_flash_applied():
+                return True
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(interval)
+
     async def verify_ztp_ready(self, expected_serial: str) -> tuple[bool, str]:
         """Verify the post-Netinstall device can phone home after handoff.
 
