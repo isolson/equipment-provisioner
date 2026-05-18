@@ -519,12 +519,21 @@ async def _run_netinstall(provisioner, port_number: int):
         # advanced-mode-only commands) — never claim success.
         verified = await handler.verify_base_flash_applied()
         if not verified:
+            logger.error(
+                "Netinstall pipeline failed on port %s: base_flash_version marker missing",
+                port_number,
+            )
             await on_progress("config", False, "base_flash_version marker missing")
             port_manager.mark_port_provisioning(
                 port_number, False, success=False,
                 error=f"/system/note missing base_flash_version={MikrotikHandler.BASE_FLASH_VERSION}",
             )
             return
+        logger.info(
+            "MikroTik base-flash marker verified on port %s (%s)",
+            port_number,
+            MikrotikHandler.BASE_FLASH_VERSION,
+        )
         await on_progress("config", True, f"base-flash verified ({MikrotikHandler.BASE_FLASH_VERSION})")
 
         # Step 6: Verify the installed base-flash can actually reach ZTP once
@@ -532,12 +541,18 @@ async def _run_netinstall(provisioner, port_number: int):
         # device-mode blocks and missing phone-home artifacts before register.
         ztp_ready, ztp_detail = await handler.verify_ztp_ready(serial)
         if not ztp_ready:
+            logger.error(
+                "Netinstall pipeline failed on port %s: ZTP readiness check failed: %s",
+                port_number,
+                ztp_detail,
+            )
             await on_progress("ztp_ready", False, ztp_detail)
             port_manager.mark_port_provisioning(
                 port_number, False, success=False,
                 error=f"ZTP readiness check failed: {ztp_detail}",
             )
             return
+        logger.info("MikroTik ZTP readiness verified on port %s: %s", port_number, ztp_detail)
         await on_progress("ztp_ready", True, ztp_detail)
 
         await handler.disconnect()
