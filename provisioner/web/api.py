@@ -515,9 +515,9 @@ async def _run_netinstall(provisioner, port_number: int):
             os.unlink(script_path)
 
         # Step 5: Verify the canonical script wrote its marker into /system/note.
-        # Absence here means the script half-ran (e.g. permission failure on
-        # advanced-mode-only commands) — never claim success.
-        verified = await handler.verify_base_flash_applied()
+        # RouterOS can return from /import before follow-up SSH reads see every
+        # command, so wait briefly before treating absence as a half-run script.
+        verified = await handler.wait_for_base_flash_applied()
         if not verified:
             logger.error(
                 "Netinstall pipeline failed on port %s: base_flash_version marker missing",
