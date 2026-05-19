@@ -3,6 +3,8 @@
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
@@ -15,6 +17,64 @@ class DummyProvisioner:
 
     def __init__(self, config):
         self.config = config
+        self.port_manager = None
+
+
+class DummyPortManager:
+    """Minimal port manager stub for API status tests."""
+
+    def __init__(self):
+        self.port_states = {
+            5: SimpleNamespace(
+                provisioning=False,
+                last_result="success",
+                last_error=None,
+                device_mac=None,
+            )
+        }
+
+    def get_port_status(self):
+        return {
+            5: {
+                "vlan_id": 1995,
+                "link_up": True,
+                "device_detected": False,
+                "device_type": None,
+                "device_ip": None,
+                "provisioning": False,
+                "link_speed": "1Gbps",
+                "last_result": "success",
+                "last_error": None,
+            }
+        }
+
+    def get_interface_for_port(self, port_number):
+        return f"eno1.199{port_number}"
+
+    def mark_port_provisioning(self, port_number, provisioning=True, success=False, error=None):
+        state = self.port_states[port_number]
+        state.provisioning = provisioning
+        if not provisioning:
+            state.last_result = "success" if success else "failed"
+            state.last_error = None if success else error
+
+    def update_checklist(self, port_number, step, value):
+        pass
+
+    def _get_single_port_status(self, port_number):
+        state = self.port_states[port_number]
+        return {
+            "provisioning": state.provisioning,
+            "last_result": state.last_result,
+            "last_error": state.last_error,
+            "checklist": {},
+        }
+
+    def update_port_device_info(self, port_number, mac=None, serial=None, model=None):
+        state = self.port_states[port_number]
+        state.device_mac = mac
+        state.device_serial = serial
+        state.device_model = model
 
 
 def make_client(tmp_path: Path):
@@ -31,6 +91,92 @@ def make_client(tmp_path: Path):
     provisioner = DummyProvisioner(config)
     app = create_app(provisioner=provisioner)
     return TestClient(app), config, data_path
+
+
+def test_ports_api_includes_last_provisioning_result(tmp_path):
+    client, _config, _data_path = make_client(tmp_path)
+    client.app.state.provisioner.port_manager = DummyPortManager()
+
+    response = client.get("/api/ports")
+
+    assert response.status_code == 200
+    port = response.json()[0]
+    assert port["port_number"] == 5
+    assert port["last_result"] == "success"
+    assert port["last_error"] is None
+
+
+async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch):
+    from provisioner.web.api import _run_netinstall
+
+    class FakeMikrotikHandler:
+        BOOTSTRAP_USER = "fleet-bootstrap"
+        BASE_FLASH_VERSION = "universal-v1"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def netinstall(self, **kwargs):
+            return True
+
+        async def wait_for_reboot(self, timeout):
+            return True
+
+        async def connect(self):
+            return True
+
+        async def get_info(self):
+            return SimpleNamespace(
+                serial_number="HKC0TEST123",
+                mac_address="04:f4:1c:c2:06:80",
+                model="hAP ax S",
+                firmware_version="7.22.2",
+            )
+
+        @staticmethod
+        async def fetch_base_flash(url):
+            return "/system note set note=\"base_flash_version=universal-v1\""
+
+        @staticmethod
+        def build_import_script(**kwargs):
+            return "/system note set note=\"base_flash_version=universal-v1\""
+
+        async def apply_config_file(self, script_path):
+            return True
+
+        async def wait_for_base_flash_applied(self):
+            return True
+
+        async def verify_ztp_ready(self, serial):
+            return True, "ZTP-ready"
+
+        async def disconnect(self):
+            pass
+
+    config = Config()
+    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
+    provisioner = SimpleNamespace(
+        config=config,
+        port_manager=DummyPortManager(),
+        firmware_manager=SimpleNamespace(firmware_path=tmp_path),
+    )
+
+    completed = AsyncMock()
+    monkeypatch.setattr("provisioner.web.api.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("provisioner.web.api._select_latest_npk_per_arch", lambda _: [tmp_path / "routeros-arm64.npk"])
+    monkeypatch.setattr("provisioner.web.api.MikrotikHandler", FakeMikrotikHandler, raising=False)
+    monkeypatch.setattr("provisioner.handlers.mikrotik.MikrotikHandler", FakeMikrotikHandler)
+    monkeypatch.setattr("provisioner.equipment_registry.register_mikrotik", AsyncMock())
+    monkeypatch.setattr("provisioner.web.websocket.notify_port_change", AsyncMock())
+    monkeypatch.setattr("provisioner.web.websocket.notify_provisioning_completed", completed)
+
+    await _run_netinstall(provisioner, 5)
+
+    completed.assert_awaited_once()
+    args = completed.await_args.args
+    assert args[:3] == (5, 0, True)
+    assert provisioner.port_manager.port_states[5].last_result == "success"
 
 
 def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch):
