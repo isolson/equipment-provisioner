@@ -135,6 +135,13 @@ class TestParseBootpRequestMac:
         )
         assert DeviceFingerprinter.parse_bootp_request_mac(frame) is None
 
+    def test_rejects_managed_fleet_hostname_bootp_probe(self):
+        frame = _build_bootp_request(
+            b"\x04\xf4\x1c\xc2\x06\x80",
+            vendor_payload=b"\x63\x82\x53\x63\x0c\x16fleet-init-HKC0APZE4XT\xff",
+        )
+        assert DeviceFingerprinter.parse_bootp_request_mac(frame) is None
+
 
 # ---------------------------------------------------------------------------
 # Per-port octet derivation
