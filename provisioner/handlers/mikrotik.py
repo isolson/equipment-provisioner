@@ -851,14 +851,15 @@ class MikrotikHandler(BaseHandler):
         return marker in (note or "")
 
     async def wait_for_base_flash_applied(
-        self, timeout: float = 120.0, interval: float = 2.0
+        self, timeout: float = 240.0, interval: float = 2.0
     ) -> bool:
         """Wait for RouterOS to finish applying the imported base-flash script.
 
         On RouterOS 7.22, `/import file-name=...` can return before all
         imported commands are visible to follow-up SSH reads. Polling the note
         marker avoids falsely failing a device that is still applying the
-        script.
+        script. hAP ax S units have taken just over two minutes to expose the
+        marker after import, so keep this window comfortably above that.
         """
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
