@@ -24,7 +24,11 @@ from provisioner.port_manager import PortManager
 # ---------------------------------------------------------------------------
 
 
-def _build_bootp_request(client_mac: bytes, broken: str = "") -> bytes:
+def _build_bootp_request(
+    client_mac: bytes,
+    broken: str = "",
+    vendor_payload: bytes = b"",
+) -> bytes:
     """Build a valid Ethernet/IPv4/UDP/BOOTP request frame.
 
     Parameters
@@ -75,7 +79,7 @@ def _build_bootp_request(client_mac: bytes, broken: str = "") -> bytes:
     bootp_chaddr = client_mac + b"\x00" * 10  # 16 bytes total
     bootp_sname = b"\x00" * 64
     bootp_file = b"\x00" * 128
-    bootp_vend = b"\x00" * 64  # truncated
+    bootp_vend = (vendor_payload + b"\x00" * 64)[:64]  # truncated
 
     bootp = struct.pack(
         "!BBBBLHH",
@@ -122,6 +126,13 @@ class TestParseBootpRequestMac:
 
     def test_rejects_zero_chaddr(self):
         frame = _build_bootp_request(b"\x00\x00\x00\x00\x00\x00")
+        assert DeviceFingerprinter.parse_bootp_request_mac(frame) is None
+
+    def test_rejects_treehouse_cpe_bootp_probe(self):
+        frame = _build_bootp_request(
+            b"\x04\xf4\x1c\xc2\x06\x80",
+            vendor_payload=b"\x63\x82\x53\x63\x3c\x0dTreehouse-CPE\xff",
+        )
         assert DeviceFingerprinter.parse_bootp_request_mac(frame) is None
 
 
