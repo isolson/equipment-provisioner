@@ -267,6 +267,16 @@ class TestWaitForBaseFlashApplied:
         assert h.verify_base_flash_applied.await_count == 3
         sleep.assert_awaited()
 
+    async def test_allows_slow_hap_ax_s_marker_visibility(self):
+        h = _handler()
+        h.verify_base_flash_applied = AsyncMock(side_effect=([False] * 70) + [True])
+
+        with patch("asyncio.sleep", new=AsyncMock()) as sleep:
+            assert await h.wait_for_base_flash_applied(timeout=240, interval=2) is True
+
+        assert h.verify_base_flash_applied.await_count == 71
+        assert sleep.await_count == 70
+
     async def test_false_after_timeout(self):
         h = _handler()
         h.verify_base_flash_applied = AsyncMock(return_value=False)
