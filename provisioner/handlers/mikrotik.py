@@ -839,13 +839,13 @@ class MikrotikHandler(BaseHandler):
     async def verify_base_flash_applied(self) -> bool:
         """Verify post-import that the canonical base-flash actually ran.
 
-        Reads `/system/note/get note` and checks for the
+        Reads `/system/note` and checks for the
         `base_flash_version=universal-v1` marker the canonical script writes.
         Per contract: absence means the script did not run cleanly and
         registration must be skipped.
         """
         note = await self._run_command(
-            "/system/note/get note", allow_failure=True
+            ":put [/system/note/get note]", allow_failure=True
         )
         marker = f"base_flash_version={self.BASE_FLASH_VERSION}"
         return marker in (note or "")
@@ -891,7 +891,9 @@ class MikrotikHandler(BaseHandler):
                 % (mode, fetch or "unknown", scheduler or "unknown"),
             )
 
-        note = await self._run_command("/system/note/get note", allow_failure=True)
+        note = await self._run_command(
+            ":put [/system/note/get note]", allow_failure=True
+        )
         marker = f"base_flash_version={self.BASE_FLASH_VERSION}"
         if marker not in (note or ""):
             return False, f"missing {marker} marker"
