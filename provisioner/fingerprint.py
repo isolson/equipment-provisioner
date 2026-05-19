@@ -293,9 +293,17 @@ class DeviceFingerprinter:
         # op=1 (BOOTREQUEST), htype=1 (Ethernet), hlen=6 (MAC)
         if frame[bootp_off] != 1 or frame[bootp_off + 1] != 1 or frame[bootp_off + 2] != 6:
             return None
-        # Already base-flashed routers use this DHCP identity; only reset-mode
-        # RouterBOOT requests should trigger destructive Netinstall.
-        if b"Treehouse-CPE" in frame[bootp_off + 236:]:
+        # Already base-flashed routers use these DHCP identities; only
+        # reset-mode RouterBOOT requests should trigger destructive Netinstall.
+        bootp_options = frame[bootp_off + 236:]
+        managed_markers = (
+            b"Treehouse-CPE",
+            b"fleet-init-",
+            b"fleet-gw-",
+            b"fleet-ext-",
+            b"fleet-rtr-",
+        )
+        if any(marker in bootp_options for marker in managed_markers):
             return None
         chaddr = frame[bootp_off + 28:bootp_off + 28 + 6]
         if len(chaddr) != 6 or chaddr == b"\x00" * 6:
