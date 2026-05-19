@@ -233,11 +233,13 @@ class TestVerifyBaseFlashApplied:
         h = _handler()
         h._run_command = AsyncMock(
             return_value=(
-                "show-at-login: yes\n"
-                "note: base_flash_version=universal-v1 serial=HBE0001\n"
+                "base_flash_version=universal-v1 serial=HBE0001\n"
             )
         )
         assert await h.verify_base_flash_applied() is True
+        h._run_command.assert_awaited_once_with(
+            ":put [/system/note/get note]", allow_failure=True
+        )
 
     async def test_false_when_marker_absent(self):
         h = _handler()
@@ -305,7 +307,7 @@ class TestVerifyZtpReady:
         async def run(command: str, allow_failure: bool = False) -> str:
             if command == "/system/device-mode/print":
                 return device_mode
-            if command == "/system/note/get note":
+            if command == ":put [/system/note/get note]":
                 return note
             if command == ":put [/system/identity/get name]":
                 return identity
