@@ -251,8 +251,15 @@ AUTOLOGIN
     cat > "${INSTALL_DIR}/restart-kiosk.sh" << RESTART
 #!/bin/bash
 BROWSER="${CHROMIUM_BIN}"
+wake_display() {
+    sudo -u kiosk DISPLAY=:0 xset dpms force on 2>/dev/null || true
+    sudo -u kiosk DISPLAY=:0 xset s off 2>/dev/null || true
+    sudo -u kiosk DISPLAY=:0 xset -dpms 2>/dev/null || true
+}
 while true; do
+    wake_display
     if ! pgrep -x "\${BROWSER}" > /dev/null && ! pgrep -x "chromium" > /dev/null; then
+        wake_display
         sudo -u kiosk DISPLAY=:0 \${BROWSER} \\
             --kiosk --noerrdialogs --disable-infobars \\
             http://localhost:8080 &
