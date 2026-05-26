@@ -142,6 +142,15 @@ firmware:
       cambium:
         enabled: false  # Stub — not yet implemented
 
+      mikrotik:
+        enabled: true
+        auto_download: true
+        channel: stable     # 7.22+ is on stable; long-term still pinned at 7.21.x and lacks -sm
+        models:             # architecture filter (empty = all 8 defaults)
+          - arm
+          - arm64
+          - mipsbe
+
 display:
   # Seconds of no connected devices before display sleeps (0 = disabled)
   sleep_timeout: 300

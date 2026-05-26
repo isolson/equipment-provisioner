@@ -331,6 +331,39 @@ def _select_latest_npk_per_arch(mikrotik_fw_dir: Path) -> List[str]:
     return selected
 
 
+def _split_routeros_and_extras(
+    npks: List[str],
+) -> tuple[List[str], Dict[str, str]]:
+    """Split selected .npks into (routeros packages, extra-pkg by arch).
+
+    netinstall-cli ships only the routeros packages. Extras like wifi-qcom
+    are installed in a post-boot step on the device — see
+    `MikrotikHandler.install_extra_npk_and_reboot` for the rationale.
+    """
+    routeros: List[str] = []
+    extras_by_arch: Dict[str, str] = {}
+    for path_str in npks:
+        match = _NPK_NAME_RE.match(Path(path_str).name)
+        if not match:
+            # Unconventional name — assume it's a routeros variant we want
+            # to ship via netinstall, not a separate extra.
+            routeros.append(path_str)
+            continue
+        package = match.group("package").lower()
+        arch = (
+            match.group("arch_first") or match.group("arch_after_version")
+        ).lower()
+        if package == "routeros":
+            routeros.append(path_str)
+        elif package in ("wifi-qcom", "wifi-qcom-ac", "wireless"):
+            # Per-arch extra; we'll install the one matching the device's
+            # reported architecture-name post-boot.
+            extras_by_arch[arch] = path_str
+        else:
+            routeros.append(path_str)
+    return routeros, extras_by_arch
+
+
 @router.post("/netinstall", response_model=ProvisionResponse)
 async def netinstall_device(
     req: NetinstallRequest,
@@ -415,10 +448,17 @@ async def _run_netinstall(provisioner, port_number: int):
     # When multiple versions of the same arch are present (e.g. mid-upgrade),
     # netinstall-cli's choice between them is unspecified, so collapse to the
     # newest version per arch before handing the list off.
+    #
+    # IMPORTANT: ship only routeros packages via netinstall-cli. wifi-qcom
+    # (and other extras) are installed in a post-boot step via SCP+reboot
+    # to work around an hAP ax wifi-radio-binding bug where simultaneous
+    # routeros+wifi-qcom netinstall leaves /interface/wifi/radio empty.
+    # See MikrotikHandler.install_extra_npk_and_reboot for the rationale.
     mikrotik_fw_dir = provisioner.firmware_manager.firmware_path / "mikrotik"
-    npks = _select_latest_npk_per_arch(mikrotik_fw_dir)
+    all_npks = _select_latest_npk_per_arch(mikrotik_fw_dir)
+    npks, extras_by_arch = _split_routeros_and_extras(all_npks)
     if not npks:
-        logger.error(f"No MikroTik firmware found for Netinstall on port {port_number} (looked in {mikrotik_fw_dir})")
+        logger.error(f"No MikroTik routeros firmware found for Netinstall on port {port_number} (looked in {mikrotik_fw_dir})")
         await finish(False, "No MikroTik firmware available")
         return
 
@@ -489,6 +529,60 @@ async def _run_netinstall(provisioner, port_number: int):
         if not serial or serial.upper() == "UNKNOWN":
             await on_progress("config", False, "No serial — cannot register")
             await finish(False, "Could not read RouterBOARD serial; refusing to register")
+            return
+
+        # Step 3a: post-flash install of arch-matched extra package (wifi-qcom).
+        # Skipped for wired-only models (mipsbe etc.) which have no extra.
+        device_arch = (info.hardware_version or "").lower()
+        wifi_pkg = extras_by_arch.get(device_arch)
+        if wifi_pkg:
+            await on_progress(
+                "wifi_qcom",
+                "running",
+                f"Installing {Path(wifi_pkg).name} (post-flash sequenced)",
+            )
+            if not await handler.install_extra_npk_and_reboot(wifi_pkg):
+                await on_progress("wifi_qcom", False, "install failed")
+                await finish(False, f"wifi-qcom post-flash install failed")
+                return
+            await on_progress("wifi_qcom", True, f"installed {Path(wifi_pkg).name}")
+
+            # Step 3b: factory reset so customized.default.rsc re-runs with
+            # wifi-qcom now bound at the kernel level. This is the step that
+            # populates /interface/wifi/radio per the forum SOLVED recipe.
+            await on_progress("wifi_bind", "running", "Factory reset to bind wifi radios")
+            if not await handler.factory_reset_and_reconnect():
+                await on_progress("wifi_bind", False, "factory reset failed")
+                await finish(False, "Could not bind wifi radios after factory reset")
+                return
+            await on_progress("wifi_bind", True, "wifi radios bound")
+        elif device_arch in ("mipsbe", "mmips", "smips", "ppc"):
+            logger.info(
+                f"Skipping wifi-qcom install for arch={device_arch!r} (wired-only model)"
+            )
+        else:
+            logger.warning(
+                f"Device arch {device_arch!r} not in extras_by_arch and not a known "
+                f"wired-only model — skipping post-flash extra-pkg install"
+            )
+
+        # Debug toggle: stop here so we can inspect the post-netinstall device
+        # state before the canonical base-flash runs. Isolates whether base-flash
+        # /import is what breaks `/interface/wifi/radio/print` on hAP ax S.
+        if os.environ.get("MIKROTIK_SKIP_BASE_FLASH", "").lower() in ("1", "true", "yes"):
+            logger.warning(
+                "MIKROTIK_SKIP_BASE_FLASH set — stopping after netinstall, "
+                "skipping base-flash /import + ZTP verify + register. Device "
+                "left at post-netinstall fleet-bootstrap state on 192.168.88.1 "
+                "for diagnostic SSH. serial=%s",
+                serial,
+            )
+            await on_progress("config", True, "SKIPPED (MIKROTIK_SKIP_BASE_FLASH=1)")
+            await handler.disconnect()
+            await finish(
+                True,
+                detail=f"netinstall OK, base-flash skipped (debug); serial={serial}",
+            )
             return
 
         ztp_api_url = getattr(config.device_settings.mikrotik, 'ztp_api_url', None)

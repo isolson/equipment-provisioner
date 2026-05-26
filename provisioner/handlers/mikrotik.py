@@ -640,9 +640,28 @@ class MikrotikHandler(BaseHandler):
             self.NETINSTALL_CLI,
             "-i", interface,
             "-a", client_ip,
-            "-r",
             "-c",  # allow concurrent netinstall servers across ports
         ]
+
+        # Debug toggles for hAP ax S WiFi-radio diagnostic.
+        # Precedence: USE_E > NO_R > default(-r).
+        # -e: empty config (no DefConf, no factory default script). Pairs
+        #     cleanly with our -s replacing customized.default.rsc.
+        # No flag: keep existing config (preserves prior state).
+        # -r (default): apply factory DefConf — conflicts semantically with
+        #     -s which replaces default-config. Suspected of leaving radios
+        #     unbound on hAP ax S when DefConf's wifi-gen step fails.
+        if os.environ.get("MIKROTIK_NETINSTALL_USE_E", "").lower() in ("1", "true", "yes"):
+            logger.warning(
+                "MIKROTIK_NETINSTALL_USE_E set — using -e (empty config) instead of -r"
+            )
+            cmd.append("-e")
+        elif os.environ.get("MIKROTIK_NETINSTALL_NO_R", "").lower() in ("1", "true", "yes"):
+            logger.warning(
+                "MIKROTIK_NETINSTALL_NO_R set — omitting -r flag from netinstall-cli"
+            )
+        else:
+            cmd.append("-r")
 
         # `-sm` requires netinstall-cli 7.22+. Older binaries will reject
         # the flag and abort the run — surface that as a "tool too old"
@@ -780,6 +799,137 @@ class MikrotikHandler(BaseHandler):
                 f"Failed to remove {host_addr} from {interface}: "
                 f"{stderr.decode().strip()}"
             )
+
+    # ------------------------------------------------------------------
+    # Sequenced extra-package install (post-netinstall)
+    # ------------------------------------------------------------------
+    #
+    # On hAP ax / ax² / ax³ / ax S, net-installing routeros + wifi-qcom
+    # in the same flash leaves /interface/wifi/radio/print empty — the
+    # driver loads but the radio chip never binds. Boot log shows
+    # `DefConf gen: Unable to find wifi radio data` + a critical "script
+    # interrupted" error. Manual `/system upgrade` to the same versions
+    # preserves wifi, so it's specifically the simultaneous-install path
+    # that breaks radio binding. Forum fix path:
+    # https://forum.mikrotik.com/t/hap-ax-lite-no-wifi-in-default-config-solved/172882
+    #
+    # The provisioner ships only `routeros-*-<arch>.npk` via netinstall-cli,
+    # then SCP-uploads `wifi-qcom-<ver>-<arch>.npk` post-boot and reboots
+    # to install onto an already-running OS. A final `/system
+    # reset-configuration` triggers a fresh DefConf gen with wifi-qcom
+    # now properly bound, populating `/interface/wifi/radio`.
+
+    async def install_extra_npk_and_reboot(
+        self,
+        local_npk_path: str,
+        timeout: int = 240,
+    ) -> bool:
+        """SFTP-upload an .npk to device root and reboot to install it.
+
+        RouterOS auto-installs any .npk it finds at `/` on next boot, then
+        removes the file. Used post-netinstall so the package installs onto
+        a fully-booted OS rather than during the netinstall first-boot
+        sequence (which breaks radio binding on hAP ax hardware).
+        """
+        await self._ensure_ssh()
+        npk_name = Path(local_npk_path).name
+        pkg_prefix = npk_name.split("-")[0].lower()  # e.g. "wifi-qcom" or "routeros"
+
+        try:
+            async with self._ssh.start_sftp_client() as sftp:
+                await sftp.put(local_npk_path, npk_name)
+            logger.info(f"Uploaded {npk_name} to {self.ip} for next-boot install")
+        except Exception as exc:
+            logger.error(f"SFTP upload of {npk_name} failed: {exc}")
+            return False
+
+        # Reboot — SSH session will drop mid-command, which is expected.
+        try:
+            await self._ssh.run("/system reboot", timeout=4, check=False)
+        except Exception:
+            pass
+        try:
+            await self.disconnect()
+        except Exception:
+            pass
+
+        # Let the device begin shutdown before we start polling.
+        await asyncio.sleep(10)
+
+        if not await self.wait_for_reboot(timeout=timeout):
+            logger.error(
+                f"{self.ip} did not come back online after {npk_name} install reboot"
+            )
+            return False
+
+        if not await self.connect():
+            logger.error(
+                f"Could not reconnect after {npk_name} install: {self.login_error}"
+            )
+            return False
+
+        # Confirm the package now appears installed.
+        result = await self._ssh.run(
+            "/system package print", timeout=10, check=False
+        )
+        if pkg_prefix not in (result.stdout or "").lower():
+            logger.error(
+                f"After install reboot, package matching '{pkg_prefix}' "
+                f"not found in /system package print on {self.ip}"
+            )
+            return False
+
+        logger.info(f"{pkg_prefix} now installed on {self.ip}")
+        return True
+
+    async def factory_reset_and_reconnect(
+        self,
+        timeout: int = 240,
+    ) -> bool:
+        """Issue `/system reset-configuration` and wait for SSH back.
+
+        After reset, RouterOS re-runs the customized.default.rsc that
+        netinstall-cli's `-s` flag installed — which rebuilds
+        bridge-bootstrap + the fleet-bootstrap user — and the wifi-qcom
+        DefConf gen runs fresh with radios now bound, populating
+        `/interface/wifi/radio`. Used right after `install_extra_npk_and_reboot`.
+        """
+        await self._ensure_ssh()
+
+        try:
+            await self._ssh.run(
+                "/system reset-configuration skip-backup=yes",
+                timeout=4,
+                check=False,
+            )
+        except Exception:
+            pass
+        try:
+            await self.disconnect()
+        except Exception:
+            pass
+
+        # Reset-configuration is more involved than a plain reboot (full
+        # storage reset + script replay). Allow extra settle time.
+        await asyncio.sleep(15)
+
+        if not await self.wait_for_reboot(timeout=timeout):
+            logger.error(
+                f"{self.ip} did not come back online after /system reset-configuration"
+            )
+            return False
+
+        if not await self.connect():
+            logger.error(
+                f"Could not reconnect after reset-configuration: {self.login_error}"
+            )
+            return False
+
+        logger.info(
+            f"Reset-configuration completed on {self.ip}; "
+            f"reconnected as {self.credentials.get('username')}"
+        )
+        return True
 
     # ------------------------------------------------------------------
     # ZTP base-flash (fetch canonical script + verify post-import note)
