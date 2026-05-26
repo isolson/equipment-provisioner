@@ -1,5 +1,10 @@
 # MikroTik Netinstall + Auto-Provisioning
 
+Bottom line: a tech only needs to put the router into Netinstall mode on a
+provisioner port. The provisioner flashes RouterOS, installs the canonical WiFi
+base script, verifies the router can phone home after it is moved to internet,
+then registers it with WiFi.
+
 How the provisioner detects a MikroTik device entering BOOTP/Netinstall mode,
 flashes it via `netinstall-cli`, applies a base configuration, and hands the
 device off ready for customer config.
@@ -60,7 +65,9 @@ override / debug control but is not part of the normal happy path.
                        │       onboardingPass; /import combined script   │
                        │    8. Verify /system/note contains              │
                        │       base_flash_version=universal-v1           │
-                       │    9. POST <ztp_api_url>/ztp/mikrotik/register  │
+                       │    9. Verify ZTP-ready state: device-mode,      │
+                       │       phone-home, schedulers, WAN probes        │
+                       │   10. POST <ztp_api_url>/ztp/mikrotik/register  │
                        │       with X-API-Key (contract payload)         │
                        └─────────────────────────────────────────────────┘
 ```
@@ -81,7 +88,8 @@ base-flash; the provisioner is forbidden from authoring its own.
 | 4. Prepend `:local` parameters | `MikrotikHandler.build_import_script()` |
 | 5. `/import` over SSH | `MikrotikHandler.apply_config_file()` |
 | 6. Verify `base_flash_version=universal-v1` | `MikrotikHandler.verify_base_flash_applied()` |
-| 7. `POST /ztp/mikrotik/register` | `equipment_registry.register_mikrotik()` |
+| 7. Verify phone-home readiness | `MikrotikHandler.verify_ztp_ready()` |
+| 8. `POST /ztp/mikrotik/register` | `equipment_registry.register_mikrotik()` |
 
 ## Critical RouterOS 7.20+ quirks
 
@@ -101,9 +109,11 @@ non-obvious blockers:
 ## What ends up on the device
 
 Defined by the canonical base-flash on the wifi-api, not by the provisioner.
-The provisioner only verifies the post-condition `/system/note` contains
-`base_flash_version=universal-v1`. Per the contract, the canonical script
-produces:
+The provisioner verifies the post-conditions needed for uptime before
+registration: `base_flash_version=universal-v1`, RouterOS `fetch` and
+scheduler enabled, `phone-home` script and schedulers present, fleet identity
+set, and WAN DHCP probe clients installed. Per the contract, the canonical
+script produces:
 
 - Identity `fleet-init-<serial>` (device renames itself to `fleet-gw-<serial>`
   or `fleet-ext-<serial>` on first successful phone-home)

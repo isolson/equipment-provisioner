@@ -5,7 +5,7 @@ Covers three integration points introduced by the auto-trigger feature:
   2. The per-port octet derivation that keeps concurrent Netinstalls
      on distinct /24s
   3. The port_manager listener loop's idempotency gates
-     (provision_attempted / last_provisioned_mac / REPROVISION_COOLDOWN)
+     (provision_attempted / last_provisioned_mac / BOOTP same-MAC retry block)
 """
 
 import struct
@@ -24,7 +24,11 @@ from provisioner.port_manager import PortManager
 # ---------------------------------------------------------------------------
 
 
-def _build_bootp_request(client_mac: bytes, broken: str = "") -> bytes:
+def _build_bootp_request(
+    client_mac: bytes,
+    broken: str = "",
+    vendor_payload: bytes = b"",
+) -> bytes:
     """Build a valid Ethernet/IPv4/UDP/BOOTP request frame.
 
     Parameters
@@ -75,7 +79,7 @@ def _build_bootp_request(client_mac: bytes, broken: str = "") -> bytes:
     bootp_chaddr = client_mac + b"\x00" * 10  # 16 bytes total
     bootp_sname = b"\x00" * 64
     bootp_file = b"\x00" * 128
-    bootp_vend = b"\x00" * 64  # truncated
+    bootp_vend = (vendor_payload + b"\x00" * 64)[:64]  # truncated
 
     bootp = struct.pack(
         "!BBBBLHH",
@@ -122,6 +126,20 @@ class TestParseBootpRequestMac:
 
     def test_rejects_zero_chaddr(self):
         frame = _build_bootp_request(b"\x00\x00\x00\x00\x00\x00")
+        assert DeviceFingerprinter.parse_bootp_request_mac(frame) is None
+
+    def test_rejects_treehouse_cpe_bootp_probe(self):
+        frame = _build_bootp_request(
+            b"\x04\xf4\x1c\xc2\x06\x80",
+            vendor_payload=b"\x63\x82\x53\x63\x3c\x0dTreehouse-CPE\xff",
+        )
+        assert DeviceFingerprinter.parse_bootp_request_mac(frame) is None
+
+    def test_rejects_managed_fleet_hostname_bootp_probe(self):
+        frame = _build_bootp_request(
+            b"\x04\xf4\x1c\xc2\x06\x80",
+            vendor_payload=b"\x63\x82\x53\x63\x0c\x16fleet-init-HKC0APZE4XT\xff",
+        )
         assert DeviceFingerprinter.parse_bootp_request_mac(frame) is None
 
 
@@ -285,10 +303,12 @@ async def test_listener_skips_when_provision_already_attempted_same_mac(manager,
 
 
 @pytest.mark.asyncio
-async def test_listener_skips_after_recent_failed_fire(manager, monkeypatch):
-    """A recent BOOTP fire (e.g. a Netinstall failure that left no
-    last_provisioned_mac) must throttle the next attempt — without this
-    a stuck device would re-trigger every BOOTP_SNIFF_WINDOW_SEC."""
+async def test_listener_skips_same_mac_after_failed_fire(manager, monkeypatch):
+    """A failed BOOTP-triggered Netinstall must not retry the same stuck unit.
+
+    The field tech can remove/reinsert the device to clear port state. Without
+    this gate, a unit left in BOOTP mode loops Netinstall attempts forever.
+    """
     fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:01"])
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
@@ -298,8 +318,9 @@ async def test_listener_skips_after_recent_failed_fire(manager, monkeypatch):
     state = manager.port_states[1]
     # Simulate: previous Netinstall fired, failed, and reset provision_attempted.
     # last_provisioned_at/_mac stayed None (failure path), but last_bootp_fired_at
-    # was set when the previous fire happened a moment ago.
-    state.last_bootp_fired_at = time.time() - 5
+    # and last_bootp_fired_mac were set when the previous fire happened.
+    state.last_bootp_fired_at = time.time() - 3600
+    state.last_bootp_fired_mac = "aa:bb:cc:00:00:01"
 
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
@@ -307,8 +328,8 @@ async def test_listener_skips_after_recent_failed_fire(manager, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_listener_refires_after_retry_cooldown_expires(manager, monkeypatch):
-    fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:01"])
+async def test_listener_refires_after_failed_fire_for_different_mac(manager, monkeypatch):
+    fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:02"])
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
     fired = []
@@ -319,9 +340,9 @@ async def test_listener_refires_after_retry_cooldown_expires(manager, monkeypatc
     manager.on_device_in_bootp(cb)
 
     state = manager.port_states[1]
-    # Older than BOOTP_RETRY_COOLDOWN_SEC — retry should be allowed.
-    state.last_bootp_fired_at = time.time() - manager.BOOTP_RETRY_COOLDOWN_SEC - 1
+    state.last_bootp_fired_at = time.time() - 5
+    state.last_bootp_fired_mac = "aa:bb:cc:00:00:01"
 
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
-    assert fired == [(1, "aa:bb:cc:00:00:01")]
+    assert fired == [(1, "aa:bb:cc:00:00:02")]

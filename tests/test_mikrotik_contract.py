@@ -233,11 +233,13 @@ class TestVerifyBaseFlashApplied:
         h = _handler()
         h._run_command = AsyncMock(
             return_value=(
-                "show-at-login: yes\n"
-                "note: base_flash_version=universal-v1 serial=HBE0001\n"
+                "base_flash_version=universal-v1 serial=HBE0001\n"
             )
         )
         assert await h.verify_base_flash_applied() is True
+        h._run_command.assert_awaited_once_with(
+            ":put [/system/note/get note]", allow_failure=True
+        )
 
     async def test_false_when_marker_absent(self):
         h = _handler()
@@ -254,6 +256,125 @@ class TestVerifyBaseFlashApplied:
         # An older universal version must NOT be accepted as compliant.
         h._run_command = AsyncMock(return_value="base_flash_version=universal-v0")
         assert await h.verify_base_flash_applied() is False
+
+
+class TestWaitForBaseFlashApplied:
+    async def test_waits_until_marker_is_visible(self):
+        h = _handler()
+        h.verify_base_flash_applied = AsyncMock(side_effect=[False, False, True])
+
+        with patch("asyncio.sleep", new=AsyncMock()) as sleep:
+            assert await h.wait_for_base_flash_applied(timeout=30, interval=2) is True
+
+        assert h.verify_base_flash_applied.await_count == 3
+        sleep.assert_awaited()
+
+    async def test_allows_slow_hap_ax_s_marker_visibility(self):
+        h = _handler()
+        h.verify_base_flash_applied = AsyncMock(side_effect=([False] * 130) + [True])
+
+        with patch("asyncio.sleep", new=AsyncMock()) as sleep:
+            assert await h.wait_for_base_flash_applied(timeout=360, interval=2) is True
+
+        assert h.verify_base_flash_applied.await_count == 131
+        assert sleep.await_count == 130
+
+    async def test_false_after_timeout(self):
+        h = _handler()
+        h.verify_base_flash_applied = AsyncMock(return_value=False)
+
+        assert await h.wait_for_base_flash_applied(timeout=0, interval=0) is False
+        h.verify_base_flash_applied.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# verify_ztp_ready
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyZtpReady:
+    def _mock_ztp_ready_commands(
+        self,
+        *,
+        device_mode: str = "mode: advanced\nfetch: yes\nscheduler: yes\n",
+        note: str = "base_flash_version=universal-v1 serial=HBE0001",
+        identity: str = "fleet-init-HBE0001",
+        phone_home: str = "1",
+        boot_scheduler: str = "1",
+        adaptive_scheduler: str = "1",
+        dhcp_probes: str = "5",
+    ):
+        async def run(command: str, allow_failure: bool = False) -> str:
+            if command == "/system/device-mode/print":
+                return device_mode
+            if command == ":put [/system/note/get note]":
+                return note
+            if command == ":put [/system/identity/get name]":
+                return identity
+            if "script/find name=phone-home" in command:
+                return phone_home
+            if "scheduler/find name=phone-home-boot" in command:
+                return boot_scheduler
+            if "scheduler/find name=phone-home-adaptive" in command:
+                return adaptive_scheduler
+            if "dhcp-client/find comment=th-wan-probe" in command:
+                return dhcp_probes
+            return ""
+
+        return AsyncMock(side_effect=run)
+
+    async def test_true_when_device_can_phone_home_after_handoff(self):
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands()
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is True
+        assert "ZTP-ready" in detail
+
+    async def test_allows_identity_after_role_self_detection(self):
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands(
+            identity="fleet-gw-HBE0001",
+        )
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is True
+        assert "ZTP-ready" in detail
+
+    async def test_false_when_device_mode_blocks_fetch_or_scheduler(self):
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands(
+            device_mode="mode: home\nfetch: no\nscheduler: no\n",
+        )
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is False
+        assert "device-mode blocks ZTP" in detail
+
+    async def test_false_when_phone_home_scheduler_missing(self):
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands(
+            adaptive_scheduler="0",
+        )
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is False
+        assert detail == "missing phone-home scheduler"
+
+    async def test_false_when_identity_does_not_match_serial(self):
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands(
+            identity="MikroTik",
+        )
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is False
+        assert "unexpected identity" in detail
 
 
 # ---------------------------------------------------------------------------
