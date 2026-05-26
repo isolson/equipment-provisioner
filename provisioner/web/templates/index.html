@@ -56,6 +56,13 @@
             color: white; font-size: 12px; font-weight: 700;
             padding: 2px 8px; border-radius: 3px;
             text-transform: uppercase; letter-spacing: 0.5px;
+            display: inline-flex; align-items: center; gap: 5px;
+        }
+        .vendor-tag-icon {
+            width: 16px; height: 16px; border-radius: 3px;
+            background: #ffffff; padding: 2px;
+            box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
+            object-fit: contain;
         }
         .model-text { font-size: 15px; font-weight: 700; color: #111827; }
         .port-num-sm { font-size: 22px; font-weight: 900; color: #6b7280; margin-left: auto; }
@@ -342,13 +349,13 @@
 
         // Device vendors
         const deviceVendors = {
-            cambium: { name: 'Cambium', color: '#22c55e', defaultUser: 'admin' },
-            mikrotik: { name: 'MikroTik', color: '#3b82f6', defaultUser: 'admin' },
-            tachyon: { name: 'Tachyon', color: '#a855f7', defaultUser: 'root' },
-            tarana: { name: 'Tarana', color: '#d97706', defaultUser: 'admin' },
-            ubiquiti: { name: 'Ubiquiti', color: '#0559C9', defaultUser: 'ubnt' },
-            evolution_digital: { name: 'Evolution', color: '#ec4899', defaultUser: '' },
-            unknown: { name: 'Unknown', color: '#6b7280', defaultUser: 'admin' },
+            cambium: { name: 'Cambium', color: '#1A73E9', defaultUser: 'admin', icon: '/static/vendor-icons/cambium.png' },
+            mikrotik: { name: 'MikroTik', color: '#0E0E10', defaultUser: 'admin', icon: '/static/vendor-icons/mikrotik.png' },
+            tachyon: { name: 'Tachyon', color: '#a855f7', defaultUser: 'root', icon: '/static/vendor-icons/tachyon.png' },
+            tarana: { name: 'Tarana', color: '#d97706', defaultUser: 'admin', icon: '/static/vendor-icons/tarana.png' },
+            ubiquiti: { name: 'Ubiquiti', color: '#0559C9', defaultUser: 'ubnt', icon: '/static/vendor-icons/ubiquiti.png' },
+            evolution_digital: { name: 'Evolution', color: '#ec4899', defaultUser: '', icon: '/static/vendor-icons/evolution_digital.png' },
+            unknown: { name: 'Unknown', color: '#6b7280', defaultUser: 'admin', icon: '' },
         };
 
         // Initialize
@@ -863,7 +870,7 @@
                 <!-- Identity line -->
                 <div class="card-identity">
                     ${hasDevice ? `
-                        <span class="vendor-tag" style="background:${vendor.color}">${vendor.name}</span>
+                        <span class="vendor-tag" style="background:${vendor.color}">${vendor.icon ? `<img class="vendor-tag-icon" src="${vendor.icon}" alt="">` : ''}${vendor.name}</span>
                         <span class="model-text">${model || ''}</span>
                     ` : ''}
                     <span class="port-num-sm">${portNum}</span>
@@ -920,7 +927,7 @@
                 ? fw2Latest
                 : (formatFromTo(fw2From, fw2To) + (activeBank === '2' && shortFw(fw2To) ? ' (active)' : ''));
 
-            document.getElementById('modal-title').textContent = `Port ${portNum} \u2014 ${vendor.name} ${model || ''}`;
+            document.getElementById('modal-title').innerHTML = `Port ${portNum} \u2014 ${vendor.icon ? `<img src="${vendor.icon}" class="inline-block w-4 h-4 rounded align-middle mr-1 object-contain" alt="">` : ''}${vendor.name} ${model || ''}`;
 
             // Build device info rows
             const infoRows = [];
@@ -1165,7 +1172,7 @@
             document.getElementById('modal-content').innerHTML = `
                 <div class="space-y-4">
                     <div class="p-3 bg-gray-50 rounded-lg border border-gray-200">
-                        <div class="font-bold text-lg" style="color: ${vendor.color}">${vendor.name}</div>
+                        <div class="font-bold text-lg flex items-center gap-2" style="color: ${vendor.color}">${vendor.icon ? `<img src="${vendor.icon}" class="w-5 h-5 rounded object-contain" alt="">` : ''}<span>${vendor.name}</span></div>
                         <div class="text-sm text-gray-600">${port.device_ip || 'Unknown IP'}</div>
                     </div>
 
@@ -1226,7 +1233,7 @@
             document.getElementById('modal-content').innerHTML = `
                 <div class="space-y-4">
                     <div class="p-3 bg-gray-50 rounded-lg border border-gray-200">
-                        <div class="font-bold text-lg" style="color: ${vendor.color}">${vendor.name}</div>
+                        <div class="font-bold text-lg flex items-center gap-2" style="color: ${vendor.color}">${vendor.icon ? `<img src="${vendor.icon}" class="w-5 h-5 rounded object-contain" alt="">` : ''}<span>${vendor.name}</span></div>
                         <div class="text-sm text-gray-600">${port.device_ip || ''}</div>
                     </div>
                     <div>
@@ -1336,7 +1343,7 @@
             document.getElementById('modal-content').innerHTML = `
                 <div class="space-y-4">
                     <div class="p-3 bg-gray-50 rounded-lg border border-gray-200">
-                        <div class="font-bold text-lg" style="color: ${vendor.color}">${vendor.name}</div>
+                        <div class="font-bold text-lg flex items-center gap-2" style="color: ${vendor.color}">${vendor.icon ? `<img src="${vendor.icon}" class="w-5 h-5 rounded object-contain" alt="">` : ''}<span>${vendor.name}</span></div>
                         <div class="text-sm text-gray-600">${port.device_ip || ''}</div>
                     </div>
                     <div class="grid grid-cols-2 gap-3">
@@ -1454,7 +1461,7 @@
                     ` : ''}
 
                     <div class="p-3 bg-gray-50 rounded-lg border border-gray-200">
-                        <div class="font-bold text-lg" style="color: ${vendor.color}">${vendor.name}</div>
+                        <div class="font-bold text-lg flex items-center gap-2" style="color: ${vendor.color}">${vendor.icon ? `<img src="${vendor.icon}" class="w-5 h-5 rounded object-contain" alt="">` : ''}<span>${vendor.name}</span></div>
                         <div class="text-sm text-gray-600">${port.device_ip || 'Unknown IP'}</div>
                     </div>
 
@@ -1658,7 +1665,7 @@
                             <span style="color:${statusColor};font-size:14px;width:16px;text-align:center">${statusIcon}</span>
                             <div class="flex-1 min-w-0">
                                 <div class="flex items-center gap-2 text-sm">
-                                    <span class="font-medium" style="color:${vendor.color}">${vendor.name}</span>
+                                    <span class="font-medium inline-flex items-center gap-1" style="color:${vendor.color}">${vendor.icon ? `<img src="${vendor.icon}" class="w-4 h-4 rounded object-contain" alt="">` : ''}${vendor.name}</span>
                                     <span class="text-gray-900">${job.device_model || ''}</span>
                                     <span class="text-gray-400">Port ${job.port_number || '?'}</span>
                                 </div>
