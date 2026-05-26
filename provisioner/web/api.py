@@ -533,7 +533,7 @@ async def _run_netinstall(provisioner, port_number: int):
 
         # Step 3a: post-flash install of arch-matched extra package (wifi-qcom).
         # Skipped for wired-only models (mipsbe etc.) which have no extra.
-        device_arch = (info.hardware_version or "").lower()
+        device_arch = (getattr(info, "hardware_version", "") or "").lower()
         wifi_pkg = extras_by_arch.get(device_arch)
         if wifi_pkg:
             await on_progress(
