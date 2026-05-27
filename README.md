@@ -1,8 +1,8 @@
 # Network Equipment Auto-Provisioner
 
-**Zero-touch provisioning for wireless radios.** Plug in a factory-default device, walk away. The system detects it, configures it, updates firmware, and marks it ready—all automatically.
+**Plug in a radio. Walk away. It provisions itself automatically.**
 
-Built for network operators who provision dozens or hundreds of devices. Works with Cambium, Tarana, and Tachyon radios. Provisions up to 6 devices simultaneously.
+This system automatically detects, configures, and updates firmware on wireless radios. Works with Cambium, Tarana, and Tachyon radios. Provisions up to 6 devices at the same time.
 
 ---
 
@@ -11,99 +11,123 @@ Built for network operators who provision dozens or hundreds of devices. Works w
 ![Dashboard Overview](docs/screenshots/dashboard-overview.png)
 *Main dashboard showing 6 ports with real-time status*
 
-1. **Detect** — Plug in a factory-default radio. The system identifies vendor and model via fingerprinting.
-2. **Configure** — Applies your configuration templates (management IPs, passwords, SSIDs, etc.)
-3. **Update** — Downloads and installs the correct firmware version if needed
-4. **Verify** — Confirms the device is accessible and ready to deploy
+1. **Detects**: Plug in a factory-default radio. The system figures out what it is automatically.
+2. **Configures**: Applies your settings (management IPs, passwords, SSIDs, etc.)
+3. **Updates**: Installs the correct firmware version if it’s out of date
+4. **Marks ready**: Shows a green "Ready" indicator when the device is done
 
-All status updates appear in real-time on the web dashboard. No manual steps after initial setup.
-
----
-
-## Hardware Requirements
-
-### The Provisioning Station
-
-This system is designed to run on a dedicated Linux machine with an attached MikroTik switch:
-
-- **Host Computer** — Raspberry Pi 3B+ or better, OrangePi 3 LTS, or any Linux x86_64 machine
-  - **Recommended:** Lenovo ThinkPad Yoga 11e (or similar convertible) — built-in touchscreen, accelerometer for auto-rotate, runs MikroTik Netinstall natively. See [docs/HOST_SETUP.md](docs/HOST_SETUP.md).
-  - Other x86 options: Dell OptiPlex 3050, Dell Wyse 5070, HP EliteDesk 800 G2 (required for MikroTik Netinstall)
-  - Optional: 7" touchscreen for bench-top use (designed for 1024×600 displays)
-  - Minimum: 1GB RAM, 8GB storage
-
-- **Network Switch** — MikroTik 8-port RouterOS switch
-  - Tested: [CRS112-8G-4S-IN](https://mikrotik.com/product/CRS112-8G-4S-IN), [CRS310-8G+2S+IN](https://mikrotik.com/product/crs310_8g_2s_in)
-  - Must run **RouterOS** (not SwOS) — the system auto-configures it via API
-
-- **Cables** — Ethernet cables to connect devices
-
-### Port Layout
-
-```
-Port 1–6    Device provisioning (isolated VLANs, PoE if supported)
-Port 7      WAN / Internet (for firmware downloads)
-Port 8      Trunk to host computer (all VLANs + management)
-```
-
-The switch provides PoE to devices on ports 1–6 if your switch model supports it. Each port is isolated in its own VLAN so devices can't interfere with each other during provisioning.
+All status updates appear live on the web dashboard. No manual steps after initial setup.
 
 ---
 
-## Quick Start
+## What You’ll Need
 
-### One-Command Setup
+### Shopping List
+
+| Item | Recommended Model | Est. Cost | Notes |
+|------|-------------------|-----------|-------|
+| **Host computer** | Lenovo ThinkPad Yoga 11e | ~$80 used | Best all-around: x86, touchscreen, auto-rotates. Find on eBay/Amazon. |
+| **Switch** | MikroTik [CRS112-8P-4S-IN](https://mikrotik.com/product/CRS112-8P-4S-IN) | ~$200 | PoE-out on all 8 ports: powers devices through the cable. Script configures it automatically. |
+| **Ethernet cables** | Cat5e or better, 1–3 ft | ~$10/pack | Short cables keep the bench tidy. |
+| **Internet connection** | Any broadband | - | Needed for firmware downloads. Can preload offline if needed. |
+
+**Other compatible host computers** (if you can’t find the ThinkPad): Dell OptiPlex 3050, Dell Wyse 5070, HP EliteDesk 800 G2. Any x86 Linux machine works. Raspberry Pi 4 also works but can’t run MikroTik Netinstall.
+
+> **What does the switch do?** It gives each device plugged in its own isolated lane: so 6 devices can provision at once without interfering with each other. It also powers devices through the Ethernet cable if your switch model supports it (PoE). **You don’t need to configure the switch yourself: the setup script does it automatically.**
+
+### Cable Layout
+
+```
+Your devices (up to 6)
+  └─ Ports 1–6:   Plug your radios here (switch powers them via PoE)
+
+Internet/router
+  └─ Port 7:      Plug your internet connection here (for firmware downloads)
+
+Host computer
+  └─ Port 8:      One cable from switch to your laptop/PC
+```
+
+---
+
+## Setup (Step-by-Step)
+
+### Step 1: Install Linux on the host computer
+
+If you’re using the recommended ThinkPad Yoga 11e, install **Ubuntu 22.04 LTS** (64-bit). The [Ubuntu installation guide](https://ubuntu.com/tutorials/install-ubuntu-desktop) walks through it. Any Debian/Ubuntu-based Linux works.
+
+Once installed, open a terminal (Ctrl+Alt+T) and proceed to Step 2.
+
+### Step 2: Connect the cables
+
+1. Connect the MikroTik switch to power
+2. Plug an Ethernet cable from **switch port 8** to the host computer’s Ethernet port
+3. Plug your internet connection into **switch port 7**
+4. Don’t plug any radios in yet: do that after setup is complete
+
+### Step 3: Run the setup script
+
+In the terminal on your host computer, run this single command:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/isolson/network-provisioner/main/scripts/bootstrap.sh | sudo bash
 ```
 
-The bootstrap script:
-1. Installs dependencies (Python 3.9+, `arping`, `RouterOS API`, etc.)
-2. Collects device passwords from you interactively
-3. Waits for you to plug in the MikroTik switch
-4. Auto-configures the switch (VLANs, trunk, webhook callbacks)
-5. Starts the provisioner web service
-6. Opens the dashboard at `http://<your-host>:8080`
+This downloads and runs the setup script. It will:
+1. Install the software and its dependencies
+2. Ask you for your device passwords (the current admin password on your Cambium/Tarana/Tachyon devices: usually `admin` if they’re factory default)
+3. Detect the MikroTik switch automatically when you plug it in
+4. Configure the switch (VLANs, port assignments, PoE: all automatic)
+5. Start the provisioner service
 
-### Manual Installation
+**Expected output when done:**
+```
+✓ Provisioner installed
+✓ Switch configured
+✓ Service started
 
-If you prefer to review the code first:
-
-```bash
-git clone https://github.com/isolson/network-provisioner.git /opt/provisioner
-cd /opt/provisioner
-sudo bash scripts/setup.sh
+Dashboard: http://192.168.88.10:8080
 ```
 
-For the recommended day-0 workflow that minimizes CLI after install, see [docs/FIRST_SETUP_PLAN.md](docs/FIRST_SETUP_PLAN.md).
+> If you prefer to review the code before running it: `git clone https://github.com/isolson/network-provisioner.git /opt/provisioner && sudo bash /opt/provisioner/scripts/setup.sh`
 
-### First-Time Setup
+### Step 4: Finish setup in the browser
 
-After `scripts/setup.sh` or the image first-boot wizard finishes:
+1. Open `http://192.168.88.10:8080` in a browser on the host computer
+   - You should see the dashboard with 6 empty port cards
+2. Click the **Setup** tab (or follow the banner if it appears)
+3. Work through the readiness checklist:
+   - **Credentials**: Confirm your device passwords are entered
+   - **Config templates**: Upload your configuration templates (or use the bundled defaults)
+   - **Firmware**: Pre-download firmware for your device types (optional: it can download on demand if you have internet)
+4. The Setup tab will also verify your switch is wired correctly
 
-1. Open `http://<your-host>:8080/files`
-2. Review the `Setup` tab readiness checklist
-3. If you already have a known-good bench, export its setup bundle and import it here
-4. Add any extra fallback credentials your fleet needs
-5. Upload default config templates for each device type you expect to provision
-6. Preload firmware you need locally, especially if the bench may be offline
-7. Validate the station by provisioning one known-good device on port 1
+> If you’re migrating from an existing provisioning bench, you can export its setup bundle and import it here to skip most of this.
 
-The same `Setup` tab can also:
+### Step 5: Provision your first device
 
-- seed the repo’s bundled templates into the live data store
-- restart `provisioner-web` after importing `config.yaml` or `provisioner.env`
+1. Plug a factory-default radio into **port 1** of the switch
+2. Watch the port card on the dashboard: it will progress through:
+   - **Detecting** (identifying what device it is)
+   - **Provisioning** (logging in, configuring, updating firmware)
+   - **Ready** (done: green indicator)
+3. The system handles everything automatically: watch the checklist fill in as it goes
 
-The main dashboard now shows a readiness banner whenever setup is still incomplete, with a direct link back to `Setup`.
+**What success looks like:** The port card turns green with a checkmark and shows "Ready". The checklist on the right shows all steps complete (Login ✓, Config ✓, Firmware ✓, Verify ✓).
 
-The `Setup` tab also checks the expected MikroTik switch layout for the first eight ports:
+---
 
-- `ether1-ether6` provisioning ports
-- `ether7` WAN or internet uplink
-- `ether8` trunk to the host
+## When Something Goes Wrong
 
-If the switch is still factory-default, the same `Setup` tab can run the MikroTik switch configuration flow for that first-eight-port layout.
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| Port card stays blank after plugging in | Cable or device power issue | Check cable is fully seated; check device has power |
+| "Detecting" runs for more than 2 minutes | Device isn’t at factory defaults | Factory reset the device first |
+| "Provisioning" fails with "connection timeout" | No internet for firmware download | Check port 7 has internet; or preload firmware in the Setup tab |
+| Dashboard doesn’t load | Service not running | Run `sudo systemctl status provisioner-web` in the terminal |
+| Switch not found during setup | Switch not yet booted | Wait 30 seconds and try again; switch takes ~20s to boot |
+
+For more detailed troubleshooting, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ---
 
@@ -113,21 +137,30 @@ If the switch is still factory-default, the same `Setup` tab can run the MikroTi
 
 When you plug a device into ports 1–6:
 
-1. **Link detection** — The MikroTik switch sends a webhook when it sees Ethernet link-up
-2. **ARP probing** — The system probes known factory-default IPs:
+1. **Link detection**: The MikroTik switch sends a webhook when it sees Ethernet link-up
+2. **ARP probing**: The system probes known factory-default IPs:
    - `169.254.1.1` (Cambium, Tachyon)
    - `192.168.1.20` (Ubiquiti Wave/AirMax)
    - `192.168.88.1` (MikroTik)
    - `169.254.100.1` (Tarana)
-3. **Fingerprinting** — HTTP requests identify the vendor and model
-4. **Provisioning** — The appropriate handler logs in, applies config, and updates firmware
+3. **Fingerprinting**: HTTP requests identify the vendor and model
+4. **Provisioning**: The appropriate handler logs in, applies config, and updates firmware
 
 ![Device Detection Flow](docs/screenshots/device-detection.png)
 *Port card showing live detection and fingerprinting progress*
 
-### VLAN Isolation
+### Port Isolation
 
-Each port uses its own provisioning VLAN:
+Each of the 6 provisioning ports runs on its own isolated network segment. This means:
+
+- Devices can't see each other, even though they share a switch
+- Multiple devices with the same factory-default IP can provision simultaneously without conflict
+- A failed or misbehaving device on one port can't affect others
+
+This is handled automatically by the switch configuration: no manual network setup required.
+
+<details>
+<summary>Technical details (VLAN IDs and subnets)</summary>
 
 | Port | VLAN | Subnet |
 |------|------|--------|
@@ -139,7 +172,7 @@ Each port uses its own provisioning VLAN:
 
 Management VLAN 1990 (`192.168.88.0/24`) is for switch-to-host communication only.
 
-This isolation prevents devices from seeing each other during provisioning, which matters for devices that broadcast DHCP requests or have default IPs that conflict.
+</details>
 
 ---
 
@@ -152,16 +185,16 @@ This isolation prevents devices from seeing each other during provisioning, whic
 
 The dashboard updates live via WebSocket. No page refresh needed. Each port card shows:
 
-- **Vendor badge** — Color-coded by manufacturer
-- **Model name** — Detected via fingerprint
-- **Link speed** — 1Gbps, 100Mbps, or blank if no link
-- **Status center** — Large icon + text showing current state:
-  - 🔵 **Detecting** — Probing for device
-  - 🟡 **Booting** — Waiting for device to finish boot
-  - 🔵 **Provisioning** — Logging in, configuring, updating firmware
-  - 🟢 **Ready** — Device is configured and accessible
-  - 🔴 **Failed** — Provisioning error (hover for details)
-- **Checklist** — Step-by-step progress (login ✓, config ✓, firmware ✓, etc.)
+- **Vendor badge**: Color-coded by manufacturer
+- **Model name**: Detected via fingerprint
+- **Link speed**: 1Gbps, 100Mbps, or blank if no link
+- **Status center**: Large icon + text showing current state:
+  - 🔵 **Detecting**: Probing for device
+  - 🟡 **Booting**: Waiting for device to finish boot
+  - 🔵 **Provisioning**: Logging in, configuring, updating firmware
+  - 🟢 **Ready**: Device is configured and accessible
+  - 🔴 **Failed**: Provisioning error (hover for details)
+- **Checklist**: Step-by-step progress (login ✓, config ✓, firmware ✓, etc.)
 
 ### Mode Configuration
 
@@ -170,9 +203,9 @@ The dashboard updates live via WebSocket. No page refresh needed. Each port card
 
 After a device is provisioned, you can set its operational mode:
 
-- **Subscriber Module (SM)** — Default, no extra config
-- **Access Point (AP)** — Enter tower number, system sets hostname + SSID
-- **Point-to-Point (PTP)** — Enter tower numbers for both ends, system names them `tw05-tw12-a` / `tw05-tw12-b`
+- **Subscriber Module (SM)**: Default, no extra config
+- **Access Point (AP)**: Enter tower number, system sets hostname + SSID
+- **Point-to-Point (PTP)**: Enter tower numbers for both ends, system names them `tw05-tw12-a` / `tw05-tw12-b`
 
 The mode configuration applies immediately. No need to unplug and re-provision.
 
@@ -286,32 +319,6 @@ The system automatically downloads firmware from vendor CDNs if needed.
 
 ---
 
-## Time Savings
-
-**Traditional manual provisioning:**
-1. Find device on network (DHCP lease or factory default IP)
-2. Open web browser, navigate to device
-3. Log in with default credentials
-4. Change password
-5. Set management IP
-6. Find correct firmware on vendor's website
-7. Upload firmware, wait 5–10 minutes
-8. Verify device rebooted correctly
-9. Log back in
-10. Apply configuration template
-11. Label device with hostname
-
-**With auto-provisioner:**
-1. Plug in device
-2. Wait (system does steps 1–11 automatically)
-3. Unplug when card shows "Ready"
-
-**Throughput:**
-- Manual: ~15–20 minutes per device (serial, one at a time)
-- Auto: ~10 minutes per device, but 6 devices run in parallel → **6 devices in 10 minutes instead of 90–120 minutes**
-
----
-
 ## Firmware Management
 
 ![Firmware Page](docs/screenshots/firmware-page.png)
@@ -319,10 +326,10 @@ The system automatically downloads firmware from vendor CDNs if needed.
 
 The management UI at `http://<host>:8080/files` lets you seed first-run assets without shell access:
 
-- **Available firmware** — Files already stored under `/var/lib/provisioner/repo/firmware/`
-- **Config templates** — Upload/edit templates under `/var/lib/provisioner/repo/configs/`
-- **Custom credentials** — Add fallback usernames/passwords stored in `credentials.json`
-- **Manual upload or URL download** — Seed the bench ahead of time to avoid delays during provisioning
+- **Available firmware**: Files already stored under `/var/lib/provisioner/repo/firmware/`
+- **Config templates**: Upload/edit templates under `/var/lib/provisioner/repo/configs/`
+- **Custom credentials**: Add fallback usernames/passwords stored in `credentials.json`
+- **Manual upload or URL download**: Seed the bench ahead of time to avoid delays during provisioning
 
 Firmware files are cached locally. Tachyon and MikroTik can auto-download when WAN access is available; for offline benches or slower links, preload the firmware you expect to use before the first provisioning run.
 
@@ -384,13 +391,13 @@ See [API.md](docs/API.md) for complete endpoint documentation.
 
 ### Device not detected
 
-1. **Check link speed** — Should show "1Gbps" or "100Mbps" in the port card
+1. **Check link speed**: Should show "1Gbps" or "100Mbps" in the port card
    - If blank, check cable and device power
-2. **Check factory defaults** — Device must be at factory default IP
+2. **Check factory defaults**: Device must be at factory default IP
    - Cambium/Tachyon: `169.254.1.1`
    - Tarana: `169.254.100.1`
    - MikroTik: `192.168.88.1`
-3. **Check logs** — `journalctl -u provisioner-web -f`
+3. **Check logs**: `journalctl -u provisioner-web -f`
 
 ### Provisioning fails with "connection timeout"
 
@@ -420,12 +427,12 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for more issues and solutions.
 
 ### Components
 
-- **Port Manager** (`provisioner/port_manager.py`) — Core state machine, device detection, boot wait logic
-- **Switch Listener** (`provisioner/switch_listener.py`) — RouterOS API client, listens for link up/down webhooks
-- **Device Handlers** (`provisioner/handlers/`) — Vendor-specific provisioning logic (Cambium, Tarana, Tachyon)
-- **Firmware Manager** (`provisioner/firmware.py`) — Downloads and caches firmware files
-- **Web API** (`provisioner/web/api.py`) — FastAPI server, WebSocket broadcaster
-- **Web UI** (`provisioner/web/templates/`) — Tailwind CSS dashboard, vanilla JavaScript
+- **Port Manager** (`provisioner/port_manager.py`): Core state machine, device detection, boot wait logic
+- **Switch Listener** (`provisioner/switch_listener.py`): RouterOS API client, listens for link up/down webhooks
+- **Device Handlers** (`provisioner/handlers/`): Vendor-specific provisioning logic (Cambium, Tarana, Tachyon)
+- **Firmware Manager** (`provisioner/firmware.py`): Downloads and caches firmware files
+- **Web API** (`provisioner/web/api.py`): FastAPI server, WebSocket broadcaster
+- **Web UI** (`provisioner/web/templates/`): Tailwind CSS dashboard, vanilla JavaScript
 
 ### Network Flow
 
@@ -447,12 +454,12 @@ Device configured ✓
 
 Each port goes through these states:
 
-1. **Idle** — No device detected
-2. **Boot Wait** — Link detected, waiting for device to finish booting (120s max)
-3. **Detecting** — ARP probing and HTTP fingerprinting
-4. **Provisioning** — Handler is running (login → config → firmware → verify)
-5. **Ready** — Provisioning complete, device accessible
-6. **Failed** — Error occurred, see `last_error` in port state
+1. **Idle**: No device detected
+2. **Boot Wait**: Link detected, waiting for device to finish booting (120s max)
+3. **Detecting**: ARP probing and HTTP fingerprinting
+4. **Provisioning**: Handler is running (login → config → firmware → verify)
+5. **Ready**: Provisioning complete, device accessible
+6. **Failed**: Error occurred, see `last_error` in port state
 
 The state machine handles:
 - Link flapping during autonegotiation
