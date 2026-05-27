@@ -131,6 +131,7 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
                 mac_address="04:f4:1c:c2:06:80",
                 model="hAP ax S",
                 firmware_version="7.22.2",
+                hardware_version="arm64",
             )
 
         @staticmethod
