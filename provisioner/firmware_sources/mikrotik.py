@@ -38,9 +38,13 @@ class MikrotikFirmwareSource(BaseFirmwareSource):
         "x86_64",
     )
     DEFAULT_EXTRA_PACKAGES = {
-        # WiFi 6 devices such as hAP ax S need this driver package alongside
-        # the RouterOS system package after Netinstall.
+        # WiFi 6 devices need a chip-vendor-specific driver package alongside
+        # routeros after Netinstall. MikroTik publishes one .npk per
+        # chip-family / arch combo; the device binds whichever driver matches
+        # its hardware at boot. hAP ax² / ax³ use Qualcomm (arm64),
+        # hAP ax S uses MediaTek (arm) — different chips, different drivers.
         "wifi-qcom": ("arm", "arm64"),
+        "wifi-mediatek": ("arm", "arm64"),
     }
 
     def normalize_channel(self, channel: Optional[str]) -> str:

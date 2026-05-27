@@ -17,6 +17,19 @@ from .base import BaseHandler, DeviceInfo
 logger = logging.getLogger(__name__)
 
 
+_NPK_FAMILY_RE = re.compile(r"^([a-z][a-z-]*?)-\d", re.IGNORECASE)
+
+
+def _npk_package_family(filename: str) -> Optional[str]:
+    """Extract the package family from an .npk filename.
+
+    `wifi-mediatek-7.22.3-arm.npk` -> `wifi-mediatek`
+    `routeros-arm-7.22.3.npk`      -> `routeros`
+    """
+    match = _NPK_FAMILY_RE.match(filename)
+    return match.group(1).lower() if match else None
+
+
 class MikrotikHandler(BaseHandler):
     """Handler for MikroTik RouterOS devices."""
 
@@ -819,28 +832,36 @@ class MikrotikHandler(BaseHandler):
     # reset-configuration` triggers a fresh DefConf gen with wifi-qcom
     # now properly bound, populating `/interface/wifi/radio`.
 
-    async def install_extra_npk_and_reboot(
+    async def install_extra_npks_and_reboot(
         self,
-        local_npk_path: str,
+        local_npk_paths: List[str],
         timeout: int = 240,
     ) -> bool:
-        """SFTP-upload an .npk to device root and reboot to install it.
+        """SFTP-upload one or more .npks to device root and reboot to install them.
 
         RouterOS auto-installs any .npk it finds at `/` on next boot, then
-        removes the file. Used post-netinstall so the package installs onto
-        a fully-booted OS rather than during the netinstall first-boot
-        sequence (which breaks radio binding on hAP ax hardware).
+        removes the file. Multiple drivers (e.g. wifi-qcom + wifi-mediatek)
+        can be shipped together — only the one matching the device's
+        actual radio chip will bind; the others are inert.
+
+        Used post-netinstall so packages install onto a fully-booted OS
+        rather than during the netinstall first-boot sequence (which
+        breaks radio binding on hAP ax hardware).
         """
+        if not local_npk_paths:
+            return True
         await self._ensure_ssh()
-        npk_name = Path(local_npk_path).name
-        pkg_prefix = npk_name.split("-")[0].lower()  # e.g. "wifi-qcom" or "routeros"
+        names = [Path(p).name for p in local_npk_paths]
 
         try:
             async with self._ssh.start_sftp_client() as sftp:
-                await sftp.put(local_npk_path, npk_name)
-            logger.info(f"Uploaded {npk_name} to {self.ip} for next-boot install")
+                for path, name in zip(local_npk_paths, names):
+                    await sftp.put(path, name)
+                    logger.info(
+                        f"Uploaded {name} to {self.ip} for next-boot install"
+                    )
         except Exception as exc:
-            logger.error(f"SFTP upload of {npk_name} failed: {exc}")
+            logger.error(f"SFTP upload to {self.ip} failed: {exc}")
             return False
 
         # Reboot — SSH session will drop mid-command, which is expected.
@@ -858,28 +879,38 @@ class MikrotikHandler(BaseHandler):
 
         if not await self.wait_for_reboot(timeout=timeout):
             logger.error(
-                f"{self.ip} did not come back online after {npk_name} install reboot"
+                f"{self.ip} did not come back online after extra-package install reboot"
             )
             return False
 
         if not await self.connect():
             logger.error(
-                f"Could not reconnect after {npk_name} install: {self.login_error}"
+                f"Could not reconnect after extra-package install: {self.login_error}"
             )
             return False
 
-        # Confirm the package now appears installed.
+        # Confirm at least one of the uploaded packages now appears installed.
+        # We don't fail if any individual one is missing because not every
+        # uploaded driver applies to the device's chip — wifi-qcom and
+        # wifi-mediatek are mutually exclusive at install time on a given
+        # device. RouterOS will install only the matching one.
         result = await self._ssh.run(
             "/system package print", timeout=10, check=False
         )
-        if pkg_prefix not in (result.stdout or "").lower():
+        installed_output = (result.stdout or "").lower()
+        installed_count = 0
+        for name in names:
+            # filename prefix up through the last "-<arch>" delimiter is the
+            # package family (e.g. "wifi-mediatek-7.22.3-arm.npk" -> "wifi-mediatek").
+            pkg_family = _npk_package_family(name)
+            if pkg_family and pkg_family in installed_output:
+                installed_count += 1
+                logger.info(f"{pkg_family} installed on {self.ip}")
+        if installed_count == 0:
             logger.error(
-                f"After install reboot, package matching '{pkg_prefix}' "
-                f"not found in /system package print on {self.ip}"
+                f"After install reboot, none of {names} appear in /system package print on {self.ip}"
             )
             return False
-
-        logger.info(f"{pkg_prefix} now installed on {self.ip}")
         return True
 
     async def factory_reset_and_reconnect(

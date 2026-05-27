@@ -276,7 +276,7 @@ async def provision_device(
 
 
 _NPK_NAME_RE = re.compile(
-    r"^(?P<package>routeros|wifi-qcom|wifi-qcom-ac|wireless)-"
+    r"^(?P<package>routeros|wifi-qcom|wifi-qcom-ac|wifi-mediatek|wireless)-"
     r"(?:(?P<arch_first>[a-z0-9_]+)-(?P<version_after_arch>\d+(?:\.\d+)+)|"
     r"(?P<version_first>\d+(?:\.\d+)+)-(?P<arch_after_version>[a-z0-9_]+))"
     r"\.npk$",
@@ -286,7 +286,8 @@ _NPK_PACKAGE_ORDER = {
     "routeros": 0,
     "wifi-qcom": 10,
     "wifi-qcom-ac": 11,
-    "wireless": 12,
+    "wifi-mediatek": 12,
+    "wireless": 13,
 }
 
 
@@ -333,15 +334,19 @@ def _select_latest_npk_per_arch(mikrotik_fw_dir: Path) -> List[str]:
 
 def _split_routeros_and_extras(
     npks: List[str],
-) -> tuple[List[str], Dict[str, str]]:
-    """Split selected .npks into (routeros packages, extra-pkg by arch).
+) -> tuple[List[str], Dict[str, List[str]]]:
+    """Split selected .npks into (routeros packages, extras-by-arch).
 
-    netinstall-cli ships only the routeros packages. Extras like wifi-qcom
-    are installed in a post-boot step on the device — see
-    `MikrotikHandler.install_extra_npk_and_reboot` for the rationale.
+    netinstall-cli ships only the routeros packages. Extras (wifi-qcom,
+    wifi-qcom-ac, wifi-mediatek, wireless) are installed in a post-boot
+    step on the device. Multiple extras may be needed per arch because
+    MikroTik's hAP ax line includes both Qualcomm (hAP ax²/ax³) and
+    MediaTek (hAP ax S) chips at the same arch — we ship all available
+    drivers for the device's arch and let it bind whichever matches the
+    actual radio hardware.
     """
     routeros: List[str] = []
-    extras_by_arch: Dict[str, str] = {}
+    extras_by_arch: Dict[str, List[str]] = {}
     for path_str in npks:
         match = _NPK_NAME_RE.match(Path(path_str).name)
         if not match:
@@ -355,10 +360,8 @@ def _split_routeros_and_extras(
         ).lower()
         if package == "routeros":
             routeros.append(path_str)
-        elif package in ("wifi-qcom", "wifi-qcom-ac", "wireless"):
-            # Per-arch extra; we'll install the one matching the device's
-            # reported architecture-name post-boot.
-            extras_by_arch[arch] = path_str
+        elif package in ("wifi-qcom", "wifi-qcom-ac", "wifi-mediatek", "wireless"):
+            extras_by_arch.setdefault(arch, []).append(path_str)
         else:
             routeros.append(path_str)
     return routeros, extras_by_arch
@@ -531,25 +534,31 @@ async def _run_netinstall(provisioner, port_number: int):
             await finish(False, "Could not read RouterBOARD serial; refusing to register")
             return
 
-        # Step 3a: post-flash install of arch-matched extra package (wifi-qcom).
-        # Skipped for wired-only models (mipsbe etc.) which have no extra.
+        # Step 3a: post-flash install of arch-matched WiFi driver package(s).
+        # MikroTik's hAP ax line includes both Qualcomm chips (hAP ax² / ax³
+        # = arm64) and MediaTek chips (hAP ax S = arm) — we don't know the
+        # chip family without booting, so ship all available drivers for the
+        # arch and let the device bind the matching one. Skipped for
+        # wired-only models (mipsbe etc.) which have no extras.
         device_arch = (getattr(info, "hardware_version", "") or "").lower()
-        wifi_pkg = extras_by_arch.get(device_arch)
-        if wifi_pkg:
+        wifi_pkgs = extras_by_arch.get(device_arch, [])
+        if wifi_pkgs:
+            names = ", ".join(Path(p).name for p in wifi_pkgs)
             await on_progress(
-                "wifi_qcom",
+                "wifi_driver",
                 "running",
-                f"Installing {Path(wifi_pkg).name} (post-flash sequenced)",
+                f"Installing {names} (post-flash sequenced)",
             )
-            if not await handler.install_extra_npk_and_reboot(wifi_pkg):
-                await on_progress("wifi_qcom", False, "install failed")
-                await finish(False, f"wifi-qcom post-flash install failed")
+            if not await handler.install_extra_npks_and_reboot(wifi_pkgs):
+                await on_progress("wifi_driver", False, "install failed")
+                await finish(False, "WiFi-driver post-flash install failed")
                 return
-            await on_progress("wifi_qcom", True, f"installed {Path(wifi_pkg).name}")
+            await on_progress("wifi_driver", True, f"installed {names}")
 
             # Step 3b: factory reset so customized.default.rsc re-runs with
-            # wifi-qcom now bound at the kernel level. This is the step that
-            # populates /interface/wifi/radio per the forum SOLVED recipe.
+            # the wifi driver now bound at the kernel level. This is the
+            # step that populates /interface/wifi/radio per the forum SOLVED
+            # recipe.
             await on_progress("wifi_bind", "running", "Factory reset to bind wifi radios")
             if not await handler.factory_reset_and_reconnect():
                 await on_progress("wifi_bind", False, "factory reset failed")
@@ -558,12 +567,12 @@ async def _run_netinstall(provisioner, port_number: int):
             await on_progress("wifi_bind", True, "wifi radios bound")
         elif device_arch in ("mipsbe", "mmips", "smips", "ppc"):
             logger.info(
-                f"Skipping wifi-qcom install for arch={device_arch!r} (wired-only model)"
+                f"Skipping wifi-driver install for arch={device_arch!r} (wired-only model)"
             )
         else:
             logger.warning(
-                f"Device arch {device_arch!r} not in extras_by_arch and not a known "
-                f"wired-only model — skipping post-flash extra-pkg install"
+                f"Device arch {device_arch!r} has no extras in extras_by_arch and "
+                f"is not a known wired-only model — skipping post-flash extra-pkg install"
             )
 
         # Debug toggle: stop here so we can inspect the post-netinstall device

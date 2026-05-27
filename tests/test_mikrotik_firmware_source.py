@@ -71,6 +71,7 @@ async def test_mikrotik_source_accepts_lts_alias(monkeypatch):
     assert {update.filename for update in updates} == {
         "routeros-arm64-7.20.8.npk",
         "wifi-qcom-7.20.8-arm64.npk",
+        "wifi-mediatek-7.20.8-arm64.npk",
     }
     assert all(update.model == "arm64" for update in updates)
     assert all(update.channel == "long-term" for update in updates)
