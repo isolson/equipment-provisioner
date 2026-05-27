@@ -29,7 +29,9 @@ ProtectHome=read-only
 
 # Allow network and GPIO access.
 # CAP_NET_BIND_SERVICE is needed so spawned netinstall-cli can bind UDP/67 (BOOTP).
-CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_RAWIO CAP_NET_BIND_SERVICE
+# CAP_SETUID/SETGID are needed so `sudo -u kiosk ...` can drop to the kiosk
+# user to drive the X server (display wake-on-connect).
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_RAWIO CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 
 # Resource limits

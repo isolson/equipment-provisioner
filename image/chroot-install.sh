@@ -76,6 +76,7 @@ if [[ "$KIOSK" == true ]]; then
         openbox \
         unclutter \
         xdotool \
+        xinput \
         libinput-tools
 
     # Try chromium (package name varies)
@@ -195,16 +196,24 @@ if [[ "$KIOSK" == true && -n "${CHROMIUM_BIN:-}" ]]; then
     # Openbox autostart
     mkdir -p "${KIOSK_HOME}/.config/openbox"
     cat > "${KIOSK_HOME}/.config/openbox/autostart" << AUTOSTART
-# Disable screen blanking and power management
-xset s off
-xset s noblank
-xset -dpms
+# Idle screen handling — touch/keyboard/mouse wake naturally via libinput.
+# 120s: screensaver blank.  300s: full DPMS off.
+xset s 120 120
+xset +dpms
+xset dpms 120 120 300
 
 # Hide cursor after 3 seconds of inactivity
 unclutter -idle 3 -root &
 
-# Wait for web server
-sleep 5
+# Wait for the web service to be ready before launching the browser.
+# Otherwise on a slow boot Chromium hits its default error page and
+# the kiosk can't escape from it.
+for i in \$(seq 1 60); do
+    if curl -fsS -o /dev/null --max-time 2 http://localhost:8080/; then
+        break
+    fi
+    sleep 1
+done
 
 # Start Chromium in kiosk mode
 ${CHROMIUM_BIN} \\
@@ -251,15 +260,16 @@ AUTOLOGIN
     cat > "${INSTALL_DIR}/restart-kiosk.sh" << RESTART
 #!/bin/bash
 BROWSER="${CHROMIUM_BIN}"
-wake_display() {
-    sudo -u kiosk DISPLAY=:0 xset dpms force on 2>/dev/null || true
-    sudo -u kiosk DISPLAY=:0 xset s off 2>/dev/null || true
-    sudo -u kiosk DISPLAY=:0 xset -dpms 2>/dev/null || true
-}
 while true; do
-    wake_display
     if ! pgrep -x "\${BROWSER}" > /dev/null && ! pgrep -x "chromium" > /dev/null; then
-        wake_display
+        # Browser died — wake the screen so the relaunched browser is visible,
+        # then wait for the web service before respawning.
+        sudo -u kiosk DISPLAY=:0 xset dpms force on 2>/dev/null || true
+        sudo -u kiosk DISPLAY=:0 xset s reset 2>/dev/null || true
+        for i in \$(seq 1 30); do
+            curl -fsS -o /dev/null --max-time 2 http://localhost:8080/ && break
+            sleep 1
+        done
         sudo -u kiosk DISPLAY=:0 \${BROWSER} \\
             --kiosk --noerrdialogs --disable-infobars \\
             http://localhost:8080 &
@@ -286,6 +296,12 @@ WantedBy=multi-user.target
 SERVICE
 
     systemctl enable kiosk-watchdog.service
+
+    # Auto-rotate daemon for convertible laptops (ThinkPad Yoga etc.)
+    # Inert on hardware without an 'accel-display' iio sensor.
+    install -m 0755 "${INSTALL_DIR}/image/auto-rotate.py" /usr/local/bin/auto-rotate.py
+    install -m 0644 "${INSTALL_DIR}/image/auto-rotate.service" /etc/systemd/system/auto-rotate.service
+    systemctl enable auto-rotate.service
 
     log_info "Kiosk mode configured"
 fi
