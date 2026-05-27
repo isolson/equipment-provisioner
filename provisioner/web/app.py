@@ -72,8 +72,9 @@ def create_app(
     async def dashboard(request: Request):
         """Serve the main dashboard page."""
         num_ports = 6
-        if provisioner and provisioner.port_manager:
-            num_ports = provisioner.port_manager.num_ports
+        port_manager = getattr(provisioner, "port_manager", None) if provisioner else None
+        if port_manager is not None:
+            num_ports = port_manager.num_ports
         return templates.TemplateResponse(request, "index.html", {
             "request": request,
             "title": title,
