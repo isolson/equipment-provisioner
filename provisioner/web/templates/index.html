@@ -240,12 +240,12 @@
     <!-- Setup Readiness Banner -->
     <div id="setup-readiness-banner" class="hidden flex-shrink-0 px-4 py-3 border-b border-gray-300"></div>
 
-    <!-- Main Content - 2x4 Port Grid -->
+    <!-- Main Content - Port Grid (layout depends on num_ports) -->
     <main class="flex-1 overflow-y-auto p-3 flex items-start justify-center md:items-center">
         <div class="w-full max-w-[1000px]">
-            <!-- Top row: ports 2, 4, 6 (even) -->
+            <!-- Top row: even ports; rendered empty when num_ports is 1 -->
             <div class="grid grid-cols-1 gap-3 mb-3 sm:grid-cols-2 lg:grid-cols-3" id="port-row-top"></div>
-            <!-- Bottom row: ports 1, 3, 5 (odd) -->
+            <!-- Bottom row: odd ports (or the sole port when num_ports is 1) -->
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3" id="port-row-bottom"></div>
         </div>
     </main>
@@ -329,6 +329,10 @@
     <div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
 
     <script>
+        // Number of provisioning ports; injected from server config so the
+        // grid renders correctly for both VLAN (6 ports) and single-port modes.
+        const NUM_PORTS = {{ num_ports | default(6) }};
+
         // State
         let ws = null;
         let ports = {};
@@ -698,8 +702,19 @@
             topRow.innerHTML = '';
             bottomRow.innerHTML = '';
 
-            const topPorts = [2, 4, 6];
-            const bottomPorts = [1, 3, 5];
+            // Split ports into even (top row) and odd (bottom row) to preserve
+            // the existing 2-row layout for multi-port deployments. Single-port
+            // mode falls through with port 1 in the bottom row only.
+            const topPorts = [];
+            const bottomPorts = [];
+            for (let p = 1; p <= NUM_PORTS; p++) {
+                (p % 2 === 0 ? topPorts : bottomPorts).push(p);
+            }
+
+            // Center the lone card on the screen when there's only one port.
+            if (NUM_PORTS === 1) {
+                bottomRow.className = 'grid grid-cols-1 gap-3 max-w-md mx-auto';
+            }
 
             for (const portNum of topPorts) {
                 const port = ports[portNum] || { vlan_id: 1990 + portNum, link_up: false };

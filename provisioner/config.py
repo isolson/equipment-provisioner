@@ -46,7 +46,13 @@ class PortsConfig(BaseModel):
 
 
 class SimpleModeConfig(BaseModel):
-    """Simple mode configuration (single port, DHCP)."""
+    """Simple mode configuration (single port, no managed switch).
+
+    Used by the no-switch ThinkPad deployment. The base interface is treated
+    as port 1 in PortManager; vendor link-local IPs are probed via the same
+    DeviceLinkLocalIP.ALL list as multi-port mode, AND `subnet` is ARP-swept
+    so already-DHCP'd devices are also discovered.
+    """
     subnet: str = "192.168.1.0/24"
 
 

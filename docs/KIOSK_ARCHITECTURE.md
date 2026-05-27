@@ -84,8 +84,6 @@ sudo -n -u kiosk env DISPLAY=:0 xset s reset
 
 which resets the screensaver counter; DPMS shares that timer in modern X, so the standby/suspend/off countdown is pushed back too. Idempotent, silent at INFO. When all ports are empty, the loop is a no-op and native X DPMS handles idle normally.
 
-VLAN mode only — simple mode doesn't have per-port state to consult.
-
 ### Why not the JS idle path?
 
 The kiosk UI has a JS-based "no devices on any port for N seconds → POST /api/display/sleep" timer. It's disabled by default (`config.yaml` `display.sleep_timeout: 0`) because it doesn't track user input — staring at the dashboard for 5 minutes would still trigger sleep. Native X DPMS handles user activity correctly.

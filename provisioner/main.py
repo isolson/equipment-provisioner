@@ -21,7 +21,6 @@ from rich.logging import RichHandler
 
 from .config import load_config, set_config, Config
 from .db import init_db, close_db, ProvisioningRecord, ProvisioningStatus
-from .detector import DeviceDetector, DiscoveredDevice
 from .fingerprint import identify_device, DeviceType
 from .firmware import FirmwareManager
 from .config_store import init_store, get_store
@@ -40,14 +39,15 @@ console = Console()
 class Provisioner:
     """Main provisioning orchestrator.
 
-    Supports two modes:
-    - VLAN mode: Each switch port has its own VLAN, devices accessed via link-local IPs
-    - Simple mode: Single port, devices detected via DHCP/ARP scanning
+    Two deployment modes — both run through PortManager:
+    - VLAN mode (multi-port + managed switch): per-port VLAN subinterfaces,
+      management VLAN for switch webhooks.
+    - Simple mode (single port, no switch): the base interface is treated as
+      port 1, no VLAN/management setup. Used by the no-switch ThinkPad SKU.
     """
 
     def __init__(self, config: Config):
         self.config = config
-        self.detector: Optional[DeviceDetector] = None
         self.port_manager: Optional[PortManager] = None
         self.handler_manager: Optional[HandlerManager] = None
         self.firmware_manager: Optional[FirmwareManager] = None
@@ -142,42 +142,36 @@ class Provisioner:
 
         self.handler_manager = HandlerManager(credentials, alternate_credentials)
 
-        # Initialize detection based on mode
-        if self._use_vlan_mode:
-            # VLAN mode: use port manager
-            # Build management config from network settings
-            mgmt_config = None
-            if hasattr(self.config.network, 'management'):
-                mgmt = self.config.network.management
-                mgmt_config = ManagementConfig(
-                    enabled=mgmt.enabled,
-                    ip=mgmt.ip,
-                    netmask=mgmt.netmask,
-                    switch_ip=getattr(mgmt, 'switch_ip', None) or getattr(mgmt, 'gateway', None),
-                    vlan=mgmt.vlan,
-                    switch_username=self.config.credentials.mikrotik.username,
-                    switch_password=self.config.credentials.mikrotik.password,
-                )
+        # Both modes use PortManager. VLAN mode creates per-port VLAN
+        # subinterfaces + a management VLAN; simple mode treats the base
+        # interface as port 1 with no VLAN setup.
+        mgmt_config = None
+        if self._use_vlan_mode and hasattr(self.config.network, 'management'):
+            mgmt = self.config.network.management
+            mgmt_config = ManagementConfig(
+                enabled=mgmt.enabled,
+                ip=mgmt.ip,
+                netmask=mgmt.netmask,
+                switch_ip=getattr(mgmt, 'switch_ip', None) or getattr(mgmt, 'gateway', None),
+                vlan=mgmt.vlan,
+                switch_username=self.config.credentials.mikrotik.username,
+                switch_password=self.config.credentials.mikrotik.password,
+            )
 
-            self.port_manager = init_port_manager(
-                base_interface=self.config.network.interface,
-                vlan_start=self.config.ports.vlan_start,
-                num_ports=self.config.ports.num_ports,
-                local_ip_base=self.config.ports.local_ip,
-                management=mgmt_config,
-            )
-            await self.port_manager.setup()
-            self.port_manager.on_device_detected(self._on_port_device_detected)
-            self.port_manager.on_device_in_bootp(self._on_port_device_in_bootp)
-        else:
-            # Simple mode: use ARP detector
-            self.detector = DeviceDetector(
-                interface=self.config.network.interface,
-                subnet=self.config.simple_mode.subnet,
-                scan_delay=self.config.network.scan_delay,
-                device_boot_timeout=self.config.network.device_boot_timeout,
-            )
-            self.detector.on_device_discovered(self._on_device_discovered)
+        self.port_manager = init_port_manager(
+            base_interface=self.config.network.interface,
+            vlan_start=self.config.ports.vlan_start,
+            num_ports=self.config.ports.num_ports,
+            local_ip_base=self.config.ports.local_ip,
+            management=mgmt_config,
+            setup_vlans=self._use_vlan_mode,
+            simple_subnet=(
+                None if self._use_vlan_mode else self.config.simple_mode.subnet
+            ),
+        )
+        await self.port_manager.setup()
+        self.port_manager.on_device_detected(self._on_port_device_detected)
+        self.port_manager.on_device_in_bootp(self._on_port_device_in_bootp)
 
         # Initialize telemetry
         telemetry.init(self.config.analytics)
@@ -230,23 +224,22 @@ class Provisioner:
         """Start the provisioner main loop."""
         self._running = True
 
-        # Start background tasks based on mode
         tasks = []
 
+        tasks.append(asyncio.create_task(self.port_manager.start_monitoring()))
+        await self.port_manager.start_bootp_listeners()
+        tasks.append(asyncio.create_task(self._keep_display_awake_while_active()))
+
         if self._use_vlan_mode:
-            tasks.append(asyncio.create_task(self.port_manager.start_monitoring()))
             tasks.append(asyncio.create_task(self.port_manager.start_switch_reconcile_loop()))
-            await self.port_manager.start_bootp_listeners()
-            tasks.append(asyncio.create_task(self._keep_display_awake_while_active()))
             logger.info(f"Provisioner running - monitoring {self.config.ports.num_ports} ports")
             console.print(f"[green]Provisioner active on {self.config.network.interface}[/green]")
             console.print(f"[dim]Mode: VLAN ({self.config.ports.num_ports} ports)[/dim]")
             console.print(f"[dim]VLANs: {self.config.ports.vlan_start}-{self.config.ports.vlan_start + self.config.ports.num_ports - 1}[/dim]")
         else:
-            tasks.append(asyncio.create_task(self.detector.start()))
-            logger.info(f"Provisioner running - monitoring {self.config.network.interface}")
+            logger.info(f"Provisioner running - single port on {self.config.network.interface}")
             console.print(f"[green]Provisioner active on {self.config.network.interface}[/green]")
-            console.print(f"[dim]Mode: Simple (subnet {self.config.simple_mode.subnet})[/dim]")
+            console.print(f"[dim]Mode: Single port (no switch)[/dim]")
 
         # Start firmware checker if enabled in config
         if self.firmware_checker and self.config.firmware.checker.enabled:
@@ -271,9 +264,6 @@ class Provisioner:
     async def stop(self) -> None:
         """Stop the provisioner."""
         self._running = False
-
-        if self.detector:
-            self.detector.stop()
 
         if self.port_manager:
             await self.port_manager.stop_bootp_listeners()
@@ -419,7 +409,7 @@ class Provisioner:
     ) -> bool:
         """Provision a device detected on a VLAN port.
 
-        Unlike _provision_device, we already know the device type from port detection.
+        Device type is known from port detection.
 
         device_ip may be None for passively-detected vendors (Evolution Digital)
         which are identified only by MAC OUI and have no management IP.
@@ -907,189 +897,6 @@ class Provisioner:
             )
             await notify_provisioning_completed(port_num, job_id, False, {"error": str(e)})
             return False
-
-    async def _on_device_discovered(self, device: DiscoveredDevice) -> None:
-        """Handle a newly discovered device."""
-        logger.info(f"New device discovered: {device.ip_address} ({device.mac_address})")
-
-        # Wake display if configured.  Don't gate on is_sleeping(): native
-        # X DPMS can turn off the screen without our knowledge, and wake()
-        # is idempotent.
-        from .display import get_display
-        display = get_display()
-        if display and display.wake_on_connect:
-            logger.info("Waking display on device connect")
-            await display.wake()
-            from .web.websocket import notify_display_state
-            await notify_display_state(sleeping=False)
-
-        # Use semaphore to limit concurrent provisioning
-        async with self._provisioning_semaphore:
-            await self._provision_device(device)
-
-    async def _provision_device(self, device: DiscoveredDevice) -> None:
-        """Provision a discovered device."""
-        from .db import get_db
-
-        notifier = get_notifier()
-        db = await get_db()
-
-        # Create job record
-        record = ProvisioningRecord(
-            device_type="unknown",
-            mac_address=device.mac_address,
-            ip_address=device.ip_address,
-            status=ProvisioningStatus.STARTED,
-            started_at=datetime.now(),
-        )
-        job_id = await db.create_job(record)
-
-        try:
-            # Fingerprint device
-            await db.update_job(job_id, status=ProvisioningStatus.DETECTING)
-            fingerprint = await identify_device(device.ip_address, device.mac_address)
-
-            if fingerprint.device_type == DeviceType.UNKNOWN:
-                logger.warning(f"Could not identify device at {device.ip_address}")
-                await db.update_job(
-                    job_id,
-                    status=ProvisioningStatus.FAILED,
-                    error_message="Could not identify device type",
-                )
-                await telemetry.emit({
-                    "event": "unknown_model_detected",
-                    "device_type": "unknown",
-                    "device_model": None,
-                })
-                return
-
-            await db.update_job(
-                job_id,
-                device_type=fingerprint.device_type.value,
-                device_model=fingerprint.model,
-            )
-
-            # Notify started
-            await notifier.notify_started(
-                ip=device.ip_address,
-                device_type=fingerprint.device_type.value,
-                mac=device.mac_address,
-            )
-
-            # Get config and firmware paths
-            store = get_store()
-
-            config_path = store.get_config_template(
-                fingerprint.device_type.value,
-                fingerprint.model,
-            )
-
-            # Check feature flags for per-device-type config application
-            if config_path:
-                flag_name = f"apply_config_{fingerprint.device_type.value}"
-                if hasattr(self.config.features, flag_name) and not getattr(self.config.features, flag_name):
-                    logger.info(f"Skipping config for {fingerprint.device_type.value} (feature flag '{flag_name}' is disabled)")
-                    config_path = None
-
-            # Check for device-specific override
-            override = store.get_device_override(device.mac_address)
-            if override:
-                logger.info(f"Found device override for {device.mac_address}")
-
-            # Get firmware info
-            firmware_info = self.firmware_manager.get_firmware_file(
-                fingerprint.device_type.value,
-                fingerprint.model,
-            )
-
-            expected_firmware = None
-            firmware_path = None
-
-            if firmware_info:
-                # Check if update needed
-                if fingerprint.firmware_version:
-                    if self.firmware_manager.needs_update(
-                        fingerprint.device_type.value,
-                        fingerprint.firmware_version,
-                        fingerprint.model,
-                    ):
-                        firmware_path = str(firmware_info.path)
-                        expected_firmware = firmware_info.version
-                        logger.info(f"Firmware update needed: {fingerprint.firmware_version} → {expected_firmware}")
-                    else:
-                        logger.info(f"Firmware is current: {fingerprint.firmware_version}")
-                else:
-                    # Unknown current version, update anyway
-                    firmware_path = str(firmware_info.path)
-                    expected_firmware = firmware_info.version
-
-            # Run provisioning
-            await db.update_job(job_id, status=ProvisioningStatus.CONFIGURING)
-
-            # Create firmware lookup callback for model-specific re-lookup
-            def firmware_lookup(device_type: str, model: str) -> tuple:
-                fw_info = self.firmware_manager.get_firmware_file(device_type, model)
-                if fw_info:
-                    return str(fw_info.path), fw_info.version
-                return None, None
-
-            result = await self.handler_manager.provision_device(
-                fingerprint=fingerprint,
-                ip=device.ip_address,
-                config=override,
-                config_path=str(config_path) if config_path else None,
-                firmware_path=firmware_path,
-                expected_firmware=expected_firmware,
-                dual_bank=self.config.firmware.dual_bank_update,
-                firmware_lookup_callback=firmware_lookup,
-                config_backup=self.config.features.config_backup,
-            )
-
-            # Update job record
-            if result.success:
-                await db.update_job(
-                    job_id,
-                    status=ProvisioningStatus.COMPLETED,
-                    old_firmware=result.old_firmware,
-                    new_firmware=result.new_firmware,
-                    config_applied=result.config_applied,
-                    completed_at=datetime.now(),
-                )
-
-                # Update inventory
-                if result.device_info:
-                    await db.update_inventory(
-                        mac_address=device.mac_address,
-                        device_type=result.device_info.device_type,
-                        device_model=result.device_info.model,
-                        serial_number=result.device_info.serial_number,
-                        firmware=result.new_firmware or result.old_firmware,
-                        config=result.config_applied,
-                    )
-
-                await notifier.notify_completed(result)
-
-            else:
-                await db.update_job(
-                    job_id,
-                    status=ProvisioningStatus.FAILED,
-                    error_message=result.error_message,
-                    completed_at=datetime.now(),
-                )
-                await notifier.notify_failed(result, device.ip_address)
-
-        except Exception as e:
-            logger.exception(f"Provisioning error for {device.ip_address}")
-            await db.update_job(
-                job_id,
-                status=ProvisioningStatus.FAILED,
-                error_message=str(e),
-                completed_at=datetime.now(),
-            )
-
-            from .handlers.base import ProvisioningResult
-            result = ProvisioningResult(success=False, error_message=str(e))
-            await notifier.notify_failed(result, device.ip_address)
 
 
 def setup_logging(level: str = "INFO", log_file: Optional[str] = None) -> None:

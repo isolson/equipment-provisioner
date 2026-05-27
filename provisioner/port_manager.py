@@ -229,6 +229,7 @@ class PortManager:
         num_ports: int = 6,
         local_ip_base: str = "169.254.1.2",
         management: Optional[ManagementConfig] = None,
+        setup_vlans: bool = True,
     ):
         """Initialize port manager.
 
@@ -238,12 +239,24 @@ class PortManager:
             num_ports: Number of provisioning ports
             local_ip_base: Local IP address for OrangePi on each VLAN
             management: Management network configuration for switch communication
+            setup_vlans: When True (default), create per-port VLAN subinterfaces
+                and a management VLAN — the multi-port-with-switch deployment.
+                When False, treat the base interface as the single provisioning
+                port (no VLANs, no management subinterface) — the no-switch
+                single-port deployment. num_ports is forced to 1 in this mode.
         """
         self.base_interface = base_interface
         self.vlan_start = vlan_start
-        self.num_ports = num_ports
+        self.setup_vlans = setup_vlans
+        # Single-port mode collapses to one port on the base interface.
+        self.num_ports = num_ports if setup_vlans else 1
         self.local_ip_base = local_ip_base
         self.management = management or ManagementConfig()
+        # Single-port mode only: optional DHCP/static subnet to ARP-sweep for
+        # devices that arrive at addresses outside the vendor link-local list
+        # (e.g. routers that already DHCP'd to 192.168.1.x).  Set by
+        # init_port_manager from config.simple_mode.subnet.
+        self._simple_subnet: Optional[str] = None
 
         # Port configurations
         self.ports: Dict[int, PortConfig] = {}
@@ -265,6 +278,27 @@ class PortManager:
 
     def _generate_port_configs(self) -> None:
         """Generate port configurations."""
+        if not self.setup_vlans:
+            # Single-port mode: one PortState on the base interface, no VLAN.
+            port_config = PortConfig(
+                port_number=1,
+                vlan_id=0,  # unused without VLAN setup
+                interface_name=self.base_interface,
+                local_ip=self.local_ip_base,
+                secondary_ips=[
+                    "169.254.100.2/24",  # Tarana at 169.254.100.1
+                    "192.168.1.2/24",    # Ubiquiti/Tachyon at 192.168.1.x
+                    "192.168.88.11/32",  # MikroTik source IP
+                ],
+            )
+            self.ports[1] = port_config
+            self.port_states[1] = PortState(port_number=1, vlan_id=0)
+            logger.info(
+                f"Single-port mode: port 1 on {self.base_interface}, "
+                f"secondary IPs {port_config.secondary_ips}"
+            )
+            return
+
         for i in range(self.num_ports):
             port_num = i + 1
             vlan_id = self.vlan_start + i
@@ -290,8 +324,27 @@ class PortManager:
             )
 
     async def setup(self) -> bool:
-        """Setup management and VLAN interfaces on the OrangePi."""
+        """Setup management and VLAN interfaces (or base-interface aliases)."""
         self._generate_port_configs()
+
+        if not self.setup_vlans:
+            # Single-port mode: skip management VLAN and per-port VLAN creation.
+            # Assign secondary IPs directly to the base interface so vendor
+            # link-local subnets are reachable for ARP/HTTPS/SSH probes.
+            try:
+                await self._configure_single_port_interface(self.ports[1])
+                logger.info(
+                    f"Single-port interface configured on {self.base_interface}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to configure single-port interface "
+                    f"{self.base_interface}: {e}"
+                )
+                self._initialized = True
+                return False
+            self._initialized = True
+            return True
 
         # Setup management interface first (for switch communication)
         if self.management.enabled:
@@ -324,6 +377,35 @@ class PortManager:
 
         self._initialized = True
         return len(failed_ports) == 0
+
+    async def _configure_single_port_interface(self, config: PortConfig) -> None:
+        """Configure the base interface for single-port mode.
+
+        Brings the interface up and assigns vendor link-local source IPs so
+        the kernel has routes for 169.254.x.x / 192.168.1.x / 192.168.88.x
+        when probing devices.
+        """
+        interface = config.interface_name
+        await self._run_cmd(["ip", "link", "set", interface, "up"], check=False)
+
+        await self._run_cmd([
+            "ip", "addr", "replace",
+            f"{config.local_ip}/{self._netmask_to_cidr(config.netmask)}",
+            "dev", interface,
+        ])
+
+        if config.secondary_ips:
+            for secondary_ip in config.secondary_ips:
+                try:
+                    await self._run_cmd([
+                        "ip", "addr", "replace", secondary_ip, "dev", interface,
+                    ])
+                    logger.info(f"Added secondary IP {secondary_ip} to {interface}")
+                except Exception as e:
+                    logger.error(
+                        f"Failed to add secondary IP {secondary_ip} "
+                        f"to {interface}: {e}"
+                    )
 
     async def _setup_management_interface(self) -> None:
         """Setup management network interface for switch communication.
@@ -759,6 +841,12 @@ class PortManager:
         import time
         current_time = time.time()
 
+        # Single-port mode has no switch webhook to drive link_up. Poll the
+        # kernel carrier state for the base interface and feed any transition
+        # through the same state machine the webhook uses.
+        if not self.setup_vlans:
+            await self._poll_single_port_link_state()
+
         # Collect ports to check and their states
         ports_to_ping = []
         ports_to_detect = []
@@ -881,6 +969,34 @@ class PortManager:
                 return f.read().strip() == "1"
         except (FileNotFoundError, OSError):
             return False
+
+    async def _poll_single_port_link_state(self) -> None:
+        """Poll carrier state for the single-port base interface.
+
+        Single-port mode has no managed switch sending webhooks, so
+        `state.link_up` is otherwise never set. On every change we route the
+        transition through `handle_switch_port_event` to reuse its boot-wait,
+        grace-period, link-events-buffer, and WebSocket broadcast logic.
+        Without this, passive vendor detection (Evolution Digital) silently
+        fails because its `state.link_up` guard never becomes true.
+        """
+        config = self.ports.get(1)
+        if not config:
+            return
+        state = self.port_states.get(1)
+        if not state:
+            return
+
+        current_link = await self._check_link_status(config.interface_name)
+        if current_link == state.link_up:
+            return
+
+        # Reuse the switch-event handler — same state machine, same broadcasts.
+        # "ether1" is what _map_switch_port_to_port_num maps to port 1.
+        try:
+            await self.handle_switch_port_event("ether1", current_link, speed=None)
+        except Exception as e:
+            logger.warning(f"Carrier-poll link update failed: {e}")
 
     async def _detect_device_on_port(self, port_num: int) -> None:
         """Detect what device is connected to a port."""
@@ -1009,7 +1125,100 @@ class PortManager:
 
                 return
 
+        # Single-port mode only: ARP-sweep the configured DHCP subnet for
+        # devices that arrive at addresses outside the vendor link-local list
+        # (e.g. a router already DHCP'd to 192.168.1.x). VLAN-mode deployments
+        # have no DHCP server on per-port VLANs, so this is skipped there.
+        if self._simple_subnet and not self.setup_vlans:
+            if await self._detect_via_subnet_scan(port_num, config, state):
+                return
+
         logger.warning(f"No known device detected on port {port_num}")
+
+    async def _detect_via_subnet_scan(
+        self,
+        port_num: int,
+        config: PortConfig,
+        state: PortState,
+    ) -> bool:
+        """ARP-sweep the simple-mode subnet and try to fingerprint any responder.
+
+        Returns True if a device was detected and callbacks fired.
+        """
+        try:
+            from scapy.all import ARP, Ether, srp, conf
+        except ImportError:
+            logger.debug("scapy not available; subnet scan skipped")
+            return False
+
+        conf.verb = 0
+        interface = config.interface_name
+        subnet = self._simple_subnet
+        logger.info(f"Subnet ARP sweep on {interface} for {subnet}")
+
+        def _do_scan():
+            pkt = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=subnet)
+            ans, _ = srp(pkt, timeout=3, iface=interface, verbose=False)
+            return [(r.psrc, r.hwsrc.upper()) for _, r in ans]
+
+        try:
+            loop = asyncio.get_event_loop()
+            results = await asyncio.wait_for(
+                loop.run_in_executor(None, _do_scan), timeout=10,
+            )
+        except Exception as e:
+            logger.debug(f"Subnet ARP sweep failed: {e}")
+            return False
+
+        # Skip our own source IPs on the interface — they will answer the sweep.
+        local_ips = await self._get_interface_ips(interface)
+
+        for device_ip, device_mac in results:
+            if device_ip in local_ips:
+                continue
+            device_type = await self._identify_device_type(interface, device_ip, [])
+            if not device_type:
+                continue
+
+            state.link_up = True
+            state.device_detected = True
+            state.device_type = device_type
+            state.device_ip = device_ip
+            state.device_mac = device_mac
+            state.last_seen = asyncio.get_event_loop().time()
+            logger.info(
+                f"Detected {device_type} at {device_ip} on port {port_num} via subnet sweep"
+            )
+
+            if not state.provision_attempted:
+                state.provision_attempted = True
+                for callback in self._on_device_detected:
+                    try:
+                        await callback(port_num, device_type, device_ip)
+                    except Exception as e:
+                        logger.error(f"Callback error: {e}")
+            return True
+
+        return False
+
+    async def _get_interface_ips(self, interface: str) -> set[str]:
+        """Return the set of IPv4 addresses currently assigned to an interface."""
+        try:
+            proc = await self._run_cmd(
+                ["ip", "-4", "-o", "addr", "show", "dev", interface],
+                check=False,
+            )
+            if proc.returncode != 0:
+                return set()
+            ips = set()
+            for line in proc.stdout.decode().splitlines():
+                parts = line.split()
+                if "inet" in parts:
+                    cidr = parts[parts.index("inet") + 1]
+                    ips.add(cidr.split("/")[0])
+            return ips
+        except Exception:
+            return set()
 
     async def _try_passive_detection(
         self,
@@ -1812,6 +2021,8 @@ def init_port_manager(
     num_ports: int = 6,
     local_ip_base: str = "169.254.1.2",
     management: Optional[ManagementConfig] = None,
+    setup_vlans: bool = True,
+    simple_subnet: Optional[str] = None,
 ) -> PortManager:
     """Initialize the global port manager.
 
@@ -1821,13 +2032,20 @@ def init_port_manager(
         num_ports: Number of provisioning ports
         local_ip_base: Local IP address for OrangePi on each VLAN
         management: Management network config for switch webhook communication
+        setup_vlans: False for single-port (no-switch) deployments
+        simple_subnet: When setup_vlans is False, a CIDR to ARP-sweep for
+            DHCP-addressed devices outside the vendor link-local list.
     """
     global _port_manager
-    _port_manager = PortManager(
+    pm = PortManager(
         base_interface=base_interface,
         vlan_start=vlan_start,
         num_ports=num_ports,
         local_ip_base=local_ip_base,
         management=management,
+        setup_vlans=setup_vlans,
     )
+    if not setup_vlans and simple_subnet:
+        pm._simple_subnet = simple_subnet
+    _port_manager = pm
     return _port_manager
