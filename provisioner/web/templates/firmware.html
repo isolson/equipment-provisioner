@@ -192,11 +192,6 @@
     <div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
 
     <script>
-        let firmwareFiles = [];
-        let checkerStatus = { enabled: false, running: false, sources: {}, available_updates: [] };
-        let refreshInterval = null;
-        let activeVendor = initialVendor();
-
         const VENDORS = [
             { value: 'cambium', label: 'Cambium', full: 'Cambium ePMP', color: '#1A73E9', icon: '/static/vendor-icons/cambium.png' },
             { value: 'mikrotik', label: 'MikroTik', full: 'MikroTik RouterOS', color: '#0E0E10', icon: '/static/vendor-icons/mikrotik.png' },
@@ -204,6 +199,11 @@
             { value: 'tarana', label: 'Tarana', full: 'Tarana G1', color: '#d97706', icon: '/static/vendor-icons/tarana.png' },
             { value: 'ubiquiti', label: 'Ubiquiti', full: 'Ubiquiti AirMax/Wave', color: '#0559C9', icon: '/static/vendor-icons/ubiquiti.png' },
         ];
+
+        let firmwareFiles = [];
+        let checkerStatus = { enabled: false, running: false, sources: {}, available_updates: [] };
+        let refreshInterval = null;
+        let activeVendor = initialVendor();
 
         document.addEventListener('DOMContentLoaded', () => {
             syncActiveVendorHeader();

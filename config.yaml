@@ -152,13 +152,16 @@ firmware:
           - mipsbe
 
 display:
-  # Seconds of no connected devices before display sleeps (0 = disabled)
-  sleep_timeout: 300
+  # Browser-side "no devices on any port for N seconds" timer (0 = disabled).
+  # Default 0: leave idle handling to native X DPMS in the kiosk autostart
+  # (2 min blank / 5 min off), which correctly tracks user input. The
+  # display controller still initializes so wake-on-device-connect works.
+  sleep_timeout: 0
 
   # Wake display when a device connects
   wake_on_connect: true
 
-  # Try DPMS (X11) for display control
+  # Try DPMS (X11) for display control (via sudo -u kiosk)
   use_dpms: true
 
   # Fallback to sysfs backlight control
