@@ -670,22 +670,38 @@ async def _run_netinstall(provisioner, port_number: int):
         await handler.disconnect()
 
         # Step 7: Register with the wifi-api. Contract endpoint, contract payload.
-        from provisioner.equipment_registry import register_mikrotik
+        # Treated as optional when MIKROTIK_ZTP_API_KEY is unset: the device
+        # is already fully ZTP-ready post-base-flash, and the wifi-api side
+        # of the /ztp/mikrotik/register contract isn't always deployed yet
+        # (e.g. fresh provisioner host without the secret backfilled). When
+        # the key is set we still enforce success — a configured-but-failing
+        # POST is a real problem we should surface.
         ztp_api_key = getattr(config.device_settings.mikrotik, 'ztp_api_key', None)
-        try:
-            await register_mikrotik(
-                ztp_api_url=ztp_api_url,
-                api_key=ztp_api_key,
-                serial=serial,
-                mac=info.mac_address or "",
-                model=info.model or "",
-                firmware_version=info.firmware_version or "",
-                base_flash_version=MikrotikHandler.BASE_FLASH_VERSION,
+        if not ztp_api_key:
+            logger.warning(
+                "MIKROTIK_ZTP_API_KEY not set; skipping registration. "
+                "Device serial=%s is fully provisioned (wifi + base-flash + "
+                "phone-home) but not registered with wifi-api. Backfill key "
+                "in /etc/provisioner/provisioner.env to enable registration.",
+                serial,
             )
-        except Exception as exc:
-            await on_progress("register", False, str(exc)[:100])
-            await finish(False, f"wifi-api register failed: {exc}")
-            return
+            await on_progress("register", True, "skipped (no API key)")
+        else:
+            from provisioner.equipment_registry import register_mikrotik
+            try:
+                await register_mikrotik(
+                    ztp_api_url=ztp_api_url,
+                    api_key=ztp_api_key,
+                    serial=serial,
+                    mac=info.mac_address or "",
+                    model=info.model or "",
+                    firmware_version=info.firmware_version or "",
+                    base_flash_version=MikrotikHandler.BASE_FLASH_VERSION,
+                )
+            except Exception as exc:
+                await on_progress("register", False, str(exc)[:100])
+                await finish(False, f"wifi-api register failed: {exc}")
+                return
 
         await on_progress("complete", True, "ZTP base flash + register complete")
         await finish(True, detail="ZTP base flash + register complete")
