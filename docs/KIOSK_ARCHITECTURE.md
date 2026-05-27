@@ -74,6 +74,16 @@ sudo -n -u kiosk env DISPLAY=:0 xset s reset
 
 This requires `CAP_SETUID` + `CAP_SETGID` in the systemd unit — see [HOST_SETUP.md](HOST_SETUP.md#systemd-capabilities).
 
+### Keep awake while devices are present
+
+X DPMS only counts touch/keyboard/mouse as activity — a plugged-in device on its own doesn't reset the idle timer. To prevent the screen from blanking on a busy bench, `provisioner/main.py` runs a 60-second heartbeat loop (`_keep_display_awake_while_active`) that inspects `port_manager.port_states` and calls `DisplayController.keep_awake()` whenever any port has `link_up` or `device_detected`. `keep_awake()` shells:
+
+```bash
+sudo -n -u kiosk env DISPLAY=:0 xset s reset
+```
+
+which resets the screensaver counter; DPMS shares that timer in modern X, so the standby/suspend/off countdown is pushed back too. Idempotent, silent at INFO. When all ports are empty, the loop is a no-op and native X DPMS handles idle normally.
+
 ### Why not the JS idle path?
 
 The kiosk UI has a JS-based "no devices on any port for N seconds → POST /api/display/sleep" timer. It's disabled by default (`config.yaml` `display.sleep_timeout: 0`) because it doesn't track user input — staring at the dashboard for 5 minutes would still trigger sleep. Native X DPMS handles user activity correctly.
@@ -103,6 +113,7 @@ Most of the kiosk stack is system-dependent and not unit-testable. After a kiosk
 - [ ] On a non-Yoga host (or with the lid sensor masked), `auto-rotate.service` exits 0 cleanly and stays inactive instead of restart-looping.
 - [ ] With chromium running, kill it (`pkill chromium`). `kiosk-watchdog` should respawn it within ~10 s and wake the screen if it was off.
 - [ ] Plug in a device while the screen is off (5+ min idle). The screen wakes and the device-detect card appears.
+- [ ] Plug a device into a port. After ~10 min of no touch input, the screen is still on. Unplug — the screen blanks normally on the next DPMS cycle (≤7 min later).
 
 ## Related
 

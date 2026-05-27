@@ -245,6 +245,22 @@ class DisplayController:
 
         return success
 
+    async def keep_awake(self) -> bool:
+        """Defeat X DPMS idle without forcing a full wake.
+
+        Resets the screensaver counter; DPMS shares that timer in
+        modern X, so the standby/suspend/off countdown is pushed
+        back too. Cheap and idempotent — safe to call on a loop.
+        Unlike wake(), does not touch backlight/framebuffer and
+        logs at DEBUG to avoid spam at heartbeat cadence.
+        """
+        if not self.use_dpms:
+            return False
+        ok = self._xset("s", "reset")
+        if ok:
+            logger.debug("Display keep-awake heartbeat (xset s reset)")
+        return ok
+
     def is_sleeping(self) -> bool:
         """Check if display is currently sleeping."""
         return self._sleeping

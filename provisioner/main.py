@@ -193,6 +193,33 @@ class Provisioner:
             except Exception as e:
                 logger.warning(f"Periodic cleanup error: {e}")
 
+    async def _keep_display_awake_while_active(self) -> None:
+        """Keep the kiosk screen awake while any port has an active device.
+
+        Native X DPMS doesn't see port activity, so a silently-plugged
+        device would let the screen blank. This loop polls port state
+        and resets the X idle timer whenever any port reports link_up
+        or device_detected. On-plug `display.wake()` callbacks already
+        handle off -> on; this loop's job is to keep it on.
+        """
+        from .display import get_display
+
+        POLL_INTERVAL = 60  # DPMS off fires at 300s, so 5x margin
+        while self._running:
+            await asyncio.sleep(POLL_INTERVAL)
+            try:
+                display = get_display()
+                if display is None or not self.port_manager:
+                    continue
+                active = any(
+                    state.link_up or state.device_detected
+                    for state in self.port_manager.port_states.values()
+                )
+                if active:
+                    await display.keep_awake()
+            except Exception as e:
+                logger.debug(f"Display keep-awake loop error: {e}")
+
     async def run(self) -> None:
         """Start the provisioner main loop."""
         self._running = True
@@ -201,6 +228,7 @@ class Provisioner:
 
         tasks.append(asyncio.create_task(self.port_manager.start_monitoring()))
         await self.port_manager.start_bootp_listeners()
+        tasks.append(asyncio.create_task(self._keep_display_awake_while_active()))
 
         if self._use_vlan_mode:
             tasks.append(asyncio.create_task(self.port_manager.start_switch_reconcile_loop()))
