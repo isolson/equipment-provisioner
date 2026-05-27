@@ -94,6 +94,15 @@ def create_app(
             "title": title,
         })
 
+    # Console Settings (bench setup tools) page
+    @app.get("/setup", response_class=HTMLResponse)
+    async def setup_page(request: Request):
+        """Serve the console settings / bench setup page."""
+        return templates.TemplateResponse(request, "setup.html", {
+            "request": request,
+            "title": title,
+        })
+
     @app.get("/health")
     async def health_check():
         """Health check endpoint."""

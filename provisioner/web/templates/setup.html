@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Console Settings - {{ title }}</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <script src="/static/tailwindcss.js"></script>
+    <style>
+        * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+        body {
+            background: #f5f5f5;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
+        }
+        .touch-btn { min-height: 48px; min-width: 48px; }
+        .icon-btn { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
+        .drop-zone { border: 2px dashed #9ca3af; transition: all 0.2s; }
+        .drop-zone.dragover { border-color: #3b82f6; background: rgba(59, 130, 246, 0.1); }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f3f4f6; }
+        ::-webkit-scrollbar-thumb { background: #9ca3af; border-radius: 4px; }
+    </style>
+</head>
+<body class="text-gray-900 min-h-screen">
+    <header class="bg-white border-b border-gray-300 px-4 py-3 flex items-center gap-4">
+        <a href="/" class="icon-btn rounded-lg text-gray-600 hover:bg-gray-100 hover:text-gray-900" title="Back to Dashboard" aria-label="Back to Dashboard">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+            </svg>
+        </a>
+        <h1 class="text-xl font-bold">Console Settings</h1>
+        <nav class="ml-auto flex items-center gap-1 text-sm">
+            <a href="/files" class="icon-btn px-3 rounded-lg text-gray-600 hover:bg-gray-100 hover:text-gray-900 font-medium">Manage Assets</a>
+            <a href="/firmware" class="icon-btn px-3 rounded-lg text-gray-600 hover:bg-gray-100 hover:text-gray-900 font-medium">Firmware Checker</a>
+        </nav>
+    </header>
+
+    <main class="p-4 space-y-4 max-w-6xl mx-auto">
+        <section class="bg-white rounded-lg p-4 border border-gray-200">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                    <h2 class="text-base font-semibold">First-Run Readiness</h2>
+                    <div id="readiness-summary" class="text-gray-500 text-sm mt-1">Loading readiness...</div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                    <button onclick="loadReadiness()" class="min-h-11 px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-white text-sm">Refresh</button>
+                    <button onclick="toggleReadinessDetails()" class="min-h-11 px-3 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-gray-800 text-sm">Details</button>
+                </div>
+            </div>
+            <div id="global-readiness-list" class="hidden mt-3 grid gap-2 lg:grid-cols-3">
+                <div class="text-gray-400 text-center py-4">Loading...</div>
+            </div>
+        </section>
+
+        <section class="grid gap-4 lg:grid-cols-2">
+            <div class="bg-white border border-gray-200 rounded-lg p-4">
+                <h2 class="text-base font-semibold mb-2">Import Setup Bundle</h2>
+                <p class="text-sm text-gray-600 mb-4">Supported contents: <span class="font-mono">configs/</span>, <span class="font-mono">firmware/</span>, <span class="font-mono">credentials.json</span>, <span class="font-mono">manifest.yaml</span>, and optional system settings.</p>
+                <div class="drop-zone rounded-lg p-5 text-center cursor-pointer bg-white"
+                     onclick="document.getElementById('bundle-file-input').click()"
+                     ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleBundleDrop(event)">
+                    <input type="file" id="bundle-file-input" class="hidden" accept=".zip,.tar,.tgz,.gz" onchange="importSetupBundle(this.files[0])">
+                    <svg class="w-10 h-10 mx-auto text-gray-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                    </svg>
+                    <p class="text-gray-600">Drop file here</p>
+                    <p class="text-sm text-gray-400">or click to browse</p>
+                </div>
+                <label class="flex items-start gap-3 mt-4">
+                    <input type="checkbox" id="bundle-apply-system" class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                    <span class="text-sm text-gray-700">Also apply bundled <span class="font-mono">config.yaml</span> and <span class="font-mono">provisioner.env</span> to <span class="font-mono">/etc/provisioner/</span>.</span>
+                </label>
+                <div id="bundle-import-result" class="text-sm text-gray-500 mt-4">No setup bundle imported yet.</div>
+            </div>
+
+            <div class="bg-white border border-gray-200 rounded-lg p-4">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold">Export Setup Bundle</h2>
+                        <p class="text-sm text-gray-600 mt-1">Package this bench for another install.</p>
+                    </div>
+                    <button onclick="exportSetupBundle()" class="touch-btn px-4 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-white">Export Bundle</button>
+                </div>
+                <label class="flex items-start gap-3 mt-4">
+                    <input type="checkbox" id="bundle-export-system" class="mt-1 rounded border-gray-300 text-green-600 focus:ring-green-500">
+                    <span class="text-sm text-gray-700">Include <span class="font-mono">/etc/provisioner/config.yaml</span> and <span class="font-mono">/etc/provisioner/provisioner.env</span>.</span>
+                </label>
+                <div id="bundle-export-result" class="text-sm text-gray-500 mt-4">No setup bundle exported yet.</div>
+            </div>
+
+            <div class="bg-white border border-gray-200 rounded-lg p-4">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold">Seed Bundled Templates</h2>
+                        <p class="text-sm text-gray-600 mt-1">Copy repo templates into the live data store.</p>
+                    </div>
+                    <button onclick="seedBundledTemplates()" class="touch-btn px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-gray-800">Seed Templates</button>
+                </div>
+                <label class="flex items-start gap-3 mt-4">
+                    <input type="checkbox" id="seed-overwrite" class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                    <span class="text-sm text-gray-700">Overwrite existing live template files with repo versions.</span>
+                </label>
+                <div id="seed-templates-result" class="text-sm text-gray-500 mt-4">Bundled templates have not been seeded yet.</div>
+            </div>
+
+            <div class="bg-white border border-gray-200 rounded-lg p-4">
+                <h2 class="text-base font-semibold mb-2 flex items-center gap-2"><img src="/static/vendor-icons/mikrotik.png" class="w-5 h-5 rounded object-contain" alt="">Configure MikroTik Switch</h2>
+                <p class="text-sm text-gray-600 mb-4">Applies the first-eight-port layout: <span class="font-mono">ether1-ether6</span> provisioning, <span class="font-mono">ether7</span> WAN, <span class="font-mono">ether8</span> trunk.</p>
+                <div class="grid gap-3 md:grid-cols-4">
+                    <input type="text" id="switch-ip" value="192.168.88.1" aria-label="Switch IP" class="bg-white border border-gray-300 rounded-lg px-3 py-2 focus:border-blue-500 focus:outline-none">
+                    <input type="text" id="switch-username" value="admin" aria-label="Switch Username" class="bg-white border border-gray-300 rounded-lg px-3 py-2 focus:border-blue-500 focus:outline-none">
+                    <input type="password" id="switch-password" placeholder="empty for factory default" aria-label="Switch Password" class="bg-white border border-gray-300 rounded-lg px-3 py-2 focus:border-blue-500 focus:outline-none">
+                    <button onclick="configureSwitch()" class="touch-btn py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-white">Configure</button>
+                </div>
+                <label class="flex items-start gap-3 mt-4">
+                    <input type="checkbox" id="switch-skip-password" class="mt-1 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                    <span class="text-sm text-gray-700">Keep the current switch password instead of generating a new one.</span>
+                </label>
+                <div id="switch-config-result" class="text-sm text-gray-500 mt-4">No switch configuration run yet.</div>
+            </div>
+        </section>
+    </main>
+
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            loadReadiness();
+        });
+
+        function handleDragOver(e) {
+            e.preventDefault();
+            e.currentTarget.classList.add('dragover');
+        }
+
+        function handleDragLeave(e) {
+            e.preventDefault();
+            e.currentTarget.classList.remove('dragover');
+        }
+
+        function handleBundleDrop(e) {
+            e.preventDefault();
+            e.currentTarget.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) importSetupBundle(file);
+        }
+
+        async function loadReadiness() {
+            try {
+                const response = await fetch('/api/setup/readiness');
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Failed to load readiness');
+                renderReadiness(data);
+            } catch (error) {
+                document.getElementById('readiness-summary').innerHTML =
+                    `<span class="text-red-700">Failed to load readiness: ${escapeHtml(error.message || 'unknown error')}</span>`;
+                document.getElementById('global-readiness-list').innerHTML =
+                    '<div class="text-red-700 text-center py-4">Failed to load readiness checklist</div>';
+            }
+        }
+
+        function toggleReadinessDetails() {
+            document.getElementById('global-readiness-list').classList.toggle('hidden');
+        }
+
+        function renderReadiness(data) {
+            const counts = data.summary || {};
+            document.getElementById('readiness-summary').innerHTML = `
+                <div class="flex flex-wrap items-center gap-3">
+                    ${readinessBadge(data.status)}
+                    <span>${counts.ready || 0} ready</span>
+                    <span>${counts.warning || 0} warning</span>
+                    <span>${counts.missing || 0} missing</span>
+                    <span>${counts.error || 0} error</span>
+                </div>
+            `;
+
+            const globalChecks = (data.checks || []).filter(check =>
+                !['credentials', 'config_templates', 'firmware_inventory'].includes(check.id)
+            );
+            document.getElementById('global-readiness-list').innerHTML = globalChecks.map(check => `
+                <div class="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                    <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                            <div class="font-semibold text-gray-900">${escapeHtml(check.title)}</div>
+                            <div class="text-sm text-gray-600 mt-1">${escapeHtml(check.summary || '')}</div>
+                        </div>
+                        ${readinessBadge(check.status)}
+                    </div>
+                    ${renderGlobalReadinessDetails(check)}
+                </div>
+            `).join('');
+        }
+
+        function renderGlobalReadinessDetails(check) {
+            if (check.id === 'mikrotik_switch') {
+                const rows = (check.checks || []).slice(0, 8).map(item => `
+                    <div class="flex justify-between gap-3">
+                        <span>${escapeHtml(item.name)}</span>
+                        ${readinessBadge(item.status)}
+                    </div>
+                `).join('');
+                return `
+                    <div class="text-sm text-gray-600 space-y-2 mt-3">
+                        <div>Host: <span class="font-mono">${escapeHtml(check.host || 'n/a')}</span></div>
+                        <div>Mode: <span class="font-mono">${escapeHtml(check.mode || 'unknown')}</span></div>
+                        <div class="space-y-1">${rows}</div>
+                    </div>
+                `;
+            }
+            if (check.details && typeof check.details === 'object') {
+                return `
+                    <div class="text-sm text-gray-600 space-y-1 mt-3">
+                        ${Object.entries(check.details).map(([key, value]) => `
+                            <div><span class="text-gray-500">${escapeHtml(key)}:</span> <span class="font-mono">${escapeHtml(String(value))}</span></div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+            return '';
+        }
+
+        async function importSetupBundle(file) {
+            if (!file) return;
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('apply_system_files', document.getElementById('bundle-apply-system').checked ? 'true' : 'false');
+            showToast('Importing setup bundle...', 'info');
+
+            try {
+                const response = await fetch('/api/setup/bundle/import', { method: 'POST', body: formData });
+                const data = await response.json();
+                if (!response.ok) {
+                    showToast(data.detail || 'Bundle import failed', 'error');
+                    return;
+                }
+                document.getElementById('bundle-import-result').innerHTML = `
+                    <div class="text-gray-700">
+                        <div class="font-semibold">${escapeHtml(data.message)}</div>
+                        <div class="mt-2 text-sm text-gray-600">
+                            Configs: ${data.summary.configs},
+                            Firmware: ${data.summary.firmware},
+                            Credentials: ${data.summary.credentials},
+                            Manifest: ${data.summary.manifest},
+                            System files: ${data.summary.system_files}
+                        </div>
+                        <div class="mt-2 text-sm ${data.restart_required ? 'text-yellow-700' : 'text-gray-600'}">
+                            ${data.restart_required ? 'Config or env files were imported. Restart the service to apply them.' : 'No service restart is required.'}
+                        </div>
+                        ${data.restart_required ? `
+                            <button onclick="restartProvisionerService()" class="mt-3 touch-btn px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-gray-800">
+                                Restart Service
+                            </button>
+                        ` : ''}
+                    </div>
+                `;
+                document.getElementById('bundle-file-input').value = '';
+                showToast('Setup bundle imported', 'success');
+                await loadReadiness();
+            } catch (error) {
+                showToast('Bundle import failed', 'error');
+            }
+        }
+
+        async function exportSetupBundle() {
+            const includeSystemFiles = document.getElementById('bundle-export-system').checked;
+            const url = `/api/setup/bundle/export?include_system_files=${includeSystemFiles ? 'true' : 'false'}`;
+            showToast('Preparing setup bundle...', 'info');
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    const data = await response.json();
+                    showToast(data.detail || 'Bundle export failed', 'error');
+                    return;
+                }
+                const blob = await response.blob();
+                const downloadUrl = window.URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                const disposition = response.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename="?([^"]+)"?/);
+                link.href = downloadUrl;
+                link.download = match ? match[1] : 'provisioner-setup-bundle.zip';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                window.URL.revokeObjectURL(downloadUrl);
+                document.getElementById('bundle-export-result').textContent =
+                    `Exported ${link.download}${includeSystemFiles ? ' with system files.' : '.'}`;
+                showToast('Setup bundle exported', 'success');
+            } catch (error) {
+                showToast('Bundle export failed', 'error');
+            }
+        }
+
+        async function seedBundledTemplates() {
+            const overwrite = document.getElementById('seed-overwrite').checked;
+            showToast('Seeding bundled templates...', 'info');
+
+            try {
+                const response = await fetch('/api/setup/templates/seed', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ overwrite }),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    showToast(data.detail || 'Template seeding failed', 'error');
+                    return;
+                }
+                document.getElementById('seed-templates-result').innerHTML = `
+                    <div class="text-gray-700">
+                        <div class="font-semibold">${escapeHtml(data.message)}</div>
+                        <div class="mt-2 text-sm text-gray-600">Copied: ${data.copied}, Skipped: ${data.skipped}</div>
+                    </div>
+                `;
+                showToast('Bundled templates seeded', 'success');
+                await loadReadiness();
+            } catch (error) {
+                showToast('Template seeding failed', 'error');
+            }
+        }
+
+        async function configureSwitch() {
+            const payload = {
+                ip: document.getElementById('switch-ip').value.trim() || '192.168.88.1',
+                username: document.getElementById('switch-username').value.trim() || 'admin',
+                password: document.getElementById('switch-password').value,
+                skip_password_change: document.getElementById('switch-skip-password').checked,
+            };
+            showToast('Configuring MikroTik switch...', 'info');
+
+            try {
+                const response = await fetch('/api/setup/switch/configure', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    const detail = data.detail && typeof data.detail === 'object'
+                        ? (data.detail.output || data.detail.message || 'Switch setup failed')
+                        : (data.detail || 'Switch setup failed');
+                    document.getElementById('switch-config-result').innerHTML =
+                        `<div class="text-red-700 whitespace-pre-wrap">${escapeHtml(detail)}</div>`;
+                    showToast('Switch setup failed', 'error');
+                    return;
+                }
+                document.getElementById('switch-config-result').innerHTML = `
+                    <div class="text-gray-700">
+                        <div class="font-semibold">${escapeHtml(data.message)}</div>
+                        <div class="mt-2 text-sm text-gray-600 space-y-1">
+                            ${(data.port_map || []).map(line => `<div>${escapeHtml(line)}</div>`).join('')}
+                        </div>
+                        <pre class="mt-3 bg-white border border-gray-200 rounded-lg p-3 text-xs text-gray-700 overflow-auto max-h-64 whitespace-pre-wrap">${escapeHtml(data.output || '')}</pre>
+                    </div>
+                `;
+                showToast('Switch configured', 'success');
+                await loadReadiness();
+            } catch (error) {
+                showToast('Switch setup failed', 'error');
+            }
+        }
+
+        async function restartProvisionerService() {
+            showToast('Scheduling service restart...', 'info');
+            try {
+                const response = await fetch('/api/setup/restart-service', { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok) {
+                    showToast(data.detail || 'Service restart failed', 'error');
+                    return;
+                }
+                document.getElementById('bundle-import-result').innerHTML +=
+                    '<div class="mt-3 text-sm text-yellow-700">Service restart scheduled. The page may disconnect briefly.</div>';
+                showToast('Service restart scheduled', 'success');
+            } catch (error) {
+                showToast('Service restart failed', 'error');
+            }
+        }
+
+        function readinessBadge(status, id = '') {
+            const styles = {
+                ready: 'bg-green-500/15 text-green-700',
+                warning: 'bg-yellow-500/15 text-yellow-700',
+                missing: 'bg-red-500/15 text-red-700',
+                error: 'bg-red-600/15 text-red-800',
+            };
+            const idAttr = id ? ` id="${id}"` : '';
+            return `<span${idAttr} class="px-2 py-0.5 text-xs font-medium rounded ${styles[status] || styles.warning}">${escapeHtml(String(status || 'unknown').toUpperCase())}</span>`;
+        }
+
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            const colors = {
+                success: 'bg-green-600',
+                error: 'bg-red-600',
+                warning: 'bg-yellow-600',
+                info: 'bg-blue-600',
+            };
+            toast.className = `${colors[type]} text-white px-4 py-3 rounded-lg shadow-lg transform transition-all duration-300 translate-x-full`;
+            toast.textContent = message;
+            container.appendChild(toast);
+            requestAnimationFrame(() => toast.classList.remove('translate-x-full'));
+            setTimeout(() => {
+                toast.classList.add('translate-x-full');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text == null ? '' : String(text);
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
