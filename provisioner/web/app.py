@@ -71,9 +71,14 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
         """Serve the main dashboard page."""
+        num_ports = 6
+        port_manager = getattr(provisioner, "port_manager", None) if provisioner else None
+        if port_manager is not None:
+            num_ports = port_manager.num_ports
         return templates.TemplateResponse(request, "index.html", {
             "request": request,
             "title": title,
+            "num_ports": num_ports,
         })
 
     # Files management page

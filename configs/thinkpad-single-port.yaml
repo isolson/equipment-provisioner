@@ -1,0 +1,127 @@
+# Single-port (no-switch) ThinkPad deployment
+#
+# Use this config when the ThinkPad provisions devices one-at-a-time over a
+# single ethernet port (no managed switch). Wifi handles internet, equipment
+# registry webhooks, and firmware downloads via the default route.
+#
+# Copy to /etc/provisioner/config.yaml on the target host and edit interface
+# name as needed.
+
+network:
+  # Wired interface used for the device under provisioning. On a ThinkPad
+  # Yoga via USB-C dock or built-in NIC this is typically enp0s31f6,
+  # enxXXXXXX, or similar. Check with `ip -br link`.
+  interface: eth0
+
+  # No managed switch, no VLANs — port_manager runs against the bare interface.
+  mode: simple
+
+  scan_delay: 10
+  device_boot_timeout: 90
+
+# Multi-port settings — ignored when mode=simple (num_ports is forced to 1)
+# but kept here for completeness / future toggling back to vlan mode.
+ports:
+  vlan_start: 1991
+  num_ports: 1
+  local_ip: 169.254.1.2
+
+simple_mode:
+  # DHCP subnet ARP-swept on every detection cycle, in addition to the
+  # vendor link-local list. Set this to the range your already-deployed
+  # routers/APs end up on after they DHCP — e.g. 10.0.0.0/24 — so they get
+  # re-discovered without needing a factory reset.
+  subnet: 192.168.1.0/24
+
+data:
+  local_path: /var/lib/provisioner/repo
+
+credentials:
+  cambium:
+    username: admin
+    password: "${CAMBIUM_PASSWORD}"
+    backup_password: "${CAMBIUM_BACKUP_PASSWORD}"
+
+  mikrotik:
+    username: admin
+    password: "${MIKROTIK_PASSWORD}"
+    bootstrap_password: "${MIKROTIK_BOOTSTRAP_PASS}"
+
+  tarana:
+    username: admin
+    password: "${TARANA_PASSWORD}"
+
+  tachyon:
+    username: root
+    password: "${TACHYON_PASSWORD}"
+
+  ubiquiti:
+    username: ubnt
+    password: "${UBIQUITI_PASSWORD}"
+
+notifications:
+  slack_webhook: "${SLACK_WEBHOOK_URL}"
+  discord_webhook: "${DISCORD_WEBHOOK_URL}"
+
+# ThinkPad has no GPIO pins — disable the LED/buzzer subsystem.
+gpio:
+  enabled: false
+
+features:
+  mode_config: false
+  config_backup: false
+  device_overrides: false
+  apply_config_ubiquiti: false
+  apply_config_tarana: true
+
+device_settings:
+  tarana:
+    operator_id:
+  mikrotik:
+    ztp_api_url:
+    ztp_api_key: "${MIKROTIK_ZTP_API_KEY}"
+
+firmware:
+  dual_bank_update: true
+  verify_after_reboot: true
+  reboot_wait_timeout: 180
+  checker:
+    enabled: true
+    default_check_interval: 86400
+    default_auto_download: true
+    sources:
+      tachyon:
+        enabled: true
+        auto_download: true
+        channel: release
+      mikrotik:
+        enabled: true
+        auto_download: true
+        channel: stable
+        models:
+          - arm
+          - arm64
+          - mipsbe
+
+# ThinkPad runs as a regular laptop with its own display — disable the
+# kiosk power management features that are tuned for the touchscreen rig.
+display:
+  sleep_timeout: 0
+  wake_on_connect: false
+  use_dpms: false
+  use_backlight: false
+
+equipment_registry:
+  url:
+  api_key: "${EQUIPMENT_REGISTRY_API_KEY}"
+
+analytics:
+  enabled: false
+  url: ""
+  site_id: "thinkpad-single-port"
+  api_key: "${ANALYTICS_API_KEY}"
+
+logging:
+  level: INFO
+  file: /var/log/provisioner.log
+  db: /var/lib/provisioner/history.db
