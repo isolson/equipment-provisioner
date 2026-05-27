@@ -275,9 +275,11 @@ class Provisioner:
         )
 
         # Wake display if configured, same as device-detected path.
+        # Don't gate on is_sleeping(): native X DPMS can turn off the screen
+        # without our knowledge, and wake() is idempotent.
         from .display import get_display
         display = get_display()
-        if display and display.wake_on_connect and display.is_sleeping():
+        if display and display.wake_on_connect:
             await display.wake()
             from .web.websocket import notify_display_state
             await notify_display_state(sleeping=False)
@@ -307,13 +309,14 @@ class Provisioner:
             f"{' at ' + device_ip if device_ip else ' (passive/no-IP)'}"
         )
 
-        # Wake display if configured
+        # Wake display if configured.  Don't gate on is_sleeping(): native
+        # X DPMS can turn off the screen without our knowledge, and wake()
+        # is idempotent.
         from .display import get_display
         display = get_display()
-        if display and display.wake_on_connect and display.is_sleeping():
+        if display and display.wake_on_connect:
             logger.info("Waking display on device connect")
             await display.wake()
-            # Notify clients of wake
             from .web.websocket import notify_display_state
             await notify_display_state(sleeping=False)
 
@@ -881,10 +884,12 @@ class Provisioner:
         """Handle a newly discovered device."""
         logger.info(f"New device discovered: {device.ip_address} ({device.mac_address})")
 
-        # Wake display if configured
+        # Wake display if configured.  Don't gate on is_sleeping(): native
+        # X DPMS can turn off the screen without our knowledge, and wake()
+        # is idempotent.
         from .display import get_display
         display = get_display()
-        if display and display.wake_on_connect and display.is_sleeping():
+        if display and display.wake_on_connect:
             logger.info("Waking display on device connect")
             await display.wake()
             from .web.websocket import notify_display_state

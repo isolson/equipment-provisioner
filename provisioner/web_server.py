@@ -67,17 +67,17 @@ async def run_standalone(
     except Exception as e:
         logger.warning(f"Database initialization failed: {e}")
 
-    # Initialize display controller
+    # Initialize display controller.
+    # Always init (even when sleep_timeout=0) so wake-on-device-connect
+    # still fires — X DPMS handles idle-off natively in that case.
     from .display import init_display, cleanup_display
-    if config and config.display.sleep_timeout > 0:
+    if config:
         init_display(
             sleep_timeout=config.display.sleep_timeout,
             wake_on_connect=config.display.wake_on_connect,
             use_dpms=config.display.use_dpms,
             use_backlight=config.display.use_backlight,
         )
-    else:
-        logger.debug("Display sleep disabled (timeout=0)")
     
     # Create provisioner if config available
     provisioner = None

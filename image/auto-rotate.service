@@ -1,0 +1,14 @@
+[Unit]
+Description=Auto-rotate display based on lid accelerometer
+After=multi-user.target
+
+[Service]
+Type=simple
+User=kiosk
+Environment=DISPLAY=:0
+ExecStart=/usr/local/bin/auto-rotate.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -74,7 +74,7 @@ class DisplayController:
             )
             if result.returncode == 0:
                 return True
-            logger.debug(f"Command failed: {' '.join(cmd)} -> {result.stderr.decode()}")
+            logger.warning(f"Command failed (rc={result.returncode}): {' '.join(cmd)} -> stderr={result.stderr.decode().strip()!r} stdout={result.stdout.decode().strip()!r}")
             return False
         except subprocess.TimeoutExpired:
             logger.debug(f"Command timed out: {' '.join(cmd)}")
@@ -86,13 +86,28 @@ class DisplayController:
             logger.debug(f"Command error: {e}")
             return False
 
+    def _xset(self, *args: str) -> bool:
+        """Run xset against the kiosk's X server.
+
+        provisioner-web runs as root with no DISPLAY, so we hop to the
+        kiosk user (which the X server accepts via same-uid auth) and
+        explicitly set DISPLAY=:0.
+        """
+        return self._run_command(
+            ["sudo", "-n", "-u", "kiosk", "env", "DISPLAY=:0", "xset", *args]
+        )
+
     def _sleep_dpms(self) -> bool:
         """Put display to sleep using DPMS (X11)."""
-        return self._run_command(["xset", "dpms", "force", "off"])
+        return self._xset("dpms", "force", "off")
 
     def _wake_dpms(self) -> bool:
         """Wake display using DPMS (X11)."""
-        return self._run_command(["xset", "dpms", "force", "on"])
+        # 'force on' alone leaves the screensaver counted as idle, so the
+        # screen can immediately re-blank. Reset the saver too.
+        ok = self._xset("dpms", "force", "on")
+        self._xset("s", "reset")
+        return ok
 
     def _sleep_backlight(self) -> bool:
         """Put display to sleep using sysfs backlight."""
@@ -115,11 +130,15 @@ class DisplayController:
         if not self._backlight_path:
             return False
 
+        # If we never slept the backlight ourselves, leave it alone — the
+        # user's brightness setting (or X DPMS) is the source of truth.
+        if self._saved_brightness is None:
+            return False
+
         try:
-            # Restore saved brightness or use max
-            brightness = self._saved_brightness or self._max_brightness
-            self._backlight_path.write_text(str(brightness))
-            logger.debug(f"Backlight restored to {brightness}")
+            self._backlight_path.write_text(str(self._saved_brightness))
+            logger.debug(f"Backlight restored to {self._saved_brightness}")
+            self._saved_brightness = None
             return True
         except (PermissionError, OSError) as e:
             logger.debug(f"Cannot control backlight: {e}")
@@ -193,13 +212,12 @@ class DisplayController:
     async def wake(self) -> bool:
         """Wake display from sleep.
 
-        Tries all enabled methods to ensure display is on.
+        Always runs wake commands (they are idempotent) — the X DPMS idle
+        timer can turn the screen off without flipping our `_sleeping`
+        flag, so we can't trust internal state as a short-circuit.
+
         Returns True if any method succeeded.
         """
-        if not self._sleeping:
-            logger.debug("Display already awake")
-            return True
-
         success = False
 
         # Try all methods to ensure display is on
