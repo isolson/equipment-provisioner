@@ -999,7 +999,7 @@ class TachyonHandler(BaseHandler):
             logger.error(f"Failed to apply config file: {e}")
             return False
 
-    async def upload_firmware(self, firmware_path: str) -> bool:
+    async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
         """Upload firmware file to device via multipart form-data.
 
         Args:

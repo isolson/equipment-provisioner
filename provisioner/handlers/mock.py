@@ -237,7 +237,7 @@ class MockHandler(BaseHandler):
 
         return await self.apply_config(config)
 
-    async def upload_firmware(self, firmware_path: str) -> bool:
+    async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
         """Simulate firmware upload."""
         firmware_file = Path(firmware_path)
         if not firmware_file.exists():

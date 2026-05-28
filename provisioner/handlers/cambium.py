@@ -1759,18 +1759,38 @@ class CambiumHandler(BaseHandler):
             logger.error(f"Failed to restore config: {e}")
             return False
 
-    async def upload_firmware(self, firmware_path: str) -> bool:
-        """Upload firmware to the device."""
+    async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
+        """Upload firmware to the device.
+
+        Cambium ePMP uses different endpoint sequences for the first vs.
+        second bank-update pass:
+
+        - First pass (bank in {None, 1}): POST local_upload_image, then poll
+          get_upload_status until status=7. Suitable for the initial flash
+          where the device's inactive bank is the destination.
+
+        - Second pass (bank == 2): POST upload_sw_image_local, then explicitly
+          trigger the upgrade via upgrade_sw_image_local
+          (body: type=device&debug=true), then poll get_upgrade_status with
+          the same body. Required to actually flash the alternate bank after
+          a prior bank-swap reboot — the first-pass endpoint silently no-ops
+          in that state.
+
+        Endpoint set confirmed via HAR capture on Cambium Force 300-25
+        firmware 5.11.1; see docs/cambium-config.md.
+        """
         try:
             firmware_file = Path(firmware_path)
             if not firmware_file.exists():
                 logger.error(f"Firmware file not found: {firmware_path}")
                 return False
 
-            logger.info(f"Uploading firmware {firmware_file.name} to {self.ip}...")
+            logger.info(f"Uploading firmware {firmware_file.name} to {self.ip}... (bank={bank})")
 
             # Use curl when interface binding is needed (VLAN mode)
             if self.interface:
+                if bank == 2:
+                    return await self._upload_firmware_curl_alt_bank(firmware_path)
                 return await self._upload_firmware_curl(firmware_path)
 
             # Use aiohttp when no interface binding needed
@@ -1929,6 +1949,180 @@ class CambiumHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Failed to upload firmware via curl: {e}")
             return False
+
+    async def _upload_firmware_curl_alt_bank(self, firmware_path: str) -> bool:
+        """Upload firmware to the second (alternate) bank via curl.
+
+        Used for FW2 — see upload_firmware() docstring for why this differs
+        from _upload_firmware_curl. Hits the upload_sw_image_local +
+        upgrade_sw_image_local + get_upgrade_status endpoint set captured
+        from the Cambium web UI HAR on Force 300-25 firmware 5.11.1.
+        """
+        import tempfile
+
+        try:
+            firmware_file = Path(firmware_path)
+            logger.info(
+                f"Uploading firmware {firmware_file.name} to {self.ip} via {self.interface} "
+                f"(alt-bank path)"
+            )
+
+            cookie_path = None
+            stok = self._stok
+            if stok:
+                logger.debug(f"Reusing existing stok for alt-bank upload: {stok[:16]}...")
+                cookie_path = self._cookie_file
+            else:
+                logger.debug("No existing stok, logging in via curl for alt-bank upload...")
+                cookie_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+                cookie_path = cookie_file.name
+                cookie_file.close()
+
+                username = self.credentials.get("username", "admin")
+                password = self.credentials.get("password", "admin")
+                login_url = f"{self._base_url}/cgi-bin/luci"
+
+                proc = await asyncio.create_subprocess_exec(
+                    "curl", "-s", "-k", "-m", "10",
+                    "--interface", self.interface,
+                    "-c", cookie_path, "-b", cookie_path,
+                    "-X", "POST",
+                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
+                    login_url,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    logger.error(f"Login failed: {stderr.decode()}")
+                    return False
+                response = stdout.decode("utf-8", errors="ignore")
+                match = re.search(r'"stok":"([^"]+)"', response)
+                if match:
+                    stok = match.group(1)
+                    self._stok = stok
+                if not stok:
+                    logger.error("Failed to get stok token for alt-bank upload")
+                    return False
+
+            # Step 1: POST firmware to upload_sw_image_local (multipart, field name "image")
+            upload_url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/upload_sw_image_local"
+            curl_args = [
+                "curl", "-s", "-k", "-m", "600",
+                "--interface", self.interface,
+                "-X", "POST",
+                "-F", f"image=@{firmware_path}",
+            ]
+            if cookie_path:
+                curl_args.extend(["-b", cookie_path])
+            curl_args.append(upload_url)
+
+            proc = await asyncio.create_subprocess_exec(
+                *curl_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.error(f"Alt-bank upload curl failed: {stderr.decode()}")
+                return False
+            upload_resp = stdout.decode("utf-8", errors="ignore")
+            logger.info(f"Alt-bank upload response: {upload_resp[:300]}")
+            if "error" in upload_resp.lower() and "success" not in upload_resp.lower():
+                logger.error(f"Alt-bank upload failed: {upload_resp[:300]}")
+                return False
+
+            # Step 2: trigger upgrade via upgrade_sw_image_local (form body: type=device&debug=true)
+            upgrade_url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/upgrade_sw_image_local"
+            curl_args = [
+                "curl", "-s", "-k", "-m", "30",
+                "--interface", self.interface,
+                "-X", "POST",
+                "-H", "Content-Type: application/x-www-form-urlencoded",
+                "-d", "type=device&debug=true",
+            ]
+            if cookie_path:
+                curl_args.extend(["-b", cookie_path])
+            curl_args.append(upgrade_url)
+
+            proc = await asyncio.create_subprocess_exec(
+                *curl_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.error(f"upgrade_sw_image_local curl failed: {stderr.decode()}")
+                return False
+            upgrade_resp = stdout.decode("utf-8", errors="ignore")
+            logger.info(f"upgrade_sw_image_local response: {upgrade_resp[:300]}")
+
+            # Step 3: poll get_upgrade_status (same form body) until done
+            ready = await self._poll_upgrade_status_curl(stok, cookie_file=cookie_path)
+            if ready:
+                logger.info(f"Alt-bank firmware ready on {self.ip}")
+                return True
+            logger.warning("Alt-bank upgrade status unclear, assuming success")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to upload firmware to alt bank via curl: {e}")
+            return False
+
+    async def _poll_upgrade_status_curl(self, stok: str, timeout: int = 300, cookie_file: Optional[str] = None) -> bool:
+        """Poll /admin/get_upgrade_status (alt-bank path) until upgrade is ready.
+
+        Mirrors _poll_upload_status_curl but uses the get_upgrade_status
+        endpoint with the form body the device expects.
+        """
+        import time as _time
+        start_time = _time.time()
+        url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/get_upgrade_status"
+
+        while _time.time() - start_time < timeout:
+            try:
+                curl_args = [
+                    "curl", "-s", "-k", "-m", "10",
+                    "--interface", self.interface,
+                    "-X", "POST",
+                    "-H", "Content-Type: application/x-www-form-urlencoded",
+                    "-d", "type=device&debug=true",
+                ]
+                if cookie_file:
+                    curl_args.extend(["-b", cookie_file])
+                curl_args.append(url)
+
+                proc = await asyncio.create_subprocess_exec(
+                    *curl_args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await proc.communicate()
+                if proc.returncode == 0 and stdout:
+                    response = stdout.decode("utf-8", errors="ignore")
+                    logger.debug(f"Upgrade status: {response}")
+                    try:
+                        data = json.loads(response)
+                        if data.get("status") == 7:
+                            logger.info("Alt-bank upgrade complete (status=7)")
+                            return True
+                        if data.get("success") == 1 and data.get("status") in (7, "complete", "ready"):
+                            return True
+                        if data.get("percent") == 100 or data.get("progress") == 100:
+                            return True
+                        if data.get("error") and data.get("error") != 0:
+                            logger.error(f"Upgrade status error: {data}")
+                            return False
+                        logger.debug(f"Alt-bank upgrade in progress (status={data.get('status', '?')})")
+                    except json.JSONDecodeError:
+                        pass
+                await asyncio.sleep(2)
+            except Exception as e:
+                logger.debug(f"Upgrade status poll error: {e}")
+                await asyncio.sleep(2)
+
+        logger.warning(f"Upgrade status poll timed out after {timeout}s")
+        return False
 
     async def _poll_upload_status_curl(self, stok: str, timeout: int = 300, cookie_file: Optional[str] = None) -> bool:
         """Poll /admin/get_upload_status until firmware is ready.

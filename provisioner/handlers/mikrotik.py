@@ -282,7 +282,7 @@ class MikrotikHandler(BaseHandler):
             logger.error(f"Failed to apply config file: {exc}")
             return False
 
-    async def upload_firmware(self, firmware_path: str) -> bool:
+    async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
         """Upload RouterOS package to device."""
         firmware_file = Path(firmware_path)
         if not firmware_file.exists():

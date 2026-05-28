@@ -191,11 +191,19 @@ class BaseHandler(ABC):
         return False
 
     @abstractmethod
-    async def upload_firmware(self, firmware_path: str) -> bool:
+    async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
         """Upload firmware to the device.
+
+        For dual-bank devices, ``bank`` indicates which bank update is in
+        progress (1 = first pass, 2 = second pass). Most vendors flash the
+        inactive bank regardless of the pass number — they can ignore the
+        argument. Some vendors (Cambium ePMP) use a different endpoint
+        for the second-pass flash and need this to switch paths.
 
         Args:
             firmware_path: Path to the firmware file.
+            bank: 1 for the first firmware-update pass, 2 for the second.
+                  None means "vendor decides".
 
         Returns:
             True if upload successful.
@@ -525,7 +533,7 @@ class BaseHandler(ABC):
 
                     await notify("firmware_update_1", "loading", None)
 
-                    if not await self.upload_firmware(firmware_path):
+                    if not await self.upload_firmware(firmware_path, bank=1):
                         result.error_message = "Failed to upload firmware (update 1)"
                         await notify("firmware_update_1", False, result.error_message)
                         return result
@@ -702,7 +710,7 @@ class BaseHandler(ABC):
                         await notify("firmware_update_2", False, result.error_message)
                         return result
 
-                    if not await self.upload_firmware(firmware_path):
+                    if not await self.upload_firmware(firmware_path, bank=2):
                         result.error_message = "Failed to upload firmware (update 2)"
                         await notify("firmware_update_2", False, result.error_message)
                         return result
