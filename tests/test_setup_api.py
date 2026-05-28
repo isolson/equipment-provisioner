@@ -188,6 +188,7 @@ def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch
     config.credentials.tachyon.password = "fleet-pass"
     config.credentials.tarana.password = "fleet-pass"
     config.credentials.ubiquiti.password = "fleet-pass"
+    config.device_settings.tarana.operator_id = 12345
 
     (data_path / "configs" / "templates" / "cambium").mkdir(parents=True)
     (data_path / "configs" / "templates" / "tachyon").mkdir(parents=True)
