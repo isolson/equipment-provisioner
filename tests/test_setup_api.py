@@ -188,6 +188,7 @@ def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch
     config.credentials.tachyon.password = "fleet-pass"
     config.credentials.tarana.password = "fleet-pass"
     config.credentials.ubiquiti.password = "fleet-pass"
+    config.device_settings.tarana.operator_id = 12345
 
     (data_path / "configs" / "templates" / "cambium").mkdir(parents=True)
     (data_path / "configs" / "templates" / "tachyon").mkdir(parents=True)
@@ -368,6 +369,68 @@ def test_setup_seed_templates_copies_repo_templates(tmp_path, monkeypatch):
     assert payload["success"] is True
     assert payload["copied"] == 1
     assert (data_path / "configs" / "templates" / "cambium" / "ap.json").read_text() == '{"mode":"ap"}'
+
+
+def test_device_settings_put_persists_to_disk(tmp_path, monkeypatch):
+    """PUT /api/device-settings must write to disk so the value survives restart."""
+    import provisioner.config as config_module
+
+    overrides_path = tmp_path / "device-settings.json"
+    monkeypatch.setattr(config_module, "DEVICE_SETTINGS_OVERRIDES_PATH", overrides_path)
+
+    client, config, _data_path = make_client(tmp_path)
+    # Simulate config.yaml setting an install-time secret in the same subtree.
+    config.device_settings.mikrotik.ztp_api_key = "from-yaml"
+
+    response = client.put("/api/device-settings", json={"tarana": {"operator_id": 12345}})
+    assert response.status_code == 200
+    assert response.json() == {"success": True}
+
+    # File must exist with the new value.
+    assert overrides_path.exists()
+    loaded = config_module.load_device_settings_overrides(overrides_path)
+    assert loaded == {"tarana": {"operator_id": 12345}}
+    # Crucially, we did NOT snapshot the in-memory mikrotik secret to disk.
+    assert "mikrotik" not in loaded
+
+    # GET should reflect the same value (round-trip through in-memory config).
+    get_response = client.get("/api/device-settings")
+    assert get_response.status_code == 200
+    assert get_response.json()["tarana"]["operator_id"] == 12345
+
+
+def test_device_settings_put_merges_with_existing_overrides(tmp_path, monkeypatch):
+    """A second PUT must merge into the file, not clobber prior overrides."""
+    import provisioner.config as config_module
+
+    overrides_path = tmp_path / "device-settings.json"
+    # Pre-seed with a future-shape override that no current endpoint writes.
+    overrides_path.write_text('{"future_vendor": {"some_field": "preserved"}}')
+
+    monkeypatch.setattr(config_module, "DEVICE_SETTINGS_OVERRIDES_PATH", overrides_path)
+    client, _config, _data_path = make_client(tmp_path)
+
+    response = client.put("/api/device-settings", json={"tarana": {"operator_id": 9}})
+    assert response.status_code == 200
+
+    loaded = config_module.load_device_settings_overrides(overrides_path)
+    assert loaded["tarana"]["operator_id"] == 9
+    assert loaded["future_vendor"]["some_field"] == "preserved"
+
+
+def test_device_settings_load_config_overlays_overrides(tmp_path, monkeypatch):
+    """load_config() must overlay the persisted overrides file at startup."""
+    import provisioner.config as config_module
+
+    overrides_path = tmp_path / "device-settings.json"
+    overrides_path.write_text('{"tarana": {"operator_id": 777}}')
+    monkeypatch.setattr(config_module, "DEVICE_SETTINGS_OVERRIDES_PATH", overrides_path)
+
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text("network:\n  interface: eth0\n")
+
+    config = config_module.load_config(str(config_yaml))
+    assert config.device_settings.tarana.operator_id == 777
 
 
 def test_setup_restart_service_schedules_systemctl_restart(tmp_path, monkeypatch):

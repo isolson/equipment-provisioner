@@ -302,17 +302,6 @@
                     <label class="block text-sm font-medium text-gray-600 mb-2">System Status</label>
                     <div class="bg-gray-50 rounded-lg p-3 text-sm border border-gray-200" id="system-status">Loading...</div>
                 </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-600 mb-2">Tarana</label>
-                    <div class="flex items-center gap-2">
-                        <label class="text-sm text-gray-600 whitespace-nowrap">Operator ID</label>
-                        <input type="number" id="settings-operator-id" placeholder="Not set"
-                            class="flex-1 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900">
-                        <button onclick="saveDeviceSettings()" class="px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-medium text-white">
-                            Save
-                        </button>
-                    </div>
-                </div>
                 <div class="space-y-2">
                     <button onclick="triggerGitSync()" class="w-full py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm text-white">
                         Sync GitHub Repository
@@ -1720,34 +1709,10 @@
         function openSettings() {
             document.getElementById('settings-modal').classList.remove('hidden');
             fetchSystemStatus();
-            fetch('/api/device-settings').then(r => r.json()).then(s => {
-                const el = document.getElementById('settings-operator-id');
-                if (el && s.tarana?.operator_id != null) el.value = s.tarana.operator_id;
-            }).catch(() => {});
         }
 
         function closeSettings() {
             document.getElementById('settings-modal').classList.add('hidden');
-        }
-
-        async function saveDeviceSettings() {
-            const el = document.getElementById('settings-operator-id');
-            const operatorId = el?.value ? parseInt(el.value) : null;
-            try {
-                const resp = await fetch('/api/device-settings', {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ tarana: { operator_id: operatorId } }),
-                });
-                if (resp.ok) {
-                    window.defaultOperatorId = operatorId;
-                    showToast('Settings saved', 'success');
-                } else {
-                    showToast('Failed to save settings', 'error');
-                }
-            } catch (e) {
-                showToast('Failed to save settings', 'error');
-            }
         }
 
         async function fetchSystemStatus() {
