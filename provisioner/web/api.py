@@ -215,27 +215,52 @@ async def update_device_settings(settings: Dict[str, Any], request: Request):
     ``/var/lib/provisioner/device-settings.json`` so it survives a
     ``systemctl restart provisioner-web``. The file is loaded on startup by
     ``load_config`` and overlaid on top of ``config.yaml``.
+
+    Only fields explicitly edited via this endpoint are written to the
+    overrides file — we deliberately do NOT snapshot the full in-memory
+    ``device_settings`` to avoid shadowing values that legitimately come
+    from ``config.yaml`` (e.g. mikrotik.ztp_api_key).
     """
     provisioner = request.app.state.provisioner
     if not provisioner:
         raise HTTPException(status_code=503, detail="Provisioner not available")
 
+    from ..config import load_device_settings_overrides, save_device_settings_overrides_dict
+
+    persisted_changes: Dict[str, Any] = {}
+
     if "tarana" in settings:
         tarana = settings["tarana"]
         if "operator_id" in tarana:
             provisioner.config.device_settings.tarana.operator_id = tarana["operator_id"]
+            persisted_changes.setdefault("tarana", {})["operator_id"] = tarana["operator_id"]
 
-    try:
-        from ..config import save_device_settings_overrides
-        save_device_settings_overrides(provisioner.config.device_settings)
-    except OSError as e:
-        logger.error("Failed to persist device settings: %s", e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Settings updated in memory but could not be saved to disk: {e}",
-        )
+    if persisted_changes:
+        # Merge the change into whatever is already on disk so other
+        # previously-persisted overrides (future fields) are not lost.
+        try:
+            existing = load_device_settings_overrides()
+            merged = _merge_settings_dict(existing, persisted_changes)
+            save_device_settings_overrides_dict(merged)
+        except OSError as e:
+            logger.error("Failed to persist device settings: %s", e)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Settings updated in memory but could not be saved to disk: {e}",
+            )
 
     return {"success": True}
+
+
+def _merge_settings_dict(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+    """Shallow-recursive merge for device-settings overrides dict."""
+    result = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _merge_settings_dict(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 @router.post("/provision", response_model=ProvisionResponse)

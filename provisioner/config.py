@@ -336,18 +336,18 @@ def load_device_settings_overrides(
         return {}
 
 
-def save_device_settings_overrides(
-    settings: "DeviceSettingsConfig",
+def save_device_settings_overrides_dict(
+    payload: Dict[str, Any],
     path: Optional[Path] = None,
 ) -> None:
-    """Atomically persist device-settings to disk.
+    """Atomically write a dict to the device-settings overrides file.
 
-    Writes the full DeviceSettingsConfig as JSON via a temp file + rename so
-    a crash mid-write cannot corrupt the file. The file is created with mode
-    0600 (settings may include sensitive fields in the future).
+    Use this when persisting only the fields the user actually edited
+    (avoids snapshotting installer-time secrets that happen to live in the
+    same in-memory subtree). Writes via temp file + rename so a crash
+    cannot corrupt the file. The file is created with mode 0600.
     """
     resolved = _device_settings_overrides_path(path)
-    payload = settings.model_dump(mode="json")
     resolved.parent.mkdir(parents=True, exist_ok=True)
 
     fd, tmp_path = tempfile.mkstemp(
@@ -370,6 +370,19 @@ def save_device_settings_overrides(
         except OSError:
             pass
         raise
+
+
+def save_device_settings_overrides(
+    settings: "DeviceSettingsConfig",
+    path: Optional[Path] = None,
+) -> None:
+    """Atomically persist the full DeviceSettingsConfig to disk.
+
+    Prefer ``save_device_settings_overrides_dict`` when only some fields
+    have been edited — this helper snapshots the entire subtree and will
+    shadow any value also set in ``config.yaml``.
+    """
+    save_device_settings_overrides_dict(settings.model_dump(mode="json"), path)
 
 
 def apply_device_settings_overrides(

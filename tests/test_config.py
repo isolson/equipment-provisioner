@@ -20,6 +20,7 @@ from provisioner.config import (
     load_config,
     load_device_settings_overrides,
     save_device_settings_overrides,
+    save_device_settings_overrides_dict,
     expand_env_vars,
 )
 
@@ -473,3 +474,13 @@ class TestDeviceSettingsOverridesPersistence:
         config.device_settings.tarana.operator_id = 5
         apply_device_settings_overrides(config, tmp_path / "absent.json")
         assert config.device_settings.tarana.operator_id == 5
+
+    def test_save_dict_writes_only_supplied_fields(self, tmp_path):
+        """Dict helper persists exactly what is passed (no shadowing of yaml)."""
+        overrides_path = tmp_path / "device-settings.json"
+        save_device_settings_overrides_dict(
+            {"tarana": {"operator_id": 1}},
+            overrides_path,
+        )
+        loaded = load_device_settings_overrides(overrides_path)
+        assert loaded == {"tarana": {"operator_id": 1}}
