@@ -211,7 +211,7 @@ def manager():
 
 @pytest.mark.asyncio
 async def test_listener_fires_callback_on_first_bootp(manager, monkeypatch):
-    fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:01"])
+    fake = _FakeFingerprinter(manager, ["74:4d:28:00:00:01"])
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
     fired = []
@@ -223,14 +223,14 @@ async def test_listener_fires_callback_on_first_bootp(manager, monkeypatch):
 
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
-    assert fired == [(1, "aa:bb:cc:00:00:01")]
+    assert fired == [(1, "74:4d:28:00:00:01")]
     state = manager.port_states[1]
     assert state.provision_attempted is True
 
 
 @pytest.mark.asyncio
 async def test_listener_skips_when_already_provisioning(manager, monkeypatch):
-    fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:01"])
+    fake = _FakeFingerprinter(manager, ["74:4d:28:00:00:01"])
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
     fired = []
@@ -247,7 +247,7 @@ async def test_listener_skips_when_already_provisioning(manager, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_listener_respects_cooldown_for_same_mac(manager, monkeypatch):
-    fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:01"])
+    fake = _FakeFingerprinter(manager, ["74:4d:28:00:00:01"])
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
     fired = []
@@ -255,7 +255,7 @@ async def test_listener_respects_cooldown_for_same_mac(manager, monkeypatch):
 
     state = manager.port_states[1]
     state.last_provisioned_at = time.time() - 60  # 1 min ago, inside 30-min cooldown
-    state.last_provisioned_mac = "AA:BB:CC:00:00:01"
+    state.last_provisioned_mac = "74:4D:28:00:00:01"
 
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
@@ -265,7 +265,7 @@ async def test_listener_respects_cooldown_for_same_mac(manager, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_listener_bypasses_cooldown_for_new_mac(manager, monkeypatch):
-    fake = _FakeFingerprinter(manager, ["aa:bb:cc:99:99:99"])
+    fake = _FakeFingerprinter(manager, ["74:4d:28:99:99:99"])
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
     fired = []
@@ -281,13 +281,13 @@ async def test_listener_bypasses_cooldown_for_new_mac(manager, monkeypatch):
 
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
-    assert fired == [(1, "aa:bb:cc:99:99:99")]
+    assert fired == [(1, "74:4d:28:99:99:99")]
 
 
 @pytest.mark.asyncio
 async def test_listener_skips_when_provision_already_attempted_same_mac(manager, monkeypatch):
     """If we already fired for this MAC and it's still BOOTPing, don't refire."""
-    fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:01"])
+    fake = _FakeFingerprinter(manager, ["74:4d:28:00:00:01"])
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
     fired = []
@@ -295,7 +295,7 @@ async def test_listener_skips_when_provision_already_attempted_same_mac(manager,
 
     state = manager.port_states[1]
     state.provision_attempted = True
-    state.last_provisioned_mac = "aa:bb:cc:00:00:01"
+    state.last_provisioned_mac = "74:4d:28:00:00:01"
 
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
@@ -309,7 +309,7 @@ async def test_listener_skips_same_mac_after_failed_fire(manager, monkeypatch):
     The field tech can remove/reinsert the device to clear port state. Without
     this gate, a unit left in BOOTP mode loops Netinstall attempts forever.
     """
-    fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:01"])
+    fake = _FakeFingerprinter(manager, ["74:4d:28:00:00:01"])
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
     fired = []
@@ -320,7 +320,7 @@ async def test_listener_skips_same_mac_after_failed_fire(manager, monkeypatch):
     # last_provisioned_at/_mac stayed None (failure path), but last_bootp_fired_at
     # and last_bootp_fired_mac were set when the previous fire happened.
     state.last_bootp_fired_at = time.time() - 3600
-    state.last_bootp_fired_mac = "aa:bb:cc:00:00:01"
+    state.last_bootp_fired_mac = "74:4d:28:00:00:01"
 
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
@@ -329,7 +329,7 @@ async def test_listener_skips_same_mac_after_failed_fire(manager, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_listener_refires_after_failed_fire_for_different_mac(manager, monkeypatch):
-    fake = _FakeFingerprinter(manager, ["aa:bb:cc:00:00:02"])
+    fake = _FakeFingerprinter(manager, ["74:4d:28:00:00:02"])
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
     fired = []
@@ -341,8 +341,76 @@ async def test_listener_refires_after_failed_fire_for_different_mac(manager, mon
 
     state = manager.port_states[1]
     state.last_bootp_fired_at = time.time() - 5
-    state.last_bootp_fired_mac = "aa:bb:cc:00:00:01"
+    state.last_bootp_fired_mac = "74:4d:28:00:00:01"
 
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
-    assert fired == [(1, "aa:bb:cc:00:00:02")]
+    assert fired == [(1, "74:4d:28:00:00:02")]
+
+
+@pytest.mark.asyncio
+async def test_listener_skips_non_mikrotik_oui(manager, monkeypatch):
+    """BOOTP from a non-MikroTik OUI must NOT trigger auto-netinstall.
+
+    Netinstall is destructive (full reflash) and BOOTP isn't MikroTik-
+    exclusive — Ubiquiti Wave U-Boot transmits BOOTP during boot too. The
+    OUI allowlist gates the trigger before any callbacks fire.
+    """
+    # Ubiquiti OUI ac:8b:a9 — what triggered the original incident.
+    fake = _FakeFingerprinter(manager, ["ac:8b:a9:00:00:01"])
+    monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
+
+    fired = []
+    manager.on_device_in_bootp(AsyncMock(side_effect=lambda p, m: fired.append(m)))
+
+    await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
+
+    assert fired == []
+    # OUI gate should NOT mark the port as attempted — that's reserved for
+    # actual fires so the BOOTP cooldown logic doesn't get confused.
+    assert manager.port_states[1].provision_attempted is False
+
+
+@pytest.mark.asyncio
+async def test_listener_skips_non_mikrotik_oui_even_if_fingerprinted_as_other(manager, monkeypatch):
+    """If the port is already fingerprinted as a non-MikroTik vendor, skip
+    regardless of MAC OUI — covers the race where a slow BOOTP arrives
+    after the vendor has been identified.
+    """
+    # Even with a real MikroTik OUI, if the port has been fingerprinted as
+    # a different vendor, we don't run netinstall against it.
+    fake = _FakeFingerprinter(manager, ["74:4d:28:00:00:01"])
+    monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
+
+    fired = []
+    manager.on_device_in_bootp(AsyncMock(side_effect=lambda p, m: fired.append(m)))
+
+    manager.port_states[1].device_type = "ubiquiti"
+
+    await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
+
+    assert fired == []
+    assert manager.port_states[1].provision_attempted is False
+
+
+@pytest.mark.asyncio
+async def test_listener_fires_when_fingerprinted_as_mikrotik_with_unknown_oui(manager, monkeypatch):
+    """If the port has been fingerprinted as MikroTik but the BOOTP MAC has
+    an OUI not in our allowlist (e.g. cloned MAC, a vendor MikroTik OUI we
+    haven't added yet), trust the fingerprint and fire.
+    """
+    fake = _FakeFingerprinter(manager, ["ac:8b:a9:00:00:01"])  # not a MikroTik OUI
+    monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
+
+    fired = []
+
+    async def cb(port_num, mac):
+        fired.append((port_num, mac))
+
+    manager.on_device_in_bootp(cb)
+
+    manager.port_states[1].device_type = "mikrotik"
+
+    await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
+
+    assert fired == [(1, "ac:8b:a9:00:00:01")]
