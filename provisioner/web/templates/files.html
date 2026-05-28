@@ -346,10 +346,18 @@
 
         // Vendors that support pulling a config snapshot from a connected device.
         // Mirrors the backend; each vendor here must have a `fetch_config()`
-        // method on its handler. Tachyon (#46) lands separately.
+        // method on its handler.
         const SNAPSHOT_VENDORS = {
             ubiquiti: { modes: [{ value: 'default', label: 'Default' }] },
             cambium: {
+                modes: [
+                    { value: 'default', label: 'Default' },
+                    { value: 'ap', label: 'AP' },
+                    { value: 'ptp-a', label: 'PTP-A' },
+                    { value: 'ptp-b', label: 'PTP-B' },
+                ],
+            },
+            tachyon: {
                 modes: [
                     { value: 'default', label: 'Default' },
                     { value: 'ap', label: 'AP' },

@@ -27,6 +27,30 @@ from .base import BaseHandler, DeviceInfo
 logger = logging.getLogger(__name__)
 
 
+_SECRET_KEY_NEEDLES = ("password", "secret", "sessionid")
+
+
+def _is_secret_key(key: str) -> bool:
+    if not isinstance(key, str):
+        return False
+    lowered = key.lower()
+    for needle in _SECRET_KEY_NEEDLES:
+        if needle in lowered:
+            return True
+    auth_idx = lowered.find("auth")
+    if auth_idx >= 0 and lowered.find("token", auth_idx) > auth_idx:
+        return True
+    return False
+
+
+def _sanitize_config_secrets(obj):
+    if isinstance(obj, dict):
+        return {k: _sanitize_config_secrets(v) for k, v in obj.items() if not _is_secret_key(k)}
+    if isinstance(obj, list):
+        return [_sanitize_config_secrets(i) for i in obj]
+    return obj
+
+
 class TachyonHandler(BaseHandler):
     """Handler for Tachyon Networks 301, 302, 303L, and 30x series devices.
 
@@ -754,6 +778,21 @@ class TachyonHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Failed to backup config: {e}")
             raise
+
+    async def fetch_config(self) -> Dict[str, Any]:
+        """GET the device's current config, sanitized for use as a template.
+
+        Reuses the existing connect() and _api_request() machinery.
+        """
+        if not self._connected:
+            connected = await self.connect()
+            if not connected:
+                raise RuntimeError(f"Failed to connect to Tachyon: {self.login_error or 'login failed'}")
+
+        config = await self._api_request("GET", self.API_CONFIG)
+        if not isinstance(config, dict):
+            raise RuntimeError(f"Unexpected config response from {self.API_CONFIG}: {type(config).__name__}")
+        return _sanitize_config_secrets(config)
 
     async def apply_config(self, config: Dict[str, Any]) -> bool:
         """Apply configuration via API.
