@@ -345,11 +345,18 @@
         });
 
         // Vendors that support pulling a config snapshot from a connected device.
-        // Mirrors the backend; today only Ubiquiti is wired (issue #44).
-        // Cambium (#45) and Tachyon (#46) will land later and just need to be
-        // added here.
+        // Mirrors the backend; each vendor here must have a `fetch_config()`
+        // method on its handler. Tachyon (#46) lands separately.
         const SNAPSHOT_VENDORS = {
             ubiquiti: { modes: [{ value: 'default', label: 'Default' }] },
+            cambium: {
+                modes: [
+                    { value: 'default', label: 'Default' },
+                    { value: 'ap', label: 'AP' },
+                    { value: 'ptp-a', label: 'PTP-A' },
+                    { value: 'ptp-b', label: 'PTP-B' },
+                ],
+            },
         };
 
         function showVendor(vendor) {
