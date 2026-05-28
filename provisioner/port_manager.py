@@ -23,6 +23,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Callable, Awaitable, Tuple, Union
 
+from .fingerprint import is_mikrotik_oui
+
 logger = logging.getLogger(__name__)
 
 
@@ -626,6 +628,25 @@ class PortManager:
 
             state = self.port_states.get(port_num)
             if state is None:
+                continue
+
+            # Don't run destructive netinstall on non-MikroTik devices. BOOTP
+            # isn't MikroTik-exclusive — Ubiquiti Wave U-Boot transmits BOOTP
+            # during boot too. Gate on (a) port fingerprint when available,
+            # falling back to (b) MAC OUI allowlist for the pre-fingerprint
+            # race. Fingerprint wins over OUI: a MikroTik with a custom MAC
+            # still provisions.
+            if state.device_type is not None and state.device_type != "mikrotik":
+                logger.info(
+                    f"Auto-Netinstall: BOOTP from {mac} on port {port_num} ignored — "
+                    f"port fingerprinted as {state.device_type}, not MikroTik"
+                )
+                continue
+            if state.device_type != "mikrotik" and not is_mikrotik_oui(mac):
+                logger.info(
+                    f"Auto-Netinstall: BOOTP from {mac} on port {port_num} ignored — "
+                    f"MAC OUI is not MikroTik (port not yet fingerprinted)"
+                )
                 continue
 
             if state.provisioning:

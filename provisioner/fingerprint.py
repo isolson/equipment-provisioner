@@ -83,6 +83,43 @@ def evolution_digital_vendor_name(mac: str) -> Optional[str]:
     return EVOLUTION_DIGITAL_OUI_VENDORS.get(mac[:8].upper())
 
 
+# MikroTik's IEEE-registered OUI prefixes. Used to gate auto-netinstall —
+# netinstall is destructive (full reflash) and BOOTP packets aren't
+# MikroTik-exclusive: Ubiquiti Wave U-Boot also transmits BOOTP during boot.
+# Only MACs in this set may trigger BOOTP-driven netinstall.
+# Source: IEEE OUI registry (search "MikroTik" / "Routerboard.com" / "MIKROTIKLS SIA").
+MIKROTIK_OUIS = frozenset({
+    "00:0C:42",  # Routerboard.com (original)
+    "4C:5E:0C",  # MIKROTIKLS SIA
+    "6C:3B:6B",  # MIKROTIKLS SIA
+    "B8:69:F4",  # MIKROTIKLS SIA
+    "C4:AD:34",  # MIKROTIKLS SIA
+    "D4:CA:6D",  # Routerboard.com
+    "E4:8D:8C",  # Routerboard.com
+    "08:55:31",  # MIKROTIKLS SIA
+    "18:FD:74",  # Routerboard.com
+    "2C:C8:1B",  # Routerboard.com
+    "48:8F:5A",  # Routerboard.com
+    "64:D1:54",  # Routerboard.com
+    "74:4D:28",  # MIKROTIKLS SIA
+    "78:9A:18",  # MIKROTIKLS SIA
+    "CC:2D:E0",  # MikroTik
+    "DC:2C:6E",  # MikroTik
+})
+
+
+def is_mikrotik_oui(mac: str) -> bool:
+    """Return True if a MAC address belongs to a known MikroTik OUI.
+
+    Used to gate destructive operations (auto-netinstall) so they don't
+    fire on non-MikroTik devices that happen to emit BOOTP packets
+    (e.g. Ubiquiti Wave U-Boot during boot).
+    """
+    if not mac or len(mac) < 8:
+        return False
+    return mac[:8].upper() in MIKROTIK_OUIS
+
+
 @dataclass
 class DeviceFingerprint:
     """Result of device fingerprinting."""
