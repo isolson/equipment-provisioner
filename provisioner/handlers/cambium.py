@@ -770,20 +770,43 @@ class CambiumHandler(BaseHandler):
     async def disconnect(self) -> None:
         """Disconnect from the device and release session."""
         try:
-            # Logout CGI mode session (using stok)
+            # Logout CGI mode session (using stok + session cookie).
+            #
+            # LuCI requires BOTH the stok URL token AND the sysauth_* session
+            # cookie to authenticate the logout. Without the cookie the device
+            # treats the call as anonymous and ignores it — the session leaks
+            # until idle-timeout (~15 min). When several Cambium provisioning
+            # cycles run back-to-back the device hits its session limit and
+            # later logins fail with `max_user_number_reached`, which the
+            # handler reports as a lockout.
             if self._stok and self.interface:
                 logout_url = f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/logout"
-                proc = await asyncio.create_subprocess_exec(
+                cmd = [
                     "curl", "-s", "-k", "-m", "5",
                     "--interface", self.interface,
                     "-X", "POST",
                     "-d", "",  # Empty body required to avoid 411 Length Required
-                    logout_url,
+                    "-o", "/dev/null",
+                    "-w", "%{http_code}",
+                ]
+                if self._cookie_file:
+                    cmd.extend(["-b", self._cookie_file])
+                cmd.append(logout_url)
+
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                await proc.communicate()
-                logger.debug(f"Sent CGI logout for {self.ip}")
+                stdout, _ = await proc.communicate()
+                status = stdout.decode("ascii", errors="ignore").strip()
+                if status == "200":
+                    logger.info(f"CGI logout OK for {self.ip}")
+                else:
+                    logger.warning(
+                        f"CGI logout for {self.ip} returned HTTP {status or '?'} "
+                        f"(session may still be held on device)"
+                    )
 
             # Logout API mode session
             if self._session and self._auth_token:
