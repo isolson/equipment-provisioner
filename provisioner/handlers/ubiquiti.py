@@ -232,6 +232,17 @@ class UbiquitiHandler(BaseHandler):
                                 except Exception:
                                     pass
 
+                                # HTTP 200 alone isn't proof of login — Wave/airOS UIs
+                                # return the SPA login page with 200 even for failed
+                                # auth. Require an x-auth-token, JSON token, or a
+                                # recognized session cookie before declaring success.
+                                if not (self._auth_token or self._auth_cookie):
+                                    last_error = (
+                                        f"{endpoint} returned 200 but no session/token "
+                                        f"(likely SPA login page, not a real session)"
+                                    )
+                                    continue
+
                                 self._connected = True
                                 self._base_url = f"{scheme}://{self.ip}"
                                 self.credentials = creds  # Remember working creds
@@ -309,13 +320,19 @@ class UbiquitiHandler(BaseHandler):
                         # Check HTTP status from first line
                         first_line = headers_str.split("\n")[0] if headers_str else ""
                         if "200" in first_line or "302" in first_line:
-                            # Check for x-auth-token header (Wave)
+                            # Check for x-auth-token header (Wave) and Set-Cookie
+                            # (legacy airOS session) in response headers.
                             for line in headers_str.split("\n"):
-                                if line.lower().startswith("x-auth-token:"):
+                                lower = line.lower()
+                                if lower.startswith("x-auth-token:"):
                                     self._auth_token = line.split(":", 1)[1].strip()
                                     self._api_style = "wave"
                                     logger.info(f"Wave: Got x-auth-token header via curl")
-                                    break
+                                elif lower.startswith("set-cookie:"):
+                                    cookie_value = line.split(":", 1)[1].strip()
+                                    cookie_name = cookie_value.split("=", 1)[0].strip().lower()
+                                    if cookie_name in ("ubnt", "airos_sessionid", "session", "auth"):
+                                        self._auth_cookie = cookie_value.split(";", 1)[0].strip()
 
                             # Check body for errors or tokens
                             try:
@@ -330,6 +347,16 @@ class UbiquitiHandler(BaseHandler):
                                         self._auth_token = token
                             except json.JSONDecodeError:
                                 pass
+
+                            # HTTP 200 alone isn't proof of login — Wave/airOS UIs
+                            # return the SPA login page with 200 even for failed
+                            # auth. Require a token or session cookie.
+                            if not (self._auth_token or self._auth_cookie):
+                                last_error = (
+                                    f"{endpoint} returned 200 but no session/token "
+                                    f"(likely SPA login page, not a real session)"
+                                )
+                                continue
 
                             self._connected = True
                             self._base_url = f"{scheme}://{self.ip}"
