@@ -1334,7 +1334,7 @@ class TaranaHandler(BaseHandler):
             logger.error(f"Failed to apply config file: {e}")
             return False
 
-    async def upload_firmware(self, firmware_path: str) -> bool:
+    async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
         """Upload firmware to the device using gNOI File.Put over WebSocket.
 
         Protocol (observed from Tarana G1 web UI via HAR capture):

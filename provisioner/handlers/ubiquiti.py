@@ -1107,7 +1107,7 @@ class UbiquitiHandler(BaseHandler):
             logger.error(f"Failed to load config file: {e}")
             return False
 
-    async def upload_firmware(self, firmware_path: str) -> bool:
+    async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
         """Upload firmware to the device.
 
         For Wave devices:

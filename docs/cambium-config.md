@@ -299,9 +299,58 @@ endpoint with multipart upload. This is separate from config.
 | 2026-01-28 | `get_param` (config_regular) | HAR capture from browser | 5.10.4 |
 | 2026-01-27 | `set_param` (small key set) | Provisioner logs | 5.10.4 |
 | 2026-01-27 | Login (`/cgi-bin/luci`) | Provisioner logs | 5.10.4 |
+| 2026-05-28 | `upload_sw_image_local` + `upgrade_sw_image_local` + `get_upgrade_status` (FW2 alt-bank flash) | HAR capture from browser, Force 300-25 | 5.11.1 |
 
 ---
 
-*Last updated: 2026-01-28*
+## Dual-bank firmware update (issue #58)
+
+Cambium ePMP devices have two firmware banks (Image A and Image B). A
+full provisioning that ends with **both banks at the target version**
+needs two separate flash passes, each using a different endpoint set.
+This was confirmed via HAR capture of the web UI doing a successful
+manual dual-bank upgrade on a Force 300-25 running 5.11.1.
+
+### First pass — first-bank flash
+
+Targets the currently inactive bank; reboot then swaps it active.
+
+```
+POST /cgi-bin/luci/;stok={stok}/admin/local_upload_image    # multipart, field=image
+POST /cgi-bin/luci/;stok={stok}/admin/get_upload_status × N # poll until status=7
+POST /cgi-bin/luci/;stok={stok}/admin/reboot
+```
+
+### Second pass — alternate-bank flash
+
+After the bank swap from the first reboot, hitting `local_upload_image`
+again is a silent no-op. The web UI uses a different endpoint set to
+target the *new* inactive bank (the former active bank):
+
+```
+POST /cgi-bin/luci/;stok={stok}/admin/upload_sw_image_local      # multipart, field=image
+POST /cgi-bin/luci/;stok={stok}/admin/upgrade_sw_image_local
+  body: type=device&debug=true
+POST /cgi-bin/luci/;stok={stok}/admin/get_upgrade_status × N
+  body: type=device&debug=true
+POST /cgi-bin/luci/;stok={stok}/admin/reboot
+```
+
+The `upgrade_sw_image_local` step is the explicit "now actually flash
+the inactive bank with what was just uploaded" trigger — without it,
+the upload sits idle and the bank version is never updated. This is
+the step the provisioner was missing before #58.
+
+`get_upgrade_status` returns the same status-7 sentinel as
+`get_upload_status` (verified empirically). The form body is mandatory;
+without it the endpoint returns a 400.
+
+Handler implementation: `CambiumHandler.upload_firmware()` branches on
+the `bank` parameter — `bank=1` → first-pass flow,
+`bank=2` → alt-bank flow.
+
+---
+
+*Last updated: 2026-05-28*
 *This document is the source of truth for Cambium API behavior. Update it
 when new endpoints or behaviors are confirmed on actual hardware.*
