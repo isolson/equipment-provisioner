@@ -113,8 +113,8 @@ class SpyHandler(BaseHandler):
         self._record("verify_config")
         return True
 
-    async def upload_firmware(self, firmware_path: str) -> bool:
-        self._record("upload_firmware", path=firmware_path)
+    async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
+        self._record("upload_firmware", path=firmware_path, bank=bank)
         return True
 
     async def update_firmware(self, bank: Optional[int] = None) -> bool:
