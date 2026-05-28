@@ -933,6 +933,119 @@ class UbiquitiHandler(BaseHandler):
             logger.error(f"[SNMP] Configuration failed via curl: {e}")
             return False
 
+    # Keys whose values should be stripped from a snapshot before it's saved
+    # as a starter template. Matched case-insensitively as substrings.
+    _SNAPSHOT_SENSITIVE_KEY_FRAGMENTS = (
+        "password",
+        "secret",
+        "authtoken",
+        "auth_token",
+        "sessionid",
+        "session_id",
+        "apikey",
+        "api_key",
+        "privatekey",
+        "private_key",
+    )
+
+    @classmethod
+    def _sanitize_snapshot(cls, value: Any) -> Any:
+        """Recursively strip values for keys that look sensitive.
+
+        Returns a new structure; does not mutate the input. Sensitive values
+        are replaced with an empty string so the template stays JSON-valid
+        and the shape of the device's config is preserved.
+        """
+        if isinstance(value, dict):
+            sanitized: Dict[str, Any] = {}
+            for k, v in value.items():
+                key_lower = str(k).lower().replace("-", "").replace("_", "")
+                if any(frag in key_lower for frag in cls._SNAPSHOT_SENSITIVE_KEY_FRAGMENTS):
+                    # Preserve type when possible; empty string is the safest
+                    # default for downstream JSON consumers.
+                    sanitized[k] = ""
+                else:
+                    sanitized[k] = cls._sanitize_snapshot(v)
+            return sanitized
+        if isinstance(value, list):
+            return [cls._sanitize_snapshot(item) for item in value]
+        return value
+
+    async def _fetch_config_raw(self) -> Optional[Dict[str, Any]]:
+        """GET the current device configuration as a dict (no sanitization).
+
+        Returns None on any error. Wave-only. Uses curl when interface
+        binding is required (matches apply_config's transport split).
+        """
+        if self._api_style != "wave":
+            logger.warning("fetch_config only supported for Wave devices currently")
+            return None
+
+        base_url = self._base_url or f"https://{self.ip}"
+        url = f"{base_url}{WAVE_API_CONFIG}"
+
+        # When bound to a VLAN interface we need curl, same as apply/upload.
+        if self.interface:
+            try:
+                cmd = [
+                    "curl", "-s", "-k", "-m", "30",
+                    "--interface", self.interface,
+                    "-X", "GET",
+                ]
+                if self._auth_token:
+                    cmd.extend(["-H", f"x-auth-token: {self._auth_token}"])
+                cmd.append(url)
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    logger.error(f"fetch_config curl failed: {stderr.decode(errors='ignore')}")
+                    return None
+                try:
+                    return json.loads(stdout.decode("utf-8", errors="ignore"))
+                except json.JSONDecodeError as e:
+                    logger.error(f"fetch_config curl returned non-JSON: {e}")
+                    return None
+            except Exception as e:
+                logger.error(f"fetch_config curl error: {e}")
+                return None
+
+        # aiohttp path (mirrors the read-back block in apply_config)
+        try:
+            session = await self._get_session()
+            headers = self._auth_headers()
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    logger.error(f"fetch_config HTTP {resp.status}")
+                    return None
+                data = await resp.json(content_type=None)
+                if not isinstance(data, dict):
+                    logger.error(f"fetch_config returned non-dict: {type(data).__name__}")
+                    return None
+                return data
+        except Exception as e:
+            logger.error(f"fetch_config aiohttp error: {e}")
+            return None
+
+    async def fetch_config(self) -> Optional[Dict[str, Any]]:
+        """Fetch the device's current configuration as a sanitized dict.
+
+        Logs in if not already connected. Returns None on failure.
+        Sensitive keys (passwords, secrets, auth tokens, session ids) are
+        recursively scrubbed before returning so the result is safe to save
+        as a starter template. Wave-only.
+        """
+        if not self._connected:
+            if not await self.connect():
+                return None
+        raw = await self._fetch_config_raw()
+        if raw is None:
+            return None
+        return self._sanitize_snapshot(raw)
+
     async def apply_config(self, config: Dict[str, Any]) -> bool:
         """Apply configuration to the device.
 
@@ -989,26 +1102,24 @@ class UbiquitiHandler(BaseHandler):
             if expected_hostname or expected_ssid:
                 await asyncio.sleep(2)  # Brief pause for config to settle
 
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status == 200:
-                        readback = await resp.json(content_type=None)
+                readback = await self._fetch_config_raw()
+                if isinstance(readback, dict):
+                    if expected_hostname:
+                        actual = readback.get("system", {}).get("hostname")
+                        if actual != expected_hostname:
+                            logger.error(f"[CONFIG VERIFY] hostname mismatch: sent '{expected_hostname}', got '{actual}'")
+                            return False
+                        logger.info(f"[CONFIG VERIFY] hostname confirmed: {actual}")
 
-                        if expected_hostname:
-                            actual = readback.get("system", {}).get("hostname")
-                            if actual != expected_hostname:
-                                logger.error(f"[CONFIG VERIFY] hostname mismatch: sent '{expected_hostname}', got '{actual}'")
+                    if expected_ssid:
+                        try:
+                            actual_ssid = readback.get("wireless", {}).get("interfaces", [{}])[0].get("ssid")
+                            if actual_ssid != expected_ssid:
+                                logger.error(f"[CONFIG VERIFY] SSID mismatch: sent '{expected_ssid}', got '{actual_ssid}'")
                                 return False
-                            logger.info(f"[CONFIG VERIFY] hostname confirmed: {actual}")
-
-                        if expected_ssid:
-                            try:
-                                actual_ssid = readback.get("wireless", {}).get("interfaces", [{}])[0].get("ssid")
-                                if actual_ssid != expected_ssid:
-                                    logger.error(f"[CONFIG VERIFY] SSID mismatch: sent '{expected_ssid}', got '{actual_ssid}'")
-                                    return False
-                                logger.info(f"[CONFIG VERIFY] SSID confirmed: {actual_ssid}")
-                            except (KeyError, IndexError):
-                                pass
+                            logger.info(f"[CONFIG VERIFY] SSID confirmed: {actual_ssid}")
+                        except (KeyError, IndexError):
+                            pass
 
             return True
 
