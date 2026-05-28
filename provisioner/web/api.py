@@ -1873,6 +1873,150 @@ async def upload_config(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class SnapshotConfigRequest(BaseModel):
+    """Request to snapshot a connected device's config as a template."""
+    port_id: str
+    mode: Optional[str] = "default"
+    filename: Optional[str] = None
+
+
+@router.post("/vendors/{vendor}/snapshot")
+async def snapshot_vendor_config(
+    vendor: str,
+    body: SnapshotConfigRequest,
+    request: Request,
+):
+    """Snapshot the current config from a connected device and save as template.
+
+    Resolves ``port_id`` (e.g. ``port_1`` or just ``1``) to the device on that
+    port, verifies its vendor matches ``vendor``, logs in via the handler,
+    fetches the running config, sanitizes it, and writes it to
+    ``<data>/configs/templates/<vendor>/<filename>``.
+
+    This is the shared shape for issues #44 (Ubiquiti), #45 (Cambium), and
+    #46 (Tachyon). Only Ubiquiti is wired today.
+    """
+    vendor = _validate_device_type(vendor)
+
+    # Parse port_id: accept "port_1", "1", or int-as-str.
+    port_raw = (body.port_id or "").strip()
+    if not port_raw:
+        raise HTTPException(status_code=400, detail="port_id is required")
+    if port_raw.lower().startswith("port_"):
+        port_raw = port_raw[len("port_"):]
+    elif port_raw.lower().startswith("port"):
+        port_raw = port_raw[len("port"):]
+    try:
+        port_number = int(port_raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid port_id: {body.port_id}")
+
+    mode = (body.mode or "default").strip().lower() or "default"
+    # Filename derives from mode if not provided. Force .json suffix.
+    raw_filename = body.filename or f"{mode}.json"
+    safe_filename = _sanitize_filename(raw_filename)
+    if not safe_filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not safe_filename.lower().endswith(".json"):
+        safe_filename = f"{safe_filename}.json"
+
+    provisioner = request.app.state.provisioner
+    if not provisioner or not provisioner.port_manager or not provisioner.handler_manager:
+        raise HTTPException(status_code=503, detail="Provisioner not available")
+
+    port_status = provisioner.port_manager.get_port_status()
+    if port_number not in port_status:
+        raise HTTPException(status_code=400, detail=f"Port {port_number} not found")
+
+    status = port_status[port_number]
+    if not status.get("device_detected"):
+        raise HTTPException(status_code=400, detail=f"No device detected on port {port_number}")
+
+    detected_vendor = (status.get("device_type") or "").lower()
+    if detected_vendor != vendor:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Port {port_number} has vendor '{detected_vendor}', not '{vendor}'",
+        )
+
+    device_ip = status.get("device_ip")
+    if not device_ip:
+        raise HTTPException(status_code=400, detail=f"No IP for device on port {port_number}")
+
+    # Build a handler the same way the mode-apply endpoint does.
+    from ..fingerprint import identify_device, DeviceType
+
+    interface = provisioner.port_manager.get_interface_for_port(port_number)
+    fingerprint = await identify_device(device_ip, mac=None, interface=interface)
+    if fingerprint.device_type == DeviceType.UNKNOWN:
+        try:
+            fingerprint.device_type = DeviceType(vendor)
+        except ValueError:
+            raise HTTPException(status_code=502, detail=f"Could not identify device at {device_ip}")
+
+    handler = provisioner.handler_manager.get_handler(
+        fingerprint, device_ip, interface=interface,
+    )
+    if not handler:
+        raise HTTPException(status_code=502, detail=f"No handler for vendor '{vendor}'")
+    if not hasattr(handler, "fetch_config"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Snapshot not supported for vendor '{vendor}' yet",
+        )
+
+    snapshot = None
+    try:
+        snapshot = await handler.fetch_config()
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        logger.warning(f"Snapshot RuntimeError for {vendor} on port {port_number}: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Snapshot fetch_config crashed for {vendor} on port {port_number}")
+        raise HTTPException(status_code=502, detail=f"fetch_config failed: {e}")
+    finally:
+        try:
+            await handler.disconnect()
+        except Exception:
+            pass
+
+    if not isinstance(snapshot, dict) or not snapshot:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Device returned empty or invalid config",
+        )
+
+    # Write to the templates dir (same layout as upload_config).
+    data_path = _get_data_path(request)
+    config_dir = data_path / "configs" / "templates" / vendor
+    try:
+        config_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not create template dir: {e}")
+
+    dest_path = config_dir / safe_filename
+    try:
+        payload = json.dumps(snapshot, indent=2, sort_keys=True)
+        dest_path.write_text(payload)
+        size_bytes = dest_path.stat().st_size
+    except Exception as e:
+        logger.exception(f"Failed to write snapshot to {dest_path}")
+        raise HTTPException(status_code=500, detail=f"Failed to write template: {e}")
+
+    rel_path = f"configs/templates/{vendor}/{safe_filename}"
+    logger.info(
+        f"[SNAPSHOT] Saved {vendor} config from port {port_number} ({device_ip}) "
+        f"to {rel_path} ({size_bytes} bytes)"
+    )
+    return {
+        "saved_path": rel_path,
+        "size_bytes": size_bytes,
+        "top_level_keys": sorted(snapshot.keys()),
+    }
+
+
 @router.put("/configs/{config_type}/{device_type}/{filename}")
 async def update_config_content(
     request: Request,

@@ -198,6 +198,16 @@
                             <option value="template">Default Template</option>
                             <option value="override">Device Override (by MAC)</option>
                         </select>
+                        <div id="snapshot-button-wrap" class="hidden">
+                            <button id="snapshot-open-btn" type="button" onclick="openSnapshotModal()"
+                                class="touch-btn w-full py-2 mb-3 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-white flex items-center justify-center gap-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path>
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                </svg>
+                                Snapshot from connected device
+                            </button>
+                        </div>
                         <div class="drop-zone rounded-lg flex items-center justify-center gap-2 p-4 text-center cursor-pointer bg-white"
                              onclick="document.getElementById('cfg-file-input').click()"
                              ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleConfigDrop(event)">
@@ -247,6 +257,41 @@
 
     <div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
 
+    <div id="snapshot-modal" class="fixed inset-0 z-50 hidden" role="dialog" aria-modal="true" aria-labelledby="snapshot-title">
+        <div class="absolute inset-0 bg-black/40" onclick="closeSnapshotModal()"></div>
+        <div class="absolute inset-x-4 top-16 md:inset-x-auto md:left-1/2 md:-translate-x-1/2 md:w-[28rem] bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-200">
+            <div class="px-6 py-4 border-b border-gray-300 flex items-center justify-between">
+                <h3 class="text-lg font-bold" id="snapshot-title">Snapshot from connected device</h3>
+                <button onclick="closeSnapshotModal()" class="touch-btn p-2 rounded-lg hover:bg-gray-100" title="Close">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <p class="text-sm text-gray-600">Pulls the current configuration from a device plugged into a provisioning port and saves it as a starter template. Sensitive values (passwords, tokens) are stripped.</p>
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Port</label>
+                    <select id="snapshot-port" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 focus:border-blue-500 focus:outline-none"></select>
+                    <div id="snapshot-port-empty" class="hidden mt-2 text-xs text-amber-600"></div>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Mode</label>
+                    <select id="snapshot-mode" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 focus:border-blue-500 focus:outline-none"></select>
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-600 mb-1">Filename</label>
+                    <input id="snapshot-filename" type="text" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 focus:border-blue-500 focus:outline-none" value="default.json">
+                </div>
+                <div id="snapshot-status" class="hidden text-sm rounded-lg px-3 py-2 border"></div>
+            </div>
+            <div class="px-6 py-4 border-t border-gray-300 flex gap-3">
+                <button id="snapshot-submit-btn" onclick="submitSnapshot()" class="touch-btn flex-1 py-3 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed">Snapshot</button>
+                <button onclick="closeSnapshotModal()" class="touch-btn flex-1 py-3 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-gray-800">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <div id="editor-modal" class="fixed inset-0 z-50 hidden" role="dialog" aria-modal="true" aria-labelledby="editor-title">
         <div class="absolute inset-0 bg-black/40" onclick="closeEditor()"></div>
         <div class="absolute inset-4 md:inset-8 bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col border border-gray-200">
@@ -289,11 +334,23 @@
             syncActiveVendorHeader();
             updateVendorTabState();
             applyActiveVendorColor();
+            updateSnapshotButtonVisibility();
             document.addEventListener('keydown', (e) => {
-                if (e.key === 'Escape' && editingConfig) closeEditor();
+                if (e.key === 'Escape') {
+                    if (editingConfig) closeEditor();
+                    if (!document.getElementById('snapshot-modal').classList.contains('hidden')) closeSnapshotModal();
+                }
             });
             await Promise.all([loadReadiness(), loadFirmware(), loadConfigs(), loadCredentials()]);
         });
+
+        // Vendors that support pulling a config snapshot from a connected device.
+        // Mirrors the backend; today only Ubiquiti is wired (issue #44).
+        // Cambium (#45) and Tachyon (#46) will land later and just need to be
+        // added here.
+        const SNAPSHOT_VENDORS = {
+            ubiquiti: { modes: [{ value: 'default', label: 'Default' }] },
+        };
 
         function showVendor(vendor) {
             activeVendor = vendor;
@@ -305,6 +362,17 @@
             renderFirmwareList(firmwareData);
             renderConfigList(configsData);
             renderCredentialsList(credentialsData);
+            updateSnapshotButtonVisibility();
+        }
+
+        function updateSnapshotButtonVisibility() {
+            const wrap = document.getElementById('snapshot-button-wrap');
+            if (!wrap) return;
+            if (SNAPSHOT_VENDORS[activeVendor]) {
+                wrap.classList.remove('hidden');
+            } else {
+                wrap.classList.add('hidden');
+            }
         }
 
         function applyActiveVendorColor() {
@@ -635,6 +703,128 @@
         function closeEditor() {
             editingConfig = null;
             document.getElementById('editor-modal').classList.add('hidden');
+        }
+
+        async function openSnapshotModal() {
+            const vendor = activeVendor;
+            const meta = SNAPSHOT_VENDORS[vendor];
+            if (!meta) {
+                showToast('Snapshot not supported for this vendor', 'error');
+                return;
+            }
+            const modal = document.getElementById('snapshot-modal');
+            const portSelect = document.getElementById('snapshot-port');
+            const portEmpty = document.getElementById('snapshot-port-empty');
+            const modeSelect = document.getElementById('snapshot-mode');
+            const filenameInput = document.getElementById('snapshot-filename');
+            const submitBtn = document.getElementById('snapshot-submit-btn');
+            const statusEl = document.getElementById('snapshot-status');
+
+            statusEl.classList.add('hidden');
+            statusEl.textContent = '';
+
+            // Populate mode dropdown.
+            modeSelect.innerHTML = meta.modes.map(m =>
+                `<option value="${escapeHtml(m.value)}">${escapeHtml(m.label)}</option>`
+            ).join('');
+            const defaultMode = meta.modes[0].value;
+            filenameInput.value = `${defaultMode}.json`;
+            modeSelect.onchange = () => {
+                filenameInput.value = `${modeSelect.value}.json`;
+            };
+
+            // Populate port dropdown from /api/ports filtered to this vendor.
+            portSelect.innerHTML = '<option>Loading...</option>';
+            submitBtn.disabled = true;
+            modal.classList.remove('hidden');
+
+            try {
+                const response = await fetch('/api/ports');
+                const ports = await response.json();
+                const matching = (Array.isArray(ports) ? ports : []).filter(p =>
+                    p.device_detected && (p.device_type || '').toLowerCase() === vendor
+                );
+                if (matching.length === 0) {
+                    portSelect.innerHTML = '<option value="">(none)</option>';
+                    portSelect.disabled = true;
+                    portEmpty.textContent = `No ${vendorMeta(vendor).label} device connected. Plug one into a provisioning port and try again.`;
+                    portEmpty.classList.remove('hidden');
+                    submitBtn.disabled = true;
+                } else {
+                    portSelect.disabled = false;
+                    portEmpty.classList.add('hidden');
+                    portSelect.innerHTML = matching.map(p => {
+                        const label = `Port ${p.port_number}` +
+                            (p.device_model ? ` — ${p.device_model}` : '') +
+                            (p.device_ip ? ` (${p.device_ip})` : '');
+                        return `<option value="${p.port_number}">${escapeHtml(label)}</option>`;
+                    }).join('');
+                    submitBtn.disabled = false;
+                }
+            } catch (err) {
+                portSelect.innerHTML = '<option value="">(error)</option>';
+                portEmpty.textContent = 'Failed to load ports.';
+                portEmpty.classList.remove('hidden');
+                submitBtn.disabled = true;
+            }
+        }
+
+        function closeSnapshotModal() {
+            document.getElementById('snapshot-modal').classList.add('hidden');
+        }
+
+        async function submitSnapshot() {
+            const vendor = activeVendor;
+            const portValue = document.getElementById('snapshot-port').value;
+            const modeValue = document.getElementById('snapshot-mode').value;
+            const filenameValue = document.getElementById('snapshot-filename').value.trim();
+            const submitBtn = document.getElementById('snapshot-submit-btn');
+            const statusEl = document.getElementById('snapshot-status');
+
+            if (!portValue) {
+                showToast('Select a port', 'error');
+                return;
+            }
+            if (!filenameValue) {
+                showToast('Filename is required', 'error');
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Snapshotting...';
+            statusEl.classList.remove('hidden');
+            statusEl.className = 'text-sm rounded-lg px-3 py-2 border bg-blue-50 border-blue-200 text-blue-800';
+            statusEl.textContent = 'Logging in and fetching config...';
+
+            try {
+                const response = await fetch(`/api/vendors/${encodeURIComponent(vendor)}/snapshot`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        port_id: `port_${portValue}`,
+                        mode: modeValue,
+                        filename: filenameValue,
+                    }),
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    statusEl.className = 'text-sm rounded-lg px-3 py-2 border bg-green-50 border-green-200 text-green-800';
+                    statusEl.textContent = `Saved ${data.saved_path} (${data.size_bytes} bytes, ${data.top_level_keys.length} top-level keys).`;
+                    showToast('Snapshot saved', 'success');
+                    await loadConfigs();
+                    await loadReadiness();
+                    setTimeout(closeSnapshotModal, 1200);
+                } else {
+                    statusEl.className = 'text-sm rounded-lg px-3 py-2 border bg-red-50 border-red-200 text-red-800';
+                    statusEl.textContent = data.detail || data.error || 'Snapshot failed';
+                }
+            } catch (err) {
+                statusEl.className = 'text-sm rounded-lg px-3 py-2 border bg-red-50 border-red-200 text-red-800';
+                statusEl.textContent = `Snapshot failed: ${err.message || err}`;
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Snapshot';
+            }
         }
 
         async function saveConfig() {
