@@ -2879,3 +2879,52 @@ class CambiumHandler(BaseHandler):
         except Exception as e:
             logger.error(f"[CONFIG VERIFY] _get_config_curl error: {e}")
             return {}
+
+    _SNAPSHOT_SECRET_PATTERNS = (
+        "password",
+        "secret",
+        "authtoken",
+        "auth_token",
+        "sessionid",
+        "session_id",
+    )
+
+    @classmethod
+    def _sanitize_snapshot(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            cleaned: Dict[str, Any] = {}
+            for key, sub in value.items():
+                normalized = str(key).lower().replace("_", "").replace("-", "")
+                if any(pat in normalized for pat in cls._SNAPSHOT_SECRET_PATTERNS):
+                    cleaned[key] = ""
+                else:
+                    cleaned[key] = cls._sanitize_snapshot(sub)
+            return cleaned
+        if isinstance(value, list):
+            return [cls._sanitize_snapshot(item) for item in value]
+        return value
+
+    async def fetch_config(self) -> Dict[str, Any]:
+        """Snapshot the device's current config via the confirmed get_param endpoint.
+
+        See docs/cambium-config.md for the endpoint contract and sanitization rules.
+        """
+        if not self._stok or not self._cookie_file:
+            logger.info(f"[SNAPSHOT] No active session, connecting to {self.ip}")
+            connected = await self.connect()
+            if not connected:
+                raise RuntimeError(
+                    f"Cambium login failed: {self.login_error or 'unknown error'}"
+                )
+
+        device_props = await self._get_config_curl()
+        if not isinstance(device_props, dict) or not device_props:
+            raise RuntimeError(
+                "Cambium get_param returned no device_props (session may be stale)"
+            )
+
+        sanitized = self._sanitize_snapshot(device_props)
+        logger.info(
+            f"[SNAPSHOT] Retrieved {len(sanitized)} device_props from {self.ip}"
+        )
+        return sanitized

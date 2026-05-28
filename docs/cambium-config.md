@@ -299,9 +299,53 @@ endpoint with multipart upload. This is separate from config.
 | 2026-01-28 | `get_param` (config_regular) | HAR capture from browser | 5.10.4 |
 | 2026-01-27 | `set_param` (small key set) | Provisioner logs | 5.10.4 |
 | 2026-01-27 | Login (`/cgi-bin/luci`) | Provisioner logs | 5.10.4 |
+| 2026-05-28 | `get_param` (config_regular) — used for snapshot endpoint | Live curl from provisioner host | 5.10.4 |
 
 ---
 
-*Last updated: 2026-01-28*
+## Snapshot from connected device (issue #45)
+
+`CambiumHandler.fetch_config()` reuses the already-confirmed `get_param`
+endpoint above and is called by the generic
+`POST /api/vendors/{vendor}/snapshot` endpoint (added in issue #44). The flow is:
+
+1. `connect()` — same login as standard provisioning, obtains `stok` + cookie jar.
+2. `POST /cgi-bin/luci/;stok={stok}/admin/get_param` with body
+   `act=config_regular&debug=true` (form-encoded). Same call as
+   `verify_config()` makes today.
+3. Pull `device_props` out of the JSON response and pass it through the
+   `_sanitize_snapshot` helper which recursively blanks keys whose name
+   (case-insensitive, stripped of `_`/`-`) contains any of:
+   `password`, `secret`, `authtoken`, `sessionid`.
+4. Return the flat dict; the api endpoint writes it to
+   `/var/lib/provisioner/repo/configs/templates/cambium/{filename}`.
+
+**curl example used to verify on hardware (port 6, eth0.1996):**
+
+```bash
+# Login (same as standard provisioning), grab stok from the redirect.
+curl -s -k --interface eth0.1996 \
+  -c /tmp/cookies.txt \
+  -d "username=admin&password=admin" \
+  "https://169.254.1.1/cgi-bin/luci"
+
+# Snapshot — the only Cambium call the new endpoint makes.
+curl -s -k --interface eth0.1996 \
+  -b /tmp/cookies.txt \
+  -X POST \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "act=config_regular&debug=true" \
+  "https://169.254.1.1/cgi-bin/luci/;stok={stok}/admin/get_param"
+```
+
+Response is the same JSON shape documented under "get_param" above. The
+snapshot writes the `device_props` dict (flat keys), which matches
+the format `config_import` expects with `skipIllegal=1`, so the snapshot
+file is usable as a template round-trip without manual edits (other than
+naming/SSID placeholders).
+
+---
+
+*Last updated: 2026-05-28*
 *This document is the source of truth for Cambium API behavior. Update it
 when new endpoints or behaviors are confirmed on actual hardware.*
