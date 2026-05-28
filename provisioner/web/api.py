@@ -1965,10 +1965,16 @@ async def snapshot_vendor_config(
             detail=f"Snapshot not supported for vendor '{vendor}' yet",
         )
 
+    snapshot = None
     try:
         snapshot = await handler.fetch_config()
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        logger.warning(f"Snapshot RuntimeError for {vendor} on port {port_number}: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
-        logger.exception(f"Snapshot fetch_config raised for {vendor} on port {port_number}")
+        logger.exception(f"Snapshot fetch_config crashed for {vendor} on port {port_number}")
         raise HTTPException(status_code=502, detail=f"fetch_config failed: {e}")
     finally:
         try:

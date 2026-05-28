@@ -1033,17 +1033,25 @@ class UbiquitiHandler(BaseHandler):
     async def fetch_config(self) -> Optional[Dict[str, Any]]:
         """Fetch the device's current configuration as a sanitized dict.
 
-        Logs in if not already connected. Returns None on failure.
-        Sensitive keys (passwords, secrets, auth tokens, session ids) are
-        recursively scrubbed before returning so the result is safe to save
-        as a starter template. Wave-only.
+        Logs in if not already connected. Raises RuntimeError with a
+        descriptive message on login or fetch failure so callers can
+        distinguish "device unreachable / login failed" from "fetched but
+        empty". Sensitive keys (passwords, secrets, auth tokens, session
+        ids) are recursively scrubbed before returning so the result is
+        safe to save as a starter template. Wave-only.
         """
         if not self._connected:
             if not await self.connect():
-                return None
+                err = self.login_error or "login failed"
+                raise RuntimeError(f"Could not log in to device at {self.ip}: {err}")
+        if self._api_style != "wave":
+            raise RuntimeError(
+                f"Device at {self.ip} is not a Wave device (api_style={self._api_style}); "
+                "snapshot is currently Wave-only"
+            )
         raw = await self._fetch_config_raw()
         if raw is None:
-            return None
+            raise RuntimeError(f"Failed to GET configuration from {self.ip}")
         return self._sanitize_snapshot(raw)
 
     async def apply_config(self, config: Dict[str, Any]) -> bool:
