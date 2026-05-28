@@ -7,6 +7,7 @@ from pathlib import Path
 
 from provisioner.config import (
     Config,
+    DeviceSettingsConfig,
     NetworkConfig,
     PortsConfig,
     CredentialsConfig,
@@ -15,7 +16,10 @@ from provisioner.config import (
     FirmwareConfig,
     FirmwareCheckerConfig,
     FirmwareSourceConfig,
+    apply_device_settings_overrides,
     load_config,
+    load_device_settings_overrides,
+    save_device_settings_overrides,
     expand_env_vars,
 )
 
@@ -400,3 +404,72 @@ features:
             "apply_config_ubiquiti": False,
             "apply_config_tarana": False,
         }
+
+
+class TestDeviceSettingsOverridesPersistence:
+    """Tests for runtime-editable device_settings persistence (PR #47 follow-up)."""
+
+    def test_load_overrides_missing_file_returns_empty(self, tmp_path):
+        overrides_path = tmp_path / "missing.json"
+        assert load_device_settings_overrides(overrides_path) == {}
+
+    def test_load_overrides_malformed_returns_empty(self, tmp_path):
+        overrides_path = tmp_path / "bad.json"
+        overrides_path.write_text("{not valid json")
+        assert load_device_settings_overrides(overrides_path) == {}
+
+    def test_save_then_load_round_trip(self, tmp_path):
+        overrides_path = tmp_path / "device-settings.json"
+        settings = DeviceSettingsConfig()
+        settings.tarana.operator_id = 12345
+
+        save_device_settings_overrides(settings, overrides_path)
+
+        # File should exist with 0600 permissions and parsable JSON.
+        assert overrides_path.exists()
+        # On some filesystems mode bits may not stick; only assert if supported.
+        mode = overrides_path.stat().st_mode & 0o777
+        if mode != 0:
+            assert mode == 0o600
+
+        loaded = load_device_settings_overrides(overrides_path)
+        assert loaded["tarana"]["operator_id"] == 12345
+
+    def test_save_is_atomic_temp_file_cleaned_up(self, tmp_path):
+        overrides_path = tmp_path / "device-settings.json"
+        settings = DeviceSettingsConfig()
+        settings.tarana.operator_id = 7
+        save_device_settings_overrides(settings, overrides_path)
+        # No stray .device-settings.*.json.tmp files left behind.
+        leftovers = list(tmp_path.glob(".device-settings.*"))
+        assert leftovers == []
+
+    def test_apply_overrides_merges_into_config(self, tmp_path):
+        overrides_path = tmp_path / "device-settings.json"
+        overrides_path.write_text('{"tarana": {"operator_id": 99}}')
+
+        config = Config()
+        assert config.device_settings.tarana.operator_id is None
+        apply_device_settings_overrides(config, overrides_path)
+        assert config.device_settings.tarana.operator_id == 99
+
+    def test_apply_overrides_preserves_unrelated_yaml_fields(self, tmp_path):
+        """Overrides for one field must not wipe out adjacent settings."""
+        overrides_path = tmp_path / "device-settings.json"
+        overrides_path.write_text('{"tarana": {"operator_id": 42}}')
+
+        config = Config()
+        # Simulate something set from config.yaml at startup.
+        config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
+
+        apply_device_settings_overrides(config, overrides_path)
+
+        assert config.device_settings.tarana.operator_id == 42
+        # Unrelated mikrotik field must survive the merge.
+        assert config.device_settings.mikrotik.ztp_api_url == "https://wifi.example.test"
+
+    def test_apply_overrides_missing_file_is_noop(self, tmp_path):
+        config = Config()
+        config.device_settings.tarana.operator_id = 5
+        apply_device_settings_overrides(config, tmp_path / "absent.json")
+        assert config.device_settings.tarana.operator_id == 5

@@ -209,7 +209,13 @@ async def get_device_settings(request: Request):
 
 @router.put("/device-settings")
 async def update_device_settings(settings: Dict[str, Any], request: Request):
-    """Update device-type-specific provisioning settings (persists in memory)."""
+    """Update device-type-specific provisioning settings.
+
+    Updates the in-memory config AND persists the change to
+    ``/var/lib/provisioner/device-settings.json`` so it survives a
+    ``systemctl restart provisioner-web``. The file is loaded on startup by
+    ``load_config`` and overlaid on top of ``config.yaml``.
+    """
     provisioner = request.app.state.provisioner
     if not provisioner:
         raise HTTPException(status_code=503, detail="Provisioner not available")
@@ -218,6 +224,16 @@ async def update_device_settings(settings: Dict[str, Any], request: Request):
         tarana = settings["tarana"]
         if "operator_id" in tarana:
             provisioner.config.device_settings.tarana.operator_id = tarana["operator_id"]
+
+    try:
+        from ..config import save_device_settings_overrides
+        save_device_settings_overrides(provisioner.config.device_settings)
+    except OSError as e:
+        logger.error("Failed to persist device settings: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Settings updated in memory but could not be saved to disk: {e}",
+        )
 
     return {"success": True}
 

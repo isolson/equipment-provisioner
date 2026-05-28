@@ -1,13 +1,29 @@
 """Configuration management for Network Provisioner."""
 
+import json
+import logging
 import os
 import re
+import tempfile
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Any, Optional, Dict
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+# Runtime-mutable device settings overrides (persisted across restarts).
+# This file holds the subset of `device_settings.*` that the UI can edit at
+# runtime (currently just `tarana.operator_id`). It is overlaid on top of
+# `config.device_settings` after the YAML config is loaded, so UI edits
+# survive a `systemctl restart provisioner-web`.
+#
+# Lives under /var/lib/provisioner (runtime state) rather than
+# /etc/provisioner (install-time config) so we never round-trip user-edited
+# YAML through PyYAML (which would drop comments/formatting). See PR #47.
+DEVICE_SETTINGS_OVERRIDES_PATH = Path("/var/lib/provisioner/device-settings.json")
 
 
 class ManagementNetworkConfig(BaseModel):
@@ -285,6 +301,111 @@ def expand_env_vars(obj):
     return obj
 
 
+def _device_settings_overrides_path(path: Optional[Path] = None) -> Path:
+    """Resolve the overrides file path, honoring runtime patches.
+
+    Looks up ``DEVICE_SETTINGS_OVERRIDES_PATH`` from the module each call so
+    tests can monkeypatch the constant without re-binding all default args.
+    """
+    if path is not None:
+        return path
+    import provisioner.config as _module
+    return _module.DEVICE_SETTINGS_OVERRIDES_PATH
+
+
+def load_device_settings_overrides(
+    path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Read the device-settings overrides JSON file.
+
+    Returns an empty dict if the file is missing, unreadable, or malformed —
+    the YAML config defaults will be used in that case.
+    """
+    resolved = _device_settings_overrides_path(path)
+    try:
+        if not resolved.exists():
+            return {}
+        with open(resolved, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            logger.warning("device-settings overrides at %s is not a JSON object; ignoring", resolved)
+            return {}
+        return data
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Failed to read device-settings overrides at %s: %s", resolved, e)
+        return {}
+
+
+def save_device_settings_overrides(
+    settings: "DeviceSettingsConfig",
+    path: Optional[Path] = None,
+) -> None:
+    """Atomically persist device-settings to disk.
+
+    Writes the full DeviceSettingsConfig as JSON via a temp file + rename so
+    a crash mid-write cannot corrupt the file. The file is created with mode
+    0600 (settings may include sensitive fields in the future).
+    """
+    resolved = _device_settings_overrides_path(path)
+    payload = settings.model_dump(mode="json")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".device-settings.",
+        suffix=".json.tmp",
+        dir=str(resolved.parent),
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, resolved)
+    except Exception:
+        # Best-effort cleanup of the temp file on failure.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def apply_device_settings_overrides(
+    config: "Config",
+    path: Optional[Path] = None,
+) -> None:
+    """Overlay persisted device-settings overrides onto the in-memory config.
+
+    Only fields present in the JSON file are applied; missing fields keep
+    whatever value came from `config.yaml` (or the model default).
+    """
+    overrides = load_device_settings_overrides(path)
+    if not overrides:
+        return
+
+    # Merge by re-validating the device_settings subtree. This keeps the
+    # overlay schema-aware (unknown fields will be rejected by pydantic).
+    current = config.device_settings.model_dump(mode="json")
+    merged = _deep_merge_dict(current, overrides)
+    try:
+        config.device_settings = DeviceSettingsConfig.model_validate(merged)
+    except Exception as e:
+        logger.warning("Ignoring device-settings overrides — failed to apply: %s", e)
+
+
+def _deep_merge_dict(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge overlay into base (overlay wins for scalar values)."""
+    result = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_dict(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 def load_config(config_path: str = "config.yaml", env_file: str = ".env") -> Config:
     """Load configuration from YAML file and environment variables.
 
@@ -311,7 +432,12 @@ def load_config(config_path: str = "config.yaml", env_file: str = ".env") -> Con
     # Expand environment variables
     expanded_config = expand_env_vars(raw_config)
 
-    return Config(**expanded_config)
+    config = Config(**expanded_config)
+
+    # Overlay runtime device-settings overrides (UI-editable, persisted).
+    apply_device_settings_overrides(config)
+
+    return config
 
 
 # Global config instance (set by main.py)
