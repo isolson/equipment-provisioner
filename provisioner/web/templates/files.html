@@ -193,24 +193,36 @@
                         <span id="config-column-status" class="px-2 py-0.5 text-xs font-medium rounded bg-gray-200 text-gray-600">...</span>
                     </div>
                     <div class="p-4 space-y-4">
-                        <label class="block text-sm text-gray-600 mb-2">Template Type</label>
-                        <select id="cfg-type" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 mb-4 focus:border-blue-500 focus:outline-none">
-                            <option value="template">Default Template</option>
-                            <option value="override">Device Override (by MAC)</option>
-                        </select>
-                        <div class="drop-zone rounded-lg flex items-center justify-center gap-2 p-4 text-center cursor-pointer bg-white"
-                             onclick="document.getElementById('cfg-file-input').click()"
-                             ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleConfigDrop(event)">
-                            <input type="file" id="cfg-file-input" class="hidden" accept=".json,.yaml,.rsc,.tar,.tar.gz,.tgz" onchange="uploadConfigFile(this.files[0])">
-                            <svg class="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-                            </svg>
-                            <span class="text-sm text-gray-500">Drop configuration file or click to browse</span>
+                        <div id="config-file-section">
+                            <label class="block text-sm text-gray-600 mb-2">Template Type</label>
+                            <select id="cfg-type" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 mb-4 focus:border-blue-500 focus:outline-none">
+                                <option value="template">Default Template</option>
+                                <option value="override">Device Override (by MAC)</option>
+                            </select>
+                            <div class="drop-zone rounded-lg flex items-center justify-center gap-2 p-4 text-center cursor-pointer bg-white"
+                                 onclick="document.getElementById('cfg-file-input').click()"
+                                 ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleConfigDrop(event)">
+                                <input type="file" id="cfg-file-input" class="hidden" accept=".json,.yaml,.rsc,.tar,.tar.gz,.tgz" onchange="uploadConfigFile(this.files[0])">
+                                <svg class="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                </svg>
+                                <span class="text-sm text-gray-500">Drop configuration file or click to browse</span>
+                            </div>
+                            <div class="border-t border-gray-200 pt-4 mt-4">
+                            <div id="config-list" class="space-y-2">
+                                <div class="text-gray-400 text-center py-4">Loading...</div>
+                            </div>
+                            </div>
                         </div>
-                        <div class="border-t border-gray-200 pt-4">
-                        <div id="config-list" class="space-y-2">
-                            <div class="text-gray-400 text-center py-4">Loading...</div>
-                        </div>
+                        <div id="config-tarana-section" class="hidden">
+                            <p class="text-sm text-gray-600 mb-3">Tarana radios use a single Operator ID (group/org ID) applied via gNMI. No template file is needed.</p>
+                            <label for="tarana-operator-id" class="block text-sm font-medium text-gray-700 mb-2">Operator ID</label>
+                            <div class="flex items-center gap-2">
+                                <input type="number" id="tarana-operator-id" placeholder="Not set" min="0"
+                                    class="flex-1 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none">
+                                <button onclick="saveTaranaOperatorId()" class="touch-btn px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-white">Save</button>
+                            </div>
+                            <p id="tarana-operator-id-hint" class="text-xs text-gray-500 mt-2">Used as the default for new Tarana provisions. Can be overridden per-port from the dashboard.</p>
                         </div>
                     </div>
                 </div>
@@ -289,10 +301,11 @@
             syncActiveVendorHeader();
             updateVendorTabState();
             applyActiveVendorColor();
+            applyVendorConfigSection();
             document.addEventListener('keydown', (e) => {
                 if (e.key === 'Escape' && editingConfig) closeEditor();
             });
-            await Promise.all([loadReadiness(), loadFirmware(), loadConfigs(), loadCredentials()]);
+            await Promise.all([loadReadiness(), loadFirmware(), loadConfigs(), loadCredentials(), loadTaranaOperatorId()]);
         });
 
         function showVendor(vendor) {
@@ -301,10 +314,64 @@
             syncActiveVendorHeader();
             updateVendorTabState();
             applyActiveVendorColor();
+            applyVendorConfigSection();
             updateVendorColumnHeaders();
             renderFirmwareList(firmwareData);
             renderConfigList(configsData);
             renderCredentialsList(credentialsData);
+        }
+
+        function applyVendorConfigSection() {
+            const fileSection = document.getElementById('config-file-section');
+            const taranaSection = document.getElementById('config-tarana-section');
+            if (!fileSection || !taranaSection) return;
+            if (activeVendor === 'tarana') {
+                fileSection.classList.add('hidden');
+                taranaSection.classList.remove('hidden');
+            } else {
+                fileSection.classList.remove('hidden');
+                taranaSection.classList.add('hidden');
+            }
+        }
+
+        async function loadTaranaOperatorId() {
+            try {
+                const response = await fetch('/api/device-settings');
+                if (!response.ok) return;
+                const data = await response.json();
+                const value = data?.tarana?.operator_id;
+                const el = document.getElementById('tarana-operator-id');
+                if (el && value != null) el.value = value;
+            } catch (error) {
+                // ignore — input simply stays blank
+            }
+        }
+
+        async function saveTaranaOperatorId() {
+            const el = document.getElementById('tarana-operator-id');
+            if (!el) return;
+            const raw = el.value.trim();
+            const operatorId = raw === '' ? null : parseInt(raw, 10);
+            if (raw !== '' && (!Number.isFinite(operatorId) || operatorId < 0)) {
+                showToast('Operator ID must be a non-negative integer', 'warning');
+                return;
+            }
+            try {
+                const response = await fetch('/api/device-settings', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tarana: { operator_id: operatorId } }),
+                });
+                if (response.ok) {
+                    showToast(operatorId == null ? 'Operator ID cleared' : `Operator ID saved: ${operatorId}`, 'success');
+                    await loadReadiness();
+                } else {
+                    const data = await response.json().catch(() => ({}));
+                    showToast(data.detail || 'Failed to save operator ID', 'error');
+                }
+            } catch (error) {
+                showToast('Failed to save operator ID', 'error');
+            }
         }
 
         function applyActiveVendorColor() {

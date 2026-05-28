@@ -116,8 +116,11 @@ def _template_requirements(config: Any) -> Dict[str, Dict[str, Any]]:
         "cambium": {"required": True, "modes": ["default", "ap", "ptp-a", "ptp-b"]},
         "tachyon": {"required": True, "modes": ["default", "ap", "ptp-a", "ptp-b"]},
         "tarana": {
-            "required": bool(getattr(getattr(config, "features", None), "apply_config_tarana", False)),
+            # Tarana's "config" is just an integer (operator_id); no template
+            # file is needed. Always required and checked via device_settings.
+            "required": True,
             "modes": ["default"],
+            "config_source": "operator_id",
         },
         "ubiquiti": {
             "required": bool(getattr(getattr(config, "features", None), "apply_config_ubiquiti", False)),
@@ -125,6 +128,18 @@ def _template_requirements(config: Any) -> Dict[str, Dict[str, Any]]:
         },
     }
     return requirements
+
+
+def _tarana_operator_id(config: Any) -> Optional[int]:
+    device_settings = getattr(config, "device_settings", None)
+    tarana_settings = getattr(device_settings, "tarana", None)
+    value = getattr(tarana_settings, "operator_id", None)
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _existing_template_modes(device_dir: Path) -> Dict[str, List[str]]:
@@ -147,6 +162,32 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
     missing_required = []
 
     for device_type, info in requirements.items():
+        if info.get("config_source") == "operator_id":
+            # Tarana: readiness reflects whether device_settings.tarana.operator_id
+            # is set rather than whether a template file exists on disk.
+            operator_id = _tarana_operator_id(config)
+            if operator_id is None:
+                status = "missing"
+                summary = "Operator ID not set"
+                missing_required.append(device_type)
+            else:
+                status = "ready"
+                summary = f"Operator ID: {operator_id}"
+
+            device_checks.append(
+                {
+                    "device_type": device_type,
+                    "required": info["required"],
+                    "status": status,
+                    "summary": summary,
+                    "existing": {},
+                    "missing_modes": [],
+                    "config_source": "operator_id",
+                    "operator_id": operator_id,
+                }
+            )
+            continue
+
         existing = _existing_template_modes(templates_root / device_type)
         missing_modes = [mode for mode in info["modes"] if mode not in existing]
         required_default_missing = info["required"] and "default" not in existing
