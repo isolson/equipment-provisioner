@@ -1817,6 +1817,27 @@ class PortManager:
 
             # Only start boot wait if not currently provisioning, no device detected, and not already waiting
             if not state.provisioning and not state.device_detected and not state.waiting_for_boot:
+                # The disconnect that landed us here may have run inside the
+                # post-provision grace window, which preserves last_result and
+                # checklist so the UI keeps the COMPLETE badge across a brief
+                # device flap. If grace has since expired, this link-up almost
+                # certainly belongs to a different device (or the same one
+                # after a real outage), so clear the preserved badge to avoid
+                # showing a stale "complete" for whoever just plugged in.
+                if state.last_result is not None and (
+                    state.provisioning_ended is None
+                    or time.time() - state.provisioning_ended >= self.PROVISIONING_GRACE_PERIOD
+                ):
+                    logger.info(
+                        f"Port {port_num} link up after grace expired — clearing stale last_result"
+                    )
+                    state.last_result = None
+                    state.last_error = None
+                    state.provision_attempted = False
+                    state.provisioning_ended = None
+                    state.checklist.reset()
+                    self.clear_device_mode(port_num)
+
                 # Start boot wait timer - will ping until device responds, then wait for web init
                 state.waiting_for_boot = True
                 state.boot_ping_responded = False
