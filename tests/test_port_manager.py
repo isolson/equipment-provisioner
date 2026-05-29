@@ -134,6 +134,88 @@ async def test_boot_wait_expiry_clears_state_when_link_down():
     assert state.link_speed is None
 
 
+@pytest.mark.asyncio
+async def test_disconnect_during_grace_then_expiry_clears_last_result():
+    """A disconnect inside the post-provisioning grace window preserves
+    last_result so the UI keeps COMPLETE while a device that just changed
+    networks comes back. Once grace expires with the link still down, the
+    polling loop must clear the stale state — otherwise the COMPLETE badge
+    lingers until the next link-up or service restart.
+    """
+    import time
+
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.link_up = True
+    state.last_result = "complete"
+    state.provisioning_ended = time.time()
+    state.checklist.login = True
+    state.checklist.config_upload = True
+
+    # Disconnect inside grace — last_result must survive.
+    await manager.handle_switch_port_event("ether1", link_up=False, speed=None)
+    assert state.link_up is False
+    assert state.last_result == "complete"
+    assert state.provisioning_ended is not None
+
+    # Advance past the grace window.
+    state.provisioning_ended = time.time() - manager.PROVISIONING_GRACE_PERIOD - 1
+
+    async def no_ping(_iface, _ip, **kw):
+        return False
+
+    async def no_detect(_port_num):
+        return None
+
+    manager._ping_device = no_ping  # type: ignore[method-assign]
+    manager._detect_device_on_port = no_detect  # type: ignore[method-assign]
+
+    await manager._check_all_ports_parallel()
+
+    assert state.last_result is None
+    assert state.last_error is None
+    assert state.provisioning_ended is None
+    assert state.checklist.login is None
+    assert state.checklist.config_upload is None
+
+
+@pytest.mark.asyncio
+async def test_post_grace_sweep_leaves_connected_complete_port_alone():
+    """A device still plugged in after a successful run should keep its
+    COMPLETE state even after grace expires — the sweep only fires on
+    link-down. Otherwise we'd wipe the badge for a freshly provisioned
+    device that's quietly running.
+    """
+    import time
+
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.link_up = True
+    state.device_detected = True
+    state.device_ip = "192.168.88.1"
+    state.last_result = "complete"
+    state.provisioning_ended = time.time() - manager.PROVISIONING_GRACE_PERIOD - 1
+    state.checklist.login = True
+
+    async def ping_ok(_iface, _ip, **kw):
+        return True
+
+    async def no_detect(_port_num):
+        return None
+
+    manager._ping_device = ping_ok  # type: ignore[method-assign]
+    manager._detect_device_on_port = no_detect  # type: ignore[method-assign]
+
+    await manager._check_all_ports_parallel()
+
+    assert state.last_result == "complete"
+    assert state.checklist.login is True
+
+
 def test_firmware_banks_initial_is_preserved_across_updates():
     """Checklist should keep first firmware snapshot for from->to display."""
     manager = PortManager(num_ports=1)
