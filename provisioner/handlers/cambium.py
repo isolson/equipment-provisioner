@@ -31,6 +31,7 @@ class CambiumHandler(BaseHandler):
         "epmp 4518": ["epmp-ax", "epmp_ax"],
         "epmp 4525": ["epmp-ax", "epmp_ax"],
         "epmp 4600": ["epmp-ax", "epmp_ax"],
+        "epmp 4600c": ["epmp-ax", "epmp_ax"],
         "epmp 4625": ["epmp-ax", "epmp_ax"],
         # Force 300 series - uses ePMP-AC firmware
         "force 300-25": ["epmp-ac", "epmp_ac", "force300", "force-300"],
@@ -1017,12 +1018,14 @@ class CambiumHandler(BaseHandler):
                     # These map Cambium internal SKU codes to human-readable model names
                     sku_to_model = {
                         "35": "Force 300-25",
+                        "55": "Force 300-25",
                         "38": "Force 300-16",
                         "49": "Force 300-19",
                         "62": "ePMP 3000 MP",
                         "53544": "ePMP 4518",
                         "53545": "ePMP 4525",
                         "53264": "ePMP 4600",
+                        "53520": "ePMP 4600C",
                         "53561": "ePMP 4625",
                     }
                     if sku_code in sku_to_model:

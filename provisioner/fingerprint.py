@@ -920,12 +920,14 @@ class DeviceFingerprinter:
         # Known SKU to model mappings
         sku_to_model = {
             "35": "Force 300-25",
+            "55": "Force 300-25",
             "38": "Force 300-16",
             "49": "Force 300-19",
             "62": "ePMP 3000 MP",
             "53544": "ePMP 4518",
             "53545": "ePMP 4525",
             "53264": "ePMP 4600",
+            "53520": "ePMP 4600C",
             "53561": "ePMP 4625",
         }
 
