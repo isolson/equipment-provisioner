@@ -1184,12 +1184,14 @@ class UbiquitiHandler(BaseHandler):
             firmware_file = Path(firmware_path)
             base_url = self._base_url or f"https://{self.ip}"
 
-            # Step 1: Discard pending upgrade
+            # Step 1: Discard pending upgrade. --data "" makes this a well-formed
+            # zero-length POST so lighttpd doesn't return 411 Length Required.
             discard_url = f"{base_url}{WAVE_API_UPGRADE_DISCARD}"
             discard_cmd = [
                 "curl", "-s", "-k", "-m", "10",
                 "--interface", self.interface,
                 "-X", "POST",
+                "--data", "",
             ]
             if self._auth_token:
                 discard_cmd.extend(["-H", f"x-auth-token: {self._auth_token}"])
@@ -1202,14 +1204,18 @@ class UbiquitiHandler(BaseHandler):
             )
             await proc.wait()
 
-            # Step 2: Upload firmware
+            # Step 2: Upload firmware. -H "Expect:" suppresses curl's automatic
+            # Expect: 100-continue for bodies >1024 bytes. AF-5XHD's lighttpd/1.4.39
+            # doesn't implement 100-continue and rejects with 417 Expectation Failed.
             upload_url = f"{base_url}{WAVE_API_UPGRADE_DIRECT}"
 
             cmd = [
                 "curl", "-s", "-k", "-m", "600",  # 10 min timeout
                 "--interface", self.interface,
                 "-X", "POST",
+                "-H", "Expect:",
                 "-F", f"file=@{firmware_path}",
+                "-w", "\nHTTP_CODE:%{http_code}",
             ]
 
             if self._auth_token:
@@ -1226,20 +1232,35 @@ class UbiquitiHandler(BaseHandler):
             )
             stdout, stderr = await proc.communicate()
 
-            if proc.returncode == 0:
-                response = stdout.decode("utf-8", errors="ignore")
-                result = json.loads(response)
+            if proc.returncode != 0:
+                logger.error(
+                    f"Firmware upload curl failed (rc={proc.returncode}): "
+                    f"{stderr.decode('utf-8', errors='ignore')[:200]}"
+                )
+                return False
 
-                if result.get("error", 0) == 0:
-                    logger.info(f"[FIRMWARE] Firmware uploaded to {self.ip}")
-                    # Store the firmware path so we can try alternatives on incompatibility
-                    self._last_uploaded_firmware = firmware_path
-                    return True
-                else:
-                    logger.error(f"Firmware upload error: {result}")
-                    return False
+            response = stdout.decode("utf-8", errors="ignore")
+            http_code = "unknown"
+            if "\nHTTP_CODE:" in response:
+                body, _, code = response.rpartition("\nHTTP_CODE:")
+                response = body
+                http_code = code.strip()
+
+            try:
+                result = json.loads(response)
+            except json.JSONDecodeError:
+                logger.error(
+                    f"Firmware upload returned non-JSON (HTTP {http_code}): "
+                    f"{response.strip()[:200]!r}"
+                )
+                return False
+
+            if result.get("error", 0) == 0:
+                logger.info(f"[FIRMWARE] Firmware uploaded to {self.ip}")
+                self._last_uploaded_firmware = firmware_path
+                return True
             else:
-                logger.error(f"Firmware upload curl failed: {stderr.decode()}")
+                logger.error(f"Firmware upload error (HTTP {http_code}): {result}")
                 return False
 
         except Exception as e:
