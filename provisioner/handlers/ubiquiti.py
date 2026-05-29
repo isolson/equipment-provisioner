@@ -1310,7 +1310,9 @@ class UbiquitiHandler(BaseHandler):
                         logger.debug(f"Firmware status: {status}, progress: {progress}%")
 
                         if status == "finished":
-                            version = data.get("metadata", {}).get("version", "unknown")
+                            version = data.get("metadata", {}).get("version") or ""
+                            if not version or version == "unknown":
+                                version = self._version_from_firmware_filename(self._last_uploaded_firmware) or "unknown"
                             logger.info(f"[FIRMWARE] Update complete: {version}")
                             if version and version != "unknown":
                                 self._pending_fw_version = version
@@ -1392,7 +1394,9 @@ class UbiquitiHandler(BaseHandler):
                     logger.debug(f"Firmware status: {status}, progress: {progress}%")
 
                     if status == "finished":
-                        version = data.get("metadata", {}).get("version", "unknown")
+                        version = data.get("metadata", {}).get("version") or ""
+                        if not version or version == "unknown":
+                            version = self._version_from_firmware_filename(self._last_uploaded_firmware) or "unknown"
                         logger.info(f"[FIRMWARE] Update complete: {version}")
                         if version and version != "unknown":
                             self._pending_fw_version = version
@@ -1428,6 +1432,19 @@ class UbiquitiHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Failed to poll firmware status: {e}")
             return False
+
+    @staticmethod
+    def _version_from_firmware_filename(path: Optional[str]) -> Optional[str]:
+        """Extract semver-like version from a firmware filename.
+
+        AF-5XHD's upgrade-status endpoint reports status="finished" without
+        populating metadata.version, so we fall back to the filename which
+        always contains the version (e.g. "322c-airfiber-1.5.5-...bin" -> "1.5.5").
+        """
+        if not path:
+            return None
+        m = re.search(r"-(\d+\.\d+(?:\.\d+)?)(?:[-.]|$)", Path(path).name)
+        return m.group(1) if m else None
 
     async def _find_alternative_firmware(self, tried: set) -> Optional[str]:
         """Find an alternative firmware file that hasn't been tried yet.
