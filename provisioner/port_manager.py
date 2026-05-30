@@ -914,6 +914,34 @@ class PortManager:
                 current_time - state.provisioning_ended < self.PROVISIONING_GRACE_PERIOD
             )
 
+            # A disconnect inside the grace window preserves last_result so the
+            # UI keeps COMPLETE while a device that just changed networks comes
+            # back. Once grace expires with the link still down, nothing else
+            # re-enters _clear_port_state_on_disconnect, so the badge would
+            # otherwise linger forever. Run the post-grace half of the cleanup.
+            if (
+                not state.link_up
+                and state.last_result is not None
+                and state.provisioning_ended is not None
+                and not in_grace_period
+            ):
+                logger.info(f"Port {port_num} clearing stale post-grace last_result")
+                state.last_result = None
+                state.last_error = None
+                state.provision_attempted = False
+                state.provisioning_ended = None
+                state.last_bootp_fired_at = None
+                state.last_bootp_fired_mac = None
+                state.checklist.reset()
+                self.clear_device_mode(port_num)
+                try:
+                    from provisioner.web.websocket import notify_port_change
+                    port_status = self._get_single_port_status(port_num)
+                    asyncio.create_task(notify_port_change(port_num, port_status))
+                except Exception as e:
+                    logger.debug(f"Failed to broadcast post-grace clear: {e}")
+                continue
+
             if state.device_detected and state.device_ip:
                 # Device was detected - ping to verify it's still there
                 if not in_grace_period:
