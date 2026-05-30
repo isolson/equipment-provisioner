@@ -103,13 +103,14 @@ firmware:
           - arm64
           - mipsbe
 
-# ThinkPad runs as a regular laptop with its own display — disable the
-# kiosk power management features that are tuned for the touchscreen rig.
+# Kiosk display power management — keep the touchscreen awake while
+# devices are connected, wake it on plug-in. Native X DPMS in the
+# openbox autostart handles idle-off (2 min blank / 5 min off).
 display:
-  sleep_timeout: 0
-  wake_on_connect: false
-  use_dpms: false
-  use_backlight: false
+  sleep_timeout: 0           # leave idle handling to X DPMS
+  wake_on_connect: true      # wake() on every device-detected / BOOTP event
+  use_dpms: true             # xset dpms force on / xset s reset via sudo -u kiosk
+  use_backlight: true        # sysfs backlight fallback if DPMS unavailable
 
 equipment_registry:
   url:
