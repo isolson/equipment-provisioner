@@ -151,11 +151,17 @@ log_step "Installing systemd services"
 cp "${INSTALL_DIR}/systemd/provisioner.service" /etc/systemd/system/provisioner.service
 cp "${INSTALL_DIR}/systemd/provisioner-web.service" /etc/systemd/system/provisioner-web.service
 
-# systemctl enable just creates symlinks — works in chroot
-systemctl enable provisioner.service
+# Enable ONLY provisioner-web — it runs the full provisioner *and* the web UI
+# in one process (web_server.run_standalone() calls Provisioner.run()).
+# Enabling provisioner.service as well would start a SECOND full provisioner:
+# duplicate BOOTP listeners and port monitoring, so a single plugged-in device
+# triggers two concurrent netinstalls that race on the interface IP
+# ("Address already assigned"). The provisioner.service unit is kept on disk
+# for headless (no-UI) deployments, but must not run alongside provisioner-web.
+# systemctl enable just creates symlinks — works in chroot.
 systemctl enable provisioner-web.service
 
-log_info "Systemd services installed and enabled"
+log_info "Systemd services installed (provisioner-web enabled; runs provisioner + UI)"
 
 # --- Step 7: Set Python capabilities ---
 log_step "Setting network capabilities"
