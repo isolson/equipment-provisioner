@@ -14,9 +14,30 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from provisioner.fingerprint import DeviceFingerprinter
+from provisioner.fingerprint import DeviceFingerprinter, is_mikrotik_oui
 from provisioner.handlers.mikrotik import MikrotikHandler
 from provisioner.port_manager import PortManager
+
+
+class TestMikrotikOuiAllowlist:
+    """The OUI allowlist gates destructive auto-netinstall, so it must cover
+    MikroTik's full set of registered prefixes — including newer blocks."""
+
+    def test_recognizes_newer_mikrotik_ouis(self):
+        # Verified against the IEEE OUI registry (Routerboard.com / Mikrotikls).
+        for mac in (
+            "04:f4:1c:c2:06:80",  # hAP ax S bench unit that was being skipped
+            "48:a9:8a:00:00:01",
+            "d0:ea:11:00:00:01",
+            "d4:01:c3:00:00:01",
+            "f4:1e:57:00:00:01",
+        ):
+            assert is_mikrotik_oui(mac), f"{mac} should be recognized as MikroTik"
+
+    def test_rejects_non_mikrotik_oui(self):
+        assert not is_mikrotik_oui("ac:8b:a9:00:00:01")  # Ubiquiti
+        assert not is_mikrotik_oui("")
+        assert not is_mikrotik_oui("zz")
 
 
 # ---------------------------------------------------------------------------

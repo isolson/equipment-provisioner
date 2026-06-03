@@ -105,6 +105,13 @@ MIKROTIK_OUIS = frozenset({
     "78:9A:18",  # MIKROTIKLS SIA
     "CC:2D:E0",  # MikroTik
     "DC:2C:6E",  # MikroTik
+    # Newer Routerboard.com / Mikrotikls SIA blocks (2024-2025 registrations).
+    # Verified against the IEEE OUI registry; the original list predated them.
+    "48:A9:8A",  # Routerboard.com
+    "D0:EA:11",  # Routerboard.com
+    "D4:01:C3",  # Routerboard.com
+    "F4:1E:57",  # Routerboard.com (registered 2024-05)
+    "04:F4:1C",  # Routerboard.com (registered 2025-03) — hAP ax S bench unit
 })
 
 
