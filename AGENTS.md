@@ -14,7 +14,7 @@ This file is the **tool-agnostic** statement of how this codebase is structured 
 A device plugged into a VLAN-isolated port is detected by `port_manager`, classified by `fingerprint`, routed by `handler_manager` (`HANDLER_MAP`), and provisioned by `base.py`'s property-driven `provision()` flow calling into a vendor handler. The system has **two layers with very different isolation quality**:
 
 - **Behavior layer (well isolated, keep it that way):** each vendor's logic lives entirely in `handlers/{vendor}.py` (+ `firmware_sources/{vendor}.py` + `configs/templates/{vendor}/`). No handler imports another. The provisioning *order* is decided by handler **properties**, never by `if vendor ==` in the engine.
-- **Registration layer (currently leaky, being consolidated):** the list of which vendors exist is duplicated across ~6–8 registries. There is not yet a single add/remove point.
+- **Registration layer (currently leaky, being consolidated):** the list of which vendors exist is duplicated across ~10 registries. There is not yet a single add/remove point.
 
 The standards below exist to protect the first and shrink the second.
 
@@ -26,7 +26,7 @@ The standards below exist to protect the first and shrink the second.
 Change device behavior by overriding a handler **property** (`supports_dual_bank`, `config_after_all_firmware`, `update_triggers_reboot`, `verify_active_bank`, `fw2_skips_reboot`, `supports_password_change`, …). Properties may be conditional on `self._device_info.model`. **Never** add vendor branching to `base.py`, `port_manager.py`, or `fingerprint`'s flow. `base.py` must contain **zero** vendor brand strings (today it has exactly one stray `mikrotik` check at `base.py:395-403` — that is debt, not a pattern to copy; replace it with a property when you touch it).
 
 ### 2. Never add a *new* source of truth for vendor enumeration
-The vendor list already exists in: `DeviceType` enum, `HANDLER_MAP`, `handlers/__init__.py`, `cli.py`, `web/api.py` `VALID_DEVICE_TYPES` + `BUILTIN_CREDENTIALS`, `index.html` vendor map, `config.py` (`CredentialsConfig`, `DeviceIPsConfig`, firmware sources, feature flags), and `port_manager.py` `DeviceLinkLocalIP`. Credentials alone have **four** copies. When you need "the list of vendors," **derive it from an existing registry** (prefer `HANDLER_MAP`/`DeviceType`) — do not hardcode a new list, dict, or `if device_type == "..."`. The target end-state is a single `VendorSpec` registry (see the epic); move toward it, never away.
+The vendor list already exists in: `DeviceType` enum, `HANDLER_MAP`, `handlers/__init__.py`, `cli.py`, `web/api.py` `VALID_DEVICE_TYPES` + `BUILTIN_CREDENTIALS`, `index.html` vendor map, `config.py` (`CredentialsConfig`, `DeviceIPsConfig`, firmware sources, feature flags), `port_manager.py` `DeviceLinkLocalIP`, `firmware_checker.py` `SOURCE_MAP` (+ `firmware_sources/__init__.py` imports), and `setup_tools.py` `SUPPORTED_DEVICE_TYPES` (+ its readiness/hint/mode dicts). Credentials alone have **four** copies. When you need "the list of vendors," **derive it from an existing registry** (prefer `HANDLER_MAP`/`DeviceType`) — do not hardcode a new list, dict, or `if device_type == "..."`. The target end-state is a single `VendorSpec` registry (see the epic); move toward it, never away.
 
 ### 3. Adding/removing a vendor is a checklist, not a guess
 Until the registry is consolidated, adding or removing a vendor means editing **all** of the sites in `CLAUDE.md` → "Adding New Vendors or Hardware" (12 touchpoints). Failure modes differ:
@@ -64,7 +64,7 @@ There is **no hardware simulator** for most vendors, so:
 - Introducing a 9th place that enumerates vendors instead of deriving from an existing registry.
 - `{{placeholder}}` syntax in config templates.
 - Python 3.10+ syntax.
-- Removing a vendor by deleting its handler file but leaving its import / credentials / fingerprint entries (S1 crash or S2 silent breakage).
+- Removing a vendor by deleting its handler or firmware-source file but leaving its import / `SOURCE_MAP` / credentials / fingerprint / `SUPPORTED_DEVICE_TYPES` entries (S1 crash or S2 silent breakage).
 - Generalizing the Evolution Digital side-door or MikroTik netinstall/OUI gating.
 - Reordering fingerprint probes or changing confidence weights without fixture-backed verification.
 

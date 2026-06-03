@@ -4,12 +4,12 @@
 
 ## Goal
 
-Make the provisioner *additively pluggable*, not just *subtractively modular*: adding or removing a vendor should be a small, single-place change instead of a 12–14 file hunt across 6–8 duplicated registries. Do this **without touching any vendor's provisioning behavior** and without regressing the production touchscreen kiosk.
+Make the provisioner *additively pluggable*, not just *subtractively modular*: adding or removing a vendor should be a small, single-place change instead of a ~15-file hunt across ~10 duplicated registries. Do this **without touching any vendor's provisioning behavior** and without regressing the production touchscreen kiosk.
 
 ## Problem (recap of the audit)
 
 - **Behavior is well isolated (A-grade):** each vendor lives entirely in `handlers/{vendor}.py` (+ `firmware_sources/{vendor}.py` + `configs/templates/{vendor}/`). No handler imports another. The property-driven `provision()` flow holds.
-- **Registration is leaky (C-grade):** the vendor list is duplicated across **6–8 independent sources of truth** with no single add/remove point. CLAUDE.md's claim — *"only the `DeviceType` enum and `HANDLER_MAP`"* — is inaccurate.
+- **Registration is leaky (C-grade):** the vendor list is duplicated across **~10 independent sources of truth** with no single add/remove point. CLAUDE.md's claim — *"only the `DeviceType` enum and `HANDLER_MAP`"* — is inaccurate.
 - The dominant failure mode of any vendor change is **omission**: forget an S1 site (handler import, `config.py↔main.py` credentials) and the service **crashes at boot**; forget an S2 site and you get **dead code or a silently-undetectable device**.
 
 ### The duplicated sources of truth (what this epic collapses)
@@ -20,6 +20,8 @@ Make the provisioner *additively pluggable*, not just *subtractively modular*: a
 | Credentials | `CredentialsConfig` (`config.py:114`), `main.py:109` dict, handler `DEFAULT_CREDENTIALS`, `BUILTIN_CREDENTIALS` (`api.py:2086`) | 1 table (mirror `FirmwareSourceConfig`) |
 | Link-local IPs | `DeviceLinkLocalIP` (`port_manager.py:112`) + inline copy (`:982`) + `DeviceIPsConfig` (`config.py:47`) | 1 registry |
 | Detection knowledge | `HTTP_SIGNATURES` + per-vendor probes + `_extract_device_details` (`fingerprint.py`) | per-vendor contribution |
+| Firmware sources | `SOURCE_MAP` + imports (`firmware_checker.py:20-39`), `firmware_sources/__init__.py` | 1 registry (config is already table-driven; the class map + imports are not) |
+| Setup / readiness | `SUPPORTED_DEVICE_TYPES` + readiness/hint/mode dicts (`setup_tools.py:23,79-126`) | derive from the vendor registry |
 | Vendor-in-engine leak | `if self.device_type == "mikrotik"` (`base.py:395-403`) | handler property |
 
 ## Success criteria
@@ -48,7 +50,7 @@ These constrain *how* every story is executed:
 4. **CI is the safety net.** `.github/workflows/test.yml` runs the suite. Story 0 adds the registry-consistency test that becomes the regression guard for all later stories.
 5. **Simple mode (no-switch ThinkPad).** `SimpleModeConfig` runs the *same* fingerprint + `DeviceLinkLocalIP.ALL` path on a single base interface (plus a subnet ARP-sweep). Stories 4 and 7 must preserve simple-mode detection, not just multi-port.
 6. **Evolution Digital side-door.** ED is intentionally absent from `HANDLER_MAP` and dispatched from `main.py:438`/`:757`. Every registry change must keep this path intact (it needs cross-port access).
-7. **Firmware sources already prove the pattern.** `Dict[str, FirmwareSourceConfig]` (`config.py:193`, `_default_firmware_sources()`) is the table-driven model to copy for credentials — don't reinvent.
+7. **Firmware sources are only *half* consolidated.** The *config* is table-driven — `Dict[str, FirmwareSourceConfig]` (`config.py:193`, `_default_firmware_sources()`) — and is the model to copy for credentials. But the vendor→source-*class* mapping is **not**: `firmware_checker.py` `SOURCE_MAP` (`:35`) plus its imports (`:20-23`) and `firmware_sources/__init__.py` are a hardcoded import registry that crashes on removal. Fold the class map into the registry alongside the handler map (Stories 2/6); don't mistake the table-driven config for full consolidation.
 8. **Kiosk UI is production.** Story 5 changes how `index.html` gets its vendor list; it must not break the live touchscreen. There's already a `/default-credentials` endpoint enumerating types — extend that pattern rather than add a parallel one.
 9. **Tests assert the vendor set.** `test_handler_manager.py`, `test_config.py`, `test_fingerprint.py` encode the current list and will need updates as registries consolidate — expected, and formalized by Story 0.
 
@@ -60,7 +62,7 @@ Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M �
 
 ### Story 0 — Registry-consistency contract test (foundation) · S · risk: none
 **Why:** lock the current effective vendor set before changing anything, and expose drift.
-**Scope:** add `tests/test_vendor_registry.py` asserting the *same* vendor set across `DeviceType` (minus `UNKNOWN`/`EVOLUTION_DIGITAL`), `HANDLER_MAP`, `cli.py` handler dict, `VALID_DEVICE_TYPES`, `CredentialsConfig` fields, `BUILTIN_CREDENTIALS`, `DeviceLinkLocalIP.ALL`, and (via a parsed-constant or rendered-endpoint check) the `index.html` vendor map. Document ED + Mock as known exceptions.
+**Scope:** add `tests/test_vendor_registry.py` asserting the *same* vendor set across `DeviceType` (minus `UNKNOWN`/`EVOLUTION_DIGITAL`), `HANDLER_MAP`, `cli.py` handler dict, `VALID_DEVICE_TYPES`, `CredentialsConfig` fields, `BUILTIN_CREDENTIALS`, `DeviceLinkLocalIP.ALL`, `firmware_checker.SOURCE_MAP` (+ `firmware_sources/__init__.__all__`), `setup_tools.SUPPORTED_DEVICE_TYPES`, and (via a parsed-constant or rendered-endpoint check) the `index.html` vendor map. Document ED + Mock as known exceptions.
 **Acceptance:** test passes today; deliberately breaking any one registry makes it fail. **Do this first** — it is the guard for Stories 2–7.
 
 ### Story 1 — Remove the MikroTik branch from the engine (S1 fix) · S · risk: low
@@ -69,8 +71,8 @@ Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M �
 **Acceptance:** no vendor string remains in `base.py`; `test_handler_properties.py` covers the override; MikroTik firmware lookup unchanged. Independent of all other stories.
 
 ### Story 2 — One source of truth for the handler registry · M · risk: low
-**Why:** collapse 4 copies of the vendor→handler list (`HANDLER_MAP`, `cli`, `VALID_DEVICE_TYPES`, UI).
-**Scope:** make `cli.py` and `VALID_DEVICE_TYPES` *derive* from `HANDLER_MAP`/`DeviceType` (add a helper like `provisionable_device_types()`), preserving the ED exception explicitly. 
+**Why:** collapse 5 copies of the vendor→handler list (`HANDLER_MAP`, `cli`, `VALID_DEVICE_TYPES`, `setup_tools.SUPPORTED_DEVICE_TYPES`, UI).
+**Scope:** make `cli.py`, `VALID_DEVICE_TYPES`, and `setup_tools.SUPPORTED_DEVICE_TYPES` *derive* from `HANDLER_MAP`/`DeviceType` (add a helper like `provisionable_device_types()`), preserving the ED exception explicitly. (The firmware `SOURCE_MAP` maps to imported classes, so it consolidates with the plugin registry in Story 6, not here.) 
 **Acceptance:** deleting an entry from `HANDLER_MAP` propagates everywhere; Story 0 test still green; `test_handler_manager.py` updated.
 
 ### Story 3 — Table-drive credentials (kill the crash-coupling) · M · risk: low-med
@@ -91,7 +93,7 @@ Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M �
 
 ### Story 6 — Vendor descriptor / plugin registry (capstone) · L · risk: med
 **Why:** the end state — one place per vendor; makes add/remove and single-vendor builds a one-line change.
-**Scope:** introduce `VendorSpec` (handler class, default creds, link-local IPs, firmware filename patterns, config-template dir, fingerprint signatures+probe ref, UI metadata) and a registry where each vendor registers once. Derive `DeviceType`, `HANDLER_MAP`, `MODEL_FIRMWARE_PATTERNS`, IP registry, and credential defaults from it. Gate behind Stories 2–4 proving the sub-patterns.
+**Scope:** introduce `VendorSpec` (handler class, **firmware-source class**, default creds, link-local IPs, firmware filename patterns, config-template dir, fingerprint signatures+probe ref, UI metadata) and a registry where each vendor registers once. Derive `DeviceType`, `HANDLER_MAP`, `firmware_checker.SOURCE_MAP`, `MODEL_FIRMWARE_PATTERNS`, IP registry, and credential defaults from it — replacing the `firmware_sources/__init__.py` + `firmware_checker.py` import block. Gate behind Stories 2–4 proving the sub-patterns.
 **Acceptance:** adding a vendor = add `handlers/x.py` + `firmware_sources/x.py` + templates + one `register(VendorSpec(...))`. Story 0 test green. A `VENDORS` allowlist makes Direction-B (single-vendor) a config toggle.
 
 ### Story 7 — Modularize fingerprint detection (optional, highest effort) · L · risk: med-high
@@ -110,7 +112,7 @@ Story 0 (guard) ──┬─> Story 1 (S1 quick win, parallel)
                   └─> Story 4 ─┴─> Story 6 (capstone) ─> Story 7 (stretch)
 ```
 
-- **Phase 1 (low-risk, high-value):** 0, 1, 2, 3, 4 — pure enumeration consolidation, fully unit-tested, no behavioral risk. This alone gets you from "12–14 file edit" to "~2 places + vendor files" and kills both S1 issues.
+- **Phase 1 (low-risk, high-value):** 0, 1, 2, 3, 4 — pure enumeration consolidation, fully unit-tested, no behavioral risk. This alone gets you from "~15 file edit" to "~2 places + vendor files" and kills both S1 issues.
 - **Phase 2 (UI):** 5 — independent, needs kiosk verification.
 - **Phase 3 (stretch):** 6 then 7 — the true plugin model and detection modularization; do only if the maintenance math justifies the effort and behavioral risk.
 
