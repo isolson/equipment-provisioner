@@ -38,9 +38,12 @@ class MikrotikFirmwareSource(BaseFirmwareSource):
         "x86_64",
     )
     DEFAULT_EXTRA_PACKAGES = {
-        # WiFi 6 devices such as hAP ax S need this driver package alongside
-        # the RouterOS system package after Netinstall.
+        # WiFi 6 devices need a driver package alongside the RouterOS system
+        # package after Netinstall. Qualcomm-based models (hAP ax² / ax³,
+        # arm64) use wifi-qcom; MediaTek-based models (hAP ax S, arm) use
+        # wifi-mediatek. wifi-mediatek is published for arm only.
         "wifi-qcom": ("arm", "arm64"),
+        "wifi-mediatek": ("arm",),
     }
 
     def normalize_channel(self, channel: Optional[str]) -> str:
@@ -164,9 +167,17 @@ class MikrotikFirmwareSource(BaseFirmwareSource):
             logger.debug("MikroTik package not found: %s", url)
             return None
 
+        # Manifest key (== model). routeros keys by bare architecture so the
+        # REST-upgrade path can look it up by the device's reported arch. Extra
+        # driver packages key by "<package>-<arch>" so they get their own slot
+        # — otherwise a wifi driver would share the routeros arch key and the
+        # checker would skip it once routeros bumped that key to the same
+        # version (the driver would never auto-update).
+        model = architecture if package == "routeros" else f"{package}-{architecture}"
+
         return RemoteFirmwareInfo(
             vendor="mikrotik",
-            model=architecture,
+            model=model,
             version=version,
             download_url=url,
             filename=filename,

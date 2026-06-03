@@ -72,7 +72,12 @@ async def test_mikrotik_source_accepts_lts_alias(monkeypatch):
         "routeros-arm64-7.20.8.npk",
         "wifi-qcom-7.20.8-arm64.npk",
     }
-    assert all(update.model == "arm64" for update in updates)
+    # routeros keys the manifest by bare arch; the wifi driver gets its own
+    # "<package>-<arch>" key so it doesn't collide with (and get skipped by)
+    # the routeros arch entry on later checks.
+    models = {update.filename: update.model for update in updates}
+    assert models["routeros-arm64-7.20.8.npk"] == "arm64"
+    assert models["wifi-qcom-7.20.8-arm64.npk"] == "wifi-qcom-arm64"
     assert all(update.channel == "long-term" for update in updates)
 
 
