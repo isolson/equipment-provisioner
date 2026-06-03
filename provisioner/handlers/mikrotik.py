@@ -39,6 +39,10 @@ class MikrotikHandler(BaseHandler):
         self._credentials_confirmed = False
         self._alternate_credentials = alternate_credentials or []
         self.login_error: Optional[str] = None
+        # The actual `universal-vN` stamp read off the device post-import, set
+        # by verify_base_flash_applied(). Lets registration report the real
+        # version rather than the floor reference.
+        self.base_flash_version_detected: Optional[str] = None
 
     @property
     def device_type(self) -> str:
@@ -979,8 +983,23 @@ class MikrotikHandler(BaseHandler):
     # per-device :local parameters -> /import -> verify -> register.
 
     BASE_FLASH_PATH = "/ztp/mikrotik/base-flash.rsc"
+    # The base-flash stamp is `base_flash_version=universal-vN`. The server
+    # bumps N on every material base-flash change, and its contract is that
+    # ANY universal-vN at or above the recovery floor is compliant — the stamp
+    # only identifies *which* base-flash a unit carries. So we accept N >= floor
+    # rather than an exact version (exact match rejected newer units, e.g. a v2
+    # device against a v1 provisioner). BASE_FLASH_VERSION is the floor label,
+    # also used as the registration fallback when the real stamp is unknown.
     BASE_FLASH_VERSION = "universal-v1"
+    BASE_FLASH_MIN_VERSION = 1
+    _BASE_FLASH_VERSION_RE = re.compile(r"base_flash_version=universal-v(\d+)")
     BASE_FLASH_FETCH_TIMEOUT = 15  # seconds
+
+    @classmethod
+    def _parse_base_flash_version(cls, note: Optional[str]) -> Optional[int]:
+        """Return N from a `base_flash_version=universal-vN` marker, else None."""
+        match = cls._BASE_FLASH_VERSION_RE.search(note or "")
+        return int(match.group(1)) if match else None
 
     @staticmethod
     async def fetch_base_flash(ztp_api_url: str) -> str:
@@ -1026,16 +1045,21 @@ class MikrotikHandler(BaseHandler):
     async def verify_base_flash_applied(self) -> bool:
         """Verify post-import that the canonical base-flash actually ran.
 
-        Reads `/system/note` and checks for the
-        `base_flash_version=universal-v1` marker the canonical script writes.
-        Per contract: absence means the script did not run cleanly and
-        registration must be skipped.
+        Reads `/system/note` and checks for a
+        `base_flash_version=universal-vN` marker at or above the recovery floor
+        (`BASE_FLASH_MIN_VERSION`). Per contract any compliant universal-vN is
+        accepted; an older version (or no marker) means the script did not run
+        cleanly and registration must be skipped. Records the detected version
+        on `self.base_flash_version_detected` so registration can report it.
         """
         note = await self._run_command(
             ":put [/system/note/get note]", allow_failure=True
         )
-        marker = f"base_flash_version={self.BASE_FLASH_VERSION}"
-        return marker in (note or "")
+        version = self._parse_base_flash_version(note)
+        if version is None or version < self.BASE_FLASH_MIN_VERSION:
+            return False
+        self.base_flash_version_detected = f"universal-v{version}"
+        return True
 
     async def wait_for_base_flash_applied(
         self, timeout: float = 360.0, interval: float = 2.0
@@ -1081,9 +1105,13 @@ class MikrotikHandler(BaseHandler):
         note = await self._run_command(
             ":put [/system/note/get note]", allow_failure=True
         )
-        marker = f"base_flash_version={self.BASE_FLASH_VERSION}"
-        if marker not in (note or ""):
-            return False, f"missing {marker} marker"
+        version = self._parse_base_flash_version(note)
+        if version is None or version < self.BASE_FLASH_MIN_VERSION:
+            return (
+                False,
+                f"missing base_flash_version marker "
+                f">= universal-v{self.BASE_FLASH_MIN_VERSION}",
+            )
 
         identity = (
             await self._run_command(

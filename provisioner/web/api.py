@@ -712,15 +712,17 @@ async def _run_netinstall(provisioner, port_number: int):
             await on_progress("config", False, "base_flash_version marker missing")
             await finish(
                 False,
-                f"/system/note missing base_flash_version={MikrotikHandler.BASE_FLASH_VERSION}",
+                f"/system/note missing base_flash_version "
+                f">= {MikrotikHandler.BASE_FLASH_VERSION}",
             )
             return
+        detected_bf = handler.base_flash_version_detected or MikrotikHandler.BASE_FLASH_VERSION
         logger.info(
             "MikroTik base-flash marker verified on port %s (%s)",
             port_number,
-            MikrotikHandler.BASE_FLASH_VERSION,
+            detected_bf,
         )
-        await on_progress("config", True, f"base-flash verified ({MikrotikHandler.BASE_FLASH_VERSION})")
+        await on_progress("config", True, f"base-flash verified ({detected_bf})")
 
         # Step 6: Verify the installed base-flash can actually reach ZTP once
         # the router is moved to an internet uplink. This catches RouterOS
@@ -751,7 +753,10 @@ async def _run_netinstall(provisioner, port_number: int):
                 mac=info.mac_address or "",
                 model=info.model or "",
                 firmware_version=info.firmware_version or "",
-                base_flash_version=MikrotikHandler.BASE_FLASH_VERSION,
+                base_flash_version=(
+                    handler.base_flash_version_detected
+                    or MikrotikHandler.BASE_FLASH_VERSION
+                ),
             )
         except Exception as exc:
             await on_progress("register", False, str(exc)[:100])

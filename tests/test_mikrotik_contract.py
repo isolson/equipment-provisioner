@@ -253,9 +253,20 @@ class TestVerifyBaseFlashApplied:
 
     async def test_false_on_wrong_version_marker(self):
         h = _handler()
-        # An older universal version must NOT be accepted as compliant.
+        # An older universal version (below the floor) must NOT be accepted.
         h._run_command = AsyncMock(return_value="base_flash_version=universal-v0")
         assert await h.verify_base_flash_applied() is False
+
+    async def test_true_on_newer_version_marker(self):
+        h = _handler()
+        # A newer stamp (server bumps N on material changes) must be accepted —
+        # the contract is "any universal-vN at/above the floor is compliant".
+        h._run_command = AsyncMock(
+            return_value="base_flash_version=universal-v2 serial=HBE0001"
+        )
+        assert await h.verify_base_flash_applied() is True
+        # The actual stamp is recorded for accurate registration.
+        assert h.base_flash_version_detected == "universal-v2"
 
 
 class TestWaitForBaseFlashApplied:
