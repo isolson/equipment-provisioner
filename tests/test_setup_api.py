@@ -112,6 +112,7 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
     class FakeMikrotikHandler:
         BOOTSTRAP_USER = "fleet-bootstrap"
         BASE_FLASH_VERSION = "universal-v1"
+        base_flash_version_detected = "universal-v1"
 
         def __init__(self, *args, **kwargs):
             pass
@@ -193,6 +194,7 @@ async def test_netinstall_installs_mediatek_driver_for_hap_ax_s(tmp_path, monkey
     class FakeMikrotikHandler:
         BOOTSTRAP_USER = "fleet-bootstrap"
         BASE_FLASH_VERSION = "universal-v1"
+        base_flash_version_detected = "universal-v1"
 
         def __init__(self, *args, **kwargs):
             pass
