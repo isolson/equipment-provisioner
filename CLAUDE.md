@@ -8,7 +8,7 @@ A network equipment auto-provisioner running on a Linux host (currently a Lenovo
 
 - **Handler properties control flow, not if/else in base.py.** The `provision()` method in `base.py` reads handler properties (`supports_dual_bank`, `config_after_all_firmware`, `fw2_skips_reboot`, etc.) to decide what to do. To change behavior for a device, override a property in the handler — do NOT add vendor-specific branching to `base.py`.
 - **Properties can be conditional on model.** `self._device_info` is populated before properties are checked in `provision()`. A single handler can serve APs and switches with different behavior by checking the model in the property getter.
-- **Vendor logic stays in vendor handlers.** No vendor-specific code in `base.py`, `port_manager.py`, `fingerprint.py`, or shared modules. The only vendor awareness in shared code is the `DeviceType` enum and `HANDLER_MAP`.
+- **Vendor *behavior* stays in vendor handlers.** No provisioning logic in `base.py`, `port_manager.py`, or `fingerprint.py`; `base.py` must contain **zero** vendor brand strings (it currently has one stray `mikrotik` check at `base.py:395-403` — don't add more, and prefer a handler property when you touch it). Vendor *enumeration*, by contrast, is **not** confined to the enum + `HANDLER_MAP` as older notes claimed — it is currently spread across ~6–8 registries (handler map, credentials ×4, link-local IPs, fingerprint signatures, firmware patterns, CLI/API/UI lists). **Standard: never add a *new* source of truth that lists vendors — derive from an existing one.** See `AGENTS.md` for the full standard and `docs/ARCHITECTURE_ISOLATION_REVIEW.md` for the touchpoint map; we are consolidating toward a single `VendorSpec` registry (`docs/epic-vendor-isolation-refactor.md`).
 - **Config templates use deep merge, not placeholder substitution.** There is no `{{variable}}` engine. Templates are merged into the device's current config as-is. Do not add placeholder syntax to templates.
 - **Two config/firmware paths exist.** Code deploys to `/opt/provisioner/` via `scripts/deploy.sh`. The active data repo is at `/var/lib/provisioner/repo/`. Config templates need to exist in the repo dir on the Pi to take effect. Deploy script syncs code but not the repo data dir.
 
@@ -23,7 +23,9 @@ The default order is preferred for most devices. Only use `config_after_all_firm
 ## Before Modifying
 
 - Read `docs/HANDLER_DEVELOPMENT.md` for the handler property reference and provisioning flow
+- Read `AGENTS.md` for the coding-architecture standards (vendor isolation, the single-registry direction, and the anti-patterns to avoid)
 - Read `STANDARDS.md` for interface binding, VLAN isolation, and UI requirements
+- Read `docs/ARCHITECTURE_ISOLATION_REVIEW.md` (current isolation state + exhaustive vendor-touchpoint map) and `docs/epic-vendor-isolation-refactor.md` (the remediation plan) before any cross-vendor refactor
 - Read `docs/HOST_SETUP.md` before touching deploy scripts or systemd units — covers the SSH-agent gotcha, `/etc` vs `/opt` config split, and required `CAP_SETUID`/`CAP_SETGID` for the display wake path
 - Read `docs/KIOSK_ARCHITECTURE.md` before touching `provisioner/display.py`, the openbox autostart, `restart-kiosk.sh`, or `auto-rotate.*` — covers the startx-based session, same-uid X access, and the native-DPMS-vs-JS-sleep split
 - Read `docs/cambium-config.md` before touching Cambium code — endpoints must be confirmed on hardware
@@ -42,6 +44,13 @@ Follow the checklist in `docs/HANDLER_DEVELOPMENT.md` under "Adding a New Vendor
 5. `provisioner/firmware.py` — `MODEL_FIRMWARE_PATTERNS` + version regex
 6. `provisioner/config_store.py` — `CONFIG_MODEL_ALIASES` (if needed)
 7. `configs/templates/{vendor}/{model}.json` — config template
+8. `provisioner/handlers/__init__.py` — import + `__all__` *(miss this → ImportError at boot)*
+9. `provisioner/config.py` — `CredentialsConfig` field, `DeviceIPsConfig`, firmware-source default, any `apply_config_<vendor>` flag
+10. `provisioner/main.py` — credentials dict *(must move in lockstep with #9 or AttributeError at boot)*
+11. `provisioner/cli.py` — handler dict + `choices`
+12. `provisioner/web/api.py` — `VALID_DEVICE_TYPES` + `BUILTIN_CREDENTIALS`; `provisioner/web/templates/index.html` — vendor metadata map
+
+⚠️ This list is long *because* vendor enumeration isn't yet consolidated. Miss an **S1** site (#4, #8, #9, #10) and the service crashes at boot; miss an **S2** site and the device becomes silently undetectable. Run `grep -rin <vendor> provisioner/ configs/` before declaring done. The exhaustive table is in `docs/ARCHITECTURE_ISOLATION_REVIEW.md`.
 
 ## Deployment
 
@@ -59,6 +68,7 @@ sudo -n cp /opt/provisioner/configs/templates/{vendor}/{file} /var/lib/provision
 ## Common Mistakes to Avoid
 
 - Adding vendor branching to `base.py` instead of using handler properties
+- Adding a *new* place that enumerates vendors (another hardcoded list/dict or `if device_type == "..."`) instead of deriving from an existing registry — the vendor list already has 6–8 copies; don't make it 9
 - Using Python 3.10+ syntax (Pi runs 3.9)
 - Forgetting to add new device IPs to the boot-ping list (causes 120s detection delay)
 - Putting `{{placeholders}}` in config templates (no substitution engine exists)
