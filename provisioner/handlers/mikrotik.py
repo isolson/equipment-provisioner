@@ -556,6 +556,38 @@ class MikrotikHandler(BaseHandler):
 
     BOOTSTRAP_USER = "fleet-bootstrap"
 
+    # WiFi driver chipset by model. The netinstall post-boot step (see
+    # web/api.py `_run_netinstall`) uses this to pick which driver package to
+    # install: hAP ax² / ax³ (arm64) use Qualcomm (wifi-qcom); hAP ax S (arm)
+    # uses MediaTek (wifi-mediatek). Architecture alone is ambiguous — arm has
+    # both Qualcomm and MediaTek devices — so known MediaTek models are matched
+    # by name (case-insensitive substring against the RouterOS-reported model).
+    # Unknown WiFi-capable models fall back to Qualcomm (the historical
+    # default). Add a (substring, prefix) pair here as new models are tested.
+    WIFI_DRIVER_BY_MODEL = (
+        ("ax s", "wifi-mediatek"),
+    )
+    DEFAULT_WIFI_DRIVER = "wifi-qcom"
+    # Architectures with no WiFi radio — they need no driver package.
+    WIRED_ONLY_ARCHES = ("mipsbe", "mmips", "smips", "ppc", "tile", "x86", "x86_64")
+
+    @classmethod
+    def wifi_driver_for_model(
+        cls, model: Optional[str], arch: Optional[str]
+    ) -> Optional[str]:
+        """Return the WiFi driver package prefix for a model, or None if wired-only.
+
+        Returns "wifi-qcom" or "wifi-mediatek" for WiFi-capable models, or None
+        for wired-only architectures (which take no post-boot driver package).
+        """
+        if (arch or "").lower() in cls.WIRED_ONLY_ARCHES:
+            return None
+        model_lower = (model or "").lower()
+        for needle, prefix in cls.WIFI_DRIVER_BY_MODEL:
+            if needle in model_lower:
+                return prefix
+        return cls.DEFAULT_WIFI_DRIVER
+
     # `-sm <modescript>` (netinstall-cli 7.22+) takes a file path to a
     # RouterScript that runs once on first boot, before the device is
     # network-accessible. We use it to set device-mode=advanced so that the
@@ -804,20 +836,25 @@ class MikrotikHandler(BaseHandler):
     # Sequenced extra-package install (post-netinstall)
     # ------------------------------------------------------------------
     #
-    # On hAP ax / ax² / ax³ / ax S, net-installing routeros + wifi-qcom
-    # in the same flash leaves /interface/wifi/radio/print empty — the
-    # driver loads but the radio chip never binds. Boot log shows
-    # `DefConf gen: Unable to find wifi radio data` + a critical "script
-    # interrupted" error. Manual `/system upgrade` to the same versions
-    # preserves wifi, so it's specifically the simultaneous-install path
-    # that breaks radio binding. Forum fix path:
+    # On hAP ax WiFi models, net-installing routeros + the WiFi driver in the
+    # same flash leaves /interface/wifi/radio/print empty — the driver loads
+    # but the radio chip never binds. Boot log shows `DefConf gen: Unable to
+    # find wifi radio data` + a critical "script interrupted" error. Manual
+    # `/system upgrade` to the same versions preserves wifi, so it's
+    # specifically the simultaneous-install path that breaks radio binding.
+    # Forum fix path:
     # https://forum.mikrotik.com/t/hap-ax-lite-no-wifi-in-default-config-solved/172882
     #
+    # The WiFi driver package is chipset-specific: Qualcomm models (hAP ax² /
+    # ax³, arm64) use `wifi-qcom`; MediaTek models (hAP ax S, arm) use
+    # `wifi-mediatek`. The driver is selected per-model in `_run_netinstall`
+    # via `wifi_driver_for_model`.
+    #
     # The provisioner ships only `routeros-*-<arch>.npk` via netinstall-cli,
-    # then SCP-uploads `wifi-qcom-<ver>-<arch>.npk` post-boot and reboots
-    # to install onto an already-running OS. A final `/system
-    # reset-configuration` triggers a fresh DefConf gen with wifi-qcom
-    # now properly bound, populating `/interface/wifi/radio`.
+    # then SCP-uploads the WiFi driver `.npk` post-boot and reboots to install
+    # onto an already-running OS. A final `/system reset-configuration`
+    # triggers a fresh DefConf gen with the driver now properly bound,
+    # populating `/interface/wifi/radio`.
 
     async def install_extra_npk_and_reboot(
         self,

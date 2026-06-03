@@ -130,9 +130,12 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
                 serial_number="HKC0TEST123",
                 mac_address="04:f4:1c:c2:06:80",
                 model="hAP ax S",
-                firmware_version="7.22.2",
-                hardware_version="arm64",
+                firmware_version="7.23.1",
+                hardware_version="arm",
             )
+
+        from provisioner.handlers.mikrotik import MikrotikHandler as _Real
+        wifi_driver_for_model = _Real.wifi_driver_for_model
 
         @staticmethod
         async def fetch_base_flash(url):
@@ -177,6 +180,99 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
     completed.assert_awaited_once()
     args = completed.await_args.args
     assert args[:3] == (5, 0, True)
+    assert provisioner.port_manager.port_states[5].last_result == "success"
+
+
+async def test_netinstall_installs_mediatek_driver_for_hap_ax_s(tmp_path, monkeypatch):
+    """A MediaTek hAP ax S (arm) must get wifi-mediatek, not wifi-qcom, even
+    though a wifi-qcom-arm package is also present in the firmware dir."""
+    from provisioner.web.api import _run_netinstall
+
+    installed = []
+
+    class FakeMikrotikHandler:
+        BOOTSTRAP_USER = "fleet-bootstrap"
+        BASE_FLASH_VERSION = "universal-v1"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def netinstall(self, **kwargs):
+            return True
+
+        async def wait_for_reboot(self, timeout):
+            return True
+
+        async def connect(self):
+            return True
+
+        async def get_info(self):
+            return SimpleNamespace(
+                serial_number="HKC0TEST123",
+                mac_address="04:f4:1c:c2:06:80",
+                model="hAP ax S",
+                firmware_version="7.23.1",
+                hardware_version="arm",
+            )
+
+        # The real classmethod the flow consults to pick the driver family.
+        from provisioner.handlers.mikrotik import MikrotikHandler as _Real
+        wifi_driver_for_model = _Real.wifi_driver_for_model
+
+        async def install_extra_npk_and_reboot(self, local_npk_path, timeout=240):
+            installed.append(Path(local_npk_path).name)
+            return True
+
+        async def factory_reset_and_reconnect(self, timeout=240):
+            return True
+
+        @staticmethod
+        async def fetch_base_flash(url):
+            return "/system note set note=\"base_flash_version=universal-v1\""
+
+        @staticmethod
+        def build_import_script(**kwargs):
+            return "/system note set note=\"base_flash_version=universal-v1\""
+
+        async def apply_config_file(self, script_path):
+            return True
+
+        async def wait_for_base_flash_applied(self):
+            return True
+
+        async def verify_ztp_ready(self, serial):
+            return True, "ZTP-ready"
+
+        async def disconnect(self):
+            pass
+
+    config = Config()
+    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
+    provisioner = SimpleNamespace(
+        config=config,
+        port_manager=DummyPortManager(),
+        firmware_manager=SimpleNamespace(firmware_path=tmp_path),
+    )
+
+    # Both wifi drivers present for arm; only the MediaTek one should install.
+    selected = [
+        tmp_path / "routeros-arm-7.23.1.npk",
+        tmp_path / "wifi-qcom-7.23.1-arm.npk",
+        tmp_path / "wifi-mediatek-7.23.1-arm.npk",
+    ]
+    monkeypatch.setattr("provisioner.web.api.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("provisioner.web.api._select_latest_npk_per_arch", lambda _: selected)
+    monkeypatch.setattr("provisioner.web.api.MikrotikHandler", FakeMikrotikHandler, raising=False)
+    monkeypatch.setattr("provisioner.handlers.mikrotik.MikrotikHandler", FakeMikrotikHandler)
+    monkeypatch.setattr("provisioner.equipment_registry.register_mikrotik", AsyncMock())
+    monkeypatch.setattr("provisioner.web.websocket.notify_port_change", AsyncMock())
+    monkeypatch.setattr("provisioner.web.websocket.notify_provisioning_completed", AsyncMock())
+
+    await _run_netinstall(provisioner, 5)
+
+    assert installed == ["wifi-mediatek-7.23.1-arm.npk"]
+    # The routeros package shipped to netinstall must not include the wifi driver.
     assert provisioner.port_manager.port_states[5].last_result == "success"
 
 
