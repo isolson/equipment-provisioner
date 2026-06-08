@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Optional, Dict
+from typing import Any, ClassVar, Optional, Dict
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -83,8 +83,17 @@ class DeviceCredentials(BaseModel):
     password: str = ""
     backup_password: str = ""  # Backup password to try if primary fails
     bootstrap_password: str = ""  # Fleet-wide bootstrap password (MikroTik ZTP)
+    # Fleet-wide th-ext-join onboarding PSK (MikroTik ZTP). This is the
+    # passphrase wireless extenders use to join a gateway's hidden onboarding
+    # SSID, so it MUST be identical across the whole fleet (per base-flash.rsc
+    # `$onboardingPass`). Defaults to bootstrap_password when unset, matching
+    # the canonical bench tool's WIFI_ONBOARDING_PASS fallback.
+    onboarding_password: str = ""
 
-    @field_validator("password", "backup_password", "bootstrap_password", mode="before")
+    @field_validator(
+        "password", "backup_password", "bootstrap_password", "onboarding_password",
+        mode="before",
+    )
     @classmethod
     def expand_env_var(cls, v: str) -> str:
         """Expand environment variables in password."""
@@ -220,8 +229,23 @@ class TaranaDeviceConfig(BaseModel):
 
 class MikrotikDeviceConfig(BaseModel):
     """MikroTik-specific provisioning settings."""
-    ztp_api_url: Optional[str] = None  # ZTP API base URL (wifi-api ZTP service)
+    DEFAULT_ZTP_API_URL: ClassVar[str] = "https://wifi.infra.treehouse.mn"
+
+    ztp_api_url: Optional[str] = DEFAULT_ZTP_API_URL  # ZTP API base URL (wifi-api ZTP service)
     ztp_api_key: Optional[str] = None  # API key for POST /ztp/mikrotik/register
+
+    @field_validator("ztp_api_url", mode="before")
+    @classmethod
+    def default_ztp_api_url(cls, v: Optional[str]) -> str:
+        """Fall back to the prod URL for blank/None values.
+
+        Preset configs ship `ztp_api_url:` (loads as None), which would
+        otherwise override the field default and break registration with
+        'ztp_api_url not configured'. Normalize empty → default here.
+        """
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return cls.DEFAULT_ZTP_API_URL
+        return v
 
     @field_validator("ztp_api_key", mode="before")
     @classmethod

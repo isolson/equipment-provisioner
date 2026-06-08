@@ -817,7 +817,7 @@ class MikrotikHandler(BaseHandler):
         if proc.returncode == 0:
             return True
         err = stderr.decode().strip()
-        if "File exists" in err:
+        if "File exists" in err or "already assigned" in err:
             # Leftover from an aborted prior run; keep it and reuse.
             return True
         logger.error(f"Failed to add {host_addr} to {interface}: {err}")
