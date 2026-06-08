@@ -710,6 +710,12 @@ class PortManager:
             logger.info(
                 f"Auto-Netinstall: BOOTP request from {mac} on port {port_num} — firing callbacks"
             )
+            # Tag the port as MikroTik so the UI shows the vendor immediately,
+            # before fingerprinting can succeed (device is in BOOTP/netinstall mode).
+            if state.device_type is None:
+                state.device_type = "mikrotik"
+            if not state.device_mac:
+                state.device_mac = mac
             state.provision_attempted = True
             state.last_bootp_fired_at = time.time()
             state.last_bootp_fired_mac = mac

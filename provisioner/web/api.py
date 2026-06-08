@@ -680,10 +680,15 @@ async def _run_netinstall(provisioner, port_number: int):
             await finish(False, f"base-flash fetch failed: {exc}")
             return
 
+        # onboarding_pass is the fleet-wide th-ext-join PSK; it MUST be the same
+        # across the fleet for wireless extenders to join gateways. Falls back to
+        # bootstrap_pass (matching the bench tool's WIFI_ONBOARDING_PASS default).
+        onboarding_pass = config.credentials.mikrotik.onboarding_password or bootstrap_pass
         script = MikrotikHandler.build_import_script(
             serial=serial,
             bootstrap_pass=bootstrap_pass,
             base_flash_body=base_body,
+            onboarding_pass=onboarding_pass,
         )
 
         with NamedTemporaryFile(mode="w", suffix=".rsc", delete=False) as f:

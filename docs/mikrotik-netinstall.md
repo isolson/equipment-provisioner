@@ -178,7 +178,14 @@ The provisioner host must:
     by netinstall's `-s` user-script and by the canonical base-flash's
     `$bootstrapPass`. Must match the wifi-side stored value. Avoid `$`,
     backtick, `;`, `{`, `}`, and newline (RouterScript misinterprets them).
+  - `MIKROTIK_ONBOARDING_PASS` — *(optional)* fleet-wide `th-ext-join` WPA2 PSK
+    baked into every device as the canonical base-flash's `$onboardingPass`.
+    Wireless extenders use it to join gateways, so it **must be identical for
+    every device the fleet ever flashes** — store it durably (a secrets
+    manager / password vault), not just in this env file, and never rotate it
+    without re-flashing the whole fleet. If unset, it defaults to
+    `MIKROTIK_BOOTSTRAP_PASS`. Same RouterScript-unsafe characters apply.
   - `MIKROTIK_ZTP_API_KEY` — `X-API-Key` for `POST /ztp/mikrotik/register`.
 - Have `device_settings.mikrotik.ztp_api_url` set in `config.yaml` to the
-  wifi-api base URL (e.g. `https://api.infra.treehouse.mn`). The provisioner
+  wifi-api base URL (e.g. `https://ztp.example.com`). The provisioner
   hard-fails registration if this is unset rather than guessing a default.

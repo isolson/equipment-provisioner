@@ -67,6 +67,10 @@ credentials:
     username: admin
     password: "${MIKROTIK_PASSWORD}"
     bootstrap_password: "${MIKROTIK_BOOTSTRAP_PASS}"
+    # Fleet-wide th-ext-join onboarding PSK. Must be identical across the whole
+    # fleet so wireless extenders can join gateways. Defaults to
+    # bootstrap_password when unset.
+    onboarding_password: "${MIKROTIK_ONBOARDING_PASS}"
 
   tarana:
     username: admin
@@ -109,7 +113,7 @@ device_settings:
   tarana:
     operator_id:                    # Tarana operator ID (set via gNMI on /radios/global/config/operator-id)
   mikrotik:
-    ztp_api_url:                    # ZTP API base URL (e.g. https://api.infra.treehouse.mn)
+    ztp_api_url: https://wifi.infra.treehouse.mn  # ZTP API base URL (e.g. https://ztp.example.com)
     ztp_api_key: "${MIKROTIK_ZTP_API_KEY}"  # X-API-Key for POST /ztp/mikrotik/register
 
 firmware:
