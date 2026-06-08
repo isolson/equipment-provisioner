@@ -714,8 +714,10 @@ class PortManager:
             # before fingerprinting can succeed (device is in BOOTP/netinstall mode).
             if state.device_type is None:
                 state.device_type = "mikrotik"
-            if not state.device_mac:
-                state.device_mac = mac
+            # Always reflect the MAC actually being netinstalled — a different
+            # device may have replaced a prior one on this port, and a stale
+            # device_mac would mislead the UI/status.
+            state.device_mac = mac
             state.provision_attempted = True
             state.last_bootp_fired_at = time.time()
             state.last_bootp_fired_mac = mac
