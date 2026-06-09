@@ -58,6 +58,9 @@ class DummyPortManager:
             state.last_result = "success" if success else "failed"
             state.last_error = None if success else error
 
+    def set_expecting_reboot(self, port_number, expecting):
+        self.port_states[port_number].expecting_reboot = expecting
+
     def update_checklist(self, port_number, step, value):
         pass
 
