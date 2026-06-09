@@ -30,8 +30,11 @@ class DummyPortManager:
                 last_result="success",
                 last_error=None,
                 device_mac=None,
+                expecting_reboot=False,
             )
         }
+        # Ordered log of set_expecting_reboot(bool) calls for bracketing tests.
+        self.expecting_reboot_calls = []
 
     def get_port_status(self):
         return {
@@ -60,6 +63,7 @@ class DummyPortManager:
 
     def set_expecting_reboot(self, port_number, expecting):
         self.port_states[port_number].expecting_reboot = expecting
+        self.expecting_reboot_calls.append(expecting)
 
     def update_checklist(self, port_number, step, value):
         pass
@@ -185,6 +189,61 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
     args = completed.await_args.args
     assert args[:3] == (5, 0, True)
     assert provisioner.port_manager.port_states[5].last_result == "success"
+
+    # The link-loss watchdog must be suppressed for the pipeline's planned
+    # reboots: set True once (after netinstall-cli), cleared exactly once at
+    # the end, and never left True.
+    pm = provisioner.port_manager
+    assert pm.expecting_reboot_calls == [True, False]
+    assert pm.port_states[5].expecting_reboot is False
+
+
+async def test_netinstall_clears_expecting_reboot_when_step_after_flash_fails(tmp_path, monkeypatch):
+    """A failure AFTER the watchdog-suppression flag is set must still clear it.
+
+    The flag is set once netinstall-cli returns; every later step can fail and
+    return early. All those paths go through finish(), which clears the flag —
+    so expecting_reboot must never leak True even when the pipeline fails after
+    the flash (here: the post-flash boot never comes back).
+    """
+    from provisioner.web.api import _run_netinstall
+
+    class FakeMikrotikHandler:
+        BOOTSTRAP_USER = "fleet-bootstrap"
+        BASE_FLASH_VERSION = "universal-v1"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def netinstall(self, **kwargs):
+            return True
+
+        async def wait_for_reboot(self, timeout):
+            return False  # device never comes back after the flash
+
+    config = Config()
+    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
+    provisioner = SimpleNamespace(
+        config=config,
+        port_manager=DummyPortManager(),
+        firmware_manager=SimpleNamespace(firmware_path=tmp_path),
+    )
+
+    monkeypatch.setattr("provisioner.web.api.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("provisioner.web.api._select_latest_npk_per_arch", lambda _: [tmp_path / "routeros-arm64.npk"])
+    monkeypatch.setattr("provisioner.web.api.MikrotikHandler", FakeMikrotikHandler, raising=False)
+    monkeypatch.setattr("provisioner.handlers.mikrotik.MikrotikHandler", FakeMikrotikHandler)
+    monkeypatch.setattr("provisioner.web.websocket.notify_port_change", AsyncMock())
+    monkeypatch.setattr("provisioner.web.websocket.notify_provisioning_completed", AsyncMock())
+
+    await _run_netinstall(provisioner, 5)
+
+    pm = provisioner.port_manager
+    # True was set (after netinstall), then cleared by finish() on the failure.
+    assert pm.expecting_reboot_calls == [True, False]
+    assert pm.port_states[5].expecting_reboot is False
+    assert pm.port_states[5].last_result == "failed"
 
 
 async def test_netinstall_installs_mediatek_driver_for_hap_ax_s(tmp_path, monkeypatch):
