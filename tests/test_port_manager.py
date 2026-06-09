@@ -216,6 +216,63 @@ async def test_post_grace_sweep_leaves_connected_complete_port_alone():
     assert state.checklist.login is True
 
 
+@pytest.mark.asyncio
+async def test_link_down_during_expected_reboot_does_not_cancel_provisioning():
+    """While expecting_reboot is set, a link-down must be ignored.
+
+    The MikroTik netinstall pipeline performs several planned reboots (first
+    boot, wifi-driver install, factory-reset) that drop the switch-port link.
+    During that window expecting_reboot is set, and the link-loss watchdog must
+    NOT arm a delayed cancel or kill the in-flight provisioning task — otherwise
+    a slow-rebooting device (e.g. hAP ax S) gets cancelled mid-pipeline.
+    """
+    import asyncio
+
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.link_up = True
+    state.provisioning = True
+    state.expecting_reboot = True
+
+    async def _never():
+        await asyncio.sleep(3600)
+
+    task = asyncio.ensure_future(_never())
+    state.provisioning_task = task
+    try:
+        await manager.handle_switch_port_event("ether1", link_up=False, speed=None)
+
+        assert state.link_down_grace_task is None
+        assert not task.cancelled()
+        assert state.provisioning is True
+    finally:
+        task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_link_down_without_expected_reboot_schedules_cancel():
+    """Regression guard: with expecting_reboot False, a link-down during
+    provisioning still arms the delayed-cancel watchdog (unchanged behavior).
+    """
+    import asyncio
+
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.link_up = True
+    state.provisioning = True
+    state.expecting_reboot = False
+    try:
+        await manager.handle_switch_port_event("ether1", link_up=False, speed=None)
+        assert state.link_down_grace_task is not None
+    finally:
+        if state.link_down_grace_task is not None:
+            state.link_down_grace_task.cancel()
+
+
 def test_firmware_banks_initial_is_preserved_across_updates():
     """Checklist should keep first firmware snapshot for from->to display."""
     manager = PortManager(num_ports=1)
