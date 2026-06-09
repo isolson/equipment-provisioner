@@ -500,6 +500,10 @@ async def _run_netinstall(provisioner, port_number: int):
         await notify_port_change(port_number, port_status)
 
     async def finish(success: bool, error: Optional[str] = None, detail: Optional[str] = None):
+        # Single exit chokepoint — never leak the watchdog-suppression flag.
+        # mark_port_provisioning() does not reset expecting_reboot, so clear it
+        # here explicitly (harmless no-op if it was never set).
+        port_manager.set_expecting_reboot(port_number, False)
         port_manager.mark_port_provisioning(
             port_number,
             False,
@@ -562,6 +566,13 @@ async def _run_netinstall(provisioner, port_number: int):
         if not success:
             await finish(False, "Netinstall failed")
             return
+
+        # Suppress the port link-loss watchdog for the rest of the pipeline: the
+        # planned reboots (first boot, wifi-driver install, factory-reset) and the
+        # slow base-flash /import drop or stall the switch-port link, which the
+        # watchdog would otherwise read as an unplug and cancel this task. Internal
+        # wait_for_* timeouts still bound the run, so a real unplug fails cleanly.
+        port_manager.set_expecting_reboot(port_number, True)
 
         # Step 2: Wait for device to boot after Netinstall.
         # First boot is slow (RouterBOOT + RouterOS init + SSH server start);

@@ -153,6 +153,28 @@ socket and `PortState`. Multiple ports can netinstall simultaneously:
 - `netinstall-cli` is bound to a specific VLAN interface with `-i`, so its
   packets always go out the correct port regardless of the routing table.
 
+## Planned reboots vs. the link-loss watchdog
+
+The netinstall pipeline performs several **planned reboots** — the first
+post-flash boot, the WiFi-driver install reboot, and the factory-reset reboot
+— plus a slow base-flash `/import` window (`wait_for_base_flash_applied`, up to
+360s) during which the device is unreachable. Each drops or stalls the
+switch-port link.
+
+The port-level link-loss watchdog (`_delayed_provision_cancel`, 10s grace →
+cancel the in-flight task) would otherwise read those link drops as an unplug
+and kill the pipeline. A slow-rebooting device (e.g. the MediaTek **hAP ax S**,
+whose WiFi-driver reboot exceeds 10s) hit exactly this and was cancelled before
+base-flash/register.
+
+`_run_netinstall` therefore calls `set_expecting_reboot(port, True)` right after
+`netinstall-cli` returns and clears it in the `finish()` cleanup, suppressing
+the watchdog for the whole pipeline — mirroring how the detection-based flow
+brackets reboots with `reboot_started`/`reboot_ended` (`main.py`). A genuine
+unplug still terminates the pipeline, because every wait inside the suppressed
+region is bounded by its own timeout (`netinstall` 300s, `wait_for_reboot`
+240s, `wait_for_base_flash_applied` 360s).
+
 ## Host requirements
 
 The provisioner host must:
