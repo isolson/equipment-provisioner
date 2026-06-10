@@ -1,0 +1,31 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+# Static gates that catch the regression classes we keep hitting, separate from
+# the pytest job in test.yml so each shows up as its own required status check.
+jobs:
+  py39:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Python 3.9 compatibility gate
+        run: python scripts/check_py39.py
+
+  templates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Config template validation gate
+        run: python scripts/check_templates.py

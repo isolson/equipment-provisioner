@@ -19,13 +19,13 @@ is patched with a hand-rolled stub because the project does not depend on
 ``aioresponses``.
 """
 
-from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from provisioner.equipment_registry import register_mikrotik
 from provisioner.handlers.mikrotik import MikrotikHandler
+from stubs import StubResponse, StubSession
 
 
 # ---------------------------------------------------------------------------
@@ -33,58 +33,14 @@ from provisioner.handlers.mikrotik import MikrotikHandler
 # ---------------------------------------------------------------------------
 
 
-class _StubResponse:
-    """Stand-in for an aiohttp response inside an ``async with`` block."""
-
-    def __init__(self, status: int, body: str):
-        self.status = status
-        self._body = body
-
-    async def text(self) -> str:
-        return self._body
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-
-class _StubSession:
-    """Records the request that was made and returns a canned response.
-
-    The instance is used as a context manager (``async with``) and exposes
-    ``get`` / ``post`` that also return context managers — matching the
-    layout of real ``aiohttp.ClientSession`` calls.
-    """
-
-    def __init__(self, response: _StubResponse):
-        self._response = response
-        self.last_call: Optional[Dict[str, Any]] = None
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-    def get(self, url: str, **kwargs):
-        self.last_call = {"method": "GET", "url": url, **kwargs}
-        return self._response
-
-    def post(self, url: str, **kwargs):
-        self.last_call = {"method": "POST", "url": url, **kwargs}
-        return self._response
-
-
 def _patch_session(status: int, body: str) -> tuple:
-    """Return (patcher, stub_session) for ``aiohttp.ClientSession``.
+    """Return (factory, stub_session) for patching ``aiohttp.ClientSession``.
 
-    Caller is responsible for ``patcher.start()`` / ``stop()``; we expose
-    both so assertions can inspect ``stub_session.last_call``.
+    Uses the shared :class:`~stubs.StubSession` so the suite has a single
+    aiohttp test double. The factory is a ``MagicMock`` returning the stub; the
+    stub exposes ``last_call`` for request assertions.
     """
-    response = _StubResponse(status, body)
-    stub = _StubSession(response)
+    stub = StubSession(default=StubResponse(status, body))
     factory = MagicMock(return_value=stub)
     return factory, stub
 

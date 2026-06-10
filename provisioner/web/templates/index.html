@@ -681,6 +681,9 @@
             if (value === false) return 'error';
             if (value === 'loading') return 'loading';
             if (value === 'skipped') return 'skipped';
+            // "unverified" = config sent but device state not confirmed. Must render
+            // amber, NOT green — guard this before the generic string→success below.
+            if (value === 'unverified') return 'warning';
             if (typeof value === 'string' && value.length > 0) return 'success'; // e.g., model_confirmed with name
             return 'pending';
         }
