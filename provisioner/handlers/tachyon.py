@@ -588,22 +588,20 @@ class TachyonHandler(BaseHandler):
 
         cmd.append(url)
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
+        returncode, body, http_code, stderr = await self._run_curl(cmd)
 
-        if proc.returncode != 0:
-            error_msg = stderr.decode("utf-8", errors="ignore")
-            logger.error(f"API request failed: {method} {endpoint}: {error_msg}")
-            raise RuntimeError(f"curl request failed: {error_msg}")
+        if returncode != 0:
+            logger.error(f"API request failed: {method} {endpoint}: {stderr}")
+            raise RuntimeError(f"curl request failed: {stderr}")
 
-        text = stdout.decode("utf-8", errors="ignore")
+        # curl -s exits 0 even on HTTP 4xx/5xx; surface real HTTP errors so callers
+        # (read-back GET, update_firmware POST) cannot mistake an error page for data.
+        if http_code is not None and http_code >= 400:
+            logger.error(f"API request {method} {endpoint} returned HTTP {http_code}: {body[:300]}")
+            raise RuntimeError(f"HTTP {http_code} from {endpoint}: {body[:200]}")
 
         try:
-            data = json.loads(text)
+            data = json.loads(body)
             # Check for auth failure in JSON body (API returns 200 but statusCode: 401)
             if isinstance(data, dict) and data.get("statusCode") == 401:
                 self._connected = False
@@ -612,7 +610,45 @@ class TachyonHandler(BaseHandler):
                 raise PermissionError("Invalid credentials - session rejected (401)")
             return data
         except json.JSONDecodeError:
-            return {"raw": text, "status": 200}
+            return {"raw": body, "status": http_code if http_code is not None else 200}
+
+    # Sentinel appended via ``curl -w`` so we can recover the HTTP status code that
+    # ``curl -s`` (no -f) otherwise hides. Must match the parsing in _run_curl().
+    _CURL_STATUS_MARKER = "HTTPSTATUS:"
+
+    async def _run_curl(self, cmd: list):
+        """Run a curl command and recover (returncode, body, http_code, stderr).
+
+        Appends ``-w '\\nHTTPSTATUS:%{http_code}'`` so the HTTP status code is captured.
+        Without this, ``curl -s`` exits 0 even on HTTP 4xx/5xx, which previously let
+        error/login pages be reported as successful config/firmware uploads.
+
+        http_code is None if curl produced no status line (e.g. a transport failure).
+        """
+        write_out = "\n" + self._CURL_STATUS_MARKER + "%{http_code}"
+        full_cmd = [cmd[0], "-w", write_out] + list(cmd[1:])
+
+        proc = await asyncio.create_subprocess_exec(
+            *full_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        out = stdout.decode("utf-8", errors="ignore")
+        err = stderr.decode("utf-8", errors="ignore")
+
+        body, http_code = out, None
+        marker = "\n" + self._CURL_STATUS_MARKER
+        idx = out.rfind(marker)
+        if idx != -1:
+            body = out[:idx]
+            code_str = out[idx + len(marker):].strip()
+            try:
+                http_code = int(code_str)
+            except ValueError:
+                http_code = None
+
+        return proc.returncode, body, http_code, err
 
     async def get_info(self) -> DeviceInfo:
         """Get device information from system status and bootbank."""
@@ -802,20 +838,28 @@ class TachyonHandler(BaseHandler):
                     data=config
                 )
 
-                logger.info(f"Configuration applied to {self.ip}")
-
-                # Check if reboot is required
+                # Validate the response before declaring success. _api_request already
+                # raises on HTTP >= 400 and on statusCode 401; here we also reject an
+                # app-level error returned with HTTP 200 (statusCode>=400 / error / errors)
+                # so this path matches the curl branch and update_firmware().
                 if isinstance(result, dict):
+                    if result.get("statusCode") and result.get("statusCode") >= 400:
+                        logger.error(f"Config apply failed with status {result['statusCode']}: {result.get('error')}")
+                        return False
+                    if result.get("error"):
+                        logger.error(f"Config apply error: {result['error']}")
+                        return False
+                    if result.get("errors"):
+                        for error in result["errors"]:
+                            logger.error(f"Config error: {error}")
+                        return False
                     if result.get("reboot_required"):
                         logger.info("Configuration requires reboot")
                     if result.get("warnings"):
                         for warning in result["warnings"]:
                             logger.warning(f"Config warning: {warning}")
-                    if result.get("errors"):
-                        for error in result["errors"]:
-                            logger.error(f"Config error: {error}")
-                        return False
 
+                logger.info(f"Configuration applied to {self.ip}")
                 ok = True
 
             except Exception as e:
@@ -1146,9 +1190,14 @@ class TachyonHandler(BaseHandler):
             return {}
 
     async def _apply_config_curl(self, config: Dict[str, Any]) -> bool:
-        """Apply configuration using curl with interface binding."""
-        import asyncio
+        """Apply configuration using curl with interface binding.
 
+        Success requires an affirmative response: curl succeeded, HTTP < 400, a
+        parseable JSON body, and no error markers. An empty body, a non-JSON body
+        (e.g. an HTML login/error page), an HTTP error, or an error field is a
+        FAILURE — previously these fell through to ``return True`` and the handler
+        reported a config apply that never happened.
+        """
         try:
             url = f"{self._base_url}{self.API_CONFIG}"
             payload = json.dumps(config)  # API expects raw config, not wrapped
@@ -1171,54 +1220,49 @@ class TachyonHandler(BaseHandler):
 
             cmd.extend(["-d", payload, url])
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
+            returncode, body, http_code, stderr = await self._run_curl(cmd)
 
-            if proc.returncode == 0:
-                response = stdout.decode("utf-8", errors="ignore")
-                logger.info(f"Config apply response: {response[:500]}")
-
-                # Try to parse as JSON
-                try:
-                    result = json.loads(response)
-
-                    # Check for Tachyon API error format: {"statusCode":400,"error":{...}}
-                    if result.get("statusCode") and result.get("statusCode") >= 400:
-                        error_details = result.get("error", {}).get("details", "Unknown error")
-                        logger.error(f"Config apply failed with status {result['statusCode']}: {error_details}")
-                        return False
-
-                    # Check for error field
-                    if result.get("error"):
-                        error_details = result["error"].get("details", str(result["error"]))
-                        logger.error(f"Config apply error: {error_details}")
-                        return False
-
-                    if result.get("errors"):
-                        for error in result["errors"]:
-                            logger.error(f"Config error: {error}")
-                        return False
-
-                    if result.get("reboot_required"):
-                        logger.info("Configuration requires reboot")
-                    if result.get("warnings"):
-                        for warning in result["warnings"]:
-                            logger.warning(f"Config warning: {warning}")
-
-                    # Log success details
-                    logger.info(f"Config apply result: {result}")
-                except json.JSONDecodeError:
-                    logger.warning(f"Config apply returned non-JSON response")
-
-                logger.info(f"Configuration applied to {self.ip} via {self.interface}")
-                return True
-            else:
-                logger.error(f"Config apply curl failed: {stderr.decode()}")
+            if returncode != 0:
+                logger.error(f"Config apply curl failed (rc={returncode}): {stderr}")
                 return False
+            if http_code is not None and http_code >= 400:
+                logger.error(f"Config apply failed: HTTP {http_code}, body: {body[:300]}")
+                return False
+
+            body_stripped = body.strip()
+            if not body_stripped:
+                logger.error(f"Config apply returned empty body (HTTP {http_code}) - treating as failure")
+                return False
+
+            try:
+                result = json.loads(body_stripped)
+            except json.JSONDecodeError:
+                logger.error(f"Config apply returned non-JSON response (HTTP {http_code}): {body_stripped[:300]}")
+                return False
+
+            if isinstance(result, dict):
+                # Tachyon API error format: {"statusCode":400,"error":{...}}
+                if result.get("statusCode") and result.get("statusCode") >= 400:
+                    error_details = result.get("error", {}).get("details", "Unknown error")
+                    logger.error(f"Config apply failed with status {result['statusCode']}: {error_details}")
+                    return False
+                if result.get("error"):
+                    error_details = result["error"].get("details", str(result["error"])) \
+                        if isinstance(result["error"], dict) else str(result["error"])
+                    logger.error(f"Config apply error: {error_details}")
+                    return False
+                if result.get("errors"):
+                    for error in result["errors"]:
+                        logger.error(f"Config error: {error}")
+                    return False
+                if result.get("reboot_required"):
+                    logger.info("Configuration requires reboot")
+                if result.get("warnings"):
+                    for warning in result["warnings"]:
+                        logger.warning(f"Config warning: {warning}")
+
+            logger.info(f"Configuration applied to {self.ip} via {self.interface} (HTTP {http_code})")
+            return True
 
         except Exception as e:
             logger.error(f"Failed to apply config via curl: {e}")
@@ -1353,33 +1397,38 @@ class TachyonHandler(BaseHandler):
 
             logger.info(f"Uploading firmware {firmware_file.name} to {self.ip}")
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
+            returncode, body, http_code, stderr = await self._run_curl(cmd)
 
-            if proc.returncode == 0:
-                response = stdout.decode("utf-8", errors="ignore")
-                logger.info(f"Firmware upload response: {response[:500]}")
-
-                # Try to parse response to check for errors
-                try:
-                    result = json.loads(response)
-                    if isinstance(result, dict):
-                        if result.get("error") or result.get("statusCode", 200) >= 400:
-                            logger.error(f"Firmware upload API error: {result}")
-                            return False
-                        logger.info(f"Firmware upload API result: {result}")
-                except json.JSONDecodeError:
-                    logger.debug(f"Non-JSON firmware upload response: {response[:200]}")
-
-                logger.info(f"Firmware uploaded to {self.ip}")
-                return True
-            else:
-                logger.error(f"Firmware upload failed: {stderr.decode()}")
+            if returncode != 0:
+                logger.error(f"Firmware upload curl failed (rc={returncode}): {stderr}")
                 return False
+            if http_code is not None and http_code >= 400:
+                logger.error(f"Firmware upload failed: HTTP {http_code}, body: {body[:300]}")
+                return False
+
+            logger.info(f"Firmware upload response (HTTP {http_code}): {body[:500]}")
+
+            # A successful upload returns a JSON body (documented: {"version":"unknown"}).
+            # An empty body or a non-JSON body (HTML login/error page) is a FAILURE —
+            # previously these fell through to ``return True`` and the handler reported a
+            # firmware upload that never happened.
+            body_stripped = body.strip()
+            if not body_stripped:
+                logger.error(f"Firmware upload returned empty body (HTTP {http_code}) - treating as failure")
+                return False
+
+            try:
+                result = json.loads(body_stripped)
+            except json.JSONDecodeError:
+                logger.error(f"Firmware upload returned non-JSON response (HTTP {http_code}): {body_stripped[:300]}")
+                return False
+
+            if isinstance(result, dict) and (result.get("error") or result.get("statusCode", 200) >= 400):
+                logger.error(f"Firmware upload API error: {result}")
+                return False
+
+            logger.info(f"Firmware uploaded to {self.ip} (HTTP {http_code}, response: {body_stripped[:200]})")
+            return True
 
         except Exception as e:
             logger.error(f"Failed to upload firmware via curl: {e}")
