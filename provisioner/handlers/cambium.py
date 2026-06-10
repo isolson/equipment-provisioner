@@ -12,7 +12,7 @@ import urllib.parse
 
 import aiohttp
 
-from .base import BaseHandler, DeviceInfo
+from .base import BaseHandler, DeviceInfo, UNVERIFIED
 
 logger = logging.getLogger(__name__)
 
@@ -3012,30 +3012,36 @@ class CambiumHandler(BaseHandler):
         logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed for {self.ip}")
         return False
 
-    def _check_config_values(self, config: Dict[str, Any], expected_values: Optional[Dict[str, Any]] = None) -> bool:
-        """Check config dict against expected values. Returns True if OK."""
+    def _check_config_values(self, config: Dict[str, Any], expected_values: Optional[Dict[str, Any]] = None):
+        """Check a read-back config dict against expected values.
+
+        Returns ``True`` when every expected value matched, ``False`` on a
+        mismatch, and :data:`UNVERIFIED` when there is nothing to compare — the
+        config was readable but we confirmed no specific value, so we must not
+        claim a green success.
+        """
         actual_ssid = config.get("wirelessInterfaceSSID")
         actual_snmp_name = config.get("snmpSystemName")
         actual_device_name = config.get("systemConfigDeviceName")
 
         logger.info(f"[CONFIG VERIFY] Read back: ssid={actual_ssid}, snmpName={actual_snmp_name}, deviceName={actual_device_name}")
 
-        if expected_values:
-            for field, expected in expected_values.items():
-                if field == "ssid" and actual_ssid != expected:
-                    logger.error(f"[CONFIG VERIFY] SSID mismatch: expected {expected}, got {actual_ssid}")
-                    return False
-                elif field == "hostname" and actual_snmp_name != expected:
-                    logger.error(f"[CONFIG VERIFY] snmpSystemName mismatch: expected {expected}, got {actual_snmp_name}")
-                    return False
-                elif field == "devicename" and actual_device_name != expected:
-                    logger.error(f"[CONFIG VERIFY] deviceName mismatch: expected {expected}, got {actual_device_name}")
-                    return False
+        if not expected_values:
+            logger.info(f"[CONFIG VERIFY] Config readable but no expected values to confirm — UNVERIFIED")
+            return UNVERIFIED
 
-            logger.info(f"[CONFIG VERIFY] All expected values verified successfully")
-        else:
-            logger.info(f"[CONFIG VERIFY] Config readable, no specific values to verify")
+        for field, expected in expected_values.items():
+            if field == "ssid" and actual_ssid != expected:
+                logger.error(f"[CONFIG VERIFY] SSID mismatch: expected {expected}, got {actual_ssid}")
+                return False
+            elif field == "hostname" and actual_snmp_name != expected:
+                logger.error(f"[CONFIG VERIFY] snmpSystemName mismatch: expected {expected}, got {actual_snmp_name}")
+                return False
+            elif field == "devicename" and actual_device_name != expected:
+                logger.error(f"[CONFIG VERIFY] deviceName mismatch: expected {expected}, got {actual_device_name}")
+                return False
 
+        logger.info(f"[CONFIG VERIFY] All expected values verified successfully")
         return True
 
     async def _get_config_curl(self) -> Dict[str, Any]:

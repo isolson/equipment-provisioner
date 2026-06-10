@@ -96,6 +96,8 @@ class UbiquitiHandler(BaseHandler):
         # one or two reboots. Stash the target so get_firmware_banks can wait for the live
         # version to catch up before verification reads stale old-firmware values.
         self._pending_fw_version: Optional[str] = None
+        # Last config dict applied — read back to confirm it landed.
+        self._last_applied_config: Optional[Dict[str, Any]] = None
 
     @property
     def device_type(self) -> str:
@@ -667,7 +669,13 @@ class UbiquitiHandler(BaseHandler):
         return {}
 
     async def _get_config_curl(self) -> Dict[str, Any]:
-        """Get configuration using curl with interface binding."""
+        """Get configuration using curl with interface binding.
+
+        Returns the parsed config dict, or ``{}`` on any failure (curl error,
+        timeout, malformed/non-dict body) so callers can treat an empty dict as
+        "could not read" and fail closed. This is the single curl read-back used
+        by both ``_get_config`` and the config-apply verification paths.
+        """
         try:
             url = f"{self._base_url}{WAVE_API_CONFIG}"
             cmd = [
@@ -687,7 +695,9 @@ class UbiquitiHandler(BaseHandler):
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
 
             if proc.returncode == 0 and stdout:
-                return json.loads(stdout.decode("utf-8", errors="ignore"))
+                parsed = json.loads(stdout.decode("utf-8", errors="ignore"))
+                if isinstance(parsed, dict):
+                    return parsed
         except Exception as e:
             logger.debug(f"Failed to get config via curl: {e}")
 
@@ -1012,36 +1022,51 @@ class UbiquitiHandler(BaseHandler):
                     logger.error(f"Config apply failed: HTTP {resp.status} - {body}")
                     return False
 
-            # Read-back verification
+            self._last_applied_config = config
+
+            # Read-back verification — FAIL-CLOSED. A read-back that can't be
+            # obtained (non-200) or doesn't match is a failure, never a pass.
             if expected_hostname or expected_ssid:
                 await asyncio.sleep(2)  # Brief pause for config to settle
 
                 async with session.get(url, headers=headers) as resp:
-                    if resp.status == 200:
-                        readback = await resp.json(content_type=None)
+                    if resp.status != 200:
+                        logger.error(f"[CONFIG VERIFY] Read-back failed: HTTP {resp.status} — failing closed")
+                        return False
+                    readback = await resp.json(content_type=None)
 
-                        if expected_hostname:
-                            actual = readback.get("system", {}).get("hostname")
-                            if actual != expected_hostname:
-                                logger.error(f"[CONFIG VERIFY] hostname mismatch: sent '{expected_hostname}', got '{actual}'")
-                                return False
-                            logger.info(f"[CONFIG VERIFY] hostname confirmed: {actual}")
-
-                        if expected_ssid:
-                            try:
-                                actual_ssid = readback.get("wireless", {}).get("interfaces", [{}])[0].get("ssid")
-                                if actual_ssid != expected_ssid:
-                                    logger.error(f"[CONFIG VERIFY] SSID mismatch: sent '{expected_ssid}', got '{actual_ssid}'")
-                                    return False
-                                logger.info(f"[CONFIG VERIFY] SSID confirmed: {actual_ssid}")
-                            except (KeyError, IndexError):
-                                pass
+                if not isinstance(readback, dict) or not self._config_matches(
+                    readback, expected_hostname, expected_ssid
+                ):
+                    return False
 
             return True
 
         except Exception as e:
             logger.error(f"Failed to apply config: {e}")
             return False
+
+    def _config_matches(self, readback: Dict[str, Any], expected_hostname, expected_ssid) -> bool:
+        """Return True iff the read-back config matches the expected key fields."""
+        if expected_hostname:
+            actual = readback.get("system", {}).get("hostname")
+            if actual != expected_hostname:
+                logger.error(f"[CONFIG VERIFY] hostname mismatch: sent '{expected_hostname}', got '{actual}'")
+                return False
+            logger.info(f"[CONFIG VERIFY] hostname confirmed: {actual}")
+
+        if expected_ssid:
+            actual_ssid = None
+            try:
+                actual_ssid = readback.get("wireless", {}).get("interfaces", [{}])[0].get("ssid")
+            except (KeyError, IndexError, TypeError):
+                pass
+            if actual_ssid != expected_ssid:
+                logger.error(f"[CONFIG VERIFY] SSID mismatch: sent '{expected_ssid}', got '{actual_ssid}'")
+                return False
+            logger.info(f"[CONFIG VERIFY] SSID confirmed: {actual_ssid}")
+
+        return True
 
     async def _apply_config_curl(self, config: Dict[str, Any]) -> bool:
         """Apply configuration using curl with interface binding."""
@@ -1079,7 +1104,30 @@ class UbiquitiHandler(BaseHandler):
                 logger.error(f"Config apply error: {result}")
                 return False
 
-            logger.info(f"[CONFIG] Configuration applied to {self.ip} via curl")
+            self._last_applied_config = config
+            logger.info(f"[CONFIG] Configuration sent to {self.ip} via curl")
+
+            # Read back and confirm key fields — FAIL-CLOSED, same as the
+            # aiohttp path. Previously this returned True with no read-back.
+            expected_hostname = config.get("system", {}).get("hostname")
+            expected_ssid = None
+            try:
+                interfaces = config.get("wireless", {}).get("interfaces", [])
+                if interfaces:
+                    expected_ssid = interfaces[0].get("ssid")
+            except (KeyError, IndexError, TypeError):
+                pass
+
+            if expected_hostname or expected_ssid:
+                await asyncio.sleep(2)  # Brief pause for config to settle
+                readback = await self._get_config_curl()
+                if not readback:
+                    logger.error(f"[CONFIG VERIFY] Could not read back config on {self.ip} — failing closed")
+                    return False
+                if not self._config_matches(readback, expected_hostname, expected_ssid):
+                    return False
+
+            logger.info(f"[CONFIG] Configuration confirmed on {self.ip} via curl")
             return True
 
         except Exception as e:

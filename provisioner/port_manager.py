@@ -38,6 +38,9 @@ class ProvisioningChecklist:
     - False: Failed
     - "loading": In progress
     - "skipped": Intentionally skipped by user
+    - "unverified": (config_verify only) config was sent but device state could
+      not be confirmed (e.g. device changed management network, or the handler
+      has no in-band read-back). Rendered amber — never a green success.
     """
     login: Optional[Union[bool, str]] = None
     model_confirmed: Optional[str] = None  # Stores model name on success, None if not done

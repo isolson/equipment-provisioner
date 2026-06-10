@@ -22,7 +22,7 @@ from typing import Dict, Any, Optional
 
 import aiohttp
 
-from .base import BaseHandler, DeviceInfo
+from .base import BaseHandler, DeviceInfo, UNVERIFIED
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,9 @@ class TachyonHandler(BaseHandler):
         self._credentials_confirmed: bool = False  # True after successful login (for reconnect)
         # Store alternate credentials for fallback
         self._alternate_credentials = alternate_credentials or []
+        # Last config dict passed to apply_config — verify_config reads it back
+        # and confirms key fields actually landed on the device.
+        self._last_applied_config: Optional[Dict[str, Any]] = None
 
     @property
     def device_type(self) -> str:
@@ -813,37 +816,60 @@ class TachyonHandler(BaseHandler):
         if not ok:
             return False
 
-        # Read back config and verify key fields match what we sent
-        if expected_hostname or expected_ssid:
-            try:
-                await asyncio.sleep(2)  # Brief pause for config to settle
-                readback = await self._api_request("GET", self.API_CONFIG)
-                if isinstance(readback, dict):
-                    if expected_hostname:
-                        actual = readback.get("system", {}).get("hostname")
-                        if actual != expected_hostname:
-                            logger.error(f"[CONFIG VERIFY] hostname mismatch: sent '{expected_hostname}', got '{actual}'")
-                            return False
-                        logger.info(f"[CONFIG VERIFY] hostname confirmed: {actual}")
+        # Remember what we applied so verify_config() can re-confirm it later.
+        self._last_applied_config = config
 
-                    if expected_ssid:
-                        actual_ssid = None
-                        try:
-                            vaps = readback.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
-                            if vaps:
-                                actual_ssid = vaps[0].get("ssid")
-                        except (KeyError, IndexError, TypeError):
-                            pass
-                        if actual_ssid != expected_ssid:
-                            logger.error(f"[CONFIG VERIFY] SSID mismatch: sent '{expected_ssid}', got '{actual_ssid}'")
-                            return False
-                        logger.info(f"[CONFIG VERIFY] SSID confirmed: {actual_ssid}")
-                else:
-                    logger.warning(f"[CONFIG VERIFY] Could not read back config for verification")
-            except Exception as e:
-                logger.warning(f"[CONFIG VERIFY] Read-back verification failed: {e}")
+        # Read back config and verify key fields match what we sent. This is
+        # FAIL-CLOSED: if we cannot read the config back, or it does not match,
+        # we report failure. We never claim success we could not confirm.
+        if expected_hostname or expected_ssid:
+            await asyncio.sleep(2)  # Brief pause for config to settle
+            readback = await self._get_config_curl()
+            if not readback:
+                logger.error(
+                    f"[CONFIG VERIFY] Could not read back config on {self.ip} — failing closed"
+                )
+                return False
+
+            if expected_hostname:
+                actual = readback.get("system", {}).get("hostname")
+                if actual != expected_hostname:
+                    logger.error(f"[CONFIG VERIFY] hostname mismatch: sent '{expected_hostname}', got '{actual}'")
+                    return False
+                logger.info(f"[CONFIG VERIFY] hostname confirmed: {actual}")
+
+            if expected_ssid:
+                actual_ssid = None
+                try:
+                    vaps = readback.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
+                    if vaps:
+                        actual_ssid = vaps[0].get("ssid")
+                except (KeyError, IndexError, TypeError):
+                    pass
+                if actual_ssid != expected_ssid:
+                    logger.error(f"[CONFIG VERIFY] SSID mismatch: sent '{expected_ssid}', got '{actual_ssid}'")
+                    return False
+                logger.info(f"[CONFIG VERIFY] SSID confirmed: {actual_ssid}")
 
         return True
+
+    async def _get_config_curl(self) -> Dict[str, Any]:
+        """Read the device config back for verification.
+
+        Routes over the SAME transport apply used: ``_api_request`` dispatches to
+        curl (interface-bound) when ``self._use_curl`` is set, else aiohttp.
+        Returns ``{}`` on any failure and never raises, so callers can treat an
+        empty dict as "could not confirm" and fail closed.
+        """
+        try:
+            result = await self._api_request("GET", self.API_CONFIG)
+            if isinstance(result, dict) and "raw" not in result:
+                return result
+            logger.warning(f"[CONFIG VERIFY] Read-back returned no usable config from {self.ip}")
+            return {}
+        except Exception as e:
+            logger.warning(f"[CONFIG VERIFY] Read-back request failed: {e}")
+            return {}
 
     async def _apply_config_curl(self, config: Dict[str, Any]) -> bool:
         """Apply configuration using curl with interface binding."""
@@ -1421,16 +1447,17 @@ class TachyonHandler(BaseHandler):
             logger.error(f"Failed to apply AP naming: {e}")
             return False
 
-    async def verify_config(self, expected_values: Optional[Dict[str, Any]] = None) -> bool:
-        """Post-config verification: reconnect and check firmware banks.
+    async def verify_config(self, expected_values: Optional[Dict[str, Any]] = None):
+        """Post-config verification: reconnect, then re-confirm the config.
 
-        Config field verification (hostname, SSID) is done inside apply_config()
-        immediately after the POST. This method handles the broader check:
-        reconnect to confirm device is accessible and verify firmware banks
-        are both at the expected version.
+        Reconnects, checks firmware banks, and — fail-closed — reads the config
+        back and compares the key fields (hostname, SSID) against the config we
+        applied. If the config cannot be read back, returns ``False`` rather
+        than claiming a success we cannot confirm. Returns :data:`UNVERIFIED`
+        only when there is nothing recorded to compare against.
 
         Returns:
-            True if verification passed.
+            ``True`` / ``False`` / :data:`UNVERIFIED`.
         """
         logger.info(f"[CONFIG VERIFY] Verifying Tachyon device state on {self.ip}")
         await self.disconnect()
@@ -1457,7 +1484,7 @@ class TachyonHandler(BaseHandler):
             logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed for {self.ip}")
             return False
 
-        # Check firmware banks
+        # Check firmware banks (informational signal, not the verification gate)
         try:
             banks = await self.get_firmware_banks()
             bank1 = banks.get("bank1", "unknown")
@@ -1469,5 +1496,45 @@ class TachyonHandler(BaseHandler):
         except Exception as e:
             logger.warning(f"[CONFIG VERIFY] Could not check firmware banks: {e}")
 
-        logger.info(f"[CONFIG VERIFY] Device verified accessible on {self.ip}")
+        # Re-confirm the config actually landed by reading it back and comparing
+        # against what we applied. This is the real gate (fail-closed).
+        expected = self._last_applied_config or {}
+        expected_hostname = expected.get("system", {}).get("hostname")
+        expected_ssid = None
+        try:
+            vaps = expected.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
+            if vaps:
+                expected_ssid = vaps[0].get("ssid")
+        except (KeyError, IndexError, TypeError):
+            pass
+
+        if not (expected_hostname or expected_ssid):
+            # Nothing recorded to compare — connectivity confirmed, config not.
+            logger.info(f"[CONFIG VERIFY] Device accessible on {self.ip}; no config fields to confirm")
+            return UNVERIFIED
+
+        readback = await self._get_config_curl()
+        if not readback:
+            logger.error(f"[CONFIG VERIFY] Could not read back config on {self.ip} — failing closed")
+            return False
+
+        if expected_hostname:
+            actual = readback.get("system", {}).get("hostname")
+            if actual != expected_hostname:
+                logger.error(f"[CONFIG VERIFY] hostname mismatch: expected '{expected_hostname}', got '{actual}'")
+                return False
+
+        if expected_ssid:
+            actual_ssid = None
+            try:
+                vaps = readback.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
+                if vaps:
+                    actual_ssid = vaps[0].get("ssid")
+            except (KeyError, IndexError, TypeError):
+                pass
+            if actual_ssid != expected_ssid:
+                logger.error(f"[CONFIG VERIFY] SSID mismatch: expected '{expected_ssid}', got '{actual_ssid}'")
+                return False
+
+        logger.info(f"[CONFIG VERIFY] Config confirmed on {self.ip}")
         return True

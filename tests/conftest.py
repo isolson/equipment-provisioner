@@ -6,11 +6,19 @@ exact sequence of phases that ran for a given combination of handler
 properties.
 """
 
+import asyncio
+import os
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
+# Ensure this directory is importable so sibling test helpers (``stubs``) resolve
+# regardless of pytest's import mode / invocation cwd.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from provisioner.handlers.base import BaseHandler, DeviceInfo
+from stubs import FakeCurl, StubSession
 
 
 class SpyHandler(BaseHandler):
@@ -157,3 +165,44 @@ def spy_handler_factory():
         return SpyHandler(**overrides)
 
     return _make
+
+
+@pytest.fixture
+def stub_aiohttp():
+    """Build a :class:`StubSession` for handlers that use ``aiohttp``.
+
+    Usage::
+
+        session = stub_aiohttp(router=lambda method, url, kw: StubResponse(...))
+        monkeypatch.setattr(handler, "_get_session", lambda: session)
+    """
+
+    def _make(router=None, default=None) -> StubSession:
+        return StubSession(router=router, default=default)
+
+    return _make
+
+
+@pytest.fixture
+def fake_curl(monkeypatch):
+    """Intercept ``asyncio.create_subprocess_exec`` for curl-based handler paths.
+
+    Returns a :class:`FakeCurl`; register responses with ``set_handler`` or
+    ``route_by_method``. Patches the attribute on the ``asyncio`` module, which
+    is what both the module-level and function-local ``import asyncio`` in the
+    handlers resolve to at call time.
+    """
+    fc = FakeCurl()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fc)
+    return fc
+
+
+@pytest.fixture
+def fast_sleep(monkeypatch):
+    """Make ``asyncio.sleep`` return immediately so retry/settle delays don't
+    slow the suite. Handlers use sleeps only for pacing, never for ordering."""
+
+    async def _noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _noop)

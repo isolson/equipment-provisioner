@@ -10,6 +10,16 @@ from typing import Optional, Dict, Any, Callable, Awaitable
 
 _logger = logging.getLogger(__name__)
 
+# Tri-state result for verify_config(). Verification is HONEST / fail-closed:
+#   True        -> device state positively confirmed to match what was applied
+#   False       -> read-back succeeded but did NOT match (real failure -> abort)
+#   UNVERIFIED  -> could not confirm (no read-back capability, or the device
+#                  changed networks and is unreachable). Surfaced to the UI as a
+#                  distinct amber state — never reported as a green success.
+# A handler's verify_config may return any of these; the provision() flow maps
+# them to checklist states. Plain True/False handlers keep working unchanged.
+UNVERIFIED = "unverified"
+
 
 class ProvisioningPhase(str, Enum):
     """Current phase of the provisioning process."""
@@ -143,35 +153,50 @@ class BaseHandler(ABC):
         """
         pass
 
-    async def verify_config(self, expected_values: Optional[Dict[str, Any]] = None) -> bool:
-        """Verify that configuration was applied correctly.
+    async def _read_back_config(self) -> Optional[Dict[str, Any]]:
+        """Read the device's current config for verification.
 
-        Reconnects to the device and checks that key fields match expected values.
-        Override in device-specific handlers to implement actual verification.
+        Override in handlers that can read state back from the device. The
+        default returns ``None`` meaning "this handler has no read-back
+        capability" — which the default ``verify_config`` treats as
+        :data:`UNVERIFIED` (honest: we cannot confirm), never as success.
+        """
+        return None
 
-        Waits for the device's web server to be reachable before attempting login,
-        and stops immediately on auth/lockout errors to avoid session exhaustion.
+    async def verify_config(self, expected_values: Optional[Dict[str, Any]] = None):
+        """Verify that configuration was applied correctly (fail-closed).
+
+        Reconnects to the device, then — when ``expected_values`` are supplied —
+        reads the config back via :meth:`_read_back_config` and compares. The
+        result is HONEST:
+
+          - returns ``True`` only when read-back positively matched
+          - returns ``False`` when read-back ran but a value did not match
+          - returns :data:`UNVERIFIED` when there is nothing to compare or the
+            handler cannot read state back (connectivity confirmed, config not)
+
+        Override in device-specific handlers for vendor-specific read-back.
 
         Args:
             expected_values: Optional dict of field names to expected values.
-                            If None, just verifies device is accessible.
+                            If None, only device accessibility is confirmed.
 
         Returns:
-            True if config verification passed.
+            ``True`` / ``False`` / :data:`UNVERIFIED`.
         """
-        # Default implementation - just verify we can still connect
         # Config apply does not trigger a reboot, so the device should still be up.
-        _logger.info(f"[CONFIG VERIFY] Default verification - checking device accessibility")
+        _logger.info(f"[CONFIG VERIFY] Default verification - reconnecting to {self.ip}")
         await self.disconnect()
 
-        # Try to reconnect and verify device is accessible
+        # Try to reconnect first.
+        connected = False
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
                 _logger.info(f"[CONFIG VERIFY] Login attempt {attempt}/{max_attempts}")
                 if await self.connect():
-                    _logger.info(f"[CONFIG VERIFY] Device accessible after config apply")
-                    return True
+                    connected = True
+                    break
 
                 # Check for auth/lockout errors — stop immediately, don't burn attempts
                 login_err = getattr(self, 'login_error', None) or ""
@@ -187,8 +212,34 @@ class BaseHandler(ABC):
             if attempt < max_attempts:
                 await asyncio.sleep(10)
 
-        _logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed")
-        return False
+        if not connected:
+            _logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed")
+            return False
+
+        # Reconnect confirmed the device is reachable. Without specific values to
+        # check, that is all we can honestly assert — connectivity, not config.
+        if not expected_values:
+            _logger.info(f"[CONFIG VERIFY] Device accessible; no specific values to confirm")
+            return UNVERIFIED
+
+        # Expected values were requested — read state back and compare.
+        readback = await self._read_back_config()
+        if readback is None:
+            _logger.warning(
+                f"[CONFIG VERIFY] No read-back capability on {self.ip} — reporting UNVERIFIED"
+            )
+            return UNVERIFIED
+
+        for field_name, expected in expected_values.items():
+            actual = readback.get(field_name)
+            if actual != expected:
+                _logger.error(
+                    f"[CONFIG VERIFY] {field_name} mismatch: expected {expected!r}, got {actual!r}"
+                )
+                return False
+
+        _logger.info(f"[CONFIG VERIFY] All expected values confirmed on {self.ip}")
+        return True
 
     @abstractmethod
     async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
@@ -669,13 +720,24 @@ class BaseHandler(ABC):
                     _logger.info(f"[PROVISION] Phase 6b: Verify config applied")
                     await notify("config_verify", "loading", None)
 
-                    if not await self.verify_config():
+                    verify_result = await self.verify_config()
+                    if verify_result is False:
                         result.error_message = "Config verification failed - device may not have applied config correctly"
                         await notify("config_verify", False, result.error_message)
                         return result
-
-                    await notify("config_verify", True, None)
-                    _logger.info(f"[PROVISION] Config verification passed")
+                    elif verify_result == UNVERIFIED:
+                        # Connectivity confirmed but config state could not be read
+                        # back. Surface honestly (amber) instead of a false green.
+                        # NOTE: pass NO detail. Some progress sinks store
+                        # `detail if detail else success` (web/api.py on_progress),
+                        # so a detail string here would overwrite the "unverified"
+                        # status and the UI would render it green. The reason is in
+                        # the log line below.
+                        await notify("config_verify", UNVERIFIED, None)
+                        _logger.info(f"[PROVISION] Config applied but device state could not be confirmed (UNVERIFIED)")
+                    else:
+                        await notify("config_verify", True, None)
+                        _logger.info(f"[PROVISION] Config verification passed")
                 else:
                     _logger.info(f"[PROVISION] No config to apply - skipping")
                     await notify("config_upload", "skipped", "No config specified")
@@ -843,10 +905,15 @@ class BaseHandler(ABC):
                     await notify("config_upload", True, None)
                     _logger.info(f"[PROVISION] Config applied successfully")
 
-                    # Skip verification — device may be unreachable after config
-                    # changes the management network (VLAN, DHCP mode, etc.)
-                    _logger.info(f"[PROVISION] Config verification skipped — device may be unreachable after config change")
-                    await notify("config_verify", "skipped", "Config applied — verification skipped (device may change networks)")
+                    # Config cannot be read back in-band — applying it changes the
+                    # management network (VLAN, DHCP mode), so the device leaves the
+                    # link we provisioned it on. Report this honestly as UNVERIFIED
+                    # (amber), NOT as a green success: "sent, not confirmed".
+                    # NOTE: pass NO detail — see the matching note above; a detail
+                    # string would be stored in place of the "unverified" status by
+                    # `detail if detail else success` progress sinks and render green.
+                    _logger.info(f"[PROVISION] Config sent but not read back — device changed management network (UNVERIFIED)")
+                    await notify("config_verify", UNVERIFIED, None)
                 else:
                     _logger.info(f"[PROVISION] No config to apply - skipping")
                     await notify("config_upload", "skipped", "No config specified")
