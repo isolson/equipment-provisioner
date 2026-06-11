@@ -59,6 +59,8 @@ Follow the checklist in `docs/HANDLER_DEVELOPMENT.md` under "Adding a New Vendor
 
 ```bash
 # Deploy code to host and restart service. Defaults to serveradmin@192.168.10.50.
+# Refuses to run from branches other than 'production' — use --allow-branch to
+# hardware-test a feature branch. See docs/BRANCHING.md for the promotion flow.
 ./scripts/deploy.sh
 
 # Config templates in the repo dir must be copied separately:

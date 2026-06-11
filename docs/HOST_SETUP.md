@@ -48,6 +48,8 @@ Host provisioner
 
 `scripts/deploy.sh` rsyncs the working tree to `/opt/provisioner/` on the host and restarts `provisioner-web`. Defaults to `serveradmin@192.168.10.50`; override with `PROVISIONER_HOST` / `PROVISIONER_USER`.
 
+Production deploys run from a checkout of the `production` branch — the script refuses other branches unless given `--allow-branch` (for hardware-testing a feature branch), and records the deployed commit in `/opt/provisioner/.deployed-rev`. See `docs/BRANCHING.md` for the promotion, hotfix, and rollback flows.
+
 The script auto-detects `~/.ssh/id_conductor` and passes `-i KEY -o IdentitiesOnly=yes` to both rsync and the inline ssh calls, so the 1Password-agent issue above doesn't affect it. Override with `SSH_KEY=/path/to/other_key` or set `SSH_OPTS=` to use whatever your `~/.ssh/config` provides.
 
 ## Config files: `/etc` vs `/opt`

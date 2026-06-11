@@ -70,7 +70,7 @@ Once installed, open a terminal (Ctrl+Alt+T) and proceed to Step 2.
 In the terminal on your host computer, run this single command:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/isolson/network-provisioner/main/scripts/bootstrap.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/isolson/equipment-provisioner/main/scripts/bootstrap.sh | sudo bash
 ```
 
 This downloads and runs the setup script. It will:
@@ -89,7 +89,7 @@ This downloads and runs the setup script. It will:
 Dashboard: http://192.168.88.10:8080
 ```
 
-> If you prefer to review the code before running it: `git clone https://github.com/isolson/network-provisioner.git /opt/provisioner && sudo bash /opt/provisioner/scripts/setup.sh`
+> If you prefer to review the code before running it: `git clone -b production https://github.com/isolson/equipment-provisioner.git /opt/provisioner && sudo bash /opt/provisioner/scripts/setup.sh`
 
 ### Step 4: Finish setup in the browser
 
@@ -474,8 +474,8 @@ The state machine handles:
 ### Local Setup
 
 ```bash
-git clone https://github.com/isolson/network-provisioner.git
-cd network-provisioner
+git clone https://github.com/isolson/equipment-provisioner.git
+cd equipment-provisioner
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -567,4 +567,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 Built by Isaac Olson for network operators who provision too many radios by hand.
 
-Feedback and bug reports: [GitHub Issues](https://github.com/isolson/network-provisioner/issues)
+Feedback and bug reports: [GitHub Issues](https://github.com/isolson/equipment-provisioner/issues)
