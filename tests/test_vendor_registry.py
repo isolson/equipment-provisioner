@@ -28,6 +28,9 @@ Known, documented exceptions:
   ``firmware_sources``, config defaults): Tarana's firmware download
   endpoint requires authentication, so firmware is uploaded manually
   instead of auto-fetched.
+- ``mikrotik`` has no entry in ``_template_requirements`` (setup_tools.py):
+  MikroTik is configured via netinstall/ZTP ``.rsc`` scripts, not
+  deep-merge config templates, so it has no template readiness check.
 """
 
 import re
@@ -44,7 +47,11 @@ from provisioner.fingerprint import DeviceType
 from provisioner.firmware_checker import FirmwareChecker
 from provisioner.handler_manager import HandlerManager
 from provisioner.port_manager import DeviceLinkLocalIP
-from provisioner.setup_tools import SUPPORTED_DEVICE_TYPES
+from provisioner.setup_tools import (
+    SUPPORTED_DEVICE_TYPES,
+    _read_primary_credentials,
+    _template_requirements,
+)
 from provisioner.web.api import BUILTIN_CREDENTIALS, VALID_DEVICE_TYPES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -128,6 +135,25 @@ class TestPythonRegistries:
             "first-run setup UI shows dead or missing vendor entries."
         )
 
+    def test_setup_readiness_credential_hints_cover_every_vendor(self):
+        # _read_primary_credentials iterates SUPPORTED_DEVICE_TYPES and
+        # indexes its inline `defaults` dict — a vendor missing there makes
+        # /setup/readiness raise KeyError. The getattr chains all have
+        # defaults, so a bare object() exercises exactly that lookup.
+        entries = _read_primary_credentials(object())
+        assert {e["device_type"] for e in entries} == CANONICAL, (
+            "_read_primary_credentials defaults (setup_tools.py) out of sync "
+            "with SUPPORTED_DEVICE_TYPES."
+        )
+
+    def test_setup_template_requirements_cover_template_vendors(self):
+        assert set(_template_requirements(object())) == CANONICAL - {"mikrotik"}, (
+            "_template_requirements (setup_tools.py) out of sync — a missing "
+            "vendor silently gets no template readiness check (mikrotik is "
+            "the documented exception: configured via netinstall/ZTP .rsc, "
+            "not templates)."
+        )
+
     def test_firmware_source_map_matches(self):
         assert set(FirmwareChecker.SOURCE_MAP) == FIRMWARE_SOURCE_VENDORS, (
             "SOURCE_MAP (firmware_checker.py) out of sync — an S1 site when "
@@ -175,6 +201,37 @@ class TestSourceParsedRegistries:
         assert keys == CLI_VENDORS, (
             "cli.py choices=[...] drifted (expected the documented "
             "missing-ubiquiti state until Story 2 / #72 lands)."
+        )
+
+    def test_main_credentials_assembly_matches(self):
+        # main.py hand-builds the HandlerManager credentials dict from
+        # config.credentials.<vendor> attribute accesses — the other half of
+        # the config.py/main.py S1 crash-coupling (Story 3 / #73): a vendor
+        # present here but absent from CredentialsConfig is an
+        # AttributeError at boot.
+        source = (REPO_ROOT / "provisioner" / "main.py").read_text()
+        vendors = set(re.findall(r"self\.config\.credentials\.(\w+)", source))
+        assert vendors == CANONICAL, (
+            "main.py credential assembly out of sync with CredentialsConfig."
+        )
+
+    def test_boot_ping_list_covers_the_same_ips_as_probe_list(self):
+        # The boot-wait path keeps its own inline ips_to_try list, separate
+        # from DeviceLinkLocalIP.ALL (the duplication Story 4 / #74 removes).
+        # An IP present in ALL but missing here delays boot detection.
+        source = (REPO_ROOT / "provisioner" / "port_manager.py").read_text()
+        match = re.search(r"ips_to_try\s*=\s*\[([^\]]*)\]", source)
+        assert match, (
+            "port_manager.py: couldn't find the boot-ping `ips_to_try = [...]` "
+            "list — if it now derives from DeviceLinkLocalIP.ALL (Story 4 / "
+            "#74), update this test."
+        )
+        attr_names = re.findall(r"DeviceLinkLocalIP\.(\w+)", match.group(1))
+        boot_ips = {getattr(DeviceLinkLocalIP, name) for name in attr_names}
+        probe_ips = {ip for ip, _vendors in DeviceLinkLocalIP.ALL}
+        assert boot_ips == probe_ips, (
+            "Boot-ping ips_to_try (port_manager.py) covers different IPs than "
+            "DeviceLinkLocalIP.ALL."
         )
 
     def test_index_html_vendor_map_matches(self):
