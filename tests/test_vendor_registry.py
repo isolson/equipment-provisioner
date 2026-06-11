@@ -25,8 +25,9 @@ Known, documented exceptions:
   Story 2 (#72) derives the CLI list from ``HANDLER_MAP``; remove
   ``CLI_VENDORS`` when it lands.
 - No ``tarana`` firmware source exists (``SOURCE_MAP``,
-  ``firmware_sources``, config defaults): Tarana firmware is delivered by
-  the operator cloud, not by this provisioner.
+  ``firmware_sources``, config defaults): Tarana's firmware download
+  endpoint requires authentication, so firmware is uploaded manually
+  instead of auto-fetched.
 """
 
 import re
@@ -52,8 +53,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # sentinels. Every other registry is asserted against this.
 CANONICAL = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
 
-# Vendors with a firmware-source implementation (documented exception:
-# Tarana firmware comes from the operator cloud).
+# Vendors with an auto-fetch firmware source. Documented exception: Tarana's
+# download endpoint requires authentication, so its firmware is uploaded
+# manually and no source class exists. A newly added vendor without an
+# auto-fetch source joins this exception the same way.
 FIRMWARE_SOURCE_VENDORS = CANONICAL - {"tarana"}
 
 # cli.py predates Ubiquiti support and hardcodes its own handler list
