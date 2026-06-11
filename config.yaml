@@ -114,7 +114,7 @@ device_settings:
     operator_id:                    # Tarana operator ID (set via gNMI on /radios/global/config/operator-id)
   mikrotik:
     ztp_api_url: https://wifi.infra.treehouse.mn  # ZTP API base URL (e.g. https://ztp.example.com)
-    ztp_api_key: "${MIKROTIK_ZTP_API_KEY}"  # X-API-Key for POST /ztp/mikrotik/register
+    ztp_api_key: "${MIKROTIK_ZTP_API_KEY}"  # X-API-Key for GET /ztp/mikrotik/netinstall-bootstrap.rsc and POST /ztp/mikrotik/register
 
 firmware:
   # Update both firmware banks on dual-bank devices

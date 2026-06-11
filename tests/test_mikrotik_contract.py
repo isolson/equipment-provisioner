@@ -1,12 +1,16 @@
 """Contract-compliance tests for the MikroTik ZTP pipeline.
 
-Verifies the four contract-shaped helpers:
+Verifies the five contract-shaped helpers:
 
   - ``MikrotikHandler.build_import_script``  — prepends ``:local`` parameters
     to the canonical script with correct RouterScript escaping.
   - ``MikrotikHandler.fetch_base_flash``     — GETs the canonical script
     from ``<ztp_api_url>/ztp/mikrotik/base-flash.rsc`` and raises on
     non-200.
+  - ``MikrotikHandler.fetch_netinstall_bootstrap`` — GETs the served
+    Netinstall Configure script from
+    ``<ztp_api_url>/ztp/mikrotik/netinstall-bootstrap.rsc`` with an
+    ``X-API-Key`` header and raises on non-200.
   - ``MikrotikHandler.verify_base_flash_applied`` — reads ``/system/note``
     over the live SSH session and returns ``True`` iff it contains the
     canonical ``base_flash_version=universal-v1`` marker.
@@ -170,6 +174,58 @@ class TestFetchBaseFlash:
         with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
             with pytest.raises(RuntimeError, match=str(status)):
                 await MikrotikHandler.fetch_base_flash("https://api.example.com")
+
+
+# ---------------------------------------------------------------------------
+# fetch_netinstall_bootstrap
+# ---------------------------------------------------------------------------
+
+
+class TestFetchNetinstallBootstrap:
+    async def test_returns_body_and_sends_api_key(self):
+        factory, stub = _patch_session(200, "# served bootstrap\n")
+        with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
+            body = await MikrotikHandler.fetch_netinstall_bootstrap(
+                "https://api.example.com", "sekret"
+            )
+
+        assert body == "# served bootstrap\n"
+        assert stub.last_call["method"] == "GET"
+        assert (
+            stub.last_call["url"]
+            == "https://api.example.com/ztp/mikrotik/netinstall-bootstrap.rsc"
+        )
+        assert stub.last_call["headers"]["X-API-Key"] == "sekret"
+
+    async def test_omits_api_key_header_when_unset(self):
+        factory, stub = _patch_session(200, "ok")
+        with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
+            await MikrotikHandler.fetch_netinstall_bootstrap(
+                "https://api.example.com", None
+            )
+
+        assert "X-API-Key" not in stub.last_call["headers"]
+
+    async def test_strips_trailing_slash(self):
+        factory, stub = _patch_session(200, "ok")
+        with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
+            await MikrotikHandler.fetch_netinstall_bootstrap(
+                "https://api.example.com/", "sekret"
+            )
+
+        assert (
+            stub.last_call["url"]
+            == "https://api.example.com/ztp/mikrotik/netinstall-bootstrap.rsc"
+        )
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 500, 502])
+    async def test_raises_on_non_200(self, status):
+        factory, _ = _patch_session(status, "error body")
+        with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
+            with pytest.raises(RuntimeError, match=str(status)):
+                await MikrotikHandler.fetch_netinstall_bootstrap(
+                    "https://api.example.com", "sekret"
+                )
 
 
 # ---------------------------------------------------------------------------
