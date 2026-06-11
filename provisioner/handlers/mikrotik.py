@@ -636,6 +636,8 @@ class MikrotikHandler(BaseHandler):
         self,
         firmware_paths: List[str],
         interface: str,
+        configure_script_body: Optional[str] = None,
+        configure_script_path: Optional[str] = None,
         bootstrap_password: Optional[str] = None,
         on_progress=None,
     ) -> bool:
@@ -645,14 +647,19 @@ class MikrotikHandler(BaseHandler):
         Runs netinstall-cli to flash RouterOS firmware onto the device.
 
         Args:
-            firmware_paths: All RouterOS .npk files to offer. netinstall-cli picks
-                the arch matching the BOOTP request, so pass every arch you have.
+            firmware_paths: All RouterOS / extra .npk files to offer. netinstall-cli
+                picks the matching arch from the BOOTP request, so pass every latest
+                package per package/arch that the contract requires.
             interface: VLAN interface to use (e.g. eth0.1991)
-            bootstrap_password: If set, runs a -s user-script after install that
-                creates a non-admin user (fleet-bootstrap) with this password.
-                Required for RouterOS 7.20+ where default-config admin sits in
-                a 'must change password on first login' state that prevents SSH
-                login even after /user/set on admin.
+            configure_script_body: Served RouterOS script body to pass to
+                netinstall-cli via ``-s``. Preferred contract path.
+            configure_script_path: Existing local path to pass to netinstall-cli
+                via ``-s``. Used when the caller already materialized the served
+                Configure script on disk.
+            bootstrap_password: Compatibility fallback for legacy callers that
+                do not yet provide a served Configure script. Generates the
+                older local bootstrap script; this path is not contract-compliant
+                with sixtyops/wifi PR #253.
             on_progress: Optional async callback for progress updates
         """
         if not Path(self.NETINSTALL_CLI).exists():
@@ -666,6 +673,10 @@ class MikrotikHandler(BaseHandler):
         missing = [p for p in firmware_paths if not Path(p).exists()]
         if missing:
             logger.error(f"Firmware files not found: {missing}")
+            return False
+
+        if configure_script_body is not None and configure_script_path is not None:
+            logger.error("Provide either configure_script_body or configure_script_path, not both")
             return False
 
         octet = self._netinstall_octet_for_interface(interface)
@@ -713,7 +724,24 @@ class MikrotikHandler(BaseHandler):
         cmd.extend(["-sm", modescript_path])
 
         userscript_path: Optional[str] = None
-        if bootstrap_password:
+        generated_userscript_path: Optional[str] = None
+        if configure_script_path:
+            userscript_path = configure_script_path
+            cmd.extend(["-s", userscript_path])
+        elif configure_script_body is not None:
+            fd = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".rsc", prefix="netinstall-userscript-", delete=False
+            )
+            fd.write(configure_script_body)
+            fd.close()
+            userscript_path = fd.name
+            generated_userscript_path = userscript_path
+            cmd.extend(["-s", userscript_path])
+        elif bootstrap_password:
+            logger.warning(
+                "Falling back to legacy inline Netinstall Configure script; "
+                "this is not the served-script contract path"
+            )
             escaped = self._escape_routeros_string(bootstrap_password)
             # `-s` REPLACES default-config, so we must explicitly bring up
             # the management IP (192.168.88.1) and a bridge over all ether
@@ -738,6 +766,7 @@ class MikrotikHandler(BaseHandler):
             fd.write(script_body)
             fd.close()
             userscript_path = fd.name
+            generated_userscript_path = userscript_path
             cmd.extend(["-s", userscript_path])
 
         cmd.extend(firmware_paths)
@@ -799,7 +828,7 @@ class MikrotikHandler(BaseHandler):
         finally:
             if addr_added:
                 await self._remove_netinstall_addr(interface, host_addr)
-            for path in (userscript_path, modescript_path):
+            for path in (generated_userscript_path, modescript_path):
                 if path:
                     try:
                         os.unlink(path)
@@ -982,6 +1011,7 @@ class MikrotikHandler(BaseHandler):
     # recovery, and role self-detection. Our job is fetch -> prepend the
     # per-device :local parameters -> /import -> verify -> register.
 
+    NETINSTALL_BOOTSTRAP_PATH = "/ztp/mikrotik/netinstall-bootstrap.rsc"
     BASE_FLASH_PATH = "/ztp/mikrotik/base-flash.rsc"
     # The base-flash stamp is `base_flash_version=universal-vN`. The server
     # bumps N on every material base-flash change, and its contract is that
@@ -1016,6 +1046,29 @@ class MikrotikHandler(BaseHandler):
                     body = await resp.text()
                     raise RuntimeError(
                         f"base-flash fetch {url} returned {resp.status}: {body[:200]}"
+                    )
+                return await resp.text()
+
+    @staticmethod
+    async def fetch_netinstall_bootstrap(ztp_api_url: str, api_key: Optional[str]) -> str:
+        """Fetch the served Netinstall Configure script from the wifi-api.
+
+        Per contract this endpoint is API-key gated because it includes the
+        substituted fleet secrets that become the device's persisted default
+        configuration on every factory reset.
+        """
+        url = ztp_api_url.rstrip("/") + MikrotikHandler.NETINSTALL_BOOTSTRAP_PATH
+        headers = {}
+        if api_key:
+            headers["X-API-Key"] = api_key
+
+        timeout = aiohttp.ClientTimeout(total=MikrotikHandler.BASE_FLASH_FETCH_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"netinstall bootstrap fetch {url} returned {resp.status}: {body[:200]}"
                     )
                 return await resp.text()
 

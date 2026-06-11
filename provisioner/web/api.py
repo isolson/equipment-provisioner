@@ -331,42 +331,16 @@ _NPK_PACKAGE_ORDER = {
     "wireless": 13,
 }
 
-# WiFi driver packages installed post-boot (NOT shipped during netinstall —
-# see MikrotikHandler.install_extra_npk_and_reboot for the radio-binding
-# rationale). A device's required driver family maps to the package prefixes
-# that satisfy it, most-preferred first.
-_WIFI_EXTRA_PACKAGES = ("wifi-qcom", "wifi-qcom-ac", "wifi-mediatek", "wireless")
-_WIFI_DRIVER_FAMILIES = {
-    "wifi-qcom": ("wifi-qcom", "wifi-qcom-ac", "wireless"),
-    "wifi-mediatek": ("wifi-mediatek",),
-}
-
-
-def _select_wifi_extra(
-    extras: Dict[tuple[str, str], str],
-    driver_prefix: str,
-    arch: str,
-) -> Optional[str]:
-    """Pick the post-boot wifi package for a device's driver family + arch.
-
-    `extras` is keyed by (package, arch); `driver_prefix` is the family the
-    device needs ("wifi-qcom" or "wifi-mediatek"). Returns the .npk path or
-    None if no package in that family exists for the arch.
-    """
-    for package in _WIFI_DRIVER_FAMILIES.get(driver_prefix, (driver_prefix,)):
-        path = extras.get((package, arch))
-        if path:
-            return path
-    return None
-
 
 def _select_latest_npk_per_arch(mikrotik_fw_dir: Path) -> List[str]:
     """Return one .npk path per package/arch, picking the newest version.
 
     MikroTik has used both `routeros-<arch>-<version>.npk` and
     `routeros-<version>-<arch>.npk`; extra packages such as `wifi-qcom` use
-    `<package>-<version>-<arch>.npk`. Files that don't match are passed
-    through unchanged so unconventional names still reach netinstall-cli.
+    `<package>-<version>-<arch>.npk`. Netinstall ships the full selected set,
+    including WiFi driver packages required by the wifi contract. Files that
+    don't match are passed through unchanged so unconventional names still
+    reach netinstall-cli.
     """
     selected_by_package_arch: Dict[tuple[str, str], tuple] = {}
     unmatched: List[Path] = []
@@ -401,39 +375,6 @@ def _select_latest_npk_per_arch(mikrotik_fw_dir: Path) -> List[str]:
     return selected
 
 
-def _split_routeros_and_extras(
-    npks: List[str],
-) -> tuple[List[str], Dict[tuple[str, str], str]]:
-    """Split selected .npks into (routeros packages, extras by (package, arch)).
-
-    netinstall-cli ships only the routeros packages. WiFi driver packages
-    (wifi-qcom for Qualcomm models, wifi-mediatek for MediaTek models) are
-    installed in a post-boot step on the device — see
-    `MikrotikHandler.install_extra_npk_and_reboot` for the rationale. They are
-    keyed by (package, arch) because a single arch (e.g. arm) can have both a
-    Qualcomm and a MediaTek variant; the right one is chosen post-boot from the
-    device's model via `_select_wifi_extra`.
-    """
-    routeros: List[str] = []
-    extras: Dict[tuple[str, str], str] = {}
-    for path_str in npks:
-        match = _NPK_NAME_RE.match(Path(path_str).name)
-        if not match:
-            # Unconventional name — assume it's a routeros variant we want
-            # to ship via netinstall, not a separate extra.
-            routeros.append(path_str)
-            continue
-        package = match.group("package").lower()
-        arch = (
-            match.group("arch_first") or match.group("arch_after_version")
-        ).lower()
-        if package in _WIFI_EXTRA_PACKAGES:
-            extras[(package, arch)] = path_str
-        else:
-            routeros.append(path_str)
-    return routeros, extras
-
-
 @router.post("/netinstall", response_model=ProvisionResponse)
 async def netinstall_device(
     req: NetinstallRequest,
@@ -442,9 +383,9 @@ async def netinstall_device(
 ):
     """Run Netinstall on a port (MikroTik in BOOTP mode).
 
-    Flashes RouterOS firmware, then boots the device and applies base-flash.rsc
-    for ZTP setup. The device must be in Netinstall/BOOTP mode (reset button
-    held during power-on).
+    Flashes RouterOS firmware with the contract Netinstall Mode + Configure
+    scripts. The device must be in Netinstall/BOOTP mode (reset button held
+    during power-on).
     """
     provisioner = request.app.state.provisioner
     if not provisioner:
@@ -475,7 +416,7 @@ async def netinstall_device(
 
 
 async def _run_netinstall(provisioner, port_number: int):
-    """Run Netinstall + base-flash pipeline in background."""
+    """Run Netinstall + served Configure-script pipeline in background."""
     from provisioner.handlers.mikrotik import MikrotikHandler
     from provisioner.web.websocket import (
         notify_port_change,
@@ -517,37 +458,51 @@ async def _run_netinstall(provisioner, port_number: int):
             payload["error"] = error
         await notify_provisioning_completed(port_number, 0, success, payload)
 
-    # Device is in BOOTP mode — arch unknown. Pass every .npk we have so
-    # netinstall-cli can match the arch from the BOOTP request itself.
-    # When multiple versions of the same arch are present (e.g. mid-upgrade),
-    # netinstall-cli's choice between them is unspecified, so collapse to the
-    # newest version per arch before handing the list off.
-    #
-    # IMPORTANT: ship only routeros packages via netinstall-cli. The WiFi
-    # driver package (wifi-qcom for Qualcomm models, wifi-mediatek for MediaTek
-    # models) is installed in a post-boot step via SCP+reboot to work around an
-    # hAP ax wifi-radio-binding bug where simultaneous routeros+wifi netinstall
-    # leaves /interface/wifi/radio empty. The correct driver is chosen post-boot
-    # from the device's model. See MikrotikHandler.install_extra_npk_and_reboot.
+    # Device is in BOOTP mode — model unknown. Pass every latest package we
+    # have so netinstall-cli can match the arch from the BOOTP request itself.
+    # This includes WiFi driver packages; sixtyops/wifi PR #253 treats the
+    # served Netinstall Configure script as the durable post-reset contract,
+    # and the driver package is part of that initial flash set.
     mikrotik_fw_dir = provisioner.firmware_manager.firmware_path / "mikrotik"
-    all_npks = _select_latest_npk_per_arch(mikrotik_fw_dir)
-    npks, wifi_extras = _split_routeros_and_extras(all_npks)
+    npks = _select_latest_npk_per_arch(mikrotik_fw_dir)
     if not npks:
-        logger.error(f"No MikroTik routeros firmware found for Netinstall on port {port_number} (looked in {mikrotik_fw_dir})")
+        logger.error(f"No MikroTik firmware found for Netinstall on port {port_number} (looked in {mikrotik_fw_dir})")
         await finish(False, "No MikroTik firmware available")
         return
 
-    # Bootstrap password must exist before we even start — netinstall-cli's
-    # -s user-script bakes it into admin so the post-flash login works.
-    # RouterOS 7.20+ no longer accepts admin/empty even after `-r`.
+    # The served Configure script embeds fleet-bootstrap credentials, and the
+    # post-flash login must use the same password locally.
     bootstrap_pass = config.credentials.mikrotik.bootstrap_password
     if not bootstrap_pass:
         logger.error("No MIKROTIK_BOOTSTRAP_PASS configured — cannot run Netinstall")
         await finish(False, "No MIKROTIK_BOOTSTRAP_PASS configured")
         return
 
+    ztp_api_url = getattr(config.device_settings.mikrotik, 'ztp_api_url', None)
+    if not ztp_api_url:
+        await finish(False, "device_settings.mikrotik.ztp_api_url not configured")
+        return
+
+    ztp_api_key = getattr(config.device_settings.mikrotik, 'ztp_api_key', None)
+    if not ztp_api_key:
+        await finish(False, "device_settings.mikrotik.ztp_api_key not configured")
+        return
+
+    await on_progress("config", "running", "Fetching served netinstall-bootstrap.rsc...")
     try:
-        # Step 1: Netinstall (with -s user-script that creates fleet-bootstrap user)
+        configure_script_body = await MikrotikHandler.fetch_netinstall_bootstrap(
+            ztp_api_url,
+            ztp_api_key,
+        )
+    except Exception as exc:
+        await on_progress("config", False, f"Fetch failed: {str(exc)[:100]}")
+        await finish(False, f"netinstall-bootstrap fetch failed: {exc}")
+        return
+    await on_progress("config", True, "Fetched served netinstall-bootstrap.rsc")
+
+    try:
+        # Step 1: Netinstall with the contract Mode script plus the served
+        # Configure script from the target wifi backend.
         handler = MikrotikHandler(
             ip="192.168.88.1",
             credentials={"username": MikrotikHandler.BOOTSTRAP_USER, "password": bootstrap_pass},
@@ -559,7 +514,7 @@ async def _run_netinstall(provisioner, port_number: int):
         success = await handler.netinstall(
             firmware_paths=npks,
             interface=interface,
-            bootstrap_password=bootstrap_pass,
+            configure_script_body=configure_script_body,
             on_progress=on_progress,
         )
 
@@ -568,9 +523,8 @@ async def _run_netinstall(provisioner, port_number: int):
             return
 
         # Suppress the port link-loss watchdog for the rest of the pipeline: the
-        # planned reboots (first boot, wifi-driver install, factory-reset) and the
-        # slow base-flash /import drop or stall the switch-port link, which the
-        # watchdog would otherwise read as an unplug and cancel this task. Internal
+        # first boot and follow-up verification windows can still flap the port,
+        # and the watchdog would otherwise read that as an unplug. Internal
         # wait_for_* timeouts still bound the run, so a real unplug fails cleanly.
         port_manager.set_expecting_reboot(port_number, True)
 
@@ -613,112 +567,7 @@ async def _run_netinstall(provisioner, port_number: int):
             await finish(False, "Could not read RouterBOARD serial; refusing to register")
             return
 
-        # Step 3a: post-flash install of the device's WiFi driver package.
-        # The driver family (wifi-qcom vs wifi-mediatek) is chosen from the
-        # model — arch alone is ambiguous (arm has both Qualcomm and MediaTek
-        # devices). Wired-only models report no driver and skip this step.
-        device_arch = (getattr(info, "hardware_version", "") or "").lower()
-        driver_prefix = MikrotikHandler.wifi_driver_for_model(info.model, device_arch)
-        wifi_pkg = (
-            _select_wifi_extra(wifi_extras, driver_prefix, device_arch)
-            if driver_prefix
-            else None
-        )
-        if wifi_pkg:
-            await on_progress(
-                "wifi_driver",
-                "running",
-                f"Installing {Path(wifi_pkg).name} (post-flash sequenced)",
-            )
-            if not await handler.install_extra_npk_and_reboot(wifi_pkg):
-                await on_progress("wifi_driver", False, "install failed")
-                await finish(False, "WiFi driver post-flash install failed")
-                return
-            await on_progress("wifi_driver", True, f"installed {Path(wifi_pkg).name}")
-
-            # Step 3b: factory reset so customized.default.rsc re-runs with the
-            # WiFi driver now bound at the kernel level. This is the step that
-            # populates /interface/wifi/radio per the forum SOLVED recipe.
-            await on_progress("wifi_bind", "running", "Factory reset to bind wifi radios")
-            if not await handler.factory_reset_and_reconnect():
-                await on_progress("wifi_bind", False, "factory reset failed")
-                await finish(False, "Could not bind wifi radios after factory reset")
-                return
-            await on_progress("wifi_bind", True, "wifi radios bound")
-        elif driver_prefix:
-            logger.warning(
-                f"Device {info.model!r} (arch={device_arch!r}) needs a "
-                f"{driver_prefix} package but none was found in the firmware "
-                f"dir — skipping post-flash WiFi driver install"
-            )
-        else:
-            logger.info(
-                f"No WiFi driver needed for arch={device_arch!r} "
-                f"model={info.model!r} (wired-only)"
-            )
-
-        # Debug toggle: stop here so we can inspect the post-netinstall device
-        # state before the canonical base-flash runs. Isolates whether base-flash
-        # /import is what breaks `/interface/wifi/radio/print` on hAP ax S.
-        if os.environ.get("MIKROTIK_SKIP_BASE_FLASH", "").lower() in ("1", "true", "yes"):
-            logger.warning(
-                "MIKROTIK_SKIP_BASE_FLASH set — stopping after netinstall, "
-                "skipping base-flash /import + ZTP verify + register. Device "
-                "left at post-netinstall fleet-bootstrap state on 192.168.88.1 "
-                "for diagnostic SSH. serial=%s",
-                serial,
-            )
-            await on_progress("config", True, "SKIPPED (MIKROTIK_SKIP_BASE_FLASH=1)")
-            await handler.disconnect()
-            await finish(
-                True,
-                detail=f"netinstall OK, base-flash skipped (debug); serial={serial}",
-            )
-            return
-
-        ztp_api_url = getattr(config.device_settings.mikrotik, 'ztp_api_url', None)
-        if not ztp_api_url:
-            await on_progress("config", False, "ztp_api_url not configured")
-            await finish(False, "device_settings.mikrotik.ztp_api_url not configured")
-            return
-
-        # Step 4: Fetch canonical base-flash, prepend per-device params, /import.
-        await on_progress("config", "running", "Fetching canonical base-flash.rsc...")
-        try:
-            base_body = await MikrotikHandler.fetch_base_flash(ztp_api_url)
-        except Exception as exc:
-            await on_progress("config", False, f"Fetch failed: {str(exc)[:100]}")
-            await finish(False, f"base-flash fetch failed: {exc}")
-            return
-
-        # onboarding_pass is the fleet-wide th-ext-join PSK; it MUST be the same
-        # across the fleet for wireless extenders to join gateways. Falls back to
-        # bootstrap_pass (matching the bench tool's WIFI_ONBOARDING_PASS default).
-        onboarding_pass = config.credentials.mikrotik.onboarding_password or bootstrap_pass
-        script = MikrotikHandler.build_import_script(
-            serial=serial,
-            bootstrap_pass=bootstrap_pass,
-            base_flash_body=base_body,
-            onboarding_pass=onboarding_pass,
-        )
-
-        with NamedTemporaryFile(mode="w", suffix=".rsc", delete=False) as f:
-            f.write(script)
-            script_path = f.name
-
-        try:
-            await on_progress("config", "running", "Applying canonical base-flash...")
-            applied = await handler.apply_config_file(script_path)
-            if not applied:
-                await on_progress("config", False, "Base flash /import failed")
-                await finish(False, "Base flash /import failed")
-                return
-        finally:
-            os.unlink(script_path)
-
-        # Step 5: Verify the canonical script wrote its marker into /system/note.
-        # RouterOS can return from /import before follow-up SSH reads see every
-        # command, so wait briefly before treating absence as a half-run script.
+        # Step 4: Verify the served Configure script wrote its note marker.
         verified = await handler.wait_for_base_flash_applied()
         if not verified:
             logger.error(
@@ -734,15 +583,13 @@ async def _run_netinstall(provisioner, port_number: int):
             return
         detected_bf = handler.base_flash_version_detected or MikrotikHandler.BASE_FLASH_VERSION
         logger.info(
-            "MikroTik base-flash marker verified on port %s (%s)",
+            "MikroTik Configure-script marker verified on port %s (%s)",
             port_number,
             detected_bf,
         )
-        await on_progress("config", True, f"base-flash verified ({detected_bf})")
+        await on_progress("config", True, f"Configure script verified ({detected_bf})")
 
-        # Step 6: Verify the installed base-flash can actually reach ZTP once
-        # the router is moved to an internet uplink. This catches RouterOS
-        # device-mode blocks and missing phone-home artifacts before register.
+        # Step 5: Verify the served Configure script left the device ZTP-ready.
         ztp_ready, ztp_detail = await handler.verify_ztp_ready(serial)
         if not ztp_ready:
             logger.error(
@@ -758,9 +605,8 @@ async def _run_netinstall(provisioner, port_number: int):
 
         await handler.disconnect()
 
-        # Step 7: Register with the wifi-api. Contract endpoint, contract payload.
+        # Step 6: Register with the wifi-api. Contract endpoint, contract payload.
         from provisioner.equipment_registry import register_mikrotik
-        ztp_api_key = getattr(config.device_settings.mikrotik, 'ztp_api_key', None)
         try:
             await register_mikrotik(
                 ztp_api_url=ztp_api_url,
@@ -779,9 +625,9 @@ async def _run_netinstall(provisioner, port_number: int):
             await finish(False, f"wifi-api register failed: {exc}")
             return
 
-        await on_progress("complete", True, "ZTP base flash + register complete")
-        await finish(True, detail="ZTP base flash + register complete")
-        logger.info(f"Netinstall + base-flash + register complete on port {port_number}: {serial}")
+        await on_progress("complete", True, "Netinstall Configure script + register complete")
+        await finish(True, detail="Netinstall Configure script + register complete")
+        logger.info(f"Netinstall + Configure script + register complete on port {port_number}: {serial}")
 
     except Exception as exc:
         logger.error(f"Netinstall pipeline failed on port {port_number}: {exc}", exc_info=True)
