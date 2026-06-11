@@ -153,6 +153,11 @@ class TestModelFirmwarePatterns:
         # TNA-303L (long range) has separate firmware
         assert "tna-303l" in patterns.get("tna-303l", [])
         assert "tna-303l" in patterns.get("tna-303l-65", [])
+        assert "tna-303l" in patterns.get("tna-303l-lib", [])
+
+        # TNA-305 series has separate firmware
+        assert "tna-305" in patterns.get("tna-305x", [])
+        assert "tna-305" in patterns.get("tna-305a", [])
 
         # TNS-100 subscriber
         assert "tns-100" in patterns.get("tns-100", [])
@@ -200,6 +205,21 @@ class TestFirmwareFinding:
 
         assert result is not None
         assert "1.12.3" in result.version  # Should find the higher version
+
+    def test_find_firmware_by_convention_tachyon_305(self):
+        """Test finding Tachyon TNA-305 firmware by product family."""
+        tachyon_dir = self.firmware_path / "tachyon"
+        tachyon_dir.mkdir(parents=True)
+
+        (tachyon_dir / "tna-30x-1.15.0-r55151-default.bin").touch()
+        (tachyon_dir / "tna-305-1.14.0-r7960-default.bin").touch()
+        (tachyon_dir / "tns-100-1.12.8-r54729-default.bin").touch()
+
+        manager = FirmwareManager(self.temp_dir)
+        result = manager.get_firmware_file("tachyon", "TNA-305X")
+
+        assert result is not None
+        assert "tna-305" in result.filename.lower()
 
     def test_find_firmware_by_convention_wave(self):
         """Test finding Wave firmware by naming convention."""

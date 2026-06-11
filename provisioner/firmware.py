@@ -182,13 +182,17 @@ class FirmwareManager:
         # Cambium ePMP 2000/1000 series
         "epmp 2000": ["epmp-nongps", "epmp2000"],
         "epmp 1000": ["epmp1000", "epmp-nongps"],
-        # Tachyon TNA-30x series (standard) - uses tna-30x firmware
+        # Tachyon TNA-30x series (standard 60 GHz) - uses tna-30x firmware
         "tna-303x": ["tna-30x", "tna30x"],
         "tna-301": ["tna-30x", "tna30x"],
         "tna-302": ["tna-30x", "tna30x"],
         # Tachyon TNA-303L series (long range) - uses tna-303l firmware
         "tna-303l": ["tna-303l", "tna303l"],
         "tna-303l-65": ["tna-303l", "tna303l"],
+        "tna-303l-lib": ["tna-303l", "tna303l"],
+        # Tachyon TNA-305 series (60 GHz + 5/6 GHz) - uses tna-305 firmware
+        "tna-305a": ["tna-305", "tna305"],
+        "tna-305x": ["tna-305", "tna305"],
         # Tachyon TNS-100 series (subscriber) - uses tns-100 firmware
         "tns-100": ["tns-100", "tns100"],
         # Ubiquiti Wave series - mapped to specific firmware variants

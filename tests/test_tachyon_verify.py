@@ -11,6 +11,7 @@ verification is made fail-closed (Wave 2).
 """
 
 import json
+import tarfile
 
 from provisioner.handlers.tachyon import TachyonHandler
 
@@ -26,6 +27,69 @@ def _curl_handler() -> TachyonHandler:
     h._api_token = "tok"
     h._connected = True
     return h
+
+
+def _full_export_config():
+    return {
+        "version": 3,
+        "ethernet": {
+            "ports": {
+                "eth0": {"enabled": True, "mtu": 1500, "network": {"zone": "wan"}},
+                "eth1": {"enabled": False, "mtu": 1500, "network": {"zone": "wan"}},
+            }
+        },
+        "network": {
+            "zones": {
+                "wan": {
+                    "enabled": True,
+                    "name": "Management",
+                    "ip": {"enabled": True, "ipaddr": "192.168.2.1", "prefix": 24},
+                    "dataVlan": {"proto": "802.1q", "vlan": 12},
+                }
+            }
+        },
+        "services": {
+            "snmp": {"enabled": True, "v2": {"rw": {"enabled": True}}},
+            "telnet": {"enabled": False, "port": 23},
+        },
+        "system": {"hostname": "canoeoninn", "name": "Canoe on Inn"},
+        "wireless": {
+            "radios": {
+                "wlan0": {
+                    "enabled": True,
+                    "vaps": [
+                        {
+                            "enabled": True,
+                            "mode": "sta",
+                            "ssid": "WEST",
+                            "network": {"zone": "wan"},
+                            "sta_profiles": {
+                                "enabled": True,
+                                "profiles": [
+                                    {"ssid": "NORTH"},
+                                    {"ssid": "EAST"},
+                                    {"ssid": "SOUTH"},
+                                    {"ssid": "WEST"},
+                                ],
+                            },
+                        }
+                    ],
+                }
+            }
+        },
+    }
+
+
+def _write_config_tar(tmp_path, config):
+    config_path = tmp_path / "config.json"
+    control_path = tmp_path / "CONTROL"
+    tar_path = tmp_path / "export.tar"
+    config_path.write_text(json.dumps(config))
+    control_path.write_text("CONTROL\n")
+    with tarfile.open(tar_path, "w") as tar:
+        tar.add(control_path, arcname="CONTROL")
+        tar.add(config_path, arcname="config.json")
+    return tar_path
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +148,154 @@ async def test_apply_config_true_on_full_match(fake_curl, fast_sleep):
 
     fake_curl.set_handler(route)
     assert await h.apply_config(config) is True
+
+
+async def test_apply_config_adds_missing_radio_isolation_default(fake_curl):
+    """Older Tachyon exports omit fields current firmware requires on enabled radios."""
+    h = _curl_handler()
+    config = {
+        "wireless": {
+            "radios": {
+                "wlan0": {
+                    "enabled": True,
+                    "vaps": [{"enabled": True, "network": {"zone": "wan"}}],
+                },
+                "wlan1": {
+                    "enabled": True,
+                    "vaps": [{"enabled": True, "network": {"zone": "lan"}}],
+                },
+                "wlan2": {"enabled": False},
+            }
+        }
+    }
+    posted = {}
+
+    def route(argv):
+        method = argv[argv.index("-X") + 1]
+        if method != "POST":
+            raise AssertionError("unexpected method: %s" % method)
+        posted.update(json.loads(argv[argv.index("-d") + 1]))
+        return (0, json.dumps({}))
+
+    fake_curl.set_handler(route)
+
+    assert await h.apply_config(config) is True
+
+    radios = posted["wireless"]["radios"]
+    assert radios["wlan0"]["isolation"] is False
+    assert radios["wlan1"]["isolation"] is False
+    assert radios["wlan0"]["vaps"][0]["isolate"] is False
+    assert radios["wlan1"]["vaps"][0]["isolate"] is False
+    assert radios["wlan0"]["vaps"][0]["network"]["mgmt_vlan_enabled"] is False
+    assert radios["wlan1"]["vaps"][0]["network"]["mgmt_vlan_enabled"] is False
+    assert "isolation" not in radios["wlan2"]
+
+
+async def test_apply_config_adds_missing_full_export_schema_defaults(fake_curl):
+    """Tachyon exports can omit fields the API still requires on POST."""
+    h = _curl_handler()
+    config = _full_export_config()
+    config["services"]["snmp_traps"] = {
+        "enabled": False,
+        "community": "public",
+        "protocol": "2",
+    }
+    config["services"]["ssh"] = {"enabled": True, "port": 22}
+    config["services"]["snmp"]["v3"] = {
+        "ro": {"enabled": False, "password": "", "user": ""}
+    }
+    config["network"]["zones"]["wan"]["dhcp"] = {"broadcast": False, "custom_dns": False}
+    posted = {}
+
+    def route(argv):
+        method = argv[argv.index("-X") + 1]
+        if method == "POST":
+            posted.update(json.loads(argv[argv.index("-d") + 1]))
+            return (0, json.dumps({}))
+        if method == "GET":
+            return (0, json.dumps(posted))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_handler(route)
+
+    assert await h.apply_config(config) is True
+
+    assert posted["system"]["description"] == ""
+    assert posted["system"]["latitude"] == 0
+    assert posted["system"]["longitude"] == 0
+    assert posted["services"]["cloud"] == {"enabled": False}
+    assert posted["services"]["snmp_traps"]["port"] == 162
+    assert posted["services"]["ssh"]["password_login"] is True
+    assert posted["services"]["snmp"]["v3"]["ro"]["encryption_mode"] == "aes"
+    assert posted["network"]["zones"]["wan"]["lldp_forward"] is False
+    assert posted["network"]["zones"]["wan"]["carrier_drop"] == {
+        "enabled": False,
+        "rssi_threshold": -68,
+        "down_time": 3,
+        "start_delay": 300,
+    }
+    assert posted["network"]["zones"]["wan"]["dhcp"]["enabled_options"] == {
+        "log_server": True,
+        "ntp_server": True,
+        "timezone_offset": True,
+    }
+    assert posted["ethernet"]["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] is True
+
+
+async def test_apply_config_file_tar_posts_authoritative_export_without_deep_merge(
+    tmp_path, fake_curl, fast_sleep
+):
+    """Full Tachyon exports must not inherit stale live keys like eth2-eth5."""
+    h = _curl_handler()
+    export_config = _full_export_config()
+    tar_path = _write_config_tar(tmp_path, export_config)
+    posted = {}
+
+    def route(argv):
+        method = argv[argv.index("-X") + 1]
+        if method == "POST":
+            posted.update(json.loads(argv[argv.index("-d") + 1]))
+            return (0, json.dumps({}))
+        if method == "GET":
+            return (0, json.dumps(posted))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_handler(route)
+
+    assert await h.apply_config_file(str(tar_path)) is True
+    assert fake_curl.methods == ["POST", "GET"]
+    assert sorted(posted["ethernet"]["ports"].keys()) == ["eth0", "eth1"]
+    assert "vlans" not in posted["network"]["zones"]["wan"]
+
+
+async def test_apply_config_file_partial_json_still_merges_live_config(
+    tmp_path, fake_curl, fast_sleep
+):
+    """Partial templates keep patch semantics for naming/SSID style updates."""
+    h = _curl_handler()
+    partial_path = tmp_path / "partial.json"
+    partial_path.write_text(json.dumps({"system": {"hostname": "AP-1"}}))
+    live_config = _full_export_config()
+    live_config["ethernet"]["ports"]["eth2"] = {"enabled": True}
+    posted = {}
+
+    def route(argv):
+        method = argv[argv.index("-X") + 1]
+        if method == "GET" and not posted:
+            return (0, json.dumps(live_config))
+        if method == "POST":
+            posted.update(json.loads(argv[argv.index("-d") + 1]))
+            return (0, json.dumps({}))
+        if method == "GET":
+            return (0, json.dumps(posted))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_handler(route)
+
+    assert await h.apply_config_file(str(partial_path)) is True
+    assert fake_curl.methods == ["GET", "POST", "GET"]
+    assert posted["system"]["hostname"] == "AP-1"
+    assert "eth2" in posted["ethernet"]["ports"]
 
 
 # ---------------------------------------------------------------------------
@@ -146,3 +358,36 @@ async def test_verify_config_true_on_match(monkeypatch, fast_sleep):
 
     monkeypatch.setattr(h, "_get_config_curl", readback, raising=False)
     assert await h.verify_config() is True
+
+
+async def test_verify_config_false_when_readback_has_stale_ethernet_ports(monkeypatch, fast_sleep):
+    h = _curl_handler()
+    expected = _full_export_config()
+    readback_config = json.loads(json.dumps(expected))
+    readback_config["ethernet"]["ports"]["eth2"] = {"enabled": True}
+    h._last_applied_config = expected
+    _stub_reconnect(monkeypatch, h)
+
+    async def readback():
+        return readback_config
+
+    monkeypatch.setattr(h, "_get_config_curl", readback, raising=False)
+    assert await h.verify_config() is False
+
+
+async def test_verify_config_false_when_readback_keeps_old_wan_vlans(monkeypatch, fast_sleep):
+    h = _curl_handler()
+    expected = _full_export_config()
+    readback_config = json.loads(json.dumps(expected))
+    readback_config["network"]["zones"]["wan"]["vlans"] = [
+        {"id": 12, "name": "Management"},
+        {"id": 101, "name": "Last mile"},
+    ]
+    h._last_applied_config = expected
+    _stub_reconnect(monkeypatch, h)
+
+    async def readback():
+        return readback_config
+
+    monkeypatch.setattr(h, "_get_config_curl", readback, raising=False)
+    assert await h.verify_config() is False
