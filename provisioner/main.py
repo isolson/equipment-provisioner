@@ -549,6 +549,49 @@ class Provisioner:
                 port_status = self.port_manager._get_single_port_status(port_num)
                 await notify_port_change(port_num, port_status)
 
+            if self.handler_manager and device_type == "tachyon" and not fingerprint.model:
+                logger.info(
+                    "Fingerprint did not include model for %s at %s; "
+                    "running read-only handler info preflight before asset lookup",
+                    device_type,
+                    device_ip,
+                )
+                info_result = await self.handler_manager.login_and_get_info(
+                    fingerprint=fingerprint,
+                    ip=device_ip,
+                    interface=interface,
+                    custom_credentials=custom_credentials,
+                )
+                if info_result.success and info_result.device_info:
+                    info = info_result.device_info
+                    fingerprint.model = info.model
+                    fingerprint.firmware_version = info.firmware_version
+                    fingerprint.mac_address = info.mac_address
+                    fingerprint.serial_number = info.serial_number
+
+                    await db.update_job(
+                        job_id,
+                        device_model=info.model,
+                        mac_address=info.mac_address or None,
+                        serial_number=info.serial_number or None,
+                        old_firmware=info.firmware_version,
+                    )
+                    self.port_manager.update_port_device_info(
+                        port_num,
+                        mac=info.mac_address,
+                        serial=info.serial_number,
+                        model=info.model,
+                    )
+                    port_status = self.port_manager._get_single_port_status(port_num)
+                    await notify_port_change(port_num, port_status)
+                elif info_result.error_message:
+                    logger.warning(
+                        "Read-only info preflight failed for %s at %s: %s",
+                        device_type,
+                        device_ip,
+                        info_result.error_message,
+                    )
+
             config_path = store.get_config_template(
                 device_type,
                 fingerprint.model,

@@ -9,6 +9,7 @@ Freshdesk article pages:
     - Index:   https://tachyon-networks.freshdesk.com/support/solutions/articles/67000714399
     - TNA-30x: https://tachyon-networks.freshdesk.com/support/solutions/articles/67000710575
     - TNA-303L: https://tachyon-networks.freshdesk.com/a/solutions/articles/67000745898
+    - TNA-305: https://tachyon-networks.freshdesk.com/support/solutions/articles/67000753063
     - TNS-100: https://tachyon-networks.freshdesk.com/support/solutions/articles/67000719270
 """
 
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 FIRMWARE_PAGES = {
     "tna-30x": "https://tachyon-networks.freshdesk.com/support/solutions/articles/67000710575-tna-30x-firmware-releases",
     "tna-303l": "https://tachyon-networks.freshdesk.com/support/solutions/articles/67000745898",
+    "tna-305": "https://tachyon-networks.freshdesk.com/support/solutions/articles/67000753063-tna-305-firmware-releases",
     "tns-100": "https://tachyon-networks.freshdesk.com/support/solutions/articles/67000719270-tns-100-firmware-releases",
 }
 
@@ -97,7 +99,7 @@ class TachyonFirmwareSource(BaseFirmwareSource):
 
         Args:
             session: aiohttp session.
-            product: Product identifier (tna-30x, tna-303l, tns-100).
+            product: Product identifier (tna-30x, tna-303l, tna-305, tns-100).
             url: Freshdesk article URL.
             channel: "release" or "beta".
 

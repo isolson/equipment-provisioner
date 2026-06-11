@@ -88,13 +88,17 @@ class TachyonHandler(BaseHandler):
 
     # Firmware pattern mappings for model validation
     MODEL_FIRMWARE_PATTERNS = {
-        # TNA-30x standard series uses tna-30x firmware
+        # TNA-30x standard 60 GHz series uses tna-30x firmware
         "tna-301": ["tna-30x", "tna30x"],
         "tna-302": ["tna-30x", "tna30x"],
         "tna-303x": ["tna-30x", "tna30x"],
         # TNA-303L series uses tna-303l firmware
         "tna-303l": ["tna-303l", "tna303l"],
         "tna-303l-65": ["tna-303l", "tna303l"],
+        "tna-303l-lib": ["tna-303l", "tna303l"],
+        # TNA-305 series uses tna-305 firmware
+        "tna-305a": ["tna-305", "tna305"],
+        "tna-305x": ["tna-305", "tna305"],
         # TNS-100 series uses tns-100 firmware
         "tns-100": ["tns-100", "tns100"],
     }

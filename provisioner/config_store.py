@@ -34,13 +34,78 @@ class ConfigStore:
     # Model aliases for config templates — maps model to config name
     CONFIG_MODEL_ALIASES = {
         "tachyon": {
-            "tna-303l": "tna-303x",
-            "tna-303l-65": "tna-303x",
+            "tna-301": "tna-30x",
+            "tna-302": "tna-30x",
+            "tna-303x": "tna-30x",
+            "tna-303l": "tna-303l",
+            "tna-303l-65": "tna-303l",
+            "tna-303l-lib": "tna-303l",
+            "tna-305a": "tna-305",
+            "tna-305x": "tna-305",
+            "tns-100": "tns-100",
         },
         "cambium": {
             "epmp 4518": "f4518-sm-defaultconfig",
         },
     }
+
+    @staticmethod
+    def _find_named_template(
+        directory: Path,
+        name: str,
+        extensions,
+        allow_prefixed_export: bool = False,
+    ) -> Optional[Path]:
+        """Find a template by model/name, returning the actual path casing.
+
+        Also accepts timestamp-prefixed exports such as
+        ``20260424.143334.TNA-303L-65.tar`` for model ``TNA-303L-65``.
+        """
+        if not directory.exists() or not directory.is_dir():
+            return None
+
+        entries = list(directory.iterdir())
+        for ext in extensions:
+            expected = f"{name}{ext}"
+            for entry in entries:
+                if entry.name == expected and entry.is_file():
+                    return entry
+
+        for ext in extensions:
+            expected = f"{name}{ext}".lower()
+            for entry in entries:
+                if entry.name.lower() == expected and entry.is_file():
+                    return entry
+
+        if allow_prefixed_export:
+            for ext in extensions:
+                expected_suffix = f".{name}{ext}".lower()
+                matches = [
+                    entry
+                    for entry in entries
+                    if entry.name.lower().endswith(expected_suffix) and entry.is_file()
+                ]
+                if matches:
+                    return sorted(matches, key=lambda entry: entry.name)[-1]
+
+        return None
+
+    def _get_model_alias(self, device_type: str, model: Optional[str]) -> Optional[str]:
+        if not model or device_type not in self.CONFIG_MODEL_ALIASES:
+            return None
+
+        model_key = model.lower()
+        aliases = self.CONFIG_MODEL_ALIASES[device_type]
+        alias = aliases.get(model_key)
+        if alias:
+            return alias
+
+        if device_type == "tachyon":
+            for prefix in sorted(aliases, key=len, reverse=True):
+                if model_key.startswith(f"{prefix}-"):
+                    return aliases[prefix]
+
+        return None
 
     def get_config_template(self, device_type: str, model: Optional[str] = None) -> Optional[Path]:
         """Get the path to the config template for a device type.
@@ -49,63 +114,94 @@ class ConfigStore:
         1. {templates_path}/{device_type}/{model}.* (model-specific in subdir)
         2. {templates_path}/{device_type}/{alias}.* (aliased model in subdir)
         3. {templates_path}/{device_type}/default.* (default in subdir)
-        4. {templates_path}/{device_type}/*.* (any file in subdir)
-        5. {templates_path}/{device_type}_{model}.* (legacy model-specific)
-        6. {templates_path}/{device_type}.* (legacy device type)
+        4. {templates_path}/{device_type}_{model}.* (legacy model-specific)
+        5. {templates_path}/{device_type}.* (legacy device type)
         """
         device_dir = self.templates_path / device_type
 
-        model_alias = None
-        if model and device_type in self.CONFIG_MODEL_ALIASES:
-            model_key = model.lower()
-            model_alias = self.CONFIG_MODEL_ALIASES[device_type].get(model_key)
-            if model_alias:
-                logger.debug(f"Config model alias: {model} -> {model_alias}")
+        model_names = []
+        if model:
+            model_names.append(model)
+            model_lower = model.lower()
+            if model_lower != model:
+                model_names.append(model_lower)
+
+        model_alias = self._get_model_alias(device_type, model)
+        if model_alias:
+            logger.debug(f"Config model alias: {model} -> {model_alias}")
+        is_tachyon = device_type == "tachyon"
 
         if device_dir.exists() and device_dir.is_dir():
-            if model:
-                for ext in [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]:
-                    model_template = device_dir / f"{model}{ext}"
-                    if model_template.exists():
+            if model_names:
+                for model_name in model_names:
+                    model_template = self._find_named_template(
+                        device_dir,
+                        model_name,
+                        [".json", ".rsc", ".yaml", ".tar", ".tar.gz"],
+                        allow_prefixed_export=is_tachyon,
+                    )
+                    if model_template:
                         return model_template
 
             if model_alias:
-                for ext in [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]:
-                    alias_template = device_dir / f"{model_alias}{ext}"
-                    if alias_template.exists():
-                        logger.info(f"Using aliased config template: {alias_template.name} for model {model}")
-                        return alias_template
-
-            for ext in [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]:
-                default_template = device_dir / f"default{ext}"
-                if default_template.exists():
-                    return default_template
-
-            # Any config file in subdirectory (exclude ap.* AP-naming templates)
-            for ext in [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]:
-                files = [f for f in device_dir.glob(f"*{ext}")
-                         if not f.stem.lower().startswith("ap")]
-                if files:
-                    return sorted(files)[0]
-
-        # Legacy: model-specific template in root
-        if model:
-            for ext in [".json", ".rsc", ".yaml"]:
-                model_template = self.templates_path / f"{device_type}_{model}{ext}"
-                if model_template.exists():
-                    return model_template
-
-        if model_alias:
-            for ext in [".json", ".rsc", ".yaml"]:
-                alias_template = self.templates_path / f"{device_type}_{model_alias}{ext}"
-                if alias_template.exists():
+                alias_template = self._find_named_template(
+                    device_dir,
+                    model_alias,
+                    [".json", ".rsc", ".yaml", ".tar", ".tar.gz"],
+                    allow_prefixed_export=is_tachyon,
+                )
+                if alias_template:
                     logger.info(f"Using aliased config template: {alias_template.name} for model {model}")
                     return alias_template
 
-        for ext in [".json", ".rsc", ".yaml", ".txt"]:
-            template = self.templates_path / f"{device_type}{ext}"
-            if template.exists():
-                return template
+            default_template = self._find_named_template(
+                device_dir,
+                "default",
+                [".json", ".rsc", ".yaml", ".tar", ".tar.gz"],
+            )
+            if default_template:
+                return default_template
+
+            if not is_tachyon:
+                # Historical fallback for non-Tachyon vendors. Tachyon uses
+                # product-family templates, so an arbitrary file can cross-apply
+                # switch/radio configs.
+                for ext in [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]:
+                    files = [
+                        f for f in device_dir.glob(f"*{ext}")
+                        if not f.stem.lower().startswith("ap")
+                    ]
+                    if files:
+                        return sorted(files)[0]
+
+        # Legacy: model-specific template in root
+        if model_names:
+            for model_name in model_names:
+                model_template = self._find_named_template(
+                    self.templates_path,
+                    f"{device_type}_{model_name}",
+                    [".json", ".rsc", ".yaml"],
+                )
+                if model_template:
+                    return model_template
+
+        if model_alias:
+            alias_template = self._find_named_template(
+                self.templates_path,
+                f"{device_type}_{model_alias}",
+                [".json", ".rsc", ".yaml"],
+            )
+            if alias_template:
+                logger.info(f"Using aliased config template: {alias_template.name} for model {model}")
+                return alias_template
+
+        template = self._find_named_template(
+            self.templates_path,
+            device_type,
+            [".json", ".rsc", ".yaml", ".txt"],
+        )
+        if template:
+            return template
 
         logger.warning(f"No config template found for {device_type}/{model}")
         return None
