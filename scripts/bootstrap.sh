@@ -33,7 +33,7 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
     cd "$INSTALL_DIR" && git pull --ff-only
 else
     echo -e "${GREEN}Cloning provisioner to ${INSTALL_DIR}...${NC}"
-    git clone "$REPO_URL" "$INSTALL_DIR"
+    git clone -b production "$REPO_URL" "$INSTALL_DIR"
 fi
 
 # Hand off to the unified setup script.
