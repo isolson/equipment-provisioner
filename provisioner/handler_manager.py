@@ -165,6 +165,7 @@ class HandlerManager:
         fingerprint: DeviceFingerprint,
         ip: str,
         interface: Optional[str] = None,
+        custom_credentials: Optional[Dict[str, str]] = None,
     ) -> ProvisioningResult:
         """DEBUG: Only connect, login, and get device info - no config or firmware.
 
@@ -181,7 +182,12 @@ class HandlerManager:
         from datetime import datetime
         from .handlers.base import ProvisioningPhase
 
-        handler = self.get_handler(fingerprint, ip, interface=interface)
+        handler = self.get_handler(
+            fingerprint,
+            ip,
+            interface=interface,
+            custom_credentials=custom_credentials,
+        )
 
         if not handler:
             return ProvisioningResult(
