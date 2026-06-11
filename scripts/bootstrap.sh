@@ -27,10 +27,17 @@ if ! command -v git &>/dev/null; then
     apt-get update -qq && apt-get install -y -qq git
 fi
 
-# Clone or update the repo
+# Clone or update the repo. Hosts track the 'production' branch (the deploy
+# pin — see docs/BRANCHING.md); older installs may still be on main, so the
+# update path converges them onto production.
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
     echo -e "${GREEN}Updating existing installation...${NC}"
-    cd "$INSTALL_DIR" && git pull --ff-only
+    cd "$INSTALL_DIR"
+    git fetch origin
+    if [[ "$(git rev-parse --abbrev-ref HEAD)" != "production" ]]; then
+        git checkout -B production origin/production
+    fi
+    git pull --ff-only
 else
     echo -e "${GREEN}Cloning provisioner to ${INSTALL_DIR}...${NC}"
     git clone -b production "$REPO_URL" "$INSTALL_DIR"

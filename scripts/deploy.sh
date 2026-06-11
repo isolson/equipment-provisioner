@@ -63,8 +63,9 @@ rsync -avz --delete \
   --exclude='.deployed-rev' \
   ./ "${TARGET_USER}@${TARGET_HOST}:${TARGET_PATH}/"
 
-$SSH_CMD "${TARGET_USER}@${TARGET_HOST}" \
-  "echo '${SHA}${DIRTY} ${BRANCH} $(date -u +%Y-%m-%dT%H:%M:%SZ)' > ${TARGET_PATH}/.deployed-rev"
+# Branch names may contain shell metacharacters; pass via stdin, not argv.
+printf '%s %s %s\n' "${SHA}${DIRTY}" "$BRANCH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | \
+  $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" "cat > ${TARGET_PATH}/.deployed-rev"
 
 echo "Restarting provisioner-web service..."
 $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" 'sudo -n systemctl restart provisioner-web'
