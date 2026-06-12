@@ -113,6 +113,19 @@ def test_ports_api_includes_last_provisioning_result(tmp_path):
     assert port["last_error"] is None
 
 
+# Register response with the ship-ready readback (wifi PR #255) in the state
+# the contract requires before a unit ships.
+SHIP_READY_READBACK = {
+    "device_id": 631,
+    "name": "fleet-init-HKC0TEST123",
+    "status": "planned",
+    "message": "ok",
+    "role": "unknown",
+    "customer_id": None,
+    "has_checkin_secret": False,
+}
+
+
 async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch):
     from provisioner.web.api import _run_netinstall
 
@@ -182,6 +195,9 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
         async def verify_wifi_radios_bound(self):
             return True
 
+        async def get_phone_home_url(self):
+            return "https://wifi.example.test/ztp/mikrotik/checkin"
+
         async def disconnect(self):
             pass
 
@@ -196,7 +212,7 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
     )
 
     completed = AsyncMock()
-    register = AsyncMock()
+    register = AsyncMock(return_value=SHIP_READY_READBACK)
     monkeypatch.setattr("provisioner.web.api.asyncio.sleep", AsyncMock())
     monkeypatch.setattr("provisioner.web.api._select_latest_npk_per_arch", lambda _: [tmp_path / "routeros-arm64.npk"])
     monkeypatch.setattr("provisioner.web.api.MikrotikHandler", FakeMikrotikHandler, raising=False)
@@ -353,6 +369,9 @@ async def test_netinstall_ships_wifi_driver_packages_in_flash_payload(tmp_path, 
         async def verify_wifi_radios_bound(self):
             return True
 
+        async def get_phone_home_url(self):
+            return "https://wifi.example.test/ztp/mikrotik/checkin"
+
         async def disconnect(self):
             pass
 
@@ -376,7 +395,7 @@ async def test_netinstall_ships_wifi_driver_packages_in_flash_payload(tmp_path, 
     monkeypatch.setattr("provisioner.web.api._select_latest_npk_per_arch", lambda _: selected)
     monkeypatch.setattr("provisioner.web.api.MikrotikHandler", FakeMikrotikHandler, raising=False)
     monkeypatch.setattr("provisioner.handlers.mikrotik.MikrotikHandler", FakeMikrotikHandler)
-    monkeypatch.setattr("provisioner.equipment_registry.register_mikrotik", AsyncMock())
+    monkeypatch.setattr("provisioner.equipment_registry.register_mikrotik", AsyncMock(return_value=SHIP_READY_READBACK))
     monkeypatch.setattr("provisioner.web.websocket.notify_port_change", AsyncMock())
     monkeypatch.setattr("provisioner.web.websocket.notify_provisioning_completed", AsyncMock())
 
@@ -474,6 +493,188 @@ async def test_netinstall_fails_before_register_when_wifi_radios_not_bound(tmp_p
     assert provisioner.port_manager.port_states[5].last_error == (
         "WiFi radios not bound after Netinstall (/interface/wifi empty)"
     )
+
+
+def _ship_ready_fake_handler(phone_home_url="https://wifi.example.test/ztp/mikrotik/checkin"):
+    """Minimal happy-path fake for ship-ready / baked-URL pipeline tests."""
+
+    class FakeMikrotikHandler:
+        BOOTSTRAP_USER = "fleet-bootstrap"
+        BASE_FLASH_VERSION = "universal-v1"
+        base_flash_version_detected = "universal-v1"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def netinstall(self, **kwargs):
+            return True
+
+        async def wait_for_reboot(self, timeout):
+            return True
+
+        async def connect(self):
+            return True
+
+        async def get_info(self):
+            return SimpleNamespace(
+                serial_number="HKC0TEST123",
+                mac_address="04:f4:1c:c2:06:80",
+                model="hAP ax S",
+                firmware_version="7.23.1",
+                hardware_version="arm",
+            )
+
+        from provisioner.handlers.mikrotik import MikrotikHandler as _Real
+        wifi_driver_for_model = _Real.wifi_driver_for_model
+
+        @staticmethod
+        async def fetch_netinstall_bootstrap(url, api_key):
+            return "# served netinstall bootstrap\n"
+
+        @staticmethod
+        async def fetch_netinstall_mode(url):
+            return "# served netinstall mode\n"
+
+        async def wait_for_base_flash_applied(self):
+            return True
+
+        async def verify_ztp_ready(self, serial):
+            return True, "ZTP-ready"
+
+        async def verify_wifi_radios_bound(self):
+            return True
+
+        async def get_phone_home_url(self):
+            return phone_home_url
+
+        async def disconnect(self):
+            pass
+
+    return FakeMikrotikHandler
+
+
+def _netinstall_env(monkeypatch, tmp_path, handler_cls, register):
+    config = Config()
+    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
+    config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
+    provisioner = SimpleNamespace(
+        config=config,
+        port_manager=DummyPortManager(),
+        firmware_manager=SimpleNamespace(firmware_path=tmp_path),
+    )
+    monkeypatch.setattr("provisioner.web.api.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("provisioner.web.api._select_latest_npk_per_arch", lambda _: [tmp_path / "routeros-arm.npk"])
+    monkeypatch.setattr("provisioner.web.api.MikrotikHandler", handler_cls, raising=False)
+    monkeypatch.setattr("provisioner.handlers.mikrotik.MikrotikHandler", handler_cls)
+    monkeypatch.setattr("provisioner.equipment_registry.register_mikrotik", register)
+    monkeypatch.setattr("provisioner.web.websocket.notify_port_change", AsyncMock())
+    monkeypatch.setattr("provisioner.web.websocket.notify_provisioning_completed", AsyncMock())
+    return provisioner
+
+
+async def test_netinstall_remediates_stale_ship_ready_state(tmp_path, monkeypatch):
+    """A recycled unit (locked role, old customer, stale TOFU secret) must be
+    cleared via the contract endpoints, re-registered, and re-asserted."""
+    from provisioner.web.api import _run_netinstall
+
+    stale = {
+        **SHIP_READY_READBACK,
+        "role": "gateway",
+        "customer_id": 7,
+        "has_checkin_secret": True,
+    }
+    register = AsyncMock(side_effect=[stale, SHIP_READY_READBACK])
+    clear_role = AsyncMock(return_value={})
+    clear_secret = AsyncMock(return_value={"cleared": True})
+    provisioner = _netinstall_env(
+        monkeypatch, tmp_path, _ship_ready_fake_handler(), register
+    )
+    monkeypatch.setattr("provisioner.equipment_registry.clear_role_lock", clear_role)
+    monkeypatch.setattr("provisioner.equipment_registry.clear_checkin_secret", clear_secret)
+
+    await _run_netinstall(provisioner, 5)
+
+    assert provisioner.port_manager.port_states[5].last_result == "success"
+    clear_role.assert_awaited_once_with("https://wifi.example.test", "ztp-api-key", "HKC0TEST123")
+    clear_secret.assert_awaited_once_with("https://wifi.example.test", "ztp-api-key", "HKC0TEST123")
+    assert register.await_count == 2
+
+
+async def test_netinstall_fails_when_still_stale_after_remediation(tmp_path, monkeypatch):
+    """A unit ships only when all three assertions hold — if remediation
+    doesn't clear the state, the run must fail, not ship."""
+    from provisioner.web.api import _run_netinstall
+
+    stale = {**SHIP_READY_READBACK, "has_checkin_secret": True}
+    register = AsyncMock(side_effect=[stale, stale])
+    clear_secret = AsyncMock(return_value={"cleared": True})
+    provisioner = _netinstall_env(
+        monkeypatch, tmp_path, _ship_ready_fake_handler(), register
+    )
+    monkeypatch.setattr("provisioner.equipment_registry.clear_checkin_secret", clear_secret)
+
+    await _run_netinstall(provisioner, 5)
+
+    assert provisioner.port_manager.port_states[5].last_result == "failed"
+    assert "not ship-ready" in provisioner.port_manager.port_states[5].last_error
+
+
+async def test_netinstall_skips_ship_ready_on_legacy_backend(tmp_path, monkeypatch):
+    """A backend without the readback fields (pre wifi PR #255) must not
+    block the bench — assertions are skipped with a warning."""
+    from provisioner.web.api import _run_netinstall
+
+    register = AsyncMock(return_value={
+        "device_id": 631,
+        "name": "fleet-init-HKC0TEST123",
+        "status": "planned",
+        "message": "ok",
+    })
+    provisioner = _netinstall_env(
+        monkeypatch, tmp_path, _ship_ready_fake_handler(), register
+    )
+
+    await _run_netinstall(provisioner, 5)
+
+    assert provisioner.port_manager.port_states[5].last_result == "success"
+    register.assert_awaited_once()
+
+
+async def test_netinstall_fails_on_baked_phone_home_host_mismatch(tmp_path, monkeypatch):
+    """Contract rule 4: a Configure script that baked a different host (the
+    retired-api.infra failure class) must fail before register."""
+    from provisioner.web.api import _run_netinstall
+
+    register = AsyncMock(return_value=SHIP_READY_READBACK)
+    provisioner = _netinstall_env(
+        monkeypatch,
+        tmp_path,
+        _ship_ready_fake_handler(
+            phone_home_url="https://api.infra.treehouse.mn/ztp/mikrotik/checkin"
+        ),
+        register,
+    )
+
+    await _run_netinstall(provisioner, 5)
+
+    register.assert_not_awaited()
+    assert provisioner.port_manager.port_states[5].last_result == "failed"
+    assert "phone-home URL mismatch" in provisioner.port_manager.port_states[5].last_error
+
+
+async def test_netinstall_fails_when_phone_home_url_unparseable(tmp_path, monkeypatch):
+    from provisioner.web.api import _run_netinstall
+
+    register = AsyncMock(return_value=SHIP_READY_READBACK)
+    provisioner = _netinstall_env(
+        monkeypatch, tmp_path, _ship_ready_fake_handler(phone_home_url=None), register
+    )
+
+    await _run_netinstall(provisioner, 5)
+
+    register.assert_not_awaited()
+    assert provisioner.port_manager.port_states[5].last_result == "failed"
 
 
 async def test_netinstall_requires_ztp_api_key_before_flash(tmp_path, monkeypatch):

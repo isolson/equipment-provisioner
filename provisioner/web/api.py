@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
@@ -415,6 +416,22 @@ async def netinstall_device(
     )
 
 
+def _ship_ready_issues(readback: Dict[str, Any]) -> List[str]:
+    """Contract rule 5: the register readback must show a unit with no past
+    life before it ships. (`business-router` hardware classes are excepted
+    by the contract; nothing in the current fleet falls in that class, so
+    role is enforced strictly here.)
+    """
+    issues = []
+    if readback.get("role", "unknown") != "unknown":
+        issues.append(f"role={readback.get('role')}")
+    if readback.get("customer_id") is not None:
+        issues.append(f"customer_id={readback.get('customer_id')}")
+    if readback.get("has_checkin_secret", False):
+        issues.append("has_checkin_secret=true")
+    return issues
+
+
 async def _run_netinstall(provisioner, port_number: int):
     """Run Netinstall + served Configure-script pipeline in background."""
     from provisioner.handlers.mikrotik import MikrotikHandler
@@ -661,23 +678,110 @@ async def _run_netinstall(provisioner, port_number: int):
                 return
             await on_progress("wifi_bind", True, "wifi radios bound")
 
+        # Step 5c: verify the baked phone-home URL from the bench host
+        # (contract rule 4). The bench never gives the device an internet
+        # path — first checkin is install-time by design — so the bench host
+        # checks the URL this flash actually baked on the device's behalf.
+        phone_home_url = await handler.get_phone_home_url()
+        expected_host = urlparse(ztp_api_url).hostname
+        baked_host = urlparse(phone_home_url).hostname if phone_home_url else None
+        if not phone_home_url or baked_host != expected_host:
+            logger.error(
+                "Netinstall pipeline failed on port %s: baked phone-home URL %r "
+                "does not point at backend host %r",
+                port_number,
+                phone_home_url,
+                expected_host,
+            )
+            await on_progress("phone_home_url", False, f"baked={phone_home_url or 'none'}")
+            await finish(
+                False,
+                f"baked phone-home URL mismatch: {phone_home_url or 'none'} "
+                f"(expected host {expected_host})",
+            )
+            return
+        try:
+            # GET the ungated Mode script on the *baked* host: proves the host
+            # the device will actually phone home to is alive and serving ZTP,
+            # without re-trusting the configured URL.
+            await MikrotikHandler.fetch_netinstall_mode(
+                f"{urlparse(phone_home_url).scheme}://{urlparse(phone_home_url).netloc}"
+            )
+        except Exception as exc:
+            await on_progress("phone_home_url", False, f"unreachable: {str(exc)[:80]}")
+            await finish(False, f"baked phone-home host unreachable from bench: {exc}")
+            return
+        await on_progress("phone_home_url", True, f"baked URL OK ({baked_host})")
+
         await handler.disconnect()
 
-        # Step 6: Register with the wifi-api. Contract endpoint, contract payload.
-        from provisioner.equipment_registry import register_mikrotik
+        # Step 6: Register with the wifi-api, then assert the ship-ready
+        # readback (contract rule 5): a recycled unit still carrying a locked
+        # role, a customer assignment, or a server-side TOFU secret would be
+        # served its old life — or rejected outright — at the new install.
+        from provisioner.equipment_registry import (
+            clear_checkin_secret,
+            clear_role_lock,
+            register_mikrotik,
+        )
+        register_kwargs = dict(
+            ztp_api_url=ztp_api_url,
+            api_key=ztp_api_key,
+            serial=serial,
+            mac=info.mac_address or "",
+            model=info.model or "",
+            firmware_version=info.firmware_version or "",
+            base_flash_version=(
+                handler.base_flash_version_detected
+                or MikrotikHandler.BASE_FLASH_VERSION
+            ),
+        )
         try:
-            await register_mikrotik(
-                ztp_api_url=ztp_api_url,
-                api_key=ztp_api_key,
-                serial=serial,
-                mac=info.mac_address or "",
-                model=info.model or "",
-                firmware_version=info.firmware_version or "",
-                base_flash_version=(
-                    handler.base_flash_version_detected
-                    or MikrotikHandler.BASE_FLASH_VERSION
-                ),
-            )
+            readback = await register_mikrotik(**register_kwargs)
+
+            if not any(
+                key in readback for key in ("role", "customer_id", "has_checkin_secret")
+            ):
+                # Pre-#255 backend: no readback to assert on. Don't block the
+                # bench, but say so loudly — ship-ready is unverified.
+                logger.warning(
+                    "wifi-api register response has no ship-ready readback "
+                    "(backend without wifi PR #255) — skipping ship-ready assertions"
+                )
+                await on_progress("ship_ready", True, "SKIPPED (backend lacks readback)")
+            else:
+                issues = _ship_ready_issues(readback)
+                if issues:
+                    # The unit is on the bench by deliberate operator action —
+                    # that is the operator confirmation for clearing its old
+                    # life. Both clears are logged loudly server-side.
+                    logger.warning(
+                        "MikroTik %s not ship-ready (%s) — remediating per contract",
+                        serial,
+                        ", ".join(issues),
+                    )
+                    await on_progress(
+                        "ship_ready", "running", f"stale: {', '.join(issues)} — clearing"
+                    )
+                    if (
+                        readback.get("role", "unknown") != "unknown"
+                        or readback.get("customer_id") is not None
+                    ):
+                        await clear_role_lock(ztp_api_url, ztp_api_key, serial)
+                    if readback.get("has_checkin_secret"):
+                        await clear_checkin_secret(ztp_api_url, ztp_api_key, serial)
+                    readback = await register_mikrotik(**register_kwargs)
+                    issues = _ship_ready_issues(readback)
+                if issues:
+                    await on_progress("ship_ready", False, ", ".join(issues))
+                    await finish(
+                        False,
+                        f"unit not ship-ready after remediation: {', '.join(issues)}",
+                    )
+                    return
+                await on_progress(
+                    "ship_ready", True, "role=unknown, no customer, no stale secret"
+                )
         except Exception as exc:
             await on_progress("register", False, str(exc)[:100])
             await finish(False, f"wifi-api register failed: {exc}")

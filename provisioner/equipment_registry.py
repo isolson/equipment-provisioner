@@ -52,6 +52,8 @@ async def register_equipment(
 
 
 REGISTER_MIKROTIK_PATH = "/ztp/mikrotik/register"
+CLEAR_ROLE_LOCK_PATH_FMT = "/ztp/mikrotik/devices/{serial}/clear-role-lock"
+CLEAR_CHECKIN_SECRET_PATH_FMT = "/ztp/mikrotik/devices/{serial}/clear-checkin-secret"
 REGISTER_MIKROTIK_TIMEOUT = 15  # seconds
 
 
@@ -63,7 +65,7 @@ async def register_mikrotik(
     model: str,
     firmware_version: str,
     base_flash_version: str,
-) -> bool:
+) -> dict:
     """POST contract-shaped MikroTik ZTP registration to the wifi-api.
 
     Per the equipment-provisioner contract, this is a distinct service from
@@ -72,6 +74,11 @@ async def register_mikrotik(
     - auth: `X-API-Key`
     - idempotent by serial
     - role MUST NOT be sent — device self-detects on first phone-home
+
+    Returns the parsed response body. Backends with the ship-ready readback
+    (wifi PR #255) include `role`, `customer_id`, `has_checkin_secret` for
+    the caller to assert on; older backends just return the inventory row
+    fields, and the caller treats that as legacy.
 
     Raises on non-2xx so the caller can fail the provisioning job loudly
     rather than silently succeeding with an unregistered device.
@@ -96,8 +103,64 @@ async def register_mikrotik(
                     f"MikroTik registered: serial={serial} model={model} "
                     f"firmware={firmware_version} -> {resp.status}"
                 )
-                return True
+                try:
+                    return await resp.json(content_type=None) or {}
+                except Exception:
+                    return {}
             body = await resp.text()
             raise RuntimeError(
                 f"MikroTik registration {url} returned {resp.status}: {body[:200]}"
             )
+
+
+async def _post_ztp_device_action(
+    ztp_api_url: str, api_key: Optional[str], path: str, action: str
+) -> dict:
+    """POST an API-key-gated per-device ZTP action; raise on non-2xx."""
+    url = ztp_api_url.rstrip("/") + path
+    headers = {}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    timeout = aiohttp.ClientTimeout(total=REGISTER_MIKROTIK_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, headers=headers) as resp:
+            if resp.status < 300:
+                logger.warning(f"MikroTik ZTP {action}: {url} -> {resp.status}")
+                try:
+                    return await resp.json(content_type=None) or {}
+                except Exception:
+                    return {}
+            body = await resp.text()
+            raise RuntimeError(f"{action} {url} returned {resp.status}: {body[:200]}")
+
+
+async def clear_role_lock(ztp_api_url: str, api_key: Optional[str], serial: str) -> dict:
+    """Clear a recycled unit's locked role + customer assignment.
+
+    Contract remediation for a stale ship-ready readback (role != unknown or
+    customer_id set). Detaches the old customer on the backend, which logs a
+    lifecycle event on the former customer's timeline.
+    """
+    return await _post_ztp_device_action(
+        ztp_api_url,
+        api_key,
+        CLEAR_ROLE_LOCK_PATH_FMT.format(serial=serial),
+        "clear-role-lock",
+    )
+
+
+async def clear_checkin_secret(ztp_api_url: str, api_key: Optional[str], serial: str) -> dict:
+    """Clear the server-side TOFU checkin secret for a reflashed unit.
+
+    A reflash wipes the device's copy of the secret while the server keeps
+    the hash — under CHECKIN_SECRET_ENFORCE that unit would be rejected at
+    the customer home. Always required after netinstalling a previously
+    enrolled unit; re-opens the first-contact window for this serial.
+    """
+    return await _post_ztp_device_action(
+        ztp_api_url,
+        api_key,
+        CLEAR_CHECKIN_SECRET_PATH_FMT.format(serial=serial),
+        "clear-checkin-secret",
+    )
