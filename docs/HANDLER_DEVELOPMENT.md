@@ -30,6 +30,21 @@ BaseHandler defines properties that control the provisioning flow. Override them
 | `fw2_skips_reboot` | `False` | Bank 2 update writes to inactive bank without activating. No reboot after FW2. Preserves auto-discovered state (azimuth, location) |
 | `config_after_all_firmware` | `False` | Moves config apply to AFTER all firmware updates and skips config verification. Use when config changes the management network (VLAN, DHCP), making the device unreachable for further operations |
 
+### Class-Level Traits (consulted before instantiation)
+
+Unlike the instance properties above (which may depend on `self._device_info`),
+these are plain **class attributes**. `config_store.py` and `main.py` read them
+via `HandlerManager.handler_class_for(device_type)` *before* a handler instance
+exists — during config-template lookup and the pre-provision model preflight.
+Never branch on vendor names in shared modules; add/override a trait instead.
+
+| Trait | Default | Effect When Overridden |
+|-------|---------|------------------------|
+| `allows_prefixed_config_exports` | `False` | `True`: template lookup also matches timestamp-prefixed exports (e.g. `20260424.143334.TNA-303L-65.tar` for model `TNA-303L-65`). Tachyon: `True` |
+| `allows_arbitrary_template_fallback` | `True` | `False`: when no model/alias/default template matches, do NOT fall back to an arbitrary file in the vendor's template dir. Disable for vendors with product-family templates where cross-applying configs is dangerous. Tachyon: `False` |
+| `config_alias_prefix_matching` | `False` | `True`: `CONFIG_MODEL_ALIASES` keys also match as model-name prefixes (`tna-305` covers `tna-305-xyz`). Tachyon: `True` |
+| `requires_model_preflight` | `False` | `True`: when fingerprinting identifies the vendor but not the model, run a read-only login/get-info preflight (`HandlerManager.login_and_get_info`) before firmware/config asset lookup. Enable for vendors with model-specific assets. Tachyon: `True` |
+
 ### Property Combinations by Vendor
 
 | Handler | dual_bank | update_triggers_reboot | verify_active_bank | fw2_skips_reboot | config_after_all_firmware | password_change |

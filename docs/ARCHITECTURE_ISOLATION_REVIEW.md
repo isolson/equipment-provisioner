@@ -86,6 +86,8 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 | **S3** | Per-vendor firmware scrapers | `firmware_sources/{vendor}.py` | Self-contained like handlers — good isolation, just enumerated. |
 | **S3** | Docs / labels / README / vendor icons / `config.yaml` | `README.md`, `docs/*`, `label-*.html`, `web/static/vendor-icons/*.png`, `config.yaml` | Cosmetic + runtime data (not code). |
 
+**Resolved via class-level handler traits (2026-06):** the Tachyon branches introduced by PR #85 in `config_store.py` (`is_tachyon` template-lookup gating, alias prefix matching) and `main.py` (model preflight) were replaced by `BaseHandler` class attributes — `allows_prefixed_config_exports`, `allows_arbitrary_template_fallback`, `config_alias_prefix_matching`, `requires_model_preflight` — consulted via `HandlerManager.handler_class_for(device_type)` (see `docs/HANDLER_DEVELOPMENT.md` → "Class-Level Traits"). This is the sanctioned mechanism for pre-instantiation vendor behavior in shared modules; the Tarana settings injection (S2 above) is the remaining orchestrator branch that should migrate to it. The future `VendorSpec` registry should absorb these traits.
+
 ---
 
 ## 4. Direction A — Pull Tachyon out (the worked example)

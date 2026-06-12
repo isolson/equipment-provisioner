@@ -549,7 +549,11 @@ class Provisioner:
                 port_status = self.port_manager._get_single_port_status(port_num)
                 await notify_port_change(port_num, port_status)
 
-            if self.handler_manager and device_type == "tachyon" and not fingerprint.model:
+            handler_class = (
+                self.handler_manager.handler_class_for(device_type)
+                if self.handler_manager else None
+            )
+            if handler_class and handler_class.requires_model_preflight and not fingerprint.model:
                 logger.info(
                     "Fingerprint did not include model for %s at %s; "
                     "running read-only handler info preflight before asset lookup",

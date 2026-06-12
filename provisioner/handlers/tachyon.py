@@ -22,6 +22,8 @@ from typing import Dict, Any, Optional
 
 import aiohttp
 
+from provisioner.config_templates import ConfigTemplateError, load_config_template
+
 from .base import BaseHandler, DeviceInfo, UNVERIFIED
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,16 @@ class TachyonHandler(BaseHandler):
 
     # Default credentials (factory default)
     DEFAULT_CREDENTIALS = {"username": "root", "password": "admin"}
+
+    # Template/preflight traits (see BaseHandler). Tachyon templates are
+    # full device exports per product family, so an arbitrary-file fallback
+    # could cross-apply a switch (tns-100) config to a radio. Firmware and
+    # config assets are model-specific, so the model must be known before
+    # asset lookup.
+    allows_prefixed_config_exports = True
+    allows_arbitrary_template_fallback = False
+    config_alias_prefix_matching = True
+    requires_model_preflight = True
 
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None,
                  alternate_credentials: list = None):
@@ -765,25 +777,18 @@ class TachyonHandler(BaseHandler):
     async def apply_config(self, config: Dict[str, Any]) -> bool:
         """Apply configuration via API.
 
-        After a successful POST, reads back the config and compares key fields
-        (hostname, SSID) to confirm the device actually accepted the changes.
+        After a successful POST, reads back the config and compares selected
+        authoritative fields to confirm the device actually accepted the
+        changes.
 
         Args:
             config: Configuration dictionary to apply
         """
+        self._normalize_config_for_apply(config)
+
         # Extract password from config before applying — if the config changes
         # the device password, we need the new one for reconnect after reboot.
         self._update_credentials_from_config(config)
-
-        # Capture expected values before POST for read-back verification
-        expected_hostname = config.get("system", {}).get("hostname")
-        expected_ssid = None
-        try:
-            vaps = config.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
-            if vaps:
-                expected_ssid = vaps[0].get("ssid")
-        except (KeyError, IndexError, TypeError):
-            pass
 
         # Use curl when interface binding is needed
         if self.interface:
@@ -823,10 +828,10 @@ class TachyonHandler(BaseHandler):
         # Remember what we applied so verify_config() can re-confirm it later.
         self._last_applied_config = config
 
-        # Read back config and verify key fields match what we sent. This is
-        # FAIL-CLOSED: if we cannot read the config back, or it does not match,
-        # we report failure. We never claim success we could not confirm.
-        if expected_hostname or expected_ssid:
+        # Read back config and verify selected fields match what we sent. This
+        # is FAIL-CLOSED: if we cannot read the config back, or it does not
+        # match, we report failure. We never claim success we could not confirm.
+        if self._has_verifiable_config_fields(config):
             await asyncio.sleep(2)  # Brief pause for config to settle
             readback = await self._get_config_curl()
             if not readback:
@@ -835,27 +840,292 @@ class TachyonHandler(BaseHandler):
                 )
                 return False
 
-            if expected_hostname:
-                actual = readback.get("system", {}).get("hostname")
-                if actual != expected_hostname:
-                    logger.error(f"[CONFIG VERIFY] hostname mismatch: sent '{expected_hostname}', got '{actual}'")
-                    return False
-                logger.info(f"[CONFIG VERIFY] hostname confirmed: {actual}")
-
-            if expected_ssid:
-                actual_ssid = None
-                try:
-                    vaps = readback.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
-                    if vaps:
-                        actual_ssid = vaps[0].get("ssid")
-                except (KeyError, IndexError, TypeError):
-                    pass
-                if actual_ssid != expected_ssid:
-                    logger.error(f"[CONFIG VERIFY] SSID mismatch: sent '{expected_ssid}', got '{actual_ssid}'")
-                    return False
-                logger.info(f"[CONFIG VERIFY] SSID confirmed: {actual_ssid}")
+            mismatches = self._config_verification_mismatches(config, readback)
+            if mismatches:
+                logger.error(
+                    "[CONFIG VERIFY] Config read-back mismatch on %s: %s",
+                    self.ip,
+                    "; ".join(mismatches[:5]),
+                )
+                return False
+            logger.info(f"[CONFIG VERIFY] Config confirmed on {self.ip}")
 
         return True
+
+    def _normalize_config_for_apply(self, config: Dict[str, Any]) -> None:
+        """Fill Tachyon API-required defaults omitted by older config exports."""
+        try:
+            system = config.get("system", {})
+            services = config.get("services", {})
+            radios = config.get("wireless", {}).get("radios", {})
+        except AttributeError:
+            return
+
+        if isinstance(system, dict):
+            for key, default in (
+                ("description", ""),
+                ("latitude", 0),
+                ("longitude", 0),
+            ):
+                if key not in system:
+                    system[key] = default
+                    logger.info(
+                        "Added default system.%s=%r for Tachyon config apply",
+                        key,
+                        default,
+                    )
+
+        if isinstance(services, dict):
+            if "cloud" not in services:
+                services["cloud"] = {"enabled": False}
+                logger.info("Added default services.cloud.enabled=false for Tachyon config apply")
+
+            snmp_traps = services.get("snmp_traps")
+            if isinstance(snmp_traps, dict) and "port" not in snmp_traps:
+                snmp_traps["port"] = 162
+                logger.info("Added default services.snmp_traps.port=162 for Tachyon config apply")
+
+            ssh = services.get("ssh")
+            if isinstance(ssh, dict) and "password_login" not in ssh:
+                ssh["password_login"] = True
+                logger.info("Added default services.ssh.password_login=true for Tachyon config apply")
+
+            snmp = services.get("snmp")
+            snmp_v3 = snmp.get("v3", {}) if isinstance(snmp, dict) else {}
+            snmp_v3_ro = snmp_v3.get("ro", {}) if isinstance(snmp_v3, dict) else {}
+            if isinstance(snmp_v3_ro, dict) and "encryption_mode" not in snmp_v3_ro:
+                snmp_v3_ro["encryption_mode"] = "aes"
+                logger.info(
+                    "Added default services.snmp.v3.ro.encryption_mode=aes for Tachyon config apply"
+                )
+
+        network = config.get("network", {}) if isinstance(config.get("network"), dict) else {}
+        wan = network.get("zones", {}).get("wan", {}) if isinstance(network.get("zones"), dict) else {}
+        if isinstance(wan, dict):
+            if "lldp_forward" not in wan:
+                wan["lldp_forward"] = False
+                logger.info(
+                    "Added default network.zones.wan.lldp_forward=false for Tachyon config apply"
+                )
+            if "carrier_drop" not in wan:
+                wan["carrier_drop"] = {
+                    "enabled": False,
+                    "rssi_threshold": -68,
+                    "down_time": 3,
+                    "start_delay": 300,
+                }
+                logger.info("Added default network.zones.wan.carrier_drop for Tachyon config apply")
+            dhcp = wan.get("dhcp")
+            if isinstance(dhcp, dict) and "enabled_options" not in dhcp:
+                dhcp["enabled_options"] = {
+                    "log_server": True,
+                    "ntp_server": True,
+                    "timezone_offset": True,
+                }
+                logger.info(
+                    "Added default network.zones.wan.dhcp.enabled_options for Tachyon config apply"
+                )
+
+        ethernet_ports = (
+            config.get("ethernet", {}).get("ports", {})
+            if isinstance(config.get("ethernet"), dict)
+            else {}
+        )
+        try:
+            wlan0_mode = radios.get("wlan0", {}).get("vaps", [{}])[0].get("mode")
+        except (AttributeError, IndexError, TypeError):
+            wlan0_mode = None
+        eth0 = ethernet_ports.get("eth0") if isinstance(ethernet_ports, dict) else None
+        eth0_network = eth0.get("network") if isinstance(eth0, dict) else None
+        if wlan0_mode == "sta" and isinstance(eth0_network, dict):
+            if "mgmt_vlan_enabled" not in eth0_network:
+                eth0_network["mgmt_vlan_enabled"] = True
+                logger.info(
+                    "Added default ethernet.ports.eth0.network.mgmt_vlan_enabled=true for Tachyon config apply"
+                )
+
+        if not isinstance(radios, dict):
+            return
+
+        for radio_name, radio in radios.items():
+            if not isinstance(radio, dict):
+                continue
+            if radio.get("enabled") is True and "isolation" not in radio:
+                radio["isolation"] = False
+                logger.info(
+                    "Added default wireless.radios.%s.isolation=false for Tachyon config apply",
+                    radio_name,
+                )
+            vaps = radio.get("vaps", [])
+            if not isinstance(vaps, list):
+                continue
+            for index, vap in enumerate(vaps):
+                if not isinstance(vap, dict):
+                    continue
+                if vap.get("enabled") is True and "isolate" not in vap:
+                    vap["isolate"] = False
+                    logger.info(
+                        "Added default wireless.radios.%s.vaps[%s].isolate=false for Tachyon config apply",
+                        radio_name,
+                        index,
+                    )
+                network = vap.get("network")
+                if isinstance(network, dict) and "mgmt_vlan_enabled" not in network:
+                    network["mgmt_vlan_enabled"] = False
+                    logger.info(
+                        "Added default wireless.radios.%s.vaps[%s].network.mgmt_vlan_enabled=false for Tachyon config apply",
+                        radio_name,
+                        index,
+                    )
+
+    def _is_full_config_export(self, config: Dict[str, Any]) -> bool:
+        """Return True when a JSON template looks like a full Tachyon export."""
+        if not isinstance(config, dict):
+            return False
+        keys = set(config.keys())
+        return (
+            {"ethernet", "network", "version"}.issubset(keys)
+            or {"network", "wireless", "system", "version"}.issubset(keys)
+        )
+
+    def _has_verifiable_config_fields(self, config: Dict[str, Any]) -> bool:
+        if not isinstance(config, dict):
+            return False
+        if isinstance(config.get("ethernet", {}).get("ports"), dict):
+            return True
+        if isinstance(config.get("network", {}).get("zones", {}).get("wan"), dict):
+            return True
+        if isinstance(config.get("services"), dict):
+            return True
+        system = config.get("system", {})
+        if isinstance(system, dict) and (system.get("hostname") or system.get("name")):
+            return True
+        try:
+            vaps = config.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
+            return bool(vaps and isinstance(vaps[0], dict) and vaps[0].get("ssid"))
+        except (KeyError, IndexError, TypeError, AttributeError):
+            return False
+
+    def _config_verification_mismatches(self, expected: Dict[str, Any], actual: Dict[str, Any]):
+        """Compare selected non-secret fields that prove a Tachyon export landed."""
+        mismatches = []
+
+        expected_system = expected.get("system", {}) if isinstance(expected.get("system"), dict) else {}
+        actual_system = actual.get("system", {}) if isinstance(actual.get("system"), dict) else {}
+        for key in ("hostname", "name"):
+            if key in expected_system and expected_system.get(key) != actual_system.get(key):
+                mismatches.append(f"system.{key}")
+
+        expected_ports = expected.get("ethernet", {}).get("ports")
+        actual_ports = actual.get("ethernet", {}).get("ports")
+        if isinstance(expected_ports, dict):
+            if not isinstance(actual_ports, dict):
+                mismatches.append("ethernet.ports missing")
+            elif set(expected_ports.keys()) != set(actual_ports.keys()):
+                mismatches.append("ethernet.ports key set")
+            else:
+                self._append_expected_value_mismatches(
+                    mismatches, "ethernet.ports", expected_ports, actual_ports
+                )
+
+        expected_wan = expected.get("network", {}).get("zones", {}).get("wan")
+        actual_wan = actual.get("network", {}).get("zones", {}).get("wan")
+        if isinstance(expected_wan, dict):
+            if not isinstance(actual_wan, dict):
+                mismatches.append("network.zones.wan missing")
+            else:
+                if ("vlans" in expected_wan) != ("vlans" in actual_wan):
+                    mismatches.append("network.zones.wan.vlans presence")
+                self._append_expected_value_mismatches(
+                    mismatches, "network.zones.wan", expected_wan, actual_wan
+                )
+
+        expected_services = expected.get("services")
+        actual_services = actual.get("services")
+        if isinstance(expected_services, dict):
+            if not isinstance(actual_services, dict):
+                mismatches.append("services missing")
+            elif set(expected_services.keys()) != set(actual_services.keys()):
+                mismatches.append("services key set")
+            else:
+                self._append_service_toggle_mismatches(mismatches, expected_services, actual_services)
+
+        self._append_wireless_mismatches(mismatches, expected, actual)
+        return mismatches
+
+    def _append_expected_value_mismatches(self, mismatches, prefix: str, expected: Any, actual: Any) -> None:
+        if self._is_sensitive_path(prefix):
+            return
+        if isinstance(expected, dict):
+            if not isinstance(actual, dict):
+                mismatches.append(prefix)
+                return
+            for key, value in expected.items():
+                next_prefix = f"{prefix}.{key}"
+                self._append_expected_value_mismatches(
+                    mismatches, next_prefix, value, actual.get(key)
+                )
+        elif isinstance(expected, list):
+            if expected != actual:
+                mismatches.append(prefix)
+        elif expected != actual:
+            mismatches.append(prefix)
+
+    def _append_service_toggle_mismatches(self, mismatches, expected: Dict[str, Any], actual: Dict[str, Any]) -> None:
+        def walk(expected_value, actual_value, path):
+            if self._is_sensitive_path(path):
+                return
+            if isinstance(expected_value, dict):
+                if not isinstance(actual_value, dict):
+                    mismatches.append(path)
+                    return
+                for key, value in expected_value.items():
+                    next_path = f"{path}.{key}" if path else key
+                    walk(value, actual_value.get(key), next_path)
+            elif path.endswith(".enabled") or path.endswith(".port") or path.endswith(".password_login"):
+                if expected_value != actual_value:
+                    mismatches.append(f"services.{path}")
+
+        walk(expected, actual, "")
+
+    def _append_wireless_mismatches(self, mismatches, expected: Dict[str, Any], actual: Dict[str, Any]) -> None:
+        expected_wlan0 = expected.get("wireless", {}).get("radios", {}).get("wlan0", {})
+        actual_wlan0 = actual.get("wireless", {}).get("radios", {}).get("wlan0", {})
+        if not isinstance(expected_wlan0, dict):
+            return
+
+        expected_vaps = expected_wlan0.get("vaps", [])
+        actual_vaps = actual_wlan0.get("vaps", []) if isinstance(actual_wlan0, dict) else []
+        if not expected_vaps:
+            return
+        if not actual_vaps or not isinstance(expected_vaps[0], dict) or not isinstance(actual_vaps[0], dict):
+            mismatches.append("wireless.radios.wlan0.vaps[0]")
+            return
+
+        expected_vap = expected_vaps[0]
+        actual_vap = actual_vaps[0]
+        if "ssid" in expected_vap and expected_vap.get("ssid") != actual_vap.get("ssid"):
+            mismatches.append("wireless.radios.wlan0.vaps[0].ssid")
+
+        expected_profiles = expected_vap.get("sta_profiles", {}).get("profiles", [])
+        actual_profiles = actual_vap.get("sta_profiles", {}).get("profiles", [])
+        if expected_profiles:
+            expected_ssids = [
+                profile.get("ssid")
+                for profile in expected_profiles
+                if isinstance(profile, dict)
+            ]
+            actual_ssids = [
+                profile.get("ssid")
+                for profile in actual_profiles
+                if isinstance(profile, dict)
+            ]
+            if expected_ssids != actual_ssids:
+                mismatches.append("wireless.radios.wlan0.vaps[0].sta_profiles.profiles.ssid")
+
+    def _is_sensitive_path(self, path: str) -> bool:
+        sensitive_parts = ("password", "passphrase", "private_key", "public_key", "community")
+        return any(part in path.lower() for part in sensitive_parts)
 
     async def _get_config_curl(self) -> Dict[str, Any]:
         """Read the device config back for verification.
@@ -971,59 +1241,34 @@ class TachyonHandler(BaseHandler):
         - Plain JSON files (.json)
         - Tarball files (.tar, .tar.gz, .tgz) containing config.json
         """
-        import tarfile
-
         try:
-            config_file = Path(config_path)
             logger.info(f"Loading config from file: {config_path}")
 
-            if not config_file.exists():
-                logger.error(f"Config file not found: {config_path}")
-                return False
+            loaded_template = load_config_template(config_path)
+            config = loaded_template.config
+            logger.info(
+                "Loaded config template: source=%s, keys=%s",
+                loaded_template.source_type,
+                loaded_template.top_level_keys,
+            )
 
-            logger.info(f"Config file size: {config_file.stat().st_size} bytes")
-
-            # Check if it's a tarball
-            if tarfile.is_tarfile(config_path):
-                logger.info(f"Extracting config.json from tarball: {config_path}")
-                with tarfile.open(config_path, "r:*") as tar:
-                    # Look for config.json in the tarball
-                    config_json = None
-                    for member in tar.getmembers():
-                        if member.name.endswith("config.json") or member.name == "config.json":
-                            config_json = member
-                            break
-
-                    if not config_json:
-                        logger.error(f"No config.json found in tarball: {config_path}")
-                        return False
-
-                    # Extract and parse config.json
-                    f = tar.extractfile(config_json)
-                    if f is None:
-                        logger.error(f"Failed to extract config.json from tarball")
-                        return False
-
-                    config = json.load(f)
+            if loaded_template.source_type == "tar" or self._is_full_config_export(config):
+                logger.info("Applying Tachyon config export as authoritative full config")
             else:
-                # Plain JSON file
-                with open(config_file, "r") as f:
-                    config = json.load(f)
-
-            # GET current config from device and merge template into it
-            # This preserves device-only fields that the firmware requires
-            try:
-                current_config = await self._api_request("GET", self.API_CONFIG)
-                if isinstance(current_config, dict):
-                    config = self._deep_merge(current_config, config)
-                    logger.info(f"Merged template config into current device config")
-            except Exception as e:
-                logger.warning(f"Could not GET current config for merge, applying template as-is: {e}")
+                # Partial JSON templates remain patch-like and merge into the
+                # live config before apply.
+                try:
+                    current_config = await self._api_request("GET", self.API_CONFIG)
+                    if isinstance(current_config, dict):
+                        config = self._deep_merge(current_config, config)
+                        logger.info(f"Merged partial template config into current device config")
+                except Exception as e:
+                    logger.warning(f"Could not GET current config for merge, applying template as-is: {e}")
 
             return await self.apply_config(config)
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in config file {config_path}: {e}")
+        except ConfigTemplateError as e:
+            logger.error(str(e))
             return False
         except Exception as e:
             logger.error(f"Failed to apply config file: {e}")
@@ -1455,7 +1700,7 @@ class TachyonHandler(BaseHandler):
         """Post-config verification: reconnect, then re-confirm the config.
 
         Reconnects, checks firmware banks, and — fail-closed — reads the config
-        back and compares the key fields (hostname, SSID) against the config we
+        back and compares selected non-secret fields against the config we
         applied. If the config cannot be read back, returns ``False`` rather
         than claiming a success we cannot confirm. Returns :data:`UNVERIFIED`
         only when there is nothing recorded to compare against.
@@ -1503,16 +1748,7 @@ class TachyonHandler(BaseHandler):
         # Re-confirm the config actually landed by reading it back and comparing
         # against what we applied. This is the real gate (fail-closed).
         expected = self._last_applied_config or {}
-        expected_hostname = expected.get("system", {}).get("hostname")
-        expected_ssid = None
-        try:
-            vaps = expected.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
-            if vaps:
-                expected_ssid = vaps[0].get("ssid")
-        except (KeyError, IndexError, TypeError):
-            pass
-
-        if not (expected_hostname or expected_ssid):
+        if not self._has_verifiable_config_fields(expected):
             # Nothing recorded to compare — connectivity confirmed, config not.
             logger.info(f"[CONFIG VERIFY] Device accessible on {self.ip}; no config fields to confirm")
             return UNVERIFIED
@@ -1522,23 +1758,14 @@ class TachyonHandler(BaseHandler):
             logger.error(f"[CONFIG VERIFY] Could not read back config on {self.ip} — failing closed")
             return False
 
-        if expected_hostname:
-            actual = readback.get("system", {}).get("hostname")
-            if actual != expected_hostname:
-                logger.error(f"[CONFIG VERIFY] hostname mismatch: expected '{expected_hostname}', got '{actual}'")
-                return False
-
-        if expected_ssid:
-            actual_ssid = None
-            try:
-                vaps = readback.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps", [])
-                if vaps:
-                    actual_ssid = vaps[0].get("ssid")
-            except (KeyError, IndexError, TypeError):
-                pass
-            if actual_ssid != expected_ssid:
-                logger.error(f"[CONFIG VERIFY] SSID mismatch: expected '{expected_ssid}', got '{actual_ssid}'")
-                return False
+        mismatches = self._config_verification_mismatches(expected, readback)
+        if mismatches:
+            logger.error(
+                "[CONFIG VERIFY] Config read-back mismatch on %s: %s",
+                self.ip,
+                "; ".join(mismatches[:5]),
+            )
+            return False
 
         logger.info(f"[CONFIG VERIFY] Config confirmed on {self.ip}")
         return True

@@ -90,6 +90,19 @@ class ConfigStore:
 
         return None
 
+    @staticmethod
+    def _handler_traits(device_type: str):
+        """Class-level template traits for a vendor, via its handler class.
+
+        Falls back to BaseHandler defaults for types without a handler
+        (e.g. evolution_digital, unknown). Imported locally so importing
+        config_store does not pull in the handlers package.
+        """
+        from .handler_manager import HandlerManager
+        from .handlers.base import BaseHandler
+
+        return HandlerManager.handler_class_for(device_type) or BaseHandler
+
     def _get_model_alias(self, device_type: str, model: Optional[str]) -> Optional[str]:
         if not model or device_type not in self.CONFIG_MODEL_ALIASES:
             return None
@@ -100,7 +113,7 @@ class ConfigStore:
         if alias:
             return alias
 
-        if device_type == "tachyon":
+        if self._handler_traits(device_type).config_alias_prefix_matching:
             for prefix in sorted(aliases, key=len, reverse=True):
                 if model_key.startswith(f"{prefix}-"):
                     return aliases[prefix]
@@ -129,7 +142,7 @@ class ConfigStore:
         model_alias = self._get_model_alias(device_type, model)
         if model_alias:
             logger.debug(f"Config model alias: {model} -> {model_alias}")
-        is_tachyon = device_type == "tachyon"
+        traits = self._handler_traits(device_type)
 
         if device_dir.exists() and device_dir.is_dir():
             if model_names:
@@ -138,7 +151,7 @@ class ConfigStore:
                         device_dir,
                         model_name,
                         [".json", ".rsc", ".yaml", ".tar", ".tar.gz"],
-                        allow_prefixed_export=is_tachyon,
+                        allow_prefixed_export=traits.allows_prefixed_config_exports,
                     )
                     if model_template:
                         return model_template
@@ -148,7 +161,7 @@ class ConfigStore:
                     device_dir,
                     model_alias,
                     [".json", ".rsc", ".yaml", ".tar", ".tar.gz"],
-                    allow_prefixed_export=is_tachyon,
+                    allow_prefixed_export=traits.allows_prefixed_config_exports,
                 )
                 if alias_template:
                     logger.info(f"Using aliased config template: {alias_template.name} for model {model}")
@@ -162,10 +175,10 @@ class ConfigStore:
             if default_template:
                 return default_template
 
-            if not is_tachyon:
-                # Historical fallback for non-Tachyon vendors. Tachyon uses
-                # product-family templates, so an arbitrary file can cross-apply
-                # switch/radio configs.
+            if traits.allows_arbitrary_template_fallback:
+                # Historical fallback. Vendors with product-family templates
+                # (e.g. Tachyon) disable this on their handler class, since an
+                # arbitrary file could cross-apply switch/radio configs.
                 for ext in [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]:
                     files = [
                         f for f in device_dir.glob(f"*{ext}")
