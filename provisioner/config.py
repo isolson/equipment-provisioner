@@ -232,7 +232,7 @@ class MikrotikDeviceConfig(BaseModel):
     DEFAULT_ZTP_API_URL: ClassVar[str] = "https://wifi.infra.treehouse.mn"
 
     ztp_api_url: Optional[str] = DEFAULT_ZTP_API_URL  # ZTP API base URL (wifi-api ZTP service)
-    ztp_api_key: Optional[str] = None  # API key for served Netinstall bootstrap fetch + register
+    ztp_api_key: Optional[str] = None  # API key for the ZTP GETs (credentials, bootstrap) + register
 
     @field_validator("ztp_api_url", mode="before")
     @classmethod

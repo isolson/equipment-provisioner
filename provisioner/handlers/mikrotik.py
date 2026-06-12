@@ -883,11 +883,14 @@ class MikrotikHandler(BaseHandler):
     # `wifi-mediatek`. The driver is selected per-model in `_run_netinstall`
     # via `wifi_driver_for_model`.
     #
-    # The provisioner ships only `routeros-*-<arch>.npk` via netinstall-cli,
-    # then SCP-uploads the WiFi driver `.npk` post-boot and reboots to install
-    # onto an already-running OS. A final `/system reset-configuration`
-    # triggers a fresh DefConf gen with the driver now properly bound,
-    # populating `/interface/wifi/radio`.
+    # The contract Netinstall path now ships the WiFi driver in the flash set
+    # (sixtyops/wifi PR #253) and gates registration on
+    # `verify_wifi_radios_bound`. These helpers remain as the recovery path if
+    # that check fails on affected hardware, and for non-Netinstall flows:
+    # SCP-upload the driver `.npk` post-boot and reboot to install onto an
+    # already-running OS, then `/system reset-configuration` to trigger a
+    # fresh DefConf gen with the driver bound, populating
+    # `/interface/wifi/radio`.
 
     async def install_extra_npk_and_reboot(
         self,
@@ -1012,6 +1015,7 @@ class MikrotikHandler(BaseHandler):
     # per-device :local parameters -> /import -> verify -> register.
 
     NETINSTALL_BOOTSTRAP_PATH = "/ztp/mikrotik/netinstall-bootstrap.rsc"
+    PROVISIONING_CREDENTIALS_PATH = "/ztp/mikrotik/provisioning-credentials"
     BASE_FLASH_PATH = "/ztp/mikrotik/base-flash.rsc"
     # The base-flash stamp is `base_flash_version=universal-vN`. The server
     # bumps N on every material base-flash change, and its contract is that
@@ -1071,6 +1075,33 @@ class MikrotikHandler(BaseHandler):
                         f"netinstall bootstrap fetch {url} returned {resp.status}: {body[:200]}"
                     )
                 return await resp.text()
+
+    @staticmethod
+    async def fetch_provisioning_credentials(
+        ztp_api_url: str, api_key: Optional[str]
+    ) -> Dict[str, str]:
+        """Fetch the canonical fleet credentials from the wifi-api.
+
+        JSON out: ``bootstrap_password``, ``onboarding_ssid``,
+        ``onboarding_passphrase``. The served Configure script embeds the
+        backend's stored ``bootstrap_password``, so the post-flash SSH login
+        must use this value — a locally-configured password can drift from it.
+        """
+        url = ztp_api_url.rstrip("/") + MikrotikHandler.PROVISIONING_CREDENTIALS_PATH
+        headers = {}
+        if api_key:
+            headers["X-API-Key"] = api_key
+
+        timeout = aiohttp.ClientTimeout(total=MikrotikHandler.BASE_FLASH_FETCH_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"provisioning-credentials fetch {url} returned "
+                        f"{resp.status}: {body[:200]}"
+                    )
+                return await resp.json(content_type=None)
 
     @staticmethod
     def build_import_script(
@@ -1148,7 +1179,10 @@ class MikrotikHandler(BaseHandler):
         scheduler = device_mode.get("scheduler", "").lower()
         mode = device_mode.get("mode", "").lower() or "unknown"
 
-        if fetch != "yes" or scheduler != "yes":
+        # The contract requires mode=advanced itself, not just the fetch /
+        # scheduler flags: `home` also blocks /system/routerboard/upgrade and
+        # ROMON, which fielded routers depend on (managed-wifi.md).
+        if mode != "advanced" or fetch != "yes" or scheduler != "yes":
             return (
                 False,
                 "device-mode blocks ZTP: mode=%s fetch=%s scheduler=%s"
@@ -1197,6 +1231,18 @@ class MikrotikHandler(BaseHandler):
             return False, "missing WAN DHCP probe clients"
 
         return True, "ZTP-ready: device-mode, phone-home, schedulers, WAN probes verified"
+
+    async def verify_wifi_radios_bound(self) -> bool:
+        """Verify the WiFi driver actually bound the radio chip.
+
+        Netinstalling routeros + the WiFi driver in one flash has left
+        `/interface/wifi` empty on hAP ax hardware (driver loads, radio never
+        binds — see the sequenced-install notes above). The contract runbook's
+        pass criterion is a non-empty `/interface/wifi`, so wifi-capable
+        models must not register without it.
+        """
+        count = await self._run_count("/interface/wifi/find")
+        return count >= 1
 
     async def _run_count(self, routeros_find_command: str) -> int:
         """Run a RouterOS find expression and return the result count."""

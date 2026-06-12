@@ -168,10 +168,13 @@ Only `port_number` is required. All other fields are optional.
 
 Run MikroTik Netinstall on a port. Used when the device is in BOOTP / Netinstall
 listening mode (reset button held during power-on). Implements the
-equipment-provisioner contract: fetch the served Netinstall Configure script
-from `<ztp_api_url>/ztp/mikrotik/netinstall-bootstrap.rsc` with `X-API-Key`,
-flash RouterOS with both the local Mode script and that served Configure
-script, verify `/system/note` contains `base_flash_version=universal-v1`, then
+equipment-provisioner contract: fetch the canonical fleet credentials from
+`<ztp_api_url>/ztp/mikrotik/provisioning-credentials` and the served Netinstall
+Configure script from `<ztp_api_url>/ztp/mikrotik/netinstall-bootstrap.rsc`
+(both `X-API-Key`-gated), flash RouterOS with both the local Mode script and
+that served Configure script, verify `/system/note` carries a
+`base_flash_version` ≥ `universal-v1`, verify `mode=advanced` plus phone-home
+readiness (and bound wifi radios on wifi-capable models), then
 `POST <ztp_api_url>/ztp/mikrotik/register`.
 
 This endpoint is also called automatically by the per-port BOOTP sniffer when
