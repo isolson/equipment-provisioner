@@ -1,5 +1,6 @@
 from pathlib import Path
 import logging
+import sqlite3
 import sys
 import types
 
@@ -29,8 +30,18 @@ if "rich.console" not in sys.modules:
     sys.modules["rich.console"] = rich_console_module
     sys.modules["rich.logging"] = rich_logging_module
 
-if "aiosqlite" not in sys.modules:
-    sys.modules["aiosqlite"] = types.ModuleType("aiosqlite")
+# Stub aiosqlite only when it is genuinely not installed. Keying on
+# `sys.modules` shadowed the real package on CI (installed but not yet
+# imported at collection time), and the bare stub broke provisioner.db's
+# import on Python < 3.14, where `aiosqlite.Row` in a def annotation is
+# evaluated eagerly.
+try:
+    import aiosqlite  # noqa: F401
+except ImportError:
+    aiosqlite_module = types.ModuleType("aiosqlite")
+    aiosqlite_module.Row = sqlite3.Row
+    aiosqlite_module.Connection = object
+    sys.modules["aiosqlite"] = aiosqlite_module
 
 from provisioner.main import Provisioner
 
