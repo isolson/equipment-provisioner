@@ -122,15 +122,26 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
         base_flash_version_detected = "universal-v1"
         fetched = False
         last_netinstall_kwargs = None
+        last_init_kwargs = None
 
         def __init__(self, *args, **kwargs):
-            pass
+            type(self).last_init_kwargs = kwargs
 
         async def netinstall(self, **kwargs):
             assert type(self).fetched is True
             assert kwargs["configure_script_body"] == "# served netinstall bootstrap\n"
             type(self).last_netinstall_kwargs = kwargs
             return True
+
+        @staticmethod
+        async def fetch_provisioning_credentials(url, api_key):
+            assert url == "https://wifi.example.test"
+            assert api_key == "ztp-api-key"
+            return {
+                "bootstrap_password": "canonical-pass",
+                "onboarding_ssid": "th-ext-join",
+                "onboarding_passphrase": "join-pass",
+            }
 
         async def wait_for_reboot(self, timeout):
             return True
@@ -163,6 +174,9 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
         async def verify_ztp_ready(self, serial):
             return True, "ZTP-ready"
 
+        async def verify_wifi_radios_bound(self):
+            return True
+
         async def disconnect(self):
             pass
 
@@ -193,6 +207,13 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
     assert args[:3] == (5, 0, True)
     assert provisioner.port_manager.port_states[5].last_result == "success"
     assert FakeMikrotikHandler.last_netinstall_kwargs["firmware_paths"] == [tmp_path / "routeros-arm64.npk"]
+    # The post-flash SSH login must use the wifi-api's stored bootstrap
+    # password (which the served Configure script embeds), not the local
+    # MIKROTIK_BOOTSTRAP_PASS it would otherwise drift against.
+    assert FakeMikrotikHandler.last_init_kwargs["credentials"] == {
+        "username": "fleet-bootstrap",
+        "password": "canonical-pass",
+    }
     register.assert_awaited_once_with(
         ztp_api_url="https://wifi.example.test",
         api_key="ztp-api-key",
@@ -311,6 +332,9 @@ async def test_netinstall_ships_wifi_driver_packages_in_flash_payload(tmp_path, 
         async def verify_ztp_ready(self, serial):
             return True, "ZTP-ready"
 
+        async def verify_wifi_radios_bound(self):
+            return True
+
         async def disconnect(self):
             pass
 
@@ -324,7 +348,7 @@ async def test_netinstall_ships_wifi_driver_packages_in_flash_payload(tmp_path, 
         firmware_manager=SimpleNamespace(firmware_path=tmp_path),
     )
 
-    # Both wifi drivers present for arm; only the MediaTek one should install.
+    # Every selected package ships in the flash set; netinstall-cli matches arch.
     selected = [
         tmp_path / "routeros-arm-7.23.1.npk",
         tmp_path / "wifi-qcom-7.23.1-arm.npk",
@@ -346,6 +370,88 @@ async def test_netinstall_ships_wifi_driver_packages_in_flash_payload(tmp_path, 
         "wifi-mediatek-7.23.1-arm.npk",
     ]
     assert provisioner.port_manager.port_states[5].last_result == "success"
+
+
+async def test_netinstall_fails_before_register_when_wifi_radios_not_bound(tmp_path, monkeypatch):
+    """A wifi-capable model with an empty /interface/wifi must not register.
+
+    This is the hAP ax radio-binding failure mode: routeros + wifi driver in
+    one flash can leave the driver loaded but the radio unbound. The runbook's
+    step-1 pass criterion is a non-empty /interface/wifi.
+    """
+    from provisioner.web.api import _run_netinstall
+
+    class FakeMikrotikHandler:
+        BOOTSTRAP_USER = "fleet-bootstrap"
+        BASE_FLASH_VERSION = "universal-v1"
+        base_flash_version_detected = "universal-v1"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def netinstall(self, **kwargs):
+            return True
+
+        async def wait_for_reboot(self, timeout):
+            return True
+
+        async def connect(self):
+            return True
+
+        async def get_info(self):
+            return SimpleNamespace(
+                serial_number="HKC0TEST123",
+                mac_address="04:f4:1c:c2:06:80",
+                model="hAP ax S",
+                firmware_version="7.23.1",
+                hardware_version="arm",
+            )
+
+        from provisioner.handlers.mikrotik import MikrotikHandler as _Real
+        wifi_driver_for_model = _Real.wifi_driver_for_model
+
+        @staticmethod
+        async def fetch_netinstall_bootstrap(url, api_key):
+            return "# served netinstall bootstrap\n"
+
+        async def wait_for_base_flash_applied(self):
+            return True
+
+        async def verify_ztp_ready(self, serial):
+            return True, "ZTP-ready"
+
+        async def verify_wifi_radios_bound(self):
+            return False
+
+        async def disconnect(self):
+            pass
+
+    config = Config()
+    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
+    config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
+    provisioner = SimpleNamespace(
+        config=config,
+        port_manager=DummyPortManager(),
+        firmware_manager=SimpleNamespace(firmware_path=tmp_path),
+    )
+
+    register = AsyncMock()
+    monkeypatch.setattr("provisioner.web.api.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("provisioner.web.api._select_latest_npk_per_arch", lambda _: [tmp_path / "routeros-arm.npk"])
+    monkeypatch.setattr("provisioner.web.api.MikrotikHandler", FakeMikrotikHandler, raising=False)
+    monkeypatch.setattr("provisioner.handlers.mikrotik.MikrotikHandler", FakeMikrotikHandler)
+    monkeypatch.setattr("provisioner.equipment_registry.register_mikrotik", register)
+    monkeypatch.setattr("provisioner.web.websocket.notify_port_change", AsyncMock())
+    monkeypatch.setattr("provisioner.web.websocket.notify_provisioning_completed", AsyncMock())
+
+    await _run_netinstall(provisioner, 5)
+
+    register.assert_not_awaited()
+    assert provisioner.port_manager.port_states[5].last_result == "failed"
+    assert provisioner.port_manager.port_states[5].last_error == (
+        "WiFi radios not bound after Netinstall (/interface/wifi empty)"
+    )
 
 
 async def test_netinstall_requires_ztp_api_key_before_flash(tmp_path, monkeypatch):

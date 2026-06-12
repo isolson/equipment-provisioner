@@ -229,6 +229,53 @@ class TestFetchNetinstallBootstrap:
 
 
 # ---------------------------------------------------------------------------
+# fetch_provisioning_credentials
+# ---------------------------------------------------------------------------
+
+
+class TestFetchProvisioningCredentials:
+    async def test_returns_json_and_sends_api_key(self):
+        factory, stub = _patch_session(
+            200,
+            '{"bootstrap_password": "canon", "onboarding_ssid": "th-ext-join", '
+            '"onboarding_passphrase": "join-pass"}',
+        )
+        with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
+            creds = await MikrotikHandler.fetch_provisioning_credentials(
+                "https://api.example.com", "sekret"
+            )
+
+        assert creds["bootstrap_password"] == "canon"
+        assert stub.last_call["method"] == "GET"
+        assert (
+            stub.last_call["url"]
+            == "https://api.example.com/ztp/mikrotik/provisioning-credentials"
+        )
+        assert stub.last_call["headers"]["X-API-Key"] == "sekret"
+
+    async def test_strips_trailing_slash(self):
+        factory, stub = _patch_session(200, "{}")
+        with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
+            await MikrotikHandler.fetch_provisioning_credentials(
+                "https://api.example.com/", "sekret"
+            )
+
+        assert (
+            stub.last_call["url"]
+            == "https://api.example.com/ztp/mikrotik/provisioning-credentials"
+        )
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 500, 502])
+    async def test_raises_on_non_200(self, status):
+        factory, _ = _patch_session(status, "error body")
+        with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
+            with pytest.raises(RuntimeError, match=str(status)):
+                await MikrotikHandler.fetch_provisioning_credentials(
+                    "https://api.example.com", "sekret"
+                )
+
+
+# ---------------------------------------------------------------------------
 # verify_base_flash_applied
 # ---------------------------------------------------------------------------
 
@@ -377,6 +424,23 @@ class TestVerifyZtpReady:
         assert ok is False
         assert "device-mode blocks ZTP" in detail
 
+    async def test_false_when_mode_not_advanced_even_with_flags_enabled(self):
+        """Contract: the provisioner must verify mode=advanced itself.
+
+        `home` with fetch/scheduler individually enabled still blocks
+        /system/routerboard/upgrade and ROMON for fielded routers.
+        """
+        h = _handler()
+        h._run_command = self._mock_ztp_ready_commands(
+            device_mode="mode: home\nfetch: yes\nscheduler: yes\n",
+        )
+
+        ok, detail = await h.verify_ztp_ready("HBE0001")
+
+        assert ok is False
+        assert "device-mode blocks ZTP" in detail
+        assert "mode=home" in detail
+
     async def test_false_when_phone_home_scheduler_missing(self):
         h = _handler()
         h._run_command = self._mock_ztp_ready_commands(
@@ -398,6 +462,36 @@ class TestVerifyZtpReady:
 
         assert ok is False
         assert "unexpected identity" in detail
+
+
+# ---------------------------------------------------------------------------
+# verify_wifi_radios_bound
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyWifiRadiosBound:
+    async def test_true_when_interface_wifi_non_empty(self):
+        h = _handler()
+        h._run_command = AsyncMock(return_value="2")
+
+        assert await h.verify_wifi_radios_bound() is True
+        h._run_command.assert_awaited_once_with(
+            ":put [:len [/interface/wifi/find]]", allow_failure=True
+        )
+
+    async def test_false_when_interface_wifi_empty(self):
+        h = _handler()
+        h._run_command = AsyncMock(return_value="0")
+
+        assert await h.verify_wifi_radios_bound() is False
+
+    async def test_false_when_wifi_path_errors(self):
+        # No wifi package installed: the find errors and the count parse
+        # falls back to 0 rather than passing a wifi-dead unit.
+        h = _handler()
+        h._run_command = AsyncMock(return_value="bad command name find")
+
+        assert await h.verify_wifi_radios_bound() is False
 
 
 # ---------------------------------------------------------------------------

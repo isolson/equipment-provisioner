@@ -54,18 +54,25 @@ override / debug control but is not part of the normal happy path.
                        │    1. Add transient 10.255.<vlan%256>.11/24     │
                        │       to port VLAN (cleanup in finally)         │
                        │    2. GET <ztp_api_url>/ztp/mikrotik/           │
+                       │       provisioning-credentials with X-API-Key   │
+                       │       (canonical fleet-bootstrap password;      │
+                       │       MIKROTIK_BOOTSTRAP_PASS is the fallback)  │
+                       │    3. GET <ztp_api_url>/ztp/mikrotik/           │
                        │       netinstall-bootstrap.rsc with X-API-Key   │
-                       │    3. netinstall-cli -i <vlan> -a <client-ip>   │
+                       │    4. netinstall-cli -i <vlan> -a <client-ip>   │
                        │       -r -c -sm <modescript> -s <userscript>    │
                        │       <npks>                                    │
-                       │    4. Wait up to 240s for SSH                   │
-                       │    5. SSH in as fleet-bootstrap                 │
-                       │    6. Read RouterBOARD serial; abort if missing │
-                       │    7. Verify /system/note contains              │
-                       │       base_flash_version=universal-v1           │
-                       │    8. Verify ZTP-ready state: device-mode,      │
-                       │       phone-home, schedulers, WAN probes        │
-                       │    9. POST <ztp_api_url>/ztp/mikrotik/register  │
+                       │    5. Wait up to 240s for SSH                   │
+                       │    6. SSH in as fleet-bootstrap                 │
+                       │    7. Read RouterBOARD serial; abort if missing │
+                       │    8. Verify /system/note contains              │
+                       │       base_flash_version >= universal-v1        │
+                       │    9. Verify ZTP-ready state: device-mode       │
+                       │       (mode=advanced required), phone-home,     │
+                       │       schedulers, WAN probes                    │
+                       │   10. Verify wifi radios bound for wifi-capable │
+                       │       models (/interface/wifi non-empty)        │
+                       │   11. POST <ztp_api_url>/ztp/mikrotik/register  │
                        │       with X-API-Key (contract payload)         │
                        └─────────────────────────────────────────────────┘
 ```
@@ -81,13 +88,15 @@ authoring its own.
 
 | Contract step | Code path |
 |---|---|
-| 1. `GET /ztp/mikrotik/netinstall-bootstrap.rsc` with `X-API-Key` | `MikrotikHandler.fetch_netinstall_bootstrap()` |
-| 2. Flash RouterOS + required WiFi packages | `MikrotikHandler.netinstall()` in `provisioner/handlers/mikrotik.py` |
-| 3. `device-mode=advanced` | `MODE_SCRIPT_BODY` (`/system/device-mode update mode=advanced`) written to a temp file, passed as `-sm <path>` to `netinstall-cli` (requires 7.22+) |
-| 4. Serve the backend-owned Configure script via `-s` | `api._run_netinstall()` passes the fetched body into `MikrotikHandler.netinstall()` |
-| 5. Verify `base_flash_version=universal-v1` | `MikrotikHandler.verify_base_flash_applied()` |
-| 6. Verify phone-home readiness | `MikrotikHandler.verify_ztp_ready()` |
-| 7. `POST /ztp/mikrotik/register` | `equipment_registry.register_mikrotik()` |
+| 1. `GET /ztp/mikrotik/provisioning-credentials` with `X-API-Key` | `MikrotikHandler.fetch_provisioning_credentials()` — the canonical post-flash login password (the served Configure script embeds the backend's stored value); local `MIKROTIK_BOOTSTRAP_PASS` is the fallback |
+| 2. `GET /ztp/mikrotik/netinstall-bootstrap.rsc` with `X-API-Key` | `MikrotikHandler.fetch_netinstall_bootstrap()` |
+| 3. Flash RouterOS + required WiFi packages | `MikrotikHandler.netinstall()` in `provisioner/handlers/mikrotik.py` |
+| 4. `device-mode=advanced` | `MODE_SCRIPT_BODY` (`/system/device-mode update mode=advanced`) written to a temp file, passed as `-sm <path>` to `netinstall-cli` (requires 7.22+) |
+| 5. Serve the backend-owned Configure script via `-s` | `api._run_netinstall()` passes the fetched body into `MikrotikHandler.netinstall()` |
+| 6. Verify `base_flash_version` ≥ `universal-v1` | `MikrotikHandler.verify_base_flash_applied()` |
+| 7. Verify phone-home readiness, incl. `mode=advanced` | `MikrotikHandler.verify_ztp_ready()` |
+| 8. Verify wifi radios bound (wifi-capable models) | `MikrotikHandler.verify_wifi_radios_bound()` |
+| 9. `POST /ztp/mikrotik/register` | `equipment_registry.register_mikrotik()` |
 
 ## Critical RouterOS 7.20+ quirks
 
@@ -107,10 +116,12 @@ non-obvious blockers:
 
 Defined by the served Netinstall Configure script on the wifi-api, not by the
 provisioner. The provisioner verifies the post-conditions needed for uptime
-before registration: `base_flash_version=universal-v1`, RouterOS `fetch` and
-scheduler enabled, `phone-home` script and schedulers present, fleet identity
-set, and WAN DHCP probe clients installed. Per the contract, the served
-Configure script produces:
+before registration: a `base_flash_version` marker at or above the
+`universal-v1` floor (the server stamps the current `universal-vN`),
+`device-mode` reporting `mode=advanced` with `fetch` and scheduler enabled,
+`phone-home` script and schedulers present, fleet identity set, WAN DHCP probe
+clients installed, and — on wifi-capable models — a non-empty
+`/interface/wifi`. Per the contract, the served Configure script produces:
 
 - Identity `fleet-init-<serial>` (device renames itself to `fleet-gw-<serial>`
   or `fleet-ext-<serial>` on first successful phone-home)
@@ -186,13 +197,21 @@ The provisioner host must:
   trade-off — the LTS path lacks the `-sm` flag.
 - Include the required WiFi driver `.npk` files (`wifi-qcom`, `wifi-qcom-ac`,
   `wifi-mediatek`, or `wireless` as appropriate for the fleet hardware). The
-  Netinstall path now ships those packages alongside RouterOS.
+  Netinstall path now ships those packages alongside RouterOS. **Keep only one
+  driver family per arch in the firmware dir** — every latest package for the
+  matching arch is offered to the device, and MikroTik's wifi driver packages
+  are mutually exclusive, so e.g. having both `wifi-qcom-*-arm.npk` and
+  `wifi-mediatek-*-arm.npk` present would offer conflicting drivers to an
+  `arm` device.
 - Run `provisioner-web.service` with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`
   in both `CapabilityBoundingSet` and `AmbientCapabilities`.
 - Set the following in `/etc/provisioner/provisioner.env`:
-  - `MIKROTIK_BOOTSTRAP_PASS` — operator-controlled fleet password used by the
-    served Netinstall Configure script and by the canonical base-flash's
-    `$bootstrapPass`. Must match the wifi-side stored value. Avoid `$`,
+  - `MIKROTIK_BOOTSTRAP_PASS` — fallback fleet password for the post-flash
+    SSH login, used only when `GET /ztp/mikrotik/provisioning-credentials`
+    is unavailable (the canonical value is fetched from the wifi-api each run
+    and always matches what the served Configure script embeds). If set, it
+    must match the wifi-side stored value. Also used as the canonical
+    base-flash's `$bootstrapPass` in non-Netinstall flows. Avoid `$`,
     backtick, `;`, `{`, `}`, and newline (RouterScript misinterprets them).
   - `MIKROTIK_ONBOARDING_PASS` — *(optional)* fleet-wide `th-ext-join` WPA2 PSK
     baked into every device as the canonical base-flash's `$onboardingPass`.
@@ -201,8 +220,9 @@ The provisioner host must:
     manager / password vault), not just in this env file, and never rotate it
     without re-flashing the whole fleet. If unset, it defaults to
     `MIKROTIK_BOOTSTRAP_PASS`. Same RouterScript-unsafe characters apply.
-  - `MIKROTIK_ZTP_API_KEY` — `X-API-Key` for both
-    `GET /ztp/mikrotik/netinstall-bootstrap.rsc` and
+  - `MIKROTIK_ZTP_API_KEY` — `X-API-Key` for
+    `GET /ztp/mikrotik/provisioning-credentials`,
+    `GET /ztp/mikrotik/netinstall-bootstrap.rsc`, and
     `POST /ztp/mikrotik/register`.
 - Have `device_settings.mikrotik.ztp_api_url` set in `config.yaml` to the
   wifi-api base URL (e.g. `https://ztp.example.com`). The provisioner

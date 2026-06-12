@@ -470,14 +470,6 @@ async def _run_netinstall(provisioner, port_number: int):
         await finish(False, "No MikroTik firmware available")
         return
 
-    # The served Configure script embeds fleet-bootstrap credentials, and the
-    # post-flash login must use the same password locally.
-    bootstrap_pass = config.credentials.mikrotik.bootstrap_password
-    if not bootstrap_pass:
-        logger.error("No MIKROTIK_BOOTSTRAP_PASS configured — cannot run Netinstall")
-        await finish(False, "No MIKROTIK_BOOTSTRAP_PASS configured")
-        return
-
     ztp_api_url = getattr(config.device_settings.mikrotik, 'ztp_api_url', None)
     if not ztp_api_url:
         await finish(False, "device_settings.mikrotik.ztp_api_url not configured")
@@ -486,6 +478,40 @@ async def _run_netinstall(provisioner, port_number: int):
     ztp_api_key = getattr(config.device_settings.mikrotik, 'ztp_api_key', None)
     if not ztp_api_key:
         await finish(False, "device_settings.mikrotik.ztp_api_key not configured")
+        return
+
+    # The served Configure script embeds the backend's *stored* fleet-bootstrap
+    # password, so the post-flash SSH login must use that value. Fetch it from
+    # the contract credentials endpoint (same API key); fall back to the local
+    # MIKROTIK_BOOTSTRAP_PASS when the endpoint is unavailable.
+    local_bootstrap_pass = config.credentials.mikrotik.bootstrap_password
+    canonical_bootstrap_pass = None
+    try:
+        creds = await MikrotikHandler.fetch_provisioning_credentials(
+            ztp_api_url, ztp_api_key
+        )
+        canonical_bootstrap_pass = (creds or {}).get("bootstrap_password") or None
+    except Exception as exc:
+        logger.warning(
+            f"provisioning-credentials fetch failed ({exc}); "
+            f"falling back to local MIKROTIK_BOOTSTRAP_PASS"
+        )
+    if (
+        canonical_bootstrap_pass
+        and local_bootstrap_pass
+        and canonical_bootstrap_pass != local_bootstrap_pass
+    ):
+        logger.warning(
+            "Local MIKROTIK_BOOTSTRAP_PASS differs from the wifi-api's stored "
+            "bootstrap_password; using the canonical value for post-flash login"
+        )
+    bootstrap_pass = canonical_bootstrap_pass or local_bootstrap_pass
+    if not bootstrap_pass:
+        logger.error(
+            "No bootstrap password — provisioning-credentials fetch failed and "
+            "MIKROTIK_BOOTSTRAP_PASS is unset; cannot run Netinstall"
+        )
+        await finish(False, "No bootstrap password (fetch failed, MIKROTIK_BOOTSTRAP_PASS unset)")
         return
 
     await on_progress("config", "running", "Fetching served netinstall-bootstrap.rsc...")
@@ -602,6 +628,27 @@ async def _run_netinstall(provisioner, port_number: int):
             return
         logger.info("MikroTik ZTP readiness verified on port %s: %s", port_number, ztp_detail)
         await on_progress("ztp_ready", True, ztp_detail)
+
+        # Step 5b: wifi-capable models must leave the flash with bound radios.
+        # The known hAP ax failure mode is a clean install with an empty
+        # /interface/wifi (runbook step 1 pass criterion) — registering such a
+        # unit would ship a wifi-dead router.
+        device_arch = (getattr(info, "hardware_version", "") or "").lower()
+        if MikrotikHandler.wifi_driver_for_model(info.model, device_arch):
+            if not await handler.verify_wifi_radios_bound():
+                logger.error(
+                    "Netinstall pipeline failed on port %s: /interface/wifi is "
+                    "empty after flash (model=%s)",
+                    port_number,
+                    info.model,
+                )
+                await on_progress("wifi_bind", False, "/interface/wifi is empty")
+                await finish(
+                    False,
+                    "WiFi radios not bound after Netinstall (/interface/wifi empty)",
+                )
+                return
+            await on_progress("wifi_bind", True, "wifi radios bound")
 
         await handler.disconnect()
 
