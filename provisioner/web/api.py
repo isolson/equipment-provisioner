@@ -526,8 +526,18 @@ async def _run_netinstall(provisioner, port_number: int):
         return
     await on_progress("config", True, "Fetched served netinstall-bootstrap.rsc")
 
+    # The Mode script is also backend-owned (served ungated — a single static
+    # device-mode command, no secrets). Stage 1 of the wifi runbook requires
+    # both served scripts; the provisioner must not author its own.
     try:
-        # Step 1: Netinstall with the contract Mode script plus the served
+        mode_script_body = await MikrotikHandler.fetch_netinstall_mode(ztp_api_url)
+    except Exception as exc:
+        await on_progress("config", False, f"Mode-script fetch failed: {str(exc)[:100]}")
+        await finish(False, f"netinstall-mode fetch failed: {exc}")
+        return
+
+    try:
+        # Step 1: Netinstall with the served Mode script plus the served
         # Configure script from the target wifi backend.
         handler = MikrotikHandler(
             ip="192.168.88.1",
@@ -541,6 +551,7 @@ async def _run_netinstall(provisioner, port_number: int):
             firmware_paths=npks,
             interface=interface,
             configure_script_body=configure_script_body,
+            mode_script_body=mode_script_body,
             on_progress=on_progress,
         )
 

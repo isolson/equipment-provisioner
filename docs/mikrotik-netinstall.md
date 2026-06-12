@@ -59,20 +59,22 @@ override / debug control but is not part of the normal happy path.
                        │       MIKROTIK_BOOTSTRAP_PASS is the fallback)  │
                        │    3. GET <ztp_api_url>/ztp/mikrotik/           │
                        │       netinstall-bootstrap.rsc with X-API-Key   │
-                       │    4. netinstall-cli -i <vlan> -a <client-ip>   │
+                       │    4. GET <ztp_api_url>/ztp/mikrotik/           │
+                       │       netinstall-mode.rsc (ungated)             │
+                       │    5. netinstall-cli -i <vlan> -a <client-ip>   │
                        │       -r -c -sm <modescript> -s <userscript>    │
                        │       <npks>                                    │
-                       │    5. Wait up to 240s for SSH                   │
-                       │    6. SSH in as fleet-bootstrap                 │
-                       │    7. Read RouterBOARD serial; abort if missing │
-                       │    8. Verify /system/note contains              │
+                       │    6. Wait up to 240s for SSH                   │
+                       │    7. SSH in as fleet-bootstrap                 │
+                       │    8. Read RouterBOARD serial; abort if missing │
+                       │    9. Verify /system/note contains              │
                        │       base_flash_version >= universal-v1        │
-                       │    9. Verify ZTP-ready state: device-mode       │
+                       │   10. Verify ZTP-ready state: device-mode       │
                        │       (mode=advanced required), phone-home,     │
                        │       schedulers, WAN probes                    │
-                       │   10. Verify wifi radios bound for wifi-capable │
+                       │   11. Verify wifi radios bound for wifi-capable │
                        │       models (/interface/wifi non-empty)        │
-                       │   11. POST <ztp_api_url>/ztp/mikrotik/register  │
+                       │   12. POST <ztp_api_url>/ztp/mikrotik/register  │
                        │       with X-API-Key (contract payload)         │
                        └─────────────────────────────────────────────────┘
 ```
@@ -80,23 +82,24 @@ override / debug control but is not part of the normal happy path.
 ## Contract compliance
 
 This pipeline implements the equipment-provisioner contract. The provisioner's
-job is *only* fetch served Netinstall Configure script → flash with Mode +
-Configure scripts → verify → register. Everything else (phone-home, role
+job is *only* fetch the served Netinstall Mode + Configure scripts → flash with
+both → verify → register. Everything else (device-mode flip, phone-home, role
 detection, customer config delivery, factory-reset recovery) is **device-side**
-logic baked into the served Configure script; the provisioner is forbidden from
+logic baked into the served scripts; the provisioner is forbidden from
 authoring its own.
 
 | Contract step | Code path |
 |---|---|
 | 1. `GET /ztp/mikrotik/provisioning-credentials` with `X-API-Key` | `MikrotikHandler.fetch_provisioning_credentials()` — the canonical post-flash login password (the served Configure script embeds the backend's stored value); local `MIKROTIK_BOOTSTRAP_PASS` is the fallback |
 | 2. `GET /ztp/mikrotik/netinstall-bootstrap.rsc` with `X-API-Key` | `MikrotikHandler.fetch_netinstall_bootstrap()` |
-| 3. Flash RouterOS + required WiFi packages | `MikrotikHandler.netinstall()` in `provisioner/handlers/mikrotik.py` |
-| 4. `device-mode=advanced` | `MODE_SCRIPT_BODY` (`/system/device-mode update mode=advanced`) written to a temp file, passed as `-sm <path>` to `netinstall-cli` (requires 7.22+) |
-| 5. Serve the backend-owned Configure script via `-s` | `api._run_netinstall()` passes the fetched body into `MikrotikHandler.netinstall()` |
-| 6. Verify `base_flash_version` ≥ `universal-v1` | `MikrotikHandler.verify_base_flash_applied()` |
-| 7. Verify phone-home readiness, incl. `mode=advanced` | `MikrotikHandler.verify_ztp_ready()` |
-| 8. Verify wifi radios bound (wifi-capable models) | `MikrotikHandler.verify_wifi_radios_bound()` |
-| 9. `POST /ztp/mikrotik/register` | `equipment_registry.register_mikrotik()` |
+| 3. `GET /ztp/mikrotik/netinstall-mode.rsc` (ungated) | `MikrotikHandler.fetch_netinstall_mode()` — backend-owned Mode script; local `MODE_SCRIPT_BODY` exists only as the direct-caller fallback |
+| 4. Flash RouterOS + required WiFi packages | `MikrotikHandler.netinstall()` in `provisioner/handlers/mikrotik.py` |
+| 5. `device-mode=advanced` | The served Mode script body written to a temp file, passed as `-sm <path>` to `netinstall-cli` (requires 7.22+) |
+| 6. Serve the backend-owned Configure script via `-s` | `api._run_netinstall()` passes the fetched body into `MikrotikHandler.netinstall()` |
+| 7. Verify `base_flash_version` ≥ `universal-v1` | `MikrotikHandler.verify_base_flash_applied()` |
+| 8. Verify phone-home readiness, incl. `mode=advanced` | `MikrotikHandler.verify_ztp_ready()` |
+| 9. Verify wifi radios bound (wifi-capable models) | `MikrotikHandler.verify_wifi_radios_bound()` |
+| 10. `POST /ztp/mikrotik/register` | `equipment_registry.register_mikrotik()` |
 
 ## Critical RouterOS 7.20+ quirks
 
@@ -110,7 +113,7 @@ non-obvious blockers:
 | `netinstall-cli` concurrent runs | Default disallows simultaneous instances | Pass `-c` flag |
 | Capability bounding set | Default systemd unit blocks `CAP_NET_BIND_SERVICE` → can't bind UDP/67 even as root | Added to `provisioner-web.service` |
 | `-s` replaces default-config | The Configure script IS the entire first-boot script; default RouterOS config does NOT run on top | Fetch the served `netinstall-bootstrap.rsc` from the target backend and hand it to `netinstall-cli -s` unchanged |
-| `device-mode = home` (default) | Blocks scheduler + `/tool/fetch`, so phone-home cannot reach the backend | `netinstall-cli -sm` runs `MODE_SCRIPT_BODY` (`/system/device-mode update mode=advanced`) before the Configure script |
+| `device-mode = home` (default) | Blocks scheduler + `/tool/fetch`, so phone-home cannot reach the backend | `netinstall-cli -sm` runs the served `netinstall-mode.rsc` (sets `device-mode=advanced`) before the Configure script |
 
 ## What ends up on the device
 
