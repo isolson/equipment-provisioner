@@ -104,6 +104,11 @@ class _StubHandlerManager:
         self.info_calls = []
         self.provision_calls = []
 
+    def handler_class_for(self, device_type):
+        from provisioner.handler_manager import HandlerManager
+
+        return HandlerManager.handler_class_for(device_type)
+
     async def login_and_get_info(self, **kwargs):
         self.info_calls.append(kwargs)
         return ProvisioningResult(

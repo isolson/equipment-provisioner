@@ -95,6 +95,19 @@ class HandlerManager:
         """Get list of supported device types."""
         return [dt.value for dt in self.HANDLER_MAP.keys()]
 
+    @classmethod
+    def handler_class_for(cls, device_type: str) -> Optional[Type[BaseHandler]]:
+        """Resolve a handler class from a device-type string.
+
+        Lets callers consult class-level handler traits (e.g.
+        ``requires_model_preflight``) before a handler instance exists,
+        instead of branching on vendor names.
+        """
+        try:
+            return cls.HANDLER_MAP.get(DeviceType(device_type))
+        except ValueError:
+            return None
+
     async def provision_device(
         self,
         fingerprint: DeviceFingerprint,
@@ -167,9 +180,11 @@ class HandlerManager:
         interface: Optional[str] = None,
         custom_credentials: Optional[Dict[str, str]] = None,
     ) -> ProvisioningResult:
-        """DEBUG: Only connect, login, and get device info - no config or firmware.
+        """Connect, login, and get device info only - no config or firmware.
 
-        This is for debugging login/connection issues without risking config changes.
+        Read-only. Used as the pre-provisioning model preflight (when
+        fingerprinting identifies the vendor but not the model) and for
+        debugging login/connection issues without risking config changes.
 
         Args:
             fingerprint: Device fingerprint.
@@ -201,39 +216,39 @@ class HandlerManager:
             phases_completed=[],
         )
 
-        logger.info(f"DEBUG: Login-only test for {fingerprint.device_type.value} at {ip} via {interface}")
+        logger.info(f"Login-only info read for {fingerprint.device_type.value} at {ip} via {interface}")
 
         try:
             # Connect (login)
             if not await handler.connect():
                 result.error_message = getattr(handler, 'login_error', None) or "Failed to connect to device"
                 result.needs_credentials = "credentials" in result.error_message.lower() or "password" in result.error_message.lower()
-                logger.error(f"DEBUG: Login failed - {result.error_message}")
+                logger.error(f"Login-only info read: login failed - {result.error_message}")
                 return result
             result.phases_completed.append(ProvisioningPhase.CONNECTING)
-            logger.info(f"DEBUG: Login successful for {fingerprint.device_type.value} at {ip}")
+            logger.info(f"Login successful for {fingerprint.device_type.value} at {ip}")
 
             # Get device info
             try:
                 result.device_info = await handler.get_info()
                 result.old_firmware = result.device_info.firmware_version
                 result.phases_completed.append(ProvisioningPhase.GATHERING_INFO)
-                logger.info(f"DEBUG: Got device info - model: {result.device_info.model}, "
+                logger.info(f"Got device info - model: {result.device_info.model}, "
                            f"firmware: {result.device_info.firmware_version}, "
                            f"MAC: {result.device_info.mac_address}")
             except Exception as e:
-                logger.warning(f"DEBUG: get_info failed: {e}")
+                logger.warning(f"Login-only info read: get_info failed: {e}")
 
             # Success - we connected and got info (but NOT provisioned)
             result.success = True
-            result.config_applied = "DEBUG: login only"  # Mark as debug mode
+            result.config_applied = "login only (read-only)"  # Mark as info-only run
             result.phases_completed.append(ProvisioningPhase.GATHERING_INFO)  # Don't add COMPLETED
-            logger.info(f"DEBUG: Login-only test PASSED for {fingerprint.device_type.value} at {ip}")
+            logger.info(f"Login-only info read succeeded for {fingerprint.device_type.value} at {ip}")
 
         except Exception as e:
             result.error_message = str(e)
             result.phases_completed.append(ProvisioningPhase.FAILED)
-            logger.exception(f"DEBUG: Error during login test")
+            logger.exception(f"Error during login-only info read")
 
         finally:
             result.completed_at = datetime.now()

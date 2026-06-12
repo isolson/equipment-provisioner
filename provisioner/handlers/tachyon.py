@@ -49,6 +49,16 @@ class TachyonHandler(BaseHandler):
     # Default credentials (factory default)
     DEFAULT_CREDENTIALS = {"username": "root", "password": "admin"}
 
+    # Template/preflight traits (see BaseHandler). Tachyon templates are
+    # full device exports per product family, so an arbitrary-file fallback
+    # could cross-apply a switch (tns-100) config to a radio. Firmware and
+    # config assets are model-specific, so the model must be known before
+    # asset lookup.
+    allows_prefixed_config_exports = True
+    allows_arbitrary_template_fallback = False
+    config_alias_prefix_matching = True
+    requires_model_preflight = True
+
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None,
                  alternate_credentials: list = None):
         super().__init__(ip, credentials, interface)

@@ -73,6 +73,31 @@ class BaseHandler(ABC):
     to provide provisioning functionality.
     """
 
+    # Class-level traits, consulted via HANDLER_MAP *before* a handler is
+    # instantiated (config-template lookup, pre-provision model preflight).
+    # Instance @property overrides (which may depend on self._device_info)
+    # remain the mechanism for flow control inside provision().
+
+    #: Accept timestamp-prefixed config exports when matching model
+    #: templates (e.g. ``20260424.143334.TNA-303L-65.tar`` for model
+    #: ``TNA-303L-65``).
+    allows_prefixed_config_exports = False
+
+    #: Fall back to an arbitrary template file in the vendor's template dir
+    #: when no model/alias/default template matches. Vendors with
+    #: product-family templates should disable this so a config for one
+    #: product line cannot cross-apply to another.
+    allows_arbitrary_template_fallback = True
+
+    #: Match CONFIG_MODEL_ALIASES keys as model-name prefixes
+    #: (``tna-305`` also covers ``tna-305-xyz``), not just exact names.
+    config_alias_prefix_matching = False
+
+    #: Run a read-only login/get-info preflight before asset lookup when
+    #: fingerprinting identified the vendor but not the model. Enable for
+    #: vendors whose firmware/config assets are model-specific.
+    requires_model_preflight = False
+
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None):
         """Initialize the handler.
 

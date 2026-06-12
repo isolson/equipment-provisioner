@@ -170,3 +170,56 @@ def test_ubiquiti_airos_properties():
         "config_after_all_firmware": False,
         "fw2_skips_reboot": False,
     }
+
+
+# ---------------------------------------------------------------------------
+# Class-level traits — consulted via HANDLER_MAP before instantiation
+# (config-template lookup in config_store.py, model preflight in main.py)
+# ---------------------------------------------------------------------------
+
+from provisioner.handler_manager import HandlerManager
+from provisioner.handlers.base import BaseHandler
+
+TRAIT_NAMES = (
+    "allows_prefixed_config_exports",
+    "allows_arbitrary_template_fallback",
+    "config_alias_prefix_matching",
+    "requires_model_preflight",
+)
+
+
+def _traits(handler_class):
+    return {name: getattr(handler_class, name) for name in TRAIT_NAMES}
+
+
+def test_base_handler_trait_defaults():
+    assert _traits(BaseHandler) == {
+        "allows_prefixed_config_exports": False,
+        "allows_arbitrary_template_fallback": True,
+        "config_alias_prefix_matching": False,
+        "requires_model_preflight": False,
+    }
+
+
+def test_tachyon_trait_overrides():
+    assert _traits(TachyonHandler) == {
+        "allows_prefixed_config_exports": True,
+        "allows_arbitrary_template_fallback": False,
+        "config_alias_prefix_matching": True,
+        "requires_model_preflight": True,
+    }
+
+
+@pytest.mark.parametrize("handler_class", [CambiumHandler, MikrotikHandler, TaranaHandler, UbiquitiHandler])
+def test_other_vendors_keep_trait_defaults(handler_class):
+    assert _traits(handler_class) == _traits(BaseHandler)
+
+
+def test_handler_class_for_resolves_vendor_strings():
+    assert HandlerManager.handler_class_for("tachyon") is TachyonHandler
+    assert HandlerManager.handler_class_for("mikrotik") is MikrotikHandler
+
+
+@pytest.mark.parametrize("device_type", ["unknown", "evolution_digital", "not-a-vendor", ""])
+def test_handler_class_for_unmapped_types_return_none(device_type):
+    assert HandlerManager.handler_class_for(device_type) is None
