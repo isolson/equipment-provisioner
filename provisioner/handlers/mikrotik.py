@@ -1273,6 +1273,21 @@ class MikrotikHandler(BaseHandler):
         count = await self._run_count("/interface/wifi/find")
         return count >= 1
 
+    async def get_phone_home_url(self) -> Optional[str]:
+        """Parse the backend URL baked into the installed phone-home script.
+
+        Contract rule 4: the bench host (not the device — it has no internet
+        path by design) verifies the URL the Configure script actually baked
+        into *this* flash points at the right, live backend. Stops at
+        RouterScript variable interpolation (`$var`), quotes, and whitespace
+        so only the literal prefix is returned.
+        """
+        source = await self._run_command(
+            ":put [/system/script/get phone-home source]", allow_failure=True
+        )
+        match = re.search(r"https?://[^\s\"'$)\\]+", source or "")
+        return match.group(0) if match else None
+
     async def _run_count(self, routeros_find_command: str) -> int:
         """Run a RouterOS find expression and return the result count."""
         output = await self._run_command(

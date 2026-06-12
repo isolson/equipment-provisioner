@@ -74,8 +74,17 @@ override / debug control but is not part of the normal happy path.
                        │       schedulers, WAN probes                    │
                        │   11. Verify wifi radios bound for wifi-capable │
                        │       models (/interface/wifi non-empty)        │
-                       │   12. POST <ztp_api_url>/ztp/mikrotik/register  │
-                       │       with X-API-Key (contract payload)         │
+                       │   12. Parse baked phone-home URL on device;     │
+                       │       assert host == backend; GET the ungated   │
+                       │       mode.rsc on that host FROM THE BENCH      │
+                       │       (the device never gets an internet path)  │
+                       │   13. POST <ztp_api_url>/ztp/mikrotik/register  │
+                       │       with X-API-Key (contract payload);        │
+                       │       assert ship-ready readback: role=unknown, │
+                       │       customer_id=null, has_checkin_secret=     │
+                       │       false. Stale -> clear-role-lock /         │
+                       │       clear-checkin-secret, re-register,        │
+                       │       re-assert (fail the run otherwise)        │
                        └─────────────────────────────────────────────────┘
 ```
 
@@ -83,10 +92,17 @@ override / debug control but is not part of the normal happy path.
 
 This pipeline implements the equipment-provisioner contract. The provisioner's
 job is *only* fetch the served Netinstall Mode + Configure scripts → flash with
-both → verify → register. Everything else (device-mode flip, phone-home, role
-detection, customer config delivery, factory-reset recovery) is **device-side**
-logic baked into the served scripts; the provisioner is forbidden from
-authoring its own.
+both → verify → register + assert ship-ready. Everything else (device-mode
+flip, phone-home, role detection, customer config delivery, factory-reset
+recovery) is **device-side** logic baked into the served scripts; the
+provisioner is forbidden from authoring its own.
+
+**The bench must never give the device an internet path** (no NAT, proxy, or
+routed VLAN). First checkin is install-time by design: a bench checkin would
+lock `role=gateway`, run ticket correlation against open tickets, and enrol a
+TOFU checkin secret that the factory-reset verification then orphans. What
+only a real checkin could prove is covered by the wifi repo's hardware e2e
+runbook per release, not per unit.
 
 | Contract step | Code path |
 |---|---|
@@ -99,7 +115,8 @@ authoring its own.
 | 7. Verify `base_flash_version` ≥ `universal-v1` | `MikrotikHandler.verify_base_flash_applied()` |
 | 8. Verify phone-home readiness, incl. `mode=advanced` | `MikrotikHandler.verify_ztp_ready()` |
 | 9. Verify wifi radios bound (wifi-capable models) | `MikrotikHandler.verify_wifi_radios_bound()` |
-| 10. `POST /ztp/mikrotik/register` | `equipment_registry.register_mikrotik()` |
+| 10. Verify the baked phone-home URL *from the bench host* | `MikrotikHandler.get_phone_home_url()` parses the URL out of the installed `phone-home` script; the pipeline asserts its host equals the backend's and GETs the ungated `netinstall-mode.rsc` on that host to prove it is alive — catches a wrong/dead baked host (the retired-`api.infra` failure class) without giving the device a network path |
+| 11. `POST /ztp/mikrotik/register` + ship-ready assert | `equipment_registry.register_mikrotik()` returns the readback; the pipeline asserts `role=unknown`, `customer_id=null`, `has_checkin_secret=false`. Stale state → `equipment_registry.clear_role_lock()` / `clear_checkin_secret()`, re-register, re-assert; the run fails if the unit is still not ship-ready. Pre-#255 backends (no readback fields) skip the assert with a loud warning |
 
 ## Critical RouterOS 7.20+ quirks
 

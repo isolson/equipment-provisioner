@@ -27,7 +27,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from provisioner.equipment_registry import register_mikrotik
+from provisioner.equipment_registry import (
+    clear_checkin_secret,
+    clear_role_lock,
+    register_mikrotik,
+)
 from provisioner.handlers.mikrotik import MikrotikHandler
 from stubs import StubResponse, StubSession
 
@@ -540,9 +544,15 @@ class TestVerifyWifiRadiosBound:
 
 class TestRegisterMikrotik:
     async def test_posts_exact_contract_payload(self):
-        factory, stub = _patch_session(200, "{}")
+        # Ship-ready readback (wifi PR #255) comes back to the caller verbatim.
+        factory, stub = _patch_session(
+            200,
+            '{"device_id": 1, "name": "fleet-init-HBE3001234", "status": "planned",'
+            ' "message": "ok", "role": "unknown", "customer_id": null,'
+            ' "has_checkin_secret": false}',
+        )
         with patch("provisioner.equipment_registry.aiohttp.ClientSession", factory):
-            ok = await register_mikrotik(
+            readback = await register_mikrotik(
                 ztp_api_url="https://api.example.com",
                 api_key="sekret",
                 serial="HBE3001234",
@@ -552,7 +562,9 @@ class TestRegisterMikrotik:
                 base_flash_version="universal-v1",
             )
 
-        assert ok is True
+        assert readback["role"] == "unknown"
+        assert readback["customer_id"] is None
+        assert readback["has_checkin_secret"] is False
         call = stub.last_call
         assert call["method"] == "POST"
         assert call["url"] == "https://api.example.com/ztp/mikrotik/register"
@@ -604,3 +616,91 @@ class TestRegisterMikrotik:
             )
 
         assert stub.last_call["url"] == "https://api.example.com/ztp/mikrotik/register"
+
+    async def test_returns_empty_dict_on_non_json_body(self):
+        # Legacy/odd backends must not crash the pipeline — the caller treats
+        # a readback-less response as a pre-#255 backend.
+        factory, _ = _patch_session(200, "registered")
+        with patch("provisioner.equipment_registry.aiohttp.ClientSession", factory):
+            readback = await register_mikrotik(
+                ztp_api_url="https://api.example.com",
+                api_key=None,
+                serial="S", mac="M", model="hap-ax2-s",
+                firmware_version="7.22.2", base_flash_version="universal-v1",
+            )
+
+        assert readback == {}
+
+
+# ---------------------------------------------------------------------------
+# clear_role_lock / clear_checkin_secret (ship-ready remediation)
+# ---------------------------------------------------------------------------
+
+
+class TestShipReadyRemediation:
+    @pytest.mark.parametrize(
+        "func,path_tail",
+        [
+            (clear_role_lock, "clear-role-lock"),
+            (clear_checkin_secret, "clear-checkin-secret"),
+        ],
+    )
+    async def test_posts_to_device_action_with_api_key(self, func, path_tail):
+        factory, stub = _patch_session(200, '{"cleared": true}')
+        with patch("provisioner.equipment_registry.aiohttp.ClientSession", factory):
+            out = await func("https://api.example.com", "sekret", "HBE3001234")
+
+        assert out == {"cleared": True}
+        assert stub.last_call["method"] == "POST"
+        assert (
+            stub.last_call["url"]
+            == f"https://api.example.com/ztp/mikrotik/devices/HBE3001234/{path_tail}"
+        )
+        assert stub.last_call["headers"]["X-API-Key"] == "sekret"
+
+    @pytest.mark.parametrize("func", [clear_role_lock, clear_checkin_secret])
+    @pytest.mark.parametrize("status", [401, 404, 500])
+    async def test_raises_on_non_2xx(self, func, status):
+        factory, _ = _patch_session(status, "bad")
+        with patch("provisioner.equipment_registry.aiohttp.ClientSession", factory):
+            with pytest.raises(RuntimeError, match=str(status)):
+                await func("https://api.example.com", "sekret", "HBE3001234")
+
+
+# ---------------------------------------------------------------------------
+# get_phone_home_url (baked-URL verification, contract rule 4)
+# ---------------------------------------------------------------------------
+
+
+class TestGetPhoneHomeUrl:
+    async def test_parses_literal_url_prefix(self):
+        h = _handler()
+        h._run_command = AsyncMock(
+            return_value=(
+                ':local ztpBase "https://wifi.infra.treehouse.mn/ztp/mikrotik"\n'
+                '/tool/fetch url="$ztpBase/checkin" ...'
+            )
+        )
+
+        url = await h.get_phone_home_url()
+
+        assert url == "https://wifi.infra.treehouse.mn/ztp/mikrotik"
+        h._run_command.assert_awaited_once_with(
+            ":put [/system/script/get phone-home source]", allow_failure=True
+        )
+
+    async def test_stops_at_routeros_variable_interpolation(self):
+        # `"https://host$configUrl"` must parse as just the literal prefix —
+        # the $var is filled at runtime on the device.
+        h = _handler()
+        h._run_command = AsyncMock(
+            return_value='"https://wifi.infra.treehouse.mn$configUrl"'
+        )
+
+        assert await h.get_phone_home_url() == "https://wifi.infra.treehouse.mn"
+
+    async def test_returns_none_when_script_missing_or_no_url(self):
+        h = _handler()
+        h._run_command = AsyncMock(return_value="no such item")
+
+        assert await h.get_phone_home_url() is None

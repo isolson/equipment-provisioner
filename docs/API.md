@@ -175,8 +175,12 @@ Configure script from `<ztp_api_url>/ztp/mikrotik/netinstall-bootstrap.rsc`
 `<ztp_api_url>/ztp/mikrotik/netinstall-mode.rsc` (ungated), flash RouterOS with
 both served scripts, verify `/system/note` carries a
 `base_flash_version` ≥ `universal-v1`, verify `mode=advanced` plus phone-home
-readiness (and bound wifi radios on wifi-capable models), then
-`POST <ztp_api_url>/ztp/mikrotik/register`.
+readiness (and bound wifi radios on wifi-capable models), verify the baked
+phone-home URL points at the backend and is reachable *from the bench host*
+(the device deliberately has no internet path), then
+`POST <ztp_api_url>/ztp/mikrotik/register` and assert the ship-ready readback
+(`role=unknown`, `customer_id=null`, `has_checkin_secret=false`), remediating
+stale state via `clear-role-lock` / `clear-checkin-secret` before re-asserting.
 
 This endpoint is also called automatically by the per-port BOOTP sniffer when
 a device is detected in Netinstall mode, so for normal usage the tech does not
