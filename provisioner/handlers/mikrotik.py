@@ -599,8 +599,8 @@ class MikrotikHandler(BaseHandler):
     # constant is only the fallback for direct handler callers that don't
     # provide one. Sets device-mode=advanced so the served Configure script's
     # scheduler / `/tool/fetch` / `dont-require-permissions=yes` constructs
-    # are permitted. Format confirmed against tikoci/netinstall reference
-    # implementation (space form; see the contract test on slash-form).
+    # are permitted. Both the space form and the served script's slash form
+    # work in the -sm context (hardware-verified 2026-06-12).
     MODE_SCRIPT_BODY = "/system/device-mode update mode=advanced\n"
 
     @staticmethod
