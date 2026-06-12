@@ -276,6 +276,45 @@ class TestFetchProvisioningCredentials:
 
 
 # ---------------------------------------------------------------------------
+# fetch_netinstall_mode
+# ---------------------------------------------------------------------------
+
+
+class TestFetchNetinstallMode:
+    async def test_returns_body_without_auth_header(self):
+        # Per contract the Mode script endpoint is ungated — no secrets, no
+        # host rewrite — so the fetch must not send an API key.
+        factory, stub = _patch_session(200, "/system/device-mode/update mode=advanced\n")
+        with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
+            body = await MikrotikHandler.fetch_netinstall_mode("https://api.example.com")
+
+        assert body == "/system/device-mode/update mode=advanced\n"
+        assert stub.last_call["method"] == "GET"
+        assert (
+            stub.last_call["url"]
+            == "https://api.example.com/ztp/mikrotik/netinstall-mode.rsc"
+        )
+        assert "X-API-Key" not in (stub.last_call.get("headers") or {})
+
+    async def test_strips_trailing_slash(self):
+        factory, stub = _patch_session(200, "ok")
+        with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
+            await MikrotikHandler.fetch_netinstall_mode("https://api.example.com/")
+
+        assert (
+            stub.last_call["url"]
+            == "https://api.example.com/ztp/mikrotik/netinstall-mode.rsc"
+        )
+
+    @pytest.mark.parametrize("status", [400, 404, 500, 502])
+    async def test_raises_on_non_200(self, status):
+        factory, _ = _patch_session(status, "error body")
+        with patch("provisioner.handlers.mikrotik.aiohttp.ClientSession", factory):
+            with pytest.raises(RuntimeError, match=str(status)):
+                await MikrotikHandler.fetch_netinstall_mode("https://api.example.com")
+
+
+# ---------------------------------------------------------------------------
 # verify_base_flash_applied
 # ---------------------------------------------------------------------------
 

@@ -168,6 +168,11 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
             FakeMikrotikHandler.fetched = True
             return "# served netinstall bootstrap\n"
 
+        @staticmethod
+        async def fetch_netinstall_mode(url):
+            assert url == "https://wifi.example.test"
+            return "# served netinstall mode\n"
+
         async def wait_for_base_flash_applied(self):
             return True
 
@@ -207,6 +212,11 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
     assert args[:3] == (5, 0, True)
     assert provisioner.port_manager.port_states[5].last_result == "success"
     assert FakeMikrotikHandler.last_netinstall_kwargs["firmware_paths"] == [tmp_path / "routeros-arm64.npk"]
+    # Both first-boot scripts are backend-owned: the served Mode script body
+    # must reach netinstall-cli's -sm exactly as fetched.
+    assert FakeMikrotikHandler.last_netinstall_kwargs["mode_script_body"] == (
+        "# served netinstall mode\n"
+    )
     # The post-flash SSH login must use the wifi-api's stored bootstrap
     # password (which the served Configure script embeds), not the local
     # MIKROTIK_BOOTSTRAP_PASS it would otherwise drift against.
@@ -252,6 +262,10 @@ async def test_netinstall_clears_expecting_reboot_when_step_after_flash_fails(tm
         @staticmethod
         async def fetch_netinstall_bootstrap(url, api_key):
             return "# served netinstall bootstrap\n"
+
+        @staticmethod
+        async def fetch_netinstall_mode(url):
+            return "# served netinstall mode\n"
 
         async def netinstall(self, **kwargs):
             return True
@@ -325,6 +339,10 @@ async def test_netinstall_ships_wifi_driver_packages_in_flash_payload(tmp_path, 
         @staticmethod
         async def fetch_netinstall_bootstrap(url, api_key):
             return "# served netinstall bootstrap\n"
+
+        @staticmethod
+        async def fetch_netinstall_mode(url):
+            return "# served netinstall mode\n"
 
         async def wait_for_base_flash_applied(self):
             return True
@@ -413,6 +431,10 @@ async def test_netinstall_fails_before_register_when_wifi_radios_not_bound(tmp_p
         @staticmethod
         async def fetch_netinstall_bootstrap(url, api_key):
             return "# served netinstall bootstrap\n"
+
+        @staticmethod
+        async def fetch_netinstall_mode(url):
+            return "# served netinstall mode\n"
 
         async def wait_for_base_flash_applied(self):
             return True

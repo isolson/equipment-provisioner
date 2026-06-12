@@ -171,8 +171,9 @@ listening mode (reset button held during power-on). Implements the
 equipment-provisioner contract: fetch the canonical fleet credentials from
 `<ztp_api_url>/ztp/mikrotik/provisioning-credentials` and the served Netinstall
 Configure script from `<ztp_api_url>/ztp/mikrotik/netinstall-bootstrap.rsc`
-(both `X-API-Key`-gated), flash RouterOS with both the local Mode script and
-that served Configure script, verify `/system/note` carries a
+(both `X-API-Key`-gated) plus the served Mode script from
+`<ztp_api_url>/ztp/mikrotik/netinstall-mode.rsc` (ungated), flash RouterOS with
+both served scripts, verify `/system/note` carries a
 `base_flash_version` ≥ `universal-v1`, verify `mode=advanced` plus phone-home
 readiness (and bound wifi radios on wifi-capable models), then
 `POST <ztp_api_url>/ztp/mikrotik/register`.

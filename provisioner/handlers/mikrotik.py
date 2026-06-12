@@ -594,10 +594,13 @@ class MikrotikHandler(BaseHandler):
 
     # `-sm <modescript>` (netinstall-cli 7.22+) takes a file path to a
     # RouterScript that runs once on first boot, before the device is
-    # network-accessible. We use it to set device-mode=advanced so that the
-    # canonical base-flash's scheduler / `/tool/fetch` /
-    # `dont-require-permissions=yes` constructs are permitted. Format
-    # confirmed against tikoci/netinstall reference implementation.
+    # network-accessible. The contract path fetches the served Mode script
+    # (`fetch_netinstall_mode`) and passes its body through verbatim; this
+    # constant is only the fallback for direct handler callers that don't
+    # provide one. Sets device-mode=advanced so the served Configure script's
+    # scheduler / `/tool/fetch` / `dont-require-permissions=yes` constructs
+    # are permitted. Format confirmed against tikoci/netinstall reference
+    # implementation (space form; see the contract test on slash-form).
     MODE_SCRIPT_BODY = "/system/device-mode update mode=advanced\n"
 
     @staticmethod
@@ -638,6 +641,7 @@ class MikrotikHandler(BaseHandler):
         interface: str,
         configure_script_body: Optional[str] = None,
         configure_script_path: Optional[str] = None,
+        mode_script_body: Optional[str] = None,
         bootstrap_password: Optional[str] = None,
         on_progress=None,
     ) -> bool:
@@ -656,6 +660,9 @@ class MikrotikHandler(BaseHandler):
             configure_script_path: Existing local path to pass to netinstall-cli
                 via ``-s``. Used when the caller already materialized the served
                 Configure script on disk.
+            mode_script_body: Served RouterOS Mode script body to pass to
+                netinstall-cli via ``-sm``. Preferred contract path; falls back
+                to the local ``MODE_SCRIPT_BODY`` when not provided.
             bootstrap_password: Compatibility fallback for legacy callers that
                 do not yet provide a served Configure script. Generates the
                 older local bootstrap script; this path is not contract-compliant
@@ -718,7 +725,7 @@ class MikrotikHandler(BaseHandler):
         fd = tempfile.NamedTemporaryFile(
             mode="w", suffix=".rsc", prefix="netinstall-modescript-", delete=False
         )
-        fd.write(self.MODE_SCRIPT_BODY)
+        fd.write(mode_script_body if mode_script_body is not None else self.MODE_SCRIPT_BODY)
         fd.close()
         modescript_path = fd.name
         cmd.extend(["-sm", modescript_path])
@@ -1015,6 +1022,7 @@ class MikrotikHandler(BaseHandler):
     # per-device :local parameters -> /import -> verify -> register.
 
     NETINSTALL_BOOTSTRAP_PATH = "/ztp/mikrotik/netinstall-bootstrap.rsc"
+    NETINSTALL_MODE_PATH = "/ztp/mikrotik/netinstall-mode.rsc"
     PROVISIONING_CREDENTIALS_PATH = "/ztp/mikrotik/provisioning-credentials"
     BASE_FLASH_PATH = "/ztp/mikrotik/base-flash.rsc"
     # The base-flash stamp is `base_flash_version=universal-vN`. The server
@@ -1073,6 +1081,27 @@ class MikrotikHandler(BaseHandler):
                     body = await resp.text()
                     raise RuntimeError(
                         f"netinstall bootstrap fetch {url} returned {resp.status}: {body[:200]}"
+                    )
+                return await resp.text()
+
+    @staticmethod
+    async def fetch_netinstall_mode(ztp_api_url: str) -> str:
+        """Fetch the served Netinstall Mode script from the wifi-api.
+
+        Per contract this endpoint is ungated — the Mode script is a single
+        static device-mode command with no secrets and no host to rewrite.
+        The backend owns the script content; the provisioner must not author
+        its own.
+        """
+        url = ztp_api_url.rstrip("/") + MikrotikHandler.NETINSTALL_MODE_PATH
+        timeout = aiohttp.ClientTimeout(total=MikrotikHandler.BASE_FLASH_FETCH_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"netinstall mode-script fetch {url} returned "
+                        f"{resp.status}: {body[:200]}"
                     )
                 return await resp.text()
 
