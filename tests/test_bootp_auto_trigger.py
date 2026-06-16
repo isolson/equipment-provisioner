@@ -415,12 +415,43 @@ async def test_listener_skips_non_mikrotik_oui_even_if_fingerprinted_as_other(ma
 
 
 @pytest.mark.asyncio
-async def test_listener_fires_when_fingerprinted_as_mikrotik_with_unknown_oui(manager, monkeypatch):
-    """If the port has been fingerprinted as MikroTik but the BOOTP MAC has
-    an OUI not in our allowlist (e.g. cloned MAC, a vendor MikroTik OUI we
-    haven't added yet), trust the fingerprint and fire.
+async def test_listener_skips_stale_mikrotik_tag_with_non_mikrotik_oui(manager, monkeypatch):
+    """A stale device_type=="mikrotik" must NOT authorize netinstall of a
+    different, non-MikroTik device.
+
+    Regression for the port-4 Wave Pico incident: a real MikroTik was
+    netinstalled on the port (which set device_type="mikrotik" via the fire
+    path), the tag was never cleared when that unit was removed, then a
+    Ubiquiti Wave Pico was plugged into the same port. Its boot-time BOOTP
+    (non-MikroTik OUI) must be ignored — the MikroTik OUI check is
+    unconditional and does not exempt a lingering "mikrotik" tag. In the
+    BOOTP window a MikroTik can't be live-fingerprinted (no services up), so
+    a pre-fire "mikrotik" tag is always stale/auto, never trustworthy.
     """
-    fake = _FakeFingerprinter(manager, ["ac:8b:a9:00:00:01"])  # not a MikroTik OUI
+    # Ubiquiti Wave Pico OUI 9c:05:d6 — the device from the incident.
+    fake = _FakeFingerprinter(manager, ["9c:05:d6:b4:ad:cf"])
+    monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
+
+    fired = []
+    manager.on_device_in_bootp(AsyncMock(side_effect=lambda p, m: fired.append(m)))
+
+    # Stale tag left over from the previous MikroTik on this port.
+    manager.port_states[1].device_type = "mikrotik"
+
+    await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
+
+    assert fired == []
+    # The OUI gate must not mark the port attempted (reserved for real fires).
+    assert manager.port_states[1].provision_attempted is False
+
+
+@pytest.mark.asyncio
+async def test_listener_fires_for_mikrotik_oui_even_with_mikrotik_tag(manager, monkeypatch):
+    """A genuine MikroTik OUI still fires even when the port already carries a
+    "mikrotik" tag (e.g. from a prior fire) — the hardened OUI gate only
+    blocks the non-MikroTik-OUI case.
+    """
+    fake = _FakeFingerprinter(manager, ["74:4d:28:00:00:01"])  # MikroTik OUI
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
     fired = []
@@ -434,4 +465,4 @@ async def test_listener_fires_when_fingerprinted_as_mikrotik_with_unknown_oui(ma
 
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
-    assert fired == [(1, "ac:8b:a9:00:00:01")]
+    assert fired == [(1, "74:4d:28:00:00:01")]

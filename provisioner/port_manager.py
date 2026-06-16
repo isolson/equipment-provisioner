@@ -635,20 +635,30 @@ class PortManager:
 
             # Don't run destructive netinstall on non-MikroTik devices. BOOTP
             # isn't MikroTik-exclusive — Ubiquiti Wave U-Boot transmits BOOTP
-            # during boot too. Gate on (a) port fingerprint when available,
-            # falling back to (b) MAC OUI allowlist for the pre-fingerprint
-            # race. Fingerprint wins over OUI: a MikroTik with a custom MAC
-            # still provisions.
+            # during boot too. Two gates:
+            #   (a) if the port is fingerprinted as a known non-MikroTik vendor,
+            #       never netinstall — a live fingerprint always wins.
+            #   (b) otherwise require a MikroTik MAC OUI before firing.
+            # Gate (b) is UNCONDITIONAL — it does not exempt device_type ==
+            # "mikrotik". A stale "mikrotik" tag can linger on a port from a
+            # previous MikroTik that was netinstalled here (set on a prior fire
+            # below, and not cleared when that unit was removed); it must not
+            # authorize a destructive flash of a *different* device. In the
+            # BOOTP/netinstall window a MikroTik can't be fingerprinted (no
+            # services are up), so a pre-fire device_type == "mikrotik" is
+            # always a stale/auto tag, never a trustworthy live fingerprint.
+            # Trade-off: a genuine MikroTik with a non-MikroTik OUI MAC won't
+            # auto-trigger — the operator can still netinstall it manually.
             if state.device_type is not None and state.device_type != "mikrotik":
                 logger.info(
                     f"Auto-Netinstall: BOOTP from {mac} on port {port_num} ignored — "
                     f"port fingerprinted as {state.device_type}, not MikroTik"
                 )
                 continue
-            if state.device_type != "mikrotik" and not is_mikrotik_oui(mac):
+            if not is_mikrotik_oui(mac):
                 logger.info(
                     f"Auto-Netinstall: BOOTP from {mac} on port {port_num} ignored — "
-                    f"MAC OUI is not MikroTik (port not yet fingerprinted)"
+                    f"MAC OUI is not MikroTik"
                 )
                 continue
 
