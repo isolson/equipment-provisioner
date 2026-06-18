@@ -60,9 +60,15 @@ def _patch_session(status: int, body: str) -> tuple:
 
 class TestModeScriptBody:
     """The -sm flag (netinstall-cli 7.22+) takes a *file path* to a
-    RouterScript that sets device-mode on first boot. Format confirmed
-    against the tikoci/netinstall Makefile, which is the reference
-    implementation cited by the netinstall-cli 7.22 changelog.
+    RouterScript that sets device-mode on first boot. The contract path
+    fetches the served Mode script; this local constant is only the
+    direct-caller fallback.
+
+    Slash form vs space form: the served script's slash form
+    (`/system/device-mode/update`) was hardware-verified working in the
+    -sm context on 2026-06-12 (netinstall-cli 7.22.3, RouterOS 7.23.1,
+    hAP ax S — device left mode=advanced), disproving the tikoci-derived
+    note that only the space form works. Both forms are fine.
     """
 
     def test_is_single_line_device_mode_update_advanced(self):
@@ -73,14 +79,6 @@ class TestModeScriptBody:
         # netinstall-cli reads the file as text — single trailing newline
         # matches the tikoci reference (`printf '%s\n'`).
         assert MikrotikHandler.MODE_SCRIPT_BODY.endswith("\n")
-
-    def test_does_not_use_subcommand_slash_form(self):
-        # `/system/device-mode/update` (with a slash before `update`) is the
-        # confirmation-required interactive form. The netinstall mode-script
-        # context wants the space-separated form so it can bypass
-        # confirmation — getting this wrong leaves the device in `home`
-        # mode after install.
-        assert "/system/device-mode/update" not in MikrotikHandler.MODE_SCRIPT_BODY
 
 
 # ---------------------------------------------------------------------------
