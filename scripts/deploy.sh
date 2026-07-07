@@ -56,23 +56,39 @@ done
 health_check() {
   # Returns 0 if the freshly-restarted service is healthy, 1 otherwise.
   echo "Running post-deploy health check..."
-  sleep 3
   local ok=1
-  if ! $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" 'systemctl is-active --quiet provisioner-web'; then
-    echo "  ✗ provisioner-web is not active"; ok=0
+
+  # /health is the root-level liveness endpoint. The service does heavy async
+  # startup (BOOTP listeners, per-port detection scans), so poll rather than
+  # sleeping a fixed amount.
+  local code="000"
+  local i
+  for i in $(seq 1 15); do
+    code="$($SSH_CMD "${TARGET_USER}@${TARGET_HOST}" \
+      'curl -s -m 5 -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/health' 2>/dev/null || echo 000)"
+    [[ "$code" == "200" ]] && break
+    sleep 2
+  done
+  if [[ "$code" == "200" ]]; then
+    echo "  ✓ /health responds 200"
   else
+    echo "  ✗ /health returned '$code' after ~30s"; ok=0
+  fi
+
+  if $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" 'systemctl is-active --quiet provisioner-web'; then
     echo "  ✓ provisioner-web active"
+  else
+    echo "  ✗ provisioner-web is not active"; ok=0
   fi
+
+  # Boot-crash signatures from a missed registry site (see CLAUDE.md S1 list).
+  # Match the specific fatal exception types, NOT a bare "Traceback" — the
+  # service logs a benign asyncio CancelledError traceback on every startup.
   if $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" \
-       'SYSTEMD_PAGER= sudo -n journalctl -u provisioner-web --since "60 sec ago" --no-pager -o cat 2>/dev/null | grep -qiE "traceback|ImportError|AttributeError"'; then
-    echo "  ✗ traceback/import error in the last 60s of logs"; ok=0
+       'SYSTEMD_PAGER= sudo -n journalctl -u provisioner-web --since "90 sec ago" --no-pager -o cat 2>/dev/null | grep -qE "ImportError|ModuleNotFoundError|AttributeError|NameError|SyntaxError"'; then
+    echo "  ✗ import/attribute error in recent logs (boot-crash signature)"; ok=0
   else
-    echo "  ✓ no traceback in recent logs"
-  fi
-  if $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" 'curl -sf -m 5 http://127.0.0.1:8080/ports >/dev/null'; then
-    echo "  ✓ /ports responds"
-  else
-    echo "  ✗ /ports did not respond"; ok=0
+    echo "  ✓ no import/attribute error in recent logs"
   fi
   [[ "$ok" == "1" ]]
 }
@@ -182,6 +198,10 @@ else
   echo "# DEPLOY UNHEALTHY — the new code is live but failing checks."
   echo "# Roll back with:  ./scripts/deploy.sh --rollback"
   echo "############################################################"
-  $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" 'SYSTEMD_PAGER= sudo -n systemctl status provisioner-web' 2>&1 | head -20
+  # Redacted log tail — never dump `systemctl status` (its process list
+  # exposes device passwords passed as curl/sshpass argv).
+  echo "Recent log tail (secrets filtered):"
+  $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" \
+    'SYSTEMD_PAGER= sudo -n journalctl -u provisioner-web --since "90 sec ago" --no-pager -o cat 2>/dev/null | grep -ivE "password|username|sshpass|curl .*-d |cgi-bin" | tail -20'
   exit 1
 fi

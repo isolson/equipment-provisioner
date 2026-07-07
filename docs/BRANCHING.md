@@ -30,7 +30,7 @@ After a refactor phase merges to `main` (see `docs/epic-vendor-isolation-refacto
 ### Smoke checklist (baseline, every gate — ~15 min)
 
 1. `systemctl is-active provisioner-web` is `active`; `journalctl -u provisioner-web --since -5min` has no tracebacks (catches the boot-crash class from missed registry sites).
-2. Kiosk touchscreen renders the port grid; `curl -s localhost:8080/ports` returns the port array.
+2. Kiosk touchscreen renders the port grid; `curl -s localhost:8080/health` returns 200 and `curl -s localhost:8080/api/ports` returns the port array. (Root-level liveness is `/health`; the port/status API is under `/api/`.)
 3. `curl -s localhost:8080/setup/readiness` returns OK; setup UI loads.
 4. Plug in one on-hand device → detection badge appears with the correct vendor.
 5. Run one full provisioning cycle to COMPLETE.
