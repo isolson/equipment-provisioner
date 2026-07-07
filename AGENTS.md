@@ -56,6 +56,9 @@ There is **no hardware simulator** for most vendors, so:
 - Detection / handler-behavior changes carry real risk → lean on existing fixtures (`test_fingerprint.py`, `test_mikrotik_*detection*`, `test_handler_properties.py`, `test_provision_flow.py`) and assert **identical** outcomes.
 - New registries should ship with a consistency test that fails if the duplicated vendor lists drift apart (see epic Story 0).
 
+### 9. Never leak secrets or private data
+Credentials, keys, tokens, and PSKs (device passwords, `MIKROTIK_ZTP_API_KEY`, the fleet `bootstrap_password` / onboarding passphrase, RADIUS secrets) must never be echoed, logged, or passed as CLI arguments — they land in `ps`, shell history, and the **un-scrubbable** chat transcript. Inject via env (`SSHPASS=… sshpass -e`) or stdin; extract only the field you need from a credential response; confirm presence by length/mask, not value. A secret the user shares — or that you fetch — may be stored in a **gitignored** local file (`.context/*.env`, `chmod 600`) or auto-memory and referenced from there, never re-printed and never committed. If something leaks, scrub reachable artifacts (task outputs, `/tmp`, history) and report exactly what and where; never rotate fleet-wide MikroTik bootstrap/onboarding secrets unilaterally (the onboarding PSK means a whole-fleet reflash).
+
 ---
 
 ## Anti-patterns (do not do)
@@ -67,6 +70,7 @@ There is **no hardware simulator** for most vendors, so:
 - Removing a vendor by deleting its handler or firmware-source file but leaving its import / `SOURCE_MAP` / credentials / fingerprint / `SUPPORTED_DEVICE_TYPES` entries (S1 crash or S2 silent breakage).
 - Generalizing the Evolution Digital side-door or MikroTik netinstall/OUI gating.
 - Reordering fingerprint probes or changing confidence weights without fixture-backed verification.
+- Echoing/logging a secret value or passing one as a CLI argument instead of via env/stdin; writing a secret to a committed file instead of a gitignored `.context/*.env`.
 
 ---
 

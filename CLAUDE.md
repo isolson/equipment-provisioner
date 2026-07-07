@@ -70,8 +70,18 @@ sudo -n cp /opt/provisioner/configs/templates/{vendor}/{file} /var/lib/provision
 
 `deploy.sh` auto-detects `~/.ssh/id_conductor` and skirts the 1Password-agent issue; manual `ssh` outside the script may still need `-i ~/.ssh/id_conductor -o IdentitiesOnly=yes` — see `docs/HOST_SETUP.md`. `config.yaml` lives at `/etc/provisioner/config.yaml` at runtime — `deploy.sh` does NOT update it; see the install snippet in HOST_SETUP.
 
+## Secrets & Private Data
+
+Minimize the chance of leaking credentials, keys, or other private data — especially into the chat transcript, which **cannot be scrubbed afterward**.
+
+- **Never echo or print a secret value** — passwords, API keys, tokens, WPA2/PSK, RADIUS secrets, the MikroTik `bootstrap_password` / onboarding passphrase, etc. When you fetch a credential, extract only the field you need into a variable; don't dump the whole response. Confirm presence with a length or masked form, never the value.
+- **Never pass a secret as a command-line argument** — it's visible in `ps`, shell history, and the transcript. Inject via environment variable or stdin/heredoc. For SSH prefer keys; otherwise `SSHPASS=… sshpass -e …`, never `sshpass -p <value>`.
+- **When the user shares a password/key — or you fetch one — you may store it in a safe place and must not echo it again.** A "safe place" is a gitignored local file (e.g. `.context/*.env`, `chmod 600`) or your auto-memory — never a committed file, never the transcript. Reference it from there (source the env file) instead of re-typing the value.
+- **If a secret does leak**, scrub what's reachable (background-task output files, `/tmp` renders, shell history) and tell the user exactly what leaked and where so they can decide on rotation. Don't rotate fleet-wide secrets (MikroTik bootstrap/onboarding) unilaterally — the onboarding PSK rotation means reflashing the whole fleet.
+
 ## Common Mistakes to Avoid
 
+- Echoing/printing a secret value, or passing one as a CLI arg (`sshpass -p`, secrets in argv) instead of via env/stdin — see **Secrets & Private Data** above
 - Adding vendor branching to `base.py` instead of using handler properties
 - Adding a *new* place that enumerates vendors (another hardcoded list/dict or `if device_type == "..."`) instead of deriving from an existing registry — the vendor list already has ~10 copies; don't make it 11
 - Using Python 3.10+ syntax (Pi runs 3.9)
