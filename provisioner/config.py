@@ -161,6 +161,14 @@ class DisplayConfig(BaseModel):
     use_backlight: bool = True
 
 
+class LabelPrinterConfig(BaseModel):
+    """Client-side label printer integration."""
+    enabled: bool = False
+    provider: str = "brady_web_bluetooth"
+    auto_print_mikrotik_netinstall: bool = True
+    copies: int = Field(default=1, ge=1)
+
+
 class LoggingConfig(BaseModel):
     """Logging configuration."""
     level: str = "INFO"
@@ -303,6 +311,7 @@ class Config(BaseModel):
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     gpio: GPIOConfig = Field(default_factory=GPIOConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
+    label_printer: LabelPrinterConfig = Field(default_factory=LabelPrinterConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     firmware: FirmwareConfig = Field(default_factory=FirmwareConfig)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)

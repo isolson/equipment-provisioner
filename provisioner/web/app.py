@@ -72,13 +72,45 @@ def create_app(
     async def dashboard(request: Request):
         """Serve the main dashboard page."""
         num_ports = 6
+        label_printer = {
+            "enabled": False,
+            "provider": "brady_web_bluetooth",
+            "auto_print_mikrotik_netinstall": True,
+            "copies": 1,
+        }
         port_manager = getattr(provisioner, "port_manager", None) if provisioner else None
         if port_manager is not None:
             num_ports = port_manager.num_ports
+        config = getattr(provisioner, "config", None) if provisioner else None
+        if config is not None:
+            printer_config = getattr(config, "label_printer", None)
+            if printer_config is not None:
+                label_printer = printer_config.model_dump()
         return templates.TemplateResponse(request, "index.html", {
             "request": request,
             "title": title,
             "num_ports": num_ports,
+            "label_printer": label_printer,
+        })
+
+    @app.get("/labels", response_class=HTMLResponse)
+    async def labels_page(request: Request):
+        """Serve the constrained field-label printing page."""
+        label_printer = {
+            "enabled": False,
+            "provider": "brady_web_bluetooth",
+            "auto_print_mikrotik_netinstall": True,
+            "copies": 1,
+        }
+        config = getattr(provisioner, "config", None) if provisioner else None
+        if config is not None:
+            printer_config = getattr(config, "label_printer", None)
+            if printer_config is not None:
+                label_printer = printer_config.model_dump()
+        return templates.TemplateResponse(request, "labels.html", {
+            "request": request,
+            "title": title,
+            "label_printer": label_printer,
         })
 
     # Files management page

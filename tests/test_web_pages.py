@@ -1,5 +1,7 @@
 """Smoke tests for rendered web pages."""
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from provisioner.config import Config
@@ -28,7 +30,49 @@ def test_dashboard_renders_setup_banner_hook():
 
     assert 'id="setup-readiness-banner"' in html
     assert 'href="/files"' in html
+    assert 'href="/labels"' in html
     assert "loadSetupReadiness()" in html
+
+
+def test_labels_page_renders_guarded_templates():
+    client = make_client()
+
+    response = client.get("/labels")
+    assert response.status_code == 200
+    html = response.text
+
+    assert "WISP Labels" in html
+    assert "Outdoor Antenna" in html
+    assert "PTP to Building" in html
+    assert "Location AP##" in html
+    assert "Battery Inventory Date" in html
+    assert "DAY MONTH YEAR" in html
+    assert "MONTH YEAR" in html
+    assert "Anything Else" in html
+    assert "virtual-keyboard" in html
+    assert "pressVirtualKey" in html
+    assert 'inputmode="none"' in html
+    assert "TW##-TW##-PTPa" in html
+    assert "keyboard-open" in html
+    assert "visualViewport" in html
+    assert "printBitmap" in html
+
+
+def test_brady_web_sdk_license_sidecar_is_vendored():
+    vendor_dir = (
+        Path(__file__).resolve().parents[1]
+        / "provisioner"
+        / "web"
+        / "static"
+        / "vendor"
+        / "brady-web-sdk"
+    )
+    bundle = vendor_dir / "bundle.js"
+    sidecar = vendor_dir / "bundle.js.LICENSE.txt"
+
+    assert "bundle.js.LICENSE.txt" in bundle.read_text(encoding="utf-8")
+    assert sidecar.exists()
+    assert "https://sdk.bradyid.com/licences/" in sidecar.read_text(encoding="utf-8")
 
 
 def test_setup_page_renders_setup_actions():

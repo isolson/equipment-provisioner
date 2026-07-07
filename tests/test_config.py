@@ -16,6 +16,7 @@ from provisioner.config import (
     FirmwareConfig,
     FirmwareCheckerConfig,
     FirmwareSourceConfig,
+    LabelPrinterConfig,
     apply_device_settings_overrides,
     load_config,
     load_device_settings_overrides,
@@ -97,6 +98,15 @@ class TestConfigDefaults:
         assert config.ports.num_ports == 6
         assert config.credentials.tachyon.username == "root"
         assert config.firmware.dual_bank_update is True
+        assert config.label_printer.enabled is False
+
+    def test_label_printer_config_defaults(self):
+        """Label printing is opt-in and defaults to the Brady Web Bluetooth provider."""
+        config = LabelPrinterConfig()
+        assert config.enabled is False
+        assert config.provider == "brady_web_bluetooth"
+        assert config.auto_print_mikrotik_netinstall is True
+        assert config.copies == 1
 
 
 class TestConfigValidation:
@@ -263,6 +273,31 @@ credentials:
             config = load_config(config_path)
             assert config.credentials.tachyon.username == "custom_user"
             assert config.credentials.tachyon.password == "custom_pass"
+        finally:
+            os.unlink(config_path)
+
+    def test_load_config_with_label_printer(self):
+        """Label printer settings load from YAML."""
+        config_yaml = """
+network:
+  interface: eth0
+
+label_printer:
+  enabled: true
+  provider: brady_web_bluetooth
+  auto_print_mikrotik_netinstall: true
+  copies: 2
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            f.write(config_yaml)
+            config_path = f.name
+
+        try:
+            config = load_config(config_path)
+            assert config.label_printer.enabled is True
+            assert config.label_printer.provider == "brady_web_bluetooth"
+            assert config.label_printer.auto_print_mikrotik_netinstall is True
+            assert config.label_printer.copies == 2
         finally:
             os.unlink(config_path)
 

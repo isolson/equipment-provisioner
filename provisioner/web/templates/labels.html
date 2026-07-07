@@ -1,0 +1,1348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>WISP Labels - {{ title }}</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <script src="/static/tailwindcss.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+        }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            background: #f5f5f5;
+            color: #111827;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Menlo', monospace;
+        }
+
+        body.keyboard-open {
+            position: fixed;
+            inset: 0;
+        }
+
+        .app-shell {
+            height: 100dvh;
+            min-height: 100dvh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .top-bar {
+            height: 64px;
+            flex: 0 0 64px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 14px;
+            background: #ffffff;
+            border-bottom: 2px solid #d1d5db;
+        }
+
+        .top-title {
+            font-size: clamp(22px, 4vw, 32px);
+            font-weight: 900;
+            letter-spacing: 0;
+            white-space: nowrap;
+        }
+
+        .top-spacer { flex: 1 1 auto; }
+
+        .icon-btn,
+        .status-btn,
+        .choice-btn,
+        .template-btn,
+        .action-btn,
+        .stepper-btn,
+        .chip-btn {
+            border: 2px solid #d1d5db;
+            background: #ffffff;
+            color: #111827;
+            border-radius: 8px;
+            font-weight: 900;
+            letter-spacing: 0;
+        }
+
+        .icon-btn {
+            width: 52px;
+            height: 52px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 52px;
+        }
+
+        .status-btn {
+            min-height: 52px;
+            padding: 0 14px;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 18px;
+            white-space: nowrap;
+        }
+
+        .status-dot {
+            width: 16px;
+            height: 16px;
+            border-radius: 999px;
+            background: #f59e0b;
+        }
+
+        .status-ready .status-dot { background: #16a34a; }
+        .status-busy .status-dot { background: #2563eb; }
+        .status-error .status-dot { background: #dc2626; }
+
+        .work-area {
+            flex: 1 1 auto;
+            min-height: 0;
+            display: grid;
+            grid-template-columns: minmax(360px, 0.95fr) minmax(420px, 1.05fr);
+            gap: 14px;
+            padding: 14px;
+            overflow: hidden;
+        }
+
+        .panel {
+            min-height: 0;
+            background: #ffffff;
+            border: 2px solid #d1d5db;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-title {
+            flex: 0 0 auto;
+            padding: 12px 14px;
+            border-bottom: 2px solid #e5e7eb;
+            font-size: 22px;
+            font-weight: 900;
+        }
+
+        .control-stack {
+            min-height: 0;
+            flex: 1 1 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 12px;
+            overflow: hidden;
+        }
+
+        .button-row {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+        }
+
+        .choice-btn {
+            min-height: 58px;
+            padding: 6px 8px;
+            font-size: clamp(17px, 2.2vw, 22px);
+        }
+
+        .choice-btn.active,
+        .template-btn.active {
+            border-color: #111827;
+            background: #111827;
+            color: #ffffff;
+        }
+
+        .family-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .template-grid {
+            min-height: 0;
+            flex: 1 1 auto;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 8px;
+            overflow-y: auto;
+            padding-right: 2px;
+        }
+
+        .template-btn {
+            min-height: 62px;
+            padding: 8px 10px;
+            text-align: left;
+            font-size: clamp(18px, 2.4vw, 26px);
+            line-height: 1.08;
+        }
+
+        .preview-panel {
+            display: grid;
+            grid-template-rows: auto minmax(150px, 1fr) auto;
+        }
+
+        .preview-box {
+            margin: 14px;
+            min-height: 150px;
+            border: 3px solid #111827;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 14px;
+            background: #ffffff;
+        }
+
+        .preview-text {
+            width: 100%;
+            overflow-wrap: anywhere;
+            text-align: center;
+            font-size: clamp(34px, 7vw, 72px);
+            font-weight: 900;
+            line-height: 1.04;
+            letter-spacing: 0;
+            white-space: pre-line;
+        }
+
+        .preview-box.format-cable {
+            min-height: 230px;
+        }
+
+        .cable-preview-layout {
+            width: 100%;
+            height: 100%;
+            min-height: 190px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .cable-tail,
+        .cable-face {
+            height: 100%;
+            min-height: 190px;
+            border: 2px dashed #9ca3af;
+            border-radius: 8px;
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            overflow: hidden;
+        }
+
+        .cable-tail {
+            color: #9ca3af;
+            font-size: clamp(18px, 2.2vw, 30px);
+            font-weight: 900;
+            text-align: center;
+            padding: 14px;
+        }
+
+        .cable-repeat-cell {
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-right: 1px dashed #d1d5db;
+            overflow: hidden;
+        }
+
+        .cable-repeat-cell:nth-child(3n) {
+            border-right: 0;
+        }
+
+        .cable-repeat-stack {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            transform: rotate(-90deg);
+            white-space: nowrap;
+            font-size: clamp(14px, 2.1vw, 22px);
+            font-weight: 900;
+            letter-spacing: 0;
+        }
+
+        .cable-repeat-stack span {
+            display: block;
+            line-height: 1;
+        }
+
+        .fields-area {
+            min-height: 0;
+            padding: 0 14px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            overflow: hidden;
+        }
+
+        .field-card {
+            border: 2px solid #d1d5db;
+            border-radius: 8px;
+            padding: 10px;
+            background: #f9fafb;
+        }
+
+        .field-label {
+            display: block;
+            margin-bottom: 6px;
+            color: #4b5563;
+            font-size: 16px;
+            font-weight: 900;
+        }
+
+        .text-input {
+            width: 100%;
+            height: 60px;
+            border: 2px solid #111827;
+            border-radius: 8px;
+            padding: 6px 12px;
+            font-size: 28px;
+            font-weight: 900;
+            text-transform: uppercase;
+            background: #ffffff;
+            color: #111827;
+        }
+
+        .stepper {
+            display: grid;
+            grid-template-columns: 72px 1fr 72px;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .stepper-btn {
+            height: 60px;
+            font-size: 34px;
+        }
+
+        .stepper-value {
+            height: 60px;
+            border: 2px solid #111827;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #ffffff;
+            font-size: 30px;
+            font-weight: 900;
+        }
+
+        .chip-row {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .chip-btn {
+            min-height: 44px;
+            padding: 4px 6px;
+            font-size: 15px;
+        }
+
+        .action-row {
+            flex: 0 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            padding: 14px;
+            border-top: 2px solid #e5e7eb;
+            background: #ffffff;
+        }
+
+        .action-btn {
+            min-height: 72px;
+            font-size: clamp(24px, 4vw, 38px);
+        }
+
+        .action-btn.primary {
+            background: #16a34a;
+            border-color: #15803d;
+            color: #ffffff;
+        }
+
+        .action-btn.secondary {
+            background: #e5e7eb;
+            border-color: #9ca3af;
+        }
+
+        .compact-input {
+            display: none;
+            height: calc(100dvh - 64px);
+            min-height: 0;
+            padding: 12px;
+            gap: 10px;
+            overflow: hidden;
+        }
+
+        .compact-preview {
+            min-height: 92px;
+            border: 3px solid #111827;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+            background: #ffffff;
+            font-size: clamp(30px, 9vw, 58px);
+            font-weight: 900;
+            text-align: center;
+            overflow-wrap: anywhere;
+            white-space: pre-line;
+        }
+
+        .compact-field {
+            background: #ffffff;
+            border: 2px solid #d1d5db;
+            border-radius: 8px;
+            padding: 10px;
+        }
+
+        .virtual-keyboard {
+            min-height: 0;
+            display: grid;
+            grid-template-rows: repeat(5, minmax(42px, 1fr));
+            gap: 8px;
+        }
+
+        .keyboard-row {
+            min-height: 0;
+            display: grid;
+            gap: 8px;
+        }
+
+        .keyboard-row.cols-10 { grid-template-columns: repeat(10, minmax(0, 1fr)); }
+        .keyboard-row.cols-9 { grid-template-columns: repeat(9, minmax(0, 1fr)); }
+        .keyboard-row.cols-7 { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+        .keyboard-row.action-keys { grid-template-columns: 1fr 1fr 2fr 1.25fr; }
+
+        .key-btn {
+            min-width: 0;
+            min-height: 42px;
+            border: 2px solid #111827;
+            border-radius: 8px;
+            background: #ffffff;
+            color: #111827;
+            font-size: clamp(19px, 4.8vw, 34px);
+            font-weight: 900;
+            letter-spacing: 0;
+        }
+
+        .key-btn.wide {
+            font-size: clamp(17px, 3.6vw, 28px);
+        }
+
+        .compact-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        body.keyboard-open .work-area {
+            display: none;
+        }
+
+        body.keyboard-open .compact-input {
+            display: grid;
+            grid-template-rows: minmax(72px, 0.8fr) auto minmax(220px, 2fr) auto;
+        }
+
+        body.keyboard-open .top-title {
+            font-size: 20px;
+        }
+
+        body.keyboard-open .status-btn {
+            display: none;
+        }
+
+        .toast-container {
+            position: fixed;
+            left: 12px;
+            right: 12px;
+            bottom: 12px;
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            pointer-events: none;
+        }
+
+        .toast {
+            align-self: center;
+            max-width: min(680px, 100%);
+            border-radius: 8px;
+            padding: 12px 16px;
+            color: #ffffff;
+            background: #2563eb;
+            font-size: 20px;
+            font-weight: 900;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+        }
+
+        .toast.error { background: #dc2626; }
+        .toast.success { background: #16a34a; }
+        .toast.warning { background: #d97706; }
+
+        @media (max-width: 820px) {
+            .top-bar {
+                height: 58px;
+                flex-basis: 58px;
+                padding: 6px 8px;
+            }
+
+            .icon-btn {
+                width: 48px;
+                height: 48px;
+                flex-basis: 48px;
+            }
+
+            .status-label {
+                display: none;
+            }
+
+            .work-area {
+                grid-template-columns: 1fr;
+                grid-template-rows: minmax(270px, 0.95fr) minmax(270px, 1.05fr);
+                gap: 8px;
+                padding: 8px;
+            }
+
+            .panel-title {
+                padding: 8px 10px;
+                font-size: 18px;
+            }
+
+            .control-stack {
+                gap: 8px;
+                padding: 8px;
+            }
+
+            .choice-btn {
+                min-height: 50px;
+                font-size: 17px;
+            }
+
+            .template-btn {
+                min-height: 54px;
+                font-size: 18px;
+            }
+
+            .preview-box {
+                margin: 8px;
+                min-height: 92px;
+            }
+
+            .preview-text {
+                font-size: clamp(30px, 9vw, 48px);
+            }
+
+            .fields-area {
+                padding: 0 8px 8px;
+                gap: 8px;
+            }
+
+            .field-card {
+                padding: 8px;
+            }
+
+            .text-input {
+                height: 54px;
+                font-size: 24px;
+            }
+
+            .compact-input {
+                height: calc(100dvh - 58px);
+                padding: 8px;
+                gap: 8px;
+            }
+
+            .compact-preview {
+                min-height: 64px;
+            }
+
+            .virtual-keyboard {
+                grid-template-rows: repeat(5, minmax(38px, 1fr));
+                gap: 6px;
+            }
+
+            .keyboard-row {
+                gap: 6px;
+            }
+
+            .key-btn {
+                min-height: 38px;
+                font-size: clamp(18px, 6vw, 28px);
+            }
+
+            .stepper {
+                grid-template-columns: 62px 1fr 62px;
+            }
+
+            .stepper-btn,
+            .stepper-value {
+                height: 54px;
+            }
+
+            .chip-row {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+
+            .action-row {
+                padding: 8px;
+            }
+
+            .action-btn {
+                min-height: 58px;
+                font-size: 24px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-shell">
+        <header class="top-bar">
+            <a href="/" class="icon-btn" title="Back to dashboard" aria-label="Back to dashboard">
+                <svg width="28" height="28" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+                </svg>
+            </a>
+            <div class="top-title">WISP Labels</div>
+            <div class="top-spacer"></div>
+            <button id="printer-status" class="status-btn" onclick="connectPrinter()">
+                <span class="status-dot"></span>
+                <span id="printer-status-text" class="status-label">Tap To Connect</span>
+            </button>
+        </header>
+
+        <main class="work-area">
+            <section class="panel">
+                <div class="panel-title">Pick Label</div>
+                <div class="control-stack">
+                    <div class="button-row" id="format-buttons"></div>
+                    <div class="family-row" id="family-buttons"></div>
+                    <div class="template-grid" id="template-buttons"></div>
+                </div>
+            </section>
+
+            <section class="panel preview-panel">
+                <div class="panel-title">Preview</div>
+                <div id="preview-box" class="preview-box">
+                    <div id="preview-content" class="preview-text"></div>
+                </div>
+                <div id="fields-area" class="fields-area"></div>
+                <div class="action-row">
+                    <button class="action-btn primary" onclick="printCurrent(1)">PRINT 1</button>
+                    <button class="action-btn secondary" onclick="reprintLast()">REPRINT</button>
+                </div>
+            </section>
+        </main>
+
+        <section class="compact-input" id="compact-input">
+            <div class="compact-preview" id="compact-preview"></div>
+            <div class="compact-field" id="compact-field"></div>
+            <div class="virtual-keyboard" id="virtual-keyboard"></div>
+            <div class="compact-actions">
+                <button class="action-btn secondary" onclick="focusNextField()">NEXT</button>
+                <button class="action-btn primary" onclick="closeInputMode()">DONE</button>
+            </div>
+        </section>
+    </div>
+
+    <div class="toast-container" id="toast-container"></div>
+
+    <script>
+        const LABEL_PRINTER_CONFIG = {{ label_printer | tojson }};
+        const LABEL_PRINTER_OWNERSHIP_KEY = 'ownershipID';
+        const WISP_LAST_LABEL_KEY = 'wispLabelLastPrinted';
+        const TEXT_CHIPS = ['OFFICE', 'SHOP', 'MDF', 'IDF', 'HOUSE', 'GARAGE'];
+        const VIRTUAL_KEY_ROWS = [
+            ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+            ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
+            ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
+            ['Z', 'X', 'C', 'V', 'B', 'N', 'M'],
+        ];
+
+        const formats = [
+            { id: 'box', label: 'EQUIPMENT' },
+            { id: 'cable', label: 'CABLE WRAP' },
+            { id: 'patch', label: 'PATCH PANEL' },
+        ];
+
+        const families = [
+            { id: 'infra', label: 'Infrastructure' },
+            { id: 'customer', label: 'Customer / Business' },
+        ];
+
+        const templates = [
+            { id: 'infra-switch', family: 'infra', label: 'tw##sw##', fields: ['site', 'unit'], render: f => `tw${pad(f.site, 2)}sw${pad(f.unit, 2)}` },
+            { id: 'infra-router', family: 'infra', label: 'tw##rtr', fields: ['site'], render: f => `tw${pad(f.site, 2)}rtr` },
+            { id: 'infra-ptpa', family: 'infra', label: 'TW##-TW##-PTPa', fields: ['fromSite', 'toSite'], render: f => `TW${pad(f.fromSite, 2)}-TW${pad(f.toSite, 2)}-PTPa` },
+            { id: 'infra-ptpb', family: 'infra', label: 'TW##-TW##-PTPb', fields: ['fromSite', 'toSite'], render: f => `TW${pad(f.fromSite, 2)}-TW${pad(f.toSite, 2)}-PTPb` },
+            { id: 'infra-ap', family: 'infra', label: 'TW##-AP###', fields: ['site', 'apNum3'], render: f => `TW${pad(f.site, 2)}-AP${pad(f.apNum3, 3)}` },
+            { id: 'outdoor-antenna', family: 'customer', label: 'Outdoor Antenna', fields: [], render: () => 'Outdoor Antenna' },
+            { id: 'ptp-building', family: 'customer', label: 'PTP to Building', fields: ['building'], render: f => `PTP to ${cleanText(f.building || 'BUILDING')}` },
+            { id: 'loc-ap', family: 'customer', label: 'Location AP##', fields: ['loc', 'num'], render: f => `${cleanText(f.loc || 'LOC')} AP${pad(f.num, 2)}` },
+            { id: 'loc-cam', family: 'customer', label: 'Location CAM##', fields: ['loc', 'num'], render: f => `${cleanText(f.loc || 'LOC')} CAM${pad(f.num, 2)}` },
+            { id: 'loc-data', family: 'customer', label: 'Location DATA##', fields: ['loc', 'num'], render: f => `${cleanText(f.loc || 'LOC')} DATA${pad(f.num, 2)}` },
+            { id: 'loc-pos', family: 'customer', label: 'Location POS##', fields: ['loc', 'num'], render: f => `${cleanText(f.loc || 'LOC')} POS${pad(f.num, 2)}` },
+            { id: 'loc-voip', family: 'customer', label: 'Location VOIP##', fields: ['loc', 'num'], render: f => `${cleanText(f.loc || 'LOC')} VOIP${pad(f.num, 2)}` },
+            { id: 'wan', family: 'customer', label: 'WAN', fields: [], render: () => 'WAN' },
+            { id: 'lan', family: 'customer', label: 'LAN', fields: [], render: () => 'LAN' },
+            { id: 'do-not-unplug', family: 'customer', label: 'DO NOT UNPLUG', fields: [], render: () => 'DO NOT UNPLUG' },
+            { id: 'battery-inventory', family: 'customer', label: 'Battery Inventory Date', fields: ['dateMode'], render: f => formatBatteryDate(f.dateMode || 'dmy') },
+            { id: 'anything-else', family: 'customer', label: 'Anything Else', fields: ['custom1', 'custom2'], render: f => customLabelText(f.custom1, f.custom2) },
+        ];
+
+        const fieldMeta = {
+            site: { label: 'Tower', type: 'number', min: 1, max: 99, pad: 2 },
+            unit: { label: 'Unit', type: 'number', min: 1, max: 99, pad: 2 },
+            fromSite: { label: 'From TW', type: 'number', min: 1, max: 99, pad: 2 },
+            toSite: { label: 'To TW', type: 'number', min: 1, max: 99, pad: 2 },
+            apNum3: { label: 'AP Number', type: 'number', min: 0, max: 999, pad: 3 },
+            num: { label: 'Number', type: 'number', min: 1, max: 99, pad: 2 },
+            loc: { label: 'Location', type: 'text', maxLength: 14 },
+            building: { label: 'Building', type: 'text', maxLength: 16 },
+            custom1: { label: 'Line 1', type: 'text', maxLength: 18 },
+            custom2: { label: 'Line 2', type: 'text', maxLength: 18 },
+            dateMode: {
+                label: 'Date',
+                type: 'choice',
+                options: [
+                    { value: 'dmy', label: 'DAY MONTH YEAR' },
+                    { value: 'my', label: 'MONTH YEAR' },
+                ],
+            },
+        };
+
+        let state = {
+            format: 'box',
+            family: 'customer',
+            templateId: 'outdoor-antenna',
+            fields: {
+                site: 1,
+                unit: 1,
+                fromSite: 1,
+                toSite: 2,
+                apNum3: 0,
+                num: 1,
+                loc: 'OFFICE',
+                building: 'SHOP',
+                custom1: 'LABEL',
+                custom2: '',
+                dateMode: 'dmy',
+            },
+        };
+
+        let BradySdkClass = null;
+        let bradySdk = null;
+        let bradySdkLoadPromise = null;
+        let printerState = 'disconnected';
+        let activeInputField = null;
+        let visualViewportHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            renderAll();
+            if (LABEL_PRINTER_CONFIG.enabled) {
+                updatePrinterStatus('disconnected', 'Tap To Connect');
+            } else {
+                updatePrinterStatus('error', 'Printer Off');
+            }
+            if (window.visualViewport) {
+                visualViewportHeight = window.visualViewport.height;
+                window.visualViewport.addEventListener('resize', handleViewportResize);
+            }
+            document.addEventListener('focusin', event => {
+                if (event.target && event.target.matches('[data-field-input]')) {
+                    const name = event.target.dataset.fieldInput;
+                    if (activeInputField !== name || !document.body.classList.contains('keyboard-open')) {
+                        openInputMode(name);
+                    }
+                }
+            });
+        });
+
+        function currentTemplate() {
+            return templates.find(template => template.id === state.templateId) || templates[0];
+        }
+
+        function currentText() {
+            return currentTemplate().render(state.fields);
+        }
+
+        function pad(value, width) {
+            const num = Number.parseInt(value, 10);
+            const safe = Number.isFinite(num) ? Math.max(0, num) : 0;
+            return String(safe).padStart(width, '0');
+        }
+
+        function cleanText(value) {
+            return String(value || '').toUpperCase().replace(/[^A-Z0-9 /.-]/g, '').trim().slice(0, 18);
+        }
+
+        function formatBatteryDate(mode) {
+            const now = new Date();
+            const month = now.toLocaleString('en-US', { month: 'short' }).toUpperCase();
+            const year = String(now.getFullYear());
+            if (mode === 'my') return `${month} ${year}`;
+            return `${now.getDate()} ${month} ${year}`;
+        }
+
+        function customLabelText(line1, line2) {
+            const lines = [cleanText(line1 || 'LABEL'), cleanText(line2 || '')].filter(Boolean);
+            return lines.slice(0, 2).join('\n');
+        }
+
+        function renderAll() {
+            renderFormatButtons();
+            renderFamilyButtons();
+            renderTemplateButtons();
+            renderPreview();
+            renderFields();
+            renderCompactInput();
+        }
+
+        function renderFormatButtons() {
+            const target = document.getElementById('format-buttons');
+            target.innerHTML = formats.map(format => `
+                <button class="choice-btn ${state.format === format.id ? 'active' : ''}" onclick="setFormat('${format.id}')">${format.label}</button>
+            `).join('');
+        }
+
+        function renderFamilyButtons() {
+            const target = document.getElementById('family-buttons');
+            target.innerHTML = families.map(family => `
+                <button class="choice-btn ${state.family === family.id ? 'active' : ''}" onclick="setFamily('${family.id}')">${family.label}</button>
+            `).join('');
+        }
+
+        function renderTemplateButtons() {
+            const target = document.getElementById('template-buttons');
+            target.innerHTML = templates
+                .filter(template => template.family === state.family)
+                .map(template => `
+                    <button class="template-btn ${state.templateId === template.id ? 'active' : ''}" onclick="setTemplate('${template.id}')">${template.label}</button>
+                `).join('');
+        }
+
+        function renderPreview() {
+            const box = document.getElementById('preview-box');
+            const content = document.getElementById('preview-content');
+            const text = escapeHtml(currentText());
+            box.className = `preview-box format-${state.format}`;
+            if (state.format === 'cable') {
+                const lines = cableUniqueLines(currentText()).map(escapeHtml);
+                content.className = 'cable-preview-layout';
+                content.innerHTML = `
+                    <div class="cable-tail">WRAP<br>TAIL</div>
+                    <div class="cable-face">
+                        ${[1, 2, 3].map(() => `
+                            <div class="cable-repeat-cell">
+                                <div class="cable-repeat-stack">
+                                    ${lines.map(line => `<span>${line}</span>`).join('')}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            } else {
+                content.className = 'preview-text';
+                content.textContent = currentText();
+            }
+            document.getElementById('compact-preview').textContent = currentText();
+        }
+
+        function renderFields() {
+            const target = document.getElementById('fields-area');
+            const fields = currentTemplate().fields;
+            if (fields.length === 0) {
+                target.innerHTML = '';
+                return;
+            }
+            target.innerHTML = fields.map(renderField).join('');
+        }
+
+        function renderField(name) {
+            const meta = fieldMeta[name];
+            if (meta.type === 'number') {
+                return `
+                    <div class="field-card">
+                        <span class="field-label">${meta.label}</span>
+                        <div class="stepper">
+                            <button class="stepper-btn" onclick="stepField('${name}', -1)">-</button>
+                            <div class="stepper-value">${pad(state.fields[name], meta.pad || 2)}</div>
+                            <button class="stepper-btn" onclick="stepField('${name}', 1)">+</button>
+                        </div>
+                    </div>
+                `;
+            }
+            if (meta.type === 'choice') {
+                return `
+                    <div class="field-card">
+                        <span class="field-label">${meta.label}</span>
+                        <div class="button-row">
+                            ${meta.options.map(option => `
+                                <button class="choice-btn ${state.fields[name] === option.value ? 'active' : ''}" onclick="setChoiceField('${name}', '${option.value}')">${option.label}</button>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+            return `
+                <div class="field-card">
+                    <label class="field-label" for="field-${name}">${meta.label}</label>
+                    <input id="field-${name}" class="text-input" data-field-input="${name}" value="${escapeHtml(state.fields[name] || '')}" maxlength="${meta.maxLength || 16}" inputmode="none" autocomplete="off" autocapitalize="characters" readonly onclick="openInputMode('${name}')" oninput="setTextField('${name}', this.value)">
+                    <div class="chip-row">
+                        ${TEXT_CHIPS.map(chip => `<button class="chip-btn" onclick="setTextField('${name}', '${chip}')">${chip}</button>`).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderCompactInput() {
+            const target = document.getElementById('compact-field');
+            if (!activeInputField || !fieldMeta[activeInputField]) {
+                target.innerHTML = '';
+                renderVirtualKeyboard();
+                return;
+            }
+            const meta = fieldMeta[activeInputField];
+            target.innerHTML = `
+                <label class="field-label" for="compact-${activeInputField}">${meta.label}</label>
+                <input id="compact-${activeInputField}" class="text-input" data-field-input="${activeInputField}" value="${escapeHtml(state.fields[activeInputField] || '')}" maxlength="${meta.maxLength || 16}" inputmode="none" autocomplete="off" autocapitalize="characters" readonly oninput="setTextField('${activeInputField}', this.value)">
+                <div class="chip-row">
+                    ${TEXT_CHIPS.map(chip => `<button class="chip-btn" onclick="setTextField('${activeInputField}', '${chip}')">${chip}</button>`).join('')}
+                </div>
+            `;
+            renderVirtualKeyboard();
+        }
+
+        function renderVirtualKeyboard() {
+            const target = document.getElementById('virtual-keyboard');
+            if (!activeInputField || !fieldMeta[activeInputField]) {
+                target.innerHTML = '';
+                return;
+            }
+            const rows = VIRTUAL_KEY_ROWS.map(keys => {
+                const colsClass = keys.length === 10 ? 'cols-10' : keys.length === 9 ? 'cols-9' : 'cols-7';
+                return `
+                    <div class="keyboard-row ${colsClass}">
+                        ${keys.map(key => `<button class="key-btn" onclick="pressVirtualKey('${key}')">${key}</button>`).join('')}
+                    </div>
+                `;
+            }).join('');
+            target.innerHTML = `
+                ${rows}
+                <div class="keyboard-row action-keys">
+                    <button class="key-btn wide" onclick="pressVirtualKey('/')">/</button>
+                    <button class="key-btn wide" onclick="pressVirtualKey('-')">-</button>
+                    <button class="key-btn wide" onclick="pressVirtualKey('SPACE')">SPACE</button>
+                    <button class="key-btn wide" onclick="pressVirtualKey('BACK')">BACK</button>
+                </div>
+            `;
+        }
+
+        function setFormat(format) {
+            state.format = format;
+            renderAll();
+        }
+
+        function setFamily(family) {
+            state.family = family;
+            const first = templates.find(template => template.family === family);
+            if (first) state.templateId = first.id;
+            renderAll();
+        }
+
+        function setTemplate(templateId) {
+            state.templateId = templateId;
+            renderAll();
+        }
+
+        function stepField(name, delta) {
+            const meta = fieldMeta[name];
+            const current = Number.parseInt(state.fields[name], 10) || 0;
+            const next = Math.min(meta.max, Math.max(meta.min, current + delta));
+            state.fields[name] = next;
+            renderAll();
+        }
+
+        function setChoiceField(name, value) {
+            state.fields[name] = value;
+            renderAll();
+        }
+
+        function setTextField(name, value) {
+            state.fields[name] = cleanText(value);
+            const normalInput = document.getElementById(`field-${name}`);
+            const compactInput = document.getElementById(`compact-${name}`);
+            if (normalInput && normalInput.value !== state.fields[name]) normalInput.value = state.fields[name];
+            if (compactInput && compactInput.value !== state.fields[name]) compactInput.value = state.fields[name];
+            renderPreview();
+            const refocus = document.getElementById(`compact-${name}`) || document.getElementById(`field-${name}`);
+            if (refocus && document.activeElement !== refocus && activeInputField === name) {
+                setTimeout(() => refocus.focus(), 0);
+            }
+        }
+
+        function pressVirtualKey(key) {
+            if (!activeInputField || !fieldMeta[activeInputField]) return;
+            const meta = fieldMeta[activeInputField];
+            const maxLength = meta.maxLength || 16;
+            let current = String(state.fields[activeInputField] || '');
+            if (key === 'BACK') {
+                current = current.slice(0, -1);
+            } else if (key === 'SPACE') {
+                current = `${current} `;
+            } else {
+                current = `${current}${key}`;
+            }
+            setTextField(activeInputField, current.slice(0, maxLength));
+        }
+
+        function openInputMode(name) {
+            activeInputField = name;
+            document.body.classList.add('keyboard-open');
+            renderPreview();
+            renderCompactInput();
+            renderVirtualKeyboard();
+            setTimeout(() => {
+                const compact = document.getElementById(`compact-${name}`);
+                if (compact) {
+                    compact.focus();
+                }
+            }, 0);
+        }
+
+        function closeInputMode() {
+            document.body.classList.remove('keyboard-open');
+            activeInputField = null;
+            if (document.activeElement) document.activeElement.blur();
+            renderVirtualKeyboard();
+            renderAll();
+        }
+
+        function focusNextField() {
+            const fields = currentTemplate().fields.filter(name => fieldMeta[name].type === 'text');
+            if (fields.length === 0) {
+                closeInputMode();
+                return;
+            }
+            const index = Math.max(0, fields.indexOf(activeInputField));
+            const next = fields[(index + 1) % fields.length];
+            openInputMode(next);
+        }
+
+        function handleViewportResize() {
+            if (!window.visualViewport) return;
+            const visible = window.visualViewport.height;
+            const keyboardLikelyOpen = activeInputField && visible < visualViewportHeight * 0.82;
+            if (keyboardLikelyOpen) {
+                document.body.classList.add('keyboard-open');
+            }
+            if (!activeInputField) {
+                document.body.classList.remove('keyboard-open');
+            }
+        }
+
+        async function ensureBradySdk() {
+            if (bradySdk) return bradySdk;
+            if (!bradySdkLoadPromise) {
+                bradySdkLoadPromise = import('/static/vendor/brady-web-sdk/bundle.js')
+                    .then(module => {
+                        BradySdkClass = module.default;
+                        bradySdk = new BradySdkClass(onPrinterUpdate, false);
+                        onPrinterUpdate();
+                        return bradySdk;
+                    });
+            }
+            return bradySdkLoadPromise;
+        }
+
+        function isPrinterConnected() {
+            try {
+                return !!(bradySdk && bradySdk.isConnected && bradySdk.isConnected());
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function onPrinterUpdate() {
+            if (isPrinterConnected()) {
+                updatePrinterStatus('ready', 'Printer Ready');
+            } else if (printerState !== 'busy') {
+                updatePrinterStatus('disconnected', 'Tap To Connect');
+            }
+        }
+
+        function updatePrinterStatus(stateName, text) {
+            printerState = stateName;
+            const button = document.getElementById('printer-status');
+            const label = document.getElementById('printer-status-text');
+            button.classList.toggle('status-ready', stateName === 'ready');
+            button.classList.toggle('status-busy', stateName === 'busy');
+            button.classList.toggle('status-error', stateName === 'error');
+            label.textContent = text;
+            button.title = text;
+        }
+
+        async function connectPrinter() {
+            if (!LABEL_PRINTER_CONFIG.enabled) {
+                updatePrinterStatus('error', 'Printer Off');
+                showToast('Label printer is disabled in config', 'error');
+                return false;
+            }
+            try {
+                updatePrinterStatus('busy', 'Connecting');
+                const sdk = await ensureBradySdk();
+                if (sdk.isSupportedBrowser && !sdk.isSupportedBrowser()) {
+                    updatePrinterStatus('error', 'No Bluetooth');
+                    showToast('Browser does not support Web Bluetooth', 'error');
+                    return false;
+                }
+                const ownershipId = localStorage.getItem(LABEL_PRINTER_OWNERSHIP_KEY);
+                const connected = await sdk.showDiscoveredBleDevices(ownershipId);
+                if (!connected) {
+                    updatePrinterStatus('error', 'Connect Failed');
+                    showToast('Printer connection failed', 'error');
+                    return false;
+                }
+                onPrinterUpdate();
+                showToast('Printer ready', 'success');
+                return true;
+            } catch (error) {
+                console.error('Printer connection failed:', error);
+                updatePrinterStatus('error', 'Connect Failed');
+                showToast('Printer connection failed', 'error');
+                return false;
+            }
+        }
+
+        async function printCurrent(copies) {
+            const label = buildLabel(copies);
+            try {
+                if (!isPrinterConnected()) {
+                    const connected = await connectPrinter();
+                    if (!connected) return;
+                }
+                updatePrinterStatus('busy', 'Printing');
+                const sdk = await ensureBradySdk();
+                sdk.setCopies(label.copies);
+                sdk.setCutOption(0);
+                const image = await renderLabelImage(label);
+                const ok = await sdk.printBitmap(image);
+                if (!ok) throw new Error('Brady SDK returned false');
+                localStorage.setItem(WISP_LAST_LABEL_KEY, JSON.stringify(label));
+                showToast(`Printed ${label.text}`, 'success');
+                autoIncrementAfterPrint();
+                onPrinterUpdate();
+            } catch (error) {
+                console.error('Label print failed:', error);
+                updatePrinterStatus('error', 'Print Failed');
+                showToast('Print failed', 'error');
+            }
+        }
+
+        async function reprintLast() {
+            try {
+                const raw = localStorage.getItem(WISP_LAST_LABEL_KEY);
+                if (!raw) {
+                    showToast('No previous label', 'warning');
+                    return;
+                }
+                const label = JSON.parse(raw);
+                if (!isPrinterConnected()) {
+                    const connected = await connectPrinter();
+                    if (!connected) return;
+                }
+                updatePrinterStatus('busy', 'Printing');
+                const sdk = await ensureBradySdk();
+                sdk.setCopies(label.copies || 1);
+                sdk.setCutOption(0);
+                const image = await renderLabelImage(label);
+                const ok = await sdk.printBitmap(image);
+                if (!ok) throw new Error('Brady SDK returned false');
+                showToast(`Reprinted ${label.text}`, 'success');
+                onPrinterUpdate();
+            } catch (error) {
+                console.error('Reprint failed:', error);
+                updatePrinterStatus('error', 'Print Failed');
+                showToast('Reprint failed', 'error');
+            }
+        }
+
+        function buildLabel(copies) {
+            return {
+                text: currentText(),
+                format: state.format,
+                templateId: state.templateId,
+                copies: copies || 1,
+            };
+        }
+
+        function autoIncrementAfterPrint() {
+            const template = currentTemplate();
+            if (template.fields.includes('num')) state.fields.num = Math.min(99, state.fields.num + 1);
+            if (template.fields.includes('apNum3')) state.fields.apNum3 = Math.min(999, state.fields.apNum3 + 1);
+            if (template.fields.includes('unit')) state.fields.unit = Math.min(99, state.fields.unit + 1);
+            renderAll();
+        }
+
+        async function renderLabelImage(label) {
+            const size = canvasSizeForFormat(label.format);
+            const canvas = document.createElement('canvas');
+            canvas.width = size.width;
+            canvas.height = size.height;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#000000';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            if (label.format === 'cable') {
+                drawCableLabel(ctx, canvas, label.text);
+            } else {
+                drawCenteredLabel(ctx, canvas, label.text, label.format === 'patch' ? 64 : 92);
+            }
+
+            const img = new Image();
+            img.width = canvas.width;
+            img.height = canvas.height;
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = reject;
+                img.src = canvas.toDataURL('image/png');
+            });
+            return img;
+        }
+
+        function canvasSizeForFormat(format) {
+            if (format === 'patch') return { width: 760, height: 220 };
+            return { width: 900, height: 300 };
+        }
+
+        function drawCenteredLabel(ctx, canvas, text, maxFont) {
+            const lines = splitText(text, text.length > 18 ? 2 : 1);
+            let fontSize = maxFont;
+            while (fontSize > 28) {
+                ctx.font = `900 ${fontSize}px Menlo, Consolas, monospace`;
+                const fitsWidth = lines.every(line => ctx.measureText(line).width <= canvas.width - 56);
+                const fitsHeight = lines.length * fontSize * 1.18 <= canvas.height - 36;
+                if (fitsWidth && fitsHeight) break;
+                fontSize -= 4;
+            }
+            ctx.font = `900 ${fontSize}px Menlo, Consolas, monospace`;
+            const lineHeight = fontSize * 1.18;
+            const startY = canvas.height / 2 - ((lines.length - 1) * lineHeight) / 2;
+            lines.forEach((line, index) => ctx.fillText(line, canvas.width / 2, startY + index * lineHeight));
+        }
+
+        function drawCableLabel(ctx, canvas, text) {
+            const lines = cableUniqueLines(text);
+            const faceX = canvas.width / 2;
+            const cellWidth = canvas.width / 2 / 3;
+            for (let col = 0; col < 3; col++) {
+                const centerX = faceX + col * cellWidth + cellWidth / 2;
+                drawRotatedStackInCell(ctx, centerX, canvas.height / 2, canvas.height - 36, lines);
+            }
+        }
+
+        function drawRotatedStackInCell(ctx, centerX, centerY, maxWidth, lines) {
+            let fontSize = 42;
+            while (fontSize > 22) {
+                ctx.font = `900 ${fontSize}px Menlo, Consolas, monospace`;
+                const lineHeight = fontSize * 1.1;
+                const stackWidth = Math.max(...lines.map(line => ctx.measureText(line).width));
+                const stackHeight = lines.length * lineHeight;
+                if (stackWidth <= maxWidth && stackHeight <= 170) break;
+                fontSize -= 3;
+            }
+            ctx.save();
+            ctx.translate(centerX, centerY);
+            ctx.rotate(-Math.PI / 2);
+            ctx.font = `900 ${fontSize}px Menlo, Consolas, monospace`;
+            const lineHeight = fontSize * 1.1;
+            const startY = -((lines.length - 1) * lineHeight) / 2;
+            lines.forEach((line, index) => ctx.fillText(line, 0, startY + index * lineHeight));
+            ctx.restore();
+        }
+
+        function cableUniqueLines(text) {
+            const rawText = String(text || '');
+            if (rawText.indexOf('\n') >= 0) {
+                const explicitLines = rawText
+                    .split(/\n+/)
+                    .map(line => cleanText(line))
+                    .filter(Boolean)
+                    .slice(0, 2);
+                if (explicitLines.length > 0) return explicitLines;
+            }
+            const clean = cleanText(text);
+            if (!clean) return ['LABEL'];
+            if (clean === 'OUTDOOR ANTENNA') return ['OUTDOOR', 'ANTENNA'];
+            if (clean.indexOf(' TO ') > 0) {
+                const parts = clean.split(' TO ');
+                return [parts[0], `TO ${parts.slice(1).join(' TO ')}`].map(part => part.trim()).filter(Boolean).slice(0, 2);
+            }
+            const tokens = clean.split(/\s+/).filter(Boolean);
+            const last = tokens[tokens.length - 1] || '';
+            if (/^(AP|CAM|DATA|POS|VOIP)\d+$/.test(last) && tokens.length > 1) {
+                return [tokens.slice(0, -1).join(' '), last];
+            }
+            if (tokens.length > 1) {
+                const splitAt = Math.ceil(tokens.length / 2);
+                return [tokens.slice(0, splitAt).join(' '), tokens.slice(splitAt).join(' ')].filter(Boolean).slice(0, 2);
+            }
+            return [clean];
+        }
+
+        function splitText(text, maxLines) {
+            const rawText = String(text || '');
+            if (rawText.indexOf('\n') >= 0) {
+                const explicitLines = rawText.split(/\n+/).map(line => cleanText(line)).filter(Boolean);
+                if (explicitLines.length > 0) return explicitLines.slice(0, maxLines);
+            }
+            if (maxLines < 2 || text.length <= 18) return [text];
+            const parts = text.split(' ');
+            if (parts.length < 2) return [text];
+            const first = [];
+            const second = [];
+            parts.forEach(part => {
+                const firstLen = first.join(' ').length;
+                const secondLen = second.join(' ').length;
+                if (firstLen <= secondLen) first.push(part);
+                else second.push(part);
+            });
+            return [first.join(' '), second.join(' ')].filter(Boolean);
+        }
+
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 2600);
+        }
+
+        function escapeHtml(value) {
+            return String(value).replace(/[&<>"']/g, char => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;',
+            }[char]));
+        }
+    </script>
+</body>
+</html>

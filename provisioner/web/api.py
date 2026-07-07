@@ -432,6 +432,38 @@ def _ship_ready_issues(readback: Dict[str, Any]) -> List[str]:
     return issues
 
 
+def _mikrotik_netinstall_label_payload(config, info) -> Optional[Dict[str, Any]]:
+    """Build the optional client-side print payload for a ship-ready unit."""
+    printer = getattr(config, "label_printer", None)
+    if not printer:
+        return None
+    if not getattr(printer, "enabled", False):
+        return None
+    if getattr(printer, "provider", "") != "brady_web_bluetooth":
+        return None
+    if not getattr(printer, "auto_print_mikrotik_netinstall", True):
+        return None
+
+    serial = getattr(info, "serial_number", None)
+    mac = getattr(info, "mac_address", None)
+    if not serial or not mac:
+        logger.warning(
+            "MikroTik label print skipped: missing serial or MAC "
+            "(serial=%r mac=%r)",
+            serial,
+            mac,
+        )
+        return None
+
+    return {
+        "type": "mikrotik_netinstall",
+        "serial": serial,
+        "mac": mac,
+        "model": getattr(info, "model", None) or "",
+        "copies": getattr(printer, "copies", 1),
+    }
+
+
 async def _run_netinstall(provisioner, port_number: int):
     """Run Netinstall + served Configure-script pipeline in background."""
     from provisioner.handlers.mikrotik import MikrotikHandler
@@ -457,7 +489,12 @@ async def _run_netinstall(provisioner, port_number: int):
         port_status = port_manager._get_single_port_status(port_number)
         await notify_port_change(port_number, port_status)
 
-    async def finish(success: bool, error: Optional[str] = None, detail: Optional[str] = None):
+    async def finish(
+        success: bool,
+        error: Optional[str] = None,
+        detail: Optional[str] = None,
+        label: Optional[Dict[str, Any]] = None,
+    ):
         # Single exit chokepoint — never leak the watchdog-suppression flag.
         # mark_port_provisioning() does not reset expecting_reboot, so clear it
         # here explicitly (harmless no-op if it was never set).
@@ -473,6 +510,8 @@ async def _run_netinstall(provisioner, port_number: int):
         payload = {"message": detail or ("Complete" if success else error or "Failed")}
         if error:
             payload["error"] = error
+        if label:
+            payload["label"] = label
         await notify_provisioning_completed(port_number, 0, success, payload)
 
     # Device is in BOOTP mode — model unknown. Pass every latest package we
@@ -796,8 +835,13 @@ async def _run_netinstall(provisioner, port_number: int):
             await finish(False, f"wifi-api register failed: {exc}")
             return
 
+        label_payload = _mikrotik_netinstall_label_payload(config, info)
         await on_progress("complete", True, "Netinstall Configure script + register complete")
-        await finish(True, detail="Netinstall Configure script + register complete")
+        await finish(
+            True,
+            detail="Netinstall Configure script + register complete",
+            label=label_payload,
+        )
         logger.info(f"Netinstall + Configure script + register complete on port {port_number}: {serial}")
 
     except Exception as exc:

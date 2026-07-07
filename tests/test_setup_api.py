@@ -226,6 +226,7 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
     completed.assert_awaited_once()
     args = completed.await_args.args
     assert args[:3] == (5, 0, True)
+    assert "label" not in args[3]
     assert provisioner.port_manager.port_states[5].last_result == "success"
     assert FakeMikrotikHandler.last_netinstall_kwargs["firmware_paths"] == [tmp_path / "routeros-arm64.npk"]
     # Both first-boot scripts are backend-owned: the served Mode script body
@@ -471,6 +472,7 @@ async def test_netinstall_fails_before_register_when_wifi_radios_not_bound(tmp_p
     config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
+    config.label_printer.enabled = True
     provisioner = SimpleNamespace(
         config=config,
         port_manager=DummyPortManager(),
@@ -478,13 +480,14 @@ async def test_netinstall_fails_before_register_when_wifi_radios_not_bound(tmp_p
     )
 
     register = AsyncMock()
+    completed = AsyncMock()
     monkeypatch.setattr("provisioner.web.api.asyncio.sleep", AsyncMock())
     monkeypatch.setattr("provisioner.web.api._select_latest_npk_per_arch", lambda _: [tmp_path / "routeros-arm.npk"])
     monkeypatch.setattr("provisioner.web.api.MikrotikHandler", FakeMikrotikHandler, raising=False)
     monkeypatch.setattr("provisioner.handlers.mikrotik.MikrotikHandler", FakeMikrotikHandler)
     monkeypatch.setattr("provisioner.equipment_registry.register_mikrotik", register)
     monkeypatch.setattr("provisioner.web.websocket.notify_port_change", AsyncMock())
-    monkeypatch.setattr("provisioner.web.websocket.notify_provisioning_completed", AsyncMock())
+    monkeypatch.setattr("provisioner.web.websocket.notify_provisioning_completed", completed)
 
     await _run_netinstall(provisioner, 5)
 
@@ -493,6 +496,8 @@ async def test_netinstall_fails_before_register_when_wifi_radios_not_bound(tmp_p
     assert provisioner.port_manager.port_states[5].last_error == (
         "WiFi radios not bound after Netinstall (/interface/wifi empty)"
     )
+    completed.assert_awaited_once()
+    assert "label" not in completed.await_args.args[3]
 
 
 def _ship_ready_fake_handler(phone_home_url="https://wifi.example.test/ztp/mikrotik/checkin"):
@@ -571,6 +576,32 @@ def _netinstall_env(monkeypatch, tmp_path, handler_cls, register):
     monkeypatch.setattr("provisioner.web.websocket.notify_port_change", AsyncMock())
     monkeypatch.setattr("provisioner.web.websocket.notify_provisioning_completed", AsyncMock())
     return provisioner
+
+
+async def test_netinstall_completion_includes_label_when_enabled(tmp_path, monkeypatch):
+    from provisioner.web.api import _run_netinstall
+
+    completed = AsyncMock()
+    register = AsyncMock(return_value=SHIP_READY_READBACK)
+    provisioner = _netinstall_env(
+        monkeypatch, tmp_path, _ship_ready_fake_handler(), register
+    )
+    provisioner.config.label_printer.enabled = True
+    provisioner.config.label_printer.copies = 2
+    monkeypatch.setattr("provisioner.web.websocket.notify_provisioning_completed", completed)
+
+    await _run_netinstall(provisioner, 5)
+
+    completed.assert_awaited_once()
+    args = completed.await_args.args
+    assert args[:3] == (5, 0, True)
+    assert args[3]["label"] == {
+        "type": "mikrotik_netinstall",
+        "serial": "HKC0TEST123",
+        "mac": "04:f4:1c:c2:06:80",
+        "model": "hAP ax S",
+        "copies": 2,
+    }
 
 
 async def test_netinstall_remediates_stale_ship_ready_state(tmp_path, monkeypatch):

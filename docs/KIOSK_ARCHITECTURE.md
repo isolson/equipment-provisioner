@@ -27,7 +27,7 @@ When the provisioner image is built with `--kiosk` (see `image/chroot-install.sh
 │    - Configures X DPMS (2 min blank / 5 min off)                 │
 │    - Hides cursor via unclutter                                  │
 │    - Waits for http://localhost:8080/                            │
-│    - Launches chromium --kiosk http://localhost:8080             │
+│    - Launches chromium --kiosk with Web Bluetooth enabled        │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -51,6 +51,8 @@ sudo -u kiosk env DISPLAY=:0 <xclient>
 | `auto-rotate.service` | Runs `/usr/local/bin/auto-rotate.py` as `kiosk` user. Polls the lid accelerometer; rotates display + Wacom touchscreen on orientation change. Exits 0 if there's no `accel-display` iio sensor — the unit stays dormant on non-Yoga hardware. |
 | `provisioner-web.service` | The provisioner itself. Runs as root, serves port 8080, **and runs the full provisioner loop** — `web_server.run_standalone()` calls `Provisioner.run()`, so this single process owns port monitoring, BOOTP listeners, and provisioning. This is the only unit the kiosk image enables. |
 | `provisioner.service` | Headless (no-UI) variant that runs `Provisioner.run()` directly. **Do not enable it alongside `provisioner-web.service`** — two full provisioners means duplicate BOOTP listeners, so one plugged-in device fires two concurrent netinstalls that race on the interface IP. Kept on disk for no-UI deployments only. |
+
+The kiosk Chromium command includes `--enable-experimental-web-platform-features` so the local dashboard can use Web Bluetooth for client-side Brady M211 label printing. Keep that flag in both the Openbox autostart launch and `restart-kiosk.sh` watchdog respawn path.
 
 ## Display sleep/wake
 

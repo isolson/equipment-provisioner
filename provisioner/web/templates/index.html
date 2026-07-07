@@ -218,6 +218,18 @@
         </div>
         <div class="flex flex-wrap items-center gap-2 sm:justify-end">
             <span class="text-sm text-gray-600" id="status-text">Connecting...</span>
+            <button onclick="connectLabelPrinter()" class="header-btn p-2 hidden" id="label-printer-button" title="Label printer">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 9V4h12v5M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M7 14h10v6H7zM18 12h.01"></path>
+                </svg>
+                <span id="label-printer-queue-badge" class="hidden ml-1 min-w-[18px] rounded-full bg-red-600 px-1 text-[10px] font-bold text-white"></span>
+            </button>
+            <a href="/labels" class="header-btn px-3 gap-2 text-sm font-bold" title="Labels">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M4 3h7l9 9a2 2 0 010 2.83L14.83 20a2 2 0 01-2.83 0L3 11V4a1 1 0 011-1z"></path>
+                </svg>
+                <span class="hidden sm:inline">Labels</span>
+            </a>
             <a href="/files" class="header-btn p-2" title="Manage">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
@@ -321,6 +333,7 @@
         // Number of provisioning ports; injected from server config so the
         // grid renders correctly for both VLAN (6 ports) and single-port modes.
         const NUM_PORTS = {{ num_ports | default(6) }};
+        const LABEL_PRINTER_CONFIG = {{ label_printer | tojson }};
 
         // State
         let ws = null;
@@ -330,6 +343,19 @@
         const maxReconnectAttempts = 10;
         let portActivityLogs = {};
         let bootStartTimes = {};  // Track when ports enter booting state
+        const LABEL_PRINTER_OWNER_ID = sessionStorage.getItem('labelPrinterOwnerId') || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        sessionStorage.setItem('labelPrinterOwnerId', LABEL_PRINTER_OWNER_ID);
+        const LABEL_PRINT_QUEUE_KEY = 'provisionerLabelPrintQueue';
+        const LABEL_PRINTED_KEY = 'provisionerLabelPrintedIds';
+        const LABEL_PRINT_LEASE_KEY = 'provisionerLabelPrintLease';
+        const LABEL_PRINTER_OWNERSHIP_KEY = 'ownershipID';
+        let BradySdkClass = null;
+        let bradySdk = null;
+        let bradySdkLoadPromise = null;
+        let labelPrinterState = 'disabled';
+        let labelPrinterDetail = '';
+        let labelPrinterBusy = false;
+        let lastLabelByPort = {};
 
         // Display sleep state
         let displaySleeping = false;
@@ -357,6 +383,7 @@
             document.getElementById('management-url').textContent = window.location.host;
             // Fetch display config (for sleep timeout)
             fetchDisplayConfig();
+            initLabelPrinterUi();
             // Fetch device settings defaults (operator ID, etc.)
             fetch('/api/device-settings').then(r => r.json()).then(s => {
                 if (s.tarana?.operator_id) window.defaultOperatorId = s.tarana.operator_id;
@@ -365,6 +392,16 @@
             readinessRefreshTimer = setInterval(loadSetupReadiness, 60000);
             connectWebSocket();
         });
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;',
+            }[ch]));
+        }
 
         function readinessBannerClasses(status) {
             if (status === 'ready') return 'bg-green-50 text-green-900';
@@ -600,6 +637,9 @@
                                 message.success ? `Port ${message.port_number}: Complete` : `Port ${message.port_number}: Failed`,
                                 message.success ? 'success' : 'error'
                             );
+                            if (message.success && message.data?.label) {
+                                handleCompletedLabel(message.port_number, message.data.label);
+                            }
                         } else if (message.type === 'credentials_required') {
                             ports[message.port_number].needs_credentials = true;
                             ports[message.port_number].last_error = message.error || 'Invalid credentials';
@@ -968,6 +1008,7 @@
             const isDone = port.last_result === 'complete' || port.last_result === 'success';
             const canApplyMode = isDone && (port.device_type === 'cambium' || port.device_type === 'tachyon');
             const isEvolutionDigital = port.device_type === 'evolution_digital';
+            const printableLabel = lastLabelByPort[portNum] || port.last_label;
             document.getElementById('modal-footer').innerHTML = isActive ? `
                 <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
                     Close
@@ -986,6 +1027,11 @@
                 </button>
                 <button onclick="openPTPModal(${portNum})" class="flex-1 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium text-sm text-white">
                     Configure as PTP
+                </button>
+                ` : ''}
+                ${printableLabel ? `
+                <button onclick="reprintLastLabel(${portNum})" class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg font-medium text-sm text-white">
+                    Reprint Label
                 </button>
                 ` : ''}
                 <button onclick="startNetinstall(${portNum})" class="flex-1 py-2 bg-orange-600 hover:bg-orange-500 rounded-lg font-medium text-sm text-white">
@@ -1744,6 +1790,317 @@
             } catch (error) {
                 showToast('Sync failed', 'error');
             }
+        }
+
+        function initLabelPrinterUi() {
+            if (!LABEL_PRINTER_CONFIG.enabled) {
+                updateLabelPrinterState('disabled', '');
+                return;
+            }
+            window.addEventListener('storage', (event) => {
+                if (event.key === LABEL_PRINT_QUEUE_KEY || event.key === LABEL_PRINTED_KEY) {
+                    updateLabelPrinterButton();
+                }
+            });
+            updateLabelPrinterState('disconnected', 'M211 disconnected');
+        }
+
+        function updateLabelPrinterState(state, detail) {
+            labelPrinterState = state;
+            labelPrinterDetail = detail || '';
+            updateLabelPrinterButton();
+        }
+
+        function updateLabelPrinterButton() {
+            const button = document.getElementById('label-printer-button');
+            const badge = document.getElementById('label-printer-queue-badge');
+            if (!button || !badge) return;
+            if (!LABEL_PRINTER_CONFIG.enabled) {
+                button.classList.add('hidden');
+                return;
+            }
+
+            button.classList.remove('hidden');
+            if (labelPrinterState === 'connected') button.style.background = '#dcfce7';
+            else if (labelPrinterState === 'connecting' || labelPrinterState === 'printing') button.style.background = '#dbeafe';
+            else if (labelPrinterState === 'error') button.style.background = '#fee2e2';
+            else button.style.background = '#fef3c7';
+
+            const queued = readLabelQueue().length;
+            badge.textContent = queued > 0 ? String(queued) : '';
+            badge.classList.toggle('hidden', queued === 0);
+            const suffix = queued > 0 ? ` (${queued} queued)` : '';
+            button.title = `${labelPrinterDetail || 'Label printer'}${suffix}`;
+        }
+
+        async function ensureBradySdk() {
+            if (bradySdk) return bradySdk;
+            if (!bradySdkLoadPromise) {
+                bradySdkLoadPromise = import('/static/vendor/brady-web-sdk/bundle.js')
+                    .then(module => {
+                        BradySdkClass = module.default;
+                        bradySdk = new BradySdkClass(onBradyPrinterUpdate, false);
+                        onBradyPrinterUpdate(null);
+                        return bradySdk;
+                    });
+            }
+            return bradySdkLoadPromise;
+        }
+
+        function isLabelPrinterConnected() {
+            try {
+                return !!(bradySdk && bradySdk.isConnected && bradySdk.isConnected());
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function onBradyPrinterUpdate() {
+            if (!LABEL_PRINTER_CONFIG.enabled || !bradySdk) return;
+            if (isLabelPrinterConnected()) {
+                const parts = [
+                    bradySdk.printerName || bradySdk.printerModel || 'M211',
+                    bradySdk.supplyName,
+                    bradySdk.batteryLevelPercentage !== undefined ? `${bradySdk.batteryLevelPercentage}%` : '',
+                ].filter(Boolean);
+                updateLabelPrinterState('connected', parts.join(' / ') || 'M211 connected');
+                processLabelPrintQueue();
+                return;
+            }
+            if (labelPrinterState !== 'connecting' && labelPrinterState !== 'printing') {
+                updateLabelPrinterState('disconnected', 'M211 disconnected');
+            }
+        }
+
+        async function connectLabelPrinter() {
+            if (!LABEL_PRINTER_CONFIG.enabled) return;
+            try {
+                updateLabelPrinterState('connecting', 'Pairing M211...');
+                const sdk = await ensureBradySdk();
+                if (sdk.isSupportedBrowser && !sdk.isSupportedBrowser()) {
+                    updateLabelPrinterState('error', 'Browser does not support Web Bluetooth');
+                    showToast('Browser does not support Web Bluetooth', 'error');
+                    return;
+                }
+                const savedOwnershipId = localStorage.getItem(LABEL_PRINTER_OWNERSHIP_KEY);
+                const connected = await sdk.showDiscoveredBleDevices(savedOwnershipId);
+                if (!connected) {
+                    updateLabelPrinterState('error', 'M211 pairing failed');
+                    showToast('M211 pairing failed', 'error');
+                    return;
+                }
+                onBradyPrinterUpdate(null);
+                showToast('M211 label printer connected', 'success');
+                await processLabelPrintQueue();
+            } catch (error) {
+                console.error('M211 pairing failed:', error);
+                updateLabelPrinterState('error', 'M211 pairing failed');
+                showToast('M211 pairing failed', 'error');
+            }
+        }
+
+        function labelBaseId(label) {
+            return `${label.type || 'label'}:${label.serial || ''}:${label.mac || ''}`;
+        }
+
+        function normalizeLabel(label, portNumber, force = false) {
+            const copies = Number.parseInt(label.copies || LABEL_PRINTER_CONFIG.copies || 1, 10);
+            const baseId = labelBaseId(label);
+            return {
+                type: label.type || 'mikrotik_netinstall',
+                serial: label.serial || '',
+                mac: label.mac || '',
+                model: label.model || '',
+                copies: Number.isFinite(copies) && copies > 0 ? copies : 1,
+                port_number: portNumber,
+                base_id: baseId,
+                queue_id: force ? `${baseId}:manual:${Date.now()}` : baseId,
+                force: force,
+            };
+        }
+
+        function readJsonLocalStorage(key, fallback) {
+            try {
+                const raw = localStorage.getItem(key);
+                return raw ? JSON.parse(raw) : fallback;
+            } catch (error) {
+                return fallback;
+            }
+        }
+
+        function writeJsonLocalStorage(key, value) {
+            localStorage.setItem(key, JSON.stringify(value));
+        }
+
+        function readLabelQueue() {
+            return readJsonLocalStorage(LABEL_PRINT_QUEUE_KEY, []);
+        }
+
+        function writeLabelQueue(queue) {
+            writeJsonLocalStorage(LABEL_PRINT_QUEUE_KEY, queue.slice(-20));
+            updateLabelPrinterButton();
+        }
+
+        function readPrintedLabelIds() {
+            return readJsonLocalStorage(LABEL_PRINTED_KEY, []);
+        }
+
+        function markLabelPrinted(label) {
+            const printed = readPrintedLabelIds().filter(id => id !== label.base_id);
+            printed.push(label.base_id);
+            writeJsonLocalStorage(LABEL_PRINTED_KEY, printed.slice(-100));
+        }
+
+        function isLabelPrinted(label) {
+            return readPrintedLabelIds().includes(label.base_id);
+        }
+
+        function addLabelToQueue(label) {
+            const queue = readLabelQueue();
+            if (!queue.some(item => item.queue_id === label.queue_id)) {
+                queue.push(label);
+                writeLabelQueue(queue);
+            }
+        }
+
+        function removeLabelFromQueue(label) {
+            writeLabelQueue(readLabelQueue().filter(item => item.queue_id !== label.queue_id));
+        }
+
+        function acquireLabelPrintLease() {
+            const now = Date.now();
+            const lease = readJsonLocalStorage(LABEL_PRINT_LEASE_KEY, null);
+            if (lease && lease.owner && lease.owner !== LABEL_PRINTER_OWNER_ID && lease.expires > now) {
+                return false;
+            }
+            writeJsonLocalStorage(LABEL_PRINT_LEASE_KEY, {
+                owner: LABEL_PRINTER_OWNER_ID,
+                expires: now + 60000,
+            });
+            return true;
+        }
+
+        function releaseLabelPrintLease() {
+            const lease = readJsonLocalStorage(LABEL_PRINT_LEASE_KEY, null);
+            if (lease && lease.owner === LABEL_PRINTER_OWNER_ID) {
+                localStorage.removeItem(LABEL_PRINT_LEASE_KEY);
+            }
+        }
+
+        function handleCompletedLabel(portNumber, rawLabel) {
+            if (!LABEL_PRINTER_CONFIG.enabled) return;
+            const label = normalizeLabel(rawLabel, portNumber, false);
+            if (!label.serial || !label.mac) return;
+            lastLabelByPort[portNumber] = label;
+            if (ports[portNumber]) {
+                ports[portNumber].last_label = label;
+            }
+            if (!LABEL_PRINTER_CONFIG.auto_print_mikrotik_netinstall) return;
+            if (!isLabelPrinted(label)) {
+                addLabelToQueue(label);
+                showToast('MikroTik label queued', 'info');
+            }
+            processLabelPrintQueue();
+        }
+
+        async function reprintLastLabel(portNumber) {
+            const label = lastLabelByPort[portNumber] || ports[portNumber]?.last_label;
+            if (!label) {
+                showToast('No label available for this port', 'warning');
+                return;
+            }
+            const queued = normalizeLabel(label, portNumber, true);
+            addLabelToQueue(queued);
+            showToast('Label queued for reprint', 'info');
+            await processLabelPrintQueue();
+        }
+
+        async function processLabelPrintQueue() {
+            if (!LABEL_PRINTER_CONFIG.enabled || labelPrinterBusy) return;
+            if (!isLabelPrinterConnected()) {
+                if (readLabelQueue().length > 0) {
+                    updateLabelPrinterState('disconnected', 'M211 disconnected; label queued');
+                }
+                return;
+            }
+            if (!acquireLabelPrintLease()) return;
+
+            labelPrinterBusy = true;
+            try {
+                let queue = readLabelQueue();
+                while (queue.length > 0 && isLabelPrinterConnected()) {
+                    const label = queue[0];
+                    if (!label.force && isLabelPrinted(label)) {
+                        removeLabelFromQueue(label);
+                        queue = readLabelQueue();
+                        continue;
+                    }
+                    updateLabelPrinterState('printing', `Printing ${label.serial}`);
+                    await printLabel(label);
+                    markLabelPrinted(label);
+                    removeLabelFromQueue(label);
+                    showToast(`Printed label for ${label.serial}`, 'success');
+                    queue = readLabelQueue();
+                }
+            } catch (error) {
+                console.error('M211 print failed:', error);
+                updateLabelPrinterState('error', 'M211 print failed; label queued');
+                showToast('M211 print failed; label remains queued', 'error');
+            } finally {
+                labelPrinterBusy = false;
+                releaseLabelPrintLease();
+                onBradyPrinterUpdate(null);
+            }
+        }
+
+        async function printLabel(label) {
+            const sdk = await ensureBradySdk();
+            if (!isLabelPrinterConnected()) {
+                throw new Error('M211 is not connected');
+            }
+            sdk.setCopies(label.copies || 1);
+            sdk.setCutOption(0);
+            const image = await renderMikrotikLabelImage(label);
+            const ok = await sdk.printBitmap(image);
+            if (!ok) {
+                throw new Error('Brady SDK returned false from printBitmap');
+            }
+        }
+
+        async function renderMikrotikLabelImage(label) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 900;
+            canvas.height = 300;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#000000';
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'left';
+
+            const lines = [`S/N ${label.serial}`, `MAC ${label.mac}`];
+            let fontSize = 72;
+            do {
+                ctx.font = `700 ${fontSize}px Menlo, Consolas, monospace`;
+                if (lines.every(line => ctx.measureText(line).width <= canvas.width - 80)) break;
+                fontSize -= 4;
+            } while (fontSize > 34);
+
+            const lineGap = Math.round(fontSize * 1.25);
+            const startY = Math.round((canvas.height - lineGap) / 2);
+            ctx.font = `700 ${fontSize}px Menlo, Consolas, monospace`;
+            ctx.fillText(lines[0], 40, startY);
+            ctx.fillText(lines[1], 40, startY + lineGap);
+
+            const img = new Image();
+            img.width = canvas.width;
+            img.height = canvas.height;
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = reject;
+                img.src = canvas.toDataURL('image/png');
+            });
+            return img;
         }
 
         // Toast

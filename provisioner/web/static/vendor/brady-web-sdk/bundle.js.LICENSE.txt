@@ -1,0 +1,22 @@
+Brady Web SDK license information
+=================================
+
+Vendored file: bundle.js
+Source bundle URL: https://sdk.bradyid.com/bundle.js
+Fetched: 2026-06-23
+
+The minified bundle references this sidecar with:
+
+    /*! For license information please see bundle.js.LICENSE.txt */
+
+The matching sidecar was not available from Brady's CDN at:
+
+    https://sdk.bradyid.com/bundle.js.LICENSE.txt
+
+Brady publishes the SDK license terms in the Brady SDK Manual:
+
+    https://sdk.bradyid.com/licences/
+
+The npm package documented by Brady, brady-web-sdk, was unpublished when this
+bundle was vendored, so the package registry did not provide a distributable
+license file or tarball to preserve alongside the bundle.

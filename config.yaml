@@ -171,6 +171,13 @@ display:
   # Fallback to sysfs backlight control
   use_backlight: true
 
+label_printer:
+  # Browser-side Brady M211 Bluetooth printing from the kiosk UI.
+  enabled: false
+  provider: brady_web_bluetooth
+  auto_print_mikrotik_netinstall: true
+  copies: 1
+
 equipment_registry:
   # POST device metadata (serial, MAC, model, firmware) after successful provisioning
   url:                                 # e.g. https://api.example.com/ztp/register
