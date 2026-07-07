@@ -100,6 +100,19 @@ class CambiumHandler(BaseHandler):
     def supports_password_change(self) -> bool:
         return True
 
+    @property
+    def firmware_reboot_timeout(self) -> int:
+        """ePMP-AX (WiFi 6) models write the new image to flash and run a
+        first-boot init that can exceed 3 minutes on a major version jump
+        (e.g. 5.3 -> 5.11 on the 4600C), so the default 180s wait is too short.
+        Give AX models a longer ceiling; other Cambium models keep the default.
+        """
+        model = (self._device_info.model if self._device_info else None) or ""
+        model_key = model.lower().replace("cambium ", "").strip()
+        patterns = self.MODEL_FIRMWARE_PATTERNS.get(model_key)
+        is_ax = (patterns and "epmp-ax" in patterns) or model_key.startswith("epmp ax")
+        return 360 if is_ax else super().firmware_reboot_timeout
+
     def validate_firmware_for_model(self, firmware_path: str, model: str) -> tuple[bool, str]:
         """Validate that firmware file is compatible with the Cambium model."""
         import os

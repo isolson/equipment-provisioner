@@ -636,7 +636,7 @@ class BaseHandler(ABC):
                             return result
 
                     _logger.info(f"[PROVISION] Waiting for device to come back online...")
-                    if not await self.wait_for_reboot():
+                    if not await self.wait_for_reboot(timeout=self.firmware_reboot_timeout):
                         await notify("reboot_ended", True, None)
                         result.error_message = "Device did not come back online after reboot"
                         await notify("firmware_update_1", False, result.error_message)
@@ -830,7 +830,7 @@ class BaseHandler(ABC):
                                 return result
 
                         _logger.info(f"[PROVISION] Waiting for device to come back online...")
-                        if not await self.wait_for_reboot():
+                        if not await self.wait_for_reboot(timeout=self.firmware_reboot_timeout):
                             await notify("reboot_ended", True, None)
                             result.error_message = "Device did not come back online after reboot"
                             await notify("firmware_update_2", False, result.error_message)
@@ -1001,3 +1001,14 @@ class BaseHandler(ABC):
         be lost if the device switched banks again.
         """
         return False
+
+    @property
+    def firmware_reboot_timeout(self) -> int:
+        """Seconds to wait for the device to come back after a firmware reboot.
+
+        A firmware-applying reboot writes the new image to flash and runs
+        first-boot init, which can take far longer than a plain reboot.
+        Handlers may override (optionally conditional on model) when a device's
+        post-upgrade boot exceeds the default. Plain reboots are unaffected.
+        """
+        return 180
