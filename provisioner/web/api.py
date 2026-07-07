@@ -495,10 +495,19 @@ async def _run_netinstall(provisioner, port_number: int):
         # Step 2: Wait for device to boot after Netinstall.
         # First boot is slow (RouterBOOT + RouterOS init + SSH server start);
         # 240s observed needed in practice on hAP ax2.
+        # The post-flash boot also triggers an interface flap when the `-s`
+        # userscript adds `bridge-bootstrap` across all ether ports, which
+        # can hold the link down longer than LINK_DOWN_GRACE_SECONDS (10s)
+        # and trip the cancel path. Mark the port as expecting a reboot so
+        # the link-down handler ignores flaps until SSH is reachable.
+        port_manager.set_expecting_reboot(port_number, True)
         await on_progress("reboot", "running", "Waiting for device to boot...")
         await asyncio.sleep(10)
 
-        booted = await handler.wait_for_reboot(timeout=240)
+        try:
+            booted = await handler.wait_for_reboot(timeout=240)
+        finally:
+            port_manager.set_expecting_reboot(port_number, False)
         if not booted:
             await finish(False, "Device did not boot after Netinstall")
             return
