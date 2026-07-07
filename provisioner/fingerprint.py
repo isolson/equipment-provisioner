@@ -304,6 +304,42 @@ class DeviceFingerprinter:
             )
         return matched
 
+    # DHCP magic cookie (RFC 2132) that precedes the option TLVs in the BOOTP
+    # vendor area. Bare RouterBOOT Netinstall requests carry no cookie.
+    _DHCP_MAGIC_COOKIE = b"\x63\x82\x53\x63"
+
+    @staticmethod
+    def _dhcp_message_type(vendor_area: bytes) -> Optional[int]:
+        """Return the DHCP message-type (option 53) value, or None.
+
+        `vendor_area` is the raw BOOTP vendor field (offset 236 onward). A
+        bare BOOTP request (RouterBOOT Netinstall) has no DHCP magic cookie and
+        no options, so this returns None — the caller then treats it as a
+        genuine Netinstall trigger. A booted RouterOS DHCP client carries the
+        cookie followed by option 53 (1=DISCOVER, 3=REQUEST, …), which this
+        surfaces so the caller can reject it.
+        """
+        cookie = DeviceFingerprinter._DHCP_MAGIC_COOKIE
+        if not vendor_area.startswith(cookie):
+            return None
+        i = len(cookie)
+        n = len(vendor_area)
+        while i < n:
+            code = vendor_area[i]
+            if code == 0xFF:  # END
+                break
+            if code == 0x00:  # PAD (no length byte)
+                i += 1
+                continue
+            if i + 1 >= n:
+                break
+            length = vendor_area[i + 1]
+            value = vendor_area[i + 2:i + 2 + length]
+            if code == 53 and len(value) >= 1:  # DHCP message type
+                return value[0]
+            i += 2 + length
+        return None
+
     @staticmethod
     def parse_bootp_request_mac(frame: bytes) -> Optional[str]:
         """Return BOOTP client MAC from a raw Ethernet/IPv4/UDP/BOOTP frame, or None.
@@ -348,6 +384,25 @@ class DeviceFingerprinter:
             b"fleet-rtr-",
         )
         if any(marker in bootp_options for marker in managed_markers):
+            return None
+        # A *booted* RouterOS device runs a DHCP client and broadcasts a DHCP
+        # DISCOVER/REQUEST — a BOOTP op=1 carrying the DHCP magic cookie and a
+        # message-type option (53). RouterBOOT in Netinstall/Etherboot mode, by
+        # contrast, emits a *bare* BOOTP request with no DHCP message-type, and
+        # netinstall-cli only ever flashes that bare form: fed a DHCP DISCOVER
+        # it sits at "Waiting for RouterBOARD..." until the 300s timeout while
+        # the device (factory-default / booted, not in reset mode) keeps
+        # re-broadcasting. Treating a DHCP-client packet as Netinstall mode
+        # fires a doomed 5-minute flash on every unmanaged booted MikroTik, so
+        # reject any frame that carries a DHCP message-type option.
+        dhcp_msg_type = DeviceFingerprinter._dhcp_message_type(bootp_options)
+        if dhcp_msg_type is not None:
+            logger.info(
+                "BOOTP from %s ignored — DHCP message-type=%d (booted DHCP "
+                "client, not RouterBOOT Netinstall mode)",
+                ":".join(f"{b:02x}" for b in frame[bootp_off + 28:bootp_off + 34]),
+                dhcp_msg_type,
+            )
             return None
         chaddr = frame[bootp_off + 28:bootp_off + 28 + 6]
         if len(chaddr) != 6 or chaddr == b"\x00" * 6:

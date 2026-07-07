@@ -163,6 +163,73 @@ class TestParseBootpRequestMac:
         )
         assert DeviceFingerprinter.parse_bootp_request_mac(frame) is None
 
+    def test_rejects_booted_routeros_dhcp_discover(self):
+        """A booted (or factory-default) RouterOS device runs a DHCP client and
+        broadcasts DHCP DISCOVER — BOOTP op=1 with the magic cookie + option 53.
+        netinstall-cli ignores it ("Waiting for RouterBOARD..." → 300s timeout),
+        so it must NOT trigger auto-netinstall. Captured on the bench from a
+        genuine MikroTik OUI (04:f4:1c) stuck re-broadcasting DISCOVER.
+        """
+        # magic cookie + opt53=DISCOVER(1) + opt12 hostname "MikroTik" + END
+        discover = (
+            b"\x63\x82\x53\x63"      # DHCP magic cookie
+            b"\x35\x01\x01"          # option 53 (message-type) = 1 (DISCOVER)
+            b"\x0c\x08MikroTik"      # option 12 (hostname) = "MikroTik"
+            b"\xff"                  # END
+        )
+        frame = _build_bootp_request(
+            b"\x04\xf4\x1c\xc5\x4c\x83", vendor_payload=discover
+        )
+        assert DeviceFingerprinter.parse_bootp_request_mac(frame) is None
+
+    def test_rejects_booted_routeros_dhcp_request(self):
+        """DHCP REQUEST (option 53 = 3) is likewise a booted client, not a
+        RouterBOOT Netinstall beacon."""
+        request = b"\x63\x82\x53\x63\x35\x01\x03\xff"  # cookie + opt53=REQUEST + END
+        frame = _build_bootp_request(
+            b"\x04\xf4\x1c\xc5\x4c\x83", vendor_payload=request
+        )
+        assert DeviceFingerprinter.parse_bootp_request_mac(frame) is None
+
+    def test_accepts_bare_bootp_with_cookie_but_no_message_type(self):
+        """A bare BOOTP with the magic cookie but no DHCP message-type (the
+        RouterBOOT Netinstall shape) must still match — we only reject frames
+        that positively identify as a DHCP client via option 53."""
+        vendor = b"\x63\x82\x53\x63\xff"  # cookie + END, no options
+        frame = _build_bootp_request(
+            b"\x04\xf4\x1c\xc2\x06\x80", vendor_payload=vendor
+        )
+        assert (
+            DeviceFingerprinter.parse_bootp_request_mac(frame)
+            == "04:f4:1c:c2:06:80"
+        )
+
+
+class TestDhcpMessageType:
+    """Unit coverage for the DHCP option-53 extractor used to distinguish a
+    booted DHCP client from a bare RouterBOOT Netinstall request."""
+
+    def test_none_without_magic_cookie(self):
+        assert DeviceFingerprinter._dhcp_message_type(b"") is None
+        assert DeviceFingerprinter._dhcp_message_type(b"\x00" * 32) is None
+
+    def test_none_when_cookie_present_but_no_option_53(self):
+        # hostname option only, no message-type
+        assert DeviceFingerprinter._dhcp_message_type(
+            b"\x63\x82\x53\x63\x0c\x08MikroTik\xff"
+        ) is None
+
+    def test_extracts_discover_after_leading_options(self):
+        # opt55 (param req list) before opt53 — must still be found via TLV walk
+        vend = b"\x63\x82\x53\x63\x37\x03\x01\x03\x06\x35\x01\x01\xff"
+        assert DeviceFingerprinter._dhcp_message_type(vend) == 1
+
+    def test_handles_pad_and_truncation(self):
+        # PAD bytes (0x00) then opt53=REQUEST; then truncated (no END)
+        assert DeviceFingerprinter._dhcp_message_type(
+            b"\x63\x82\x53\x63\x00\x00\x35\x01\x03"
+        ) == 3
+
 
 # ---------------------------------------------------------------------------
 # Per-port octet derivation
