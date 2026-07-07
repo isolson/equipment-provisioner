@@ -107,11 +107,34 @@ class CambiumHandler(BaseHandler):
         (e.g. 5.3 -> 5.11 on the 4600C), so the default 180s wait is too short.
         Give AX models a longer ceiling; other Cambium models keep the default.
         """
-        model = (self._device_info.model if self._device_info else None) or ""
+        model = self._device_info.model if self._device_info else None
+        return 360 if self._is_ax_model(model) else super().firmware_reboot_timeout
+
+    def _is_ax_model(self, model: Optional[str]) -> bool:
+        """Whether ``model`` is an ePMP-AX (WiFi 6) device.
+
+        Derives the AX model set from ``MODEL_FIRMWARE_PATTERNS`` (the existing
+        firmware-compatibility registry) rather than a second hardcoded list,
+        and tolerates marketing variants that carry an AX model number as a
+        separate token — e.g. ``"ePMP Force 4525"`` normalizes to a key the
+        exact-match lookup misses, but shares the ``4525`` token with the AX
+        key ``epmp 4525``.
+        """
+        if not model:
+            return False
         model_key = model.lower().replace("cambium ", "").strip()
         patterns = self.MODEL_FIRMWARE_PATTERNS.get(model_key)
-        is_ax = (patterns and "epmp-ax" in patterns) or model_key.startswith("epmp ax")
-        return 360 if is_ax else super().firmware_reboot_timeout
+        if patterns and "epmp-ax" in patterns:
+            return True
+        if model_key.startswith("epmp ax"):
+            return True
+        ax_numbers = {
+            key.split()[-1]
+            for key, pats in self.MODEL_FIRMWARE_PATTERNS.items()
+            if "epmp-ax" in pats
+        }
+        tokens = set(model_key.replace("-", " ").split())
+        return bool(tokens & ax_numbers)
 
     def validate_firmware_for_model(self, firmware_path: str, model: str) -> tuple[bool, str]:
         """Validate that firmware file is compatible with the Cambium model."""

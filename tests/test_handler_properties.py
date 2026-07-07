@@ -61,6 +61,30 @@ def test_cambium_properties(model):
     }
 
 
+@pytest.mark.parametrize(
+    "model,expected",
+    [
+        # ePMP-AX (WiFi 6) models get the extended first-boot ceiling...
+        ("ePMP 4525", 360),
+        ("ePMP 4600C", 360),
+        ("Cambium ePMP 4625", 360),
+        ("ePMP AX (SKU 53999)", 360),
+        # ...including marketing variants that carry an AX model number.
+        ("ePMP Force 4525", 360),
+        # Non-AX models (and unknown) keep the default.
+        ("ePMP 3000", 180),
+        ("ePMP 3000 MP", 180),
+        ("Force 300-25", 180),
+        (None, 180),
+    ],
+)
+def test_cambium_firmware_reboot_timeout(model, expected):
+    handler = CambiumHandler(ip="192.0.2.1", credentials=CREDS)
+    if model:
+        _set_model(handler, model)
+    assert handler.firmware_reboot_timeout == expected
+
+
 # ---------------------------------------------------------------------------
 # MikroTik — single-bank, no special flow
 # ---------------------------------------------------------------------------
