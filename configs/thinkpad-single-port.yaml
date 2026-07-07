@@ -112,6 +112,12 @@ display:
   use_dpms: true             # xset dpms force on / xset s reset via sudo -u kiosk
   use_backlight: true        # sysfs backlight fallback if DPMS unavailable
 
+label_printer:
+  enabled: false
+  provider: brady_web_bluetooth
+  auto_print_mikrotik_netinstall: true
+  copies: 1
+
 equipment_registry:
   url:
   api_key: "${EQUIPMENT_REGISTRY_API_KEY}"

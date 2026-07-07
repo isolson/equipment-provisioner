@@ -423,6 +423,7 @@ ${CHROMIUM_BIN} \\
     --kiosk \\
     --noerrdialogs \\
     --disable-infobars \\
+    --enable-experimental-web-platform-features \\
     --disable-session-crashed-bubble \\
     --disable-restore-session-state \\
     --no-first-run \\
@@ -477,6 +478,7 @@ while true; do
             --kiosk \\
             --noerrdialogs \\
             --disable-infobars \\
+            --enable-experimental-web-platform-features \\
             http://localhost:8080 &
     fi
     sleep 10

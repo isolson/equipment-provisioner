@@ -518,10 +518,23 @@ Single port status change.
   "port_number": 1,
   "job_id": 42,
   "success": true,
-  "data": {},
+  "data": {
+    "message": "Complete",
+    "label": {
+      "type": "mikrotik_netinstall",
+      "serial": "HKC0TEST123",
+      "mac": "04:f4:1c:c2:06:80",
+      "model": "hAP ax S",
+      "copies": 1
+    }
+  },
   "timestamp": "..."
 }
 ```
+
+`data.label` is optional and currently emitted only for successful MikroTik
+Netinstall runs after wifi-api registration and ship-ready assertions pass,
+when `label_printer.enabled` is true.
 
 #### `credentials_required`
 Login failed; UI should prompt for credentials.

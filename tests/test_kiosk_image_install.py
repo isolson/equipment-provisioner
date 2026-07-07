@@ -39,6 +39,12 @@ def test_kiosk_install_includes_xinput():
     assert "xinput" in script
 
 
+def test_kiosk_chromium_enables_web_bluetooth():
+    """The kiosk browser needs Web Bluetooth for Brady M211 client-side printing."""
+    script = _chroot_script()
+    assert script.count("--enable-experimental-web-platform-features") >= 2
+
+
 def test_auto_rotate_installed_with_kiosk():
     """auto-rotate.py + service must be installed and enabled by the
     chroot install when --kiosk is set."""
