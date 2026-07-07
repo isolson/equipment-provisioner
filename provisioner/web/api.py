@@ -623,20 +623,17 @@ async def _run_netinstall(provisioner, port_number: int):
 
         # Step 2: Wait for device to boot after Netinstall.
         # First boot is slow (RouterBOOT + RouterOS init + SSH server start);
-        # 240s observed needed in practice on hAP ax2.
-        # The post-flash boot also triggers an interface flap when the `-s`
-        # userscript adds `bridge-bootstrap` across all ether ports, which
-        # can hold the link down longer than LINK_DOWN_GRACE_SECONDS (10s)
-        # and trip the cancel path. Mark the port as expecting a reboot so
-        # the link-down handler ignores flaps until SSH is reachable.
-        port_manager.set_expecting_reboot(port_number, True)
+        # 240s observed needed in practice on hAP ax2. The boot also flaps the
+        # port when the `-s` userscript adds `bridge-bootstrap` across all ether
+        # ports (down longer than LINK_DOWN_GRACE_SECONDS) — but that is already
+        # covered by the blanket expecting_reboot=True set above, which stays in
+        # effect through the base-flash + ZTP register steps and is cleared once
+        # in finish(). Do NOT clear it here: doing so re-arms the watchdog during
+        # those follow-up steps and cancels the pipeline mid-flow.
         await on_progress("reboot", "running", "Waiting for device to boot...")
         await asyncio.sleep(10)
 
-        try:
-            booted = await handler.wait_for_reboot(timeout=240)
-        finally:
-            port_manager.set_expecting_reboot(port_number, False)
+        booted = await handler.wait_for_reboot(timeout=240)
         if not booted:
             await finish(False, "Device did not boot after Netinstall")
             return
