@@ -30,7 +30,7 @@ After a refactor phase merges to `main` (see `docs/epic-vendor-isolation-refacto
 ### Smoke checklist (baseline, every gate — ~15 min)
 
 1. `systemctl is-active provisioner-web` is `active`; `journalctl -u provisioner-web --since -5min` has no tracebacks (catches the boot-crash class from missed registry sites).
-2. Kiosk touchscreen renders the port grid; `curl -s localhost:8080/ports` returns the port array.
+2. Kiosk touchscreen renders the port grid; `curl -s localhost:8080/health` returns 200 and `curl -s localhost:8080/api/ports` returns the port array. (Root-level liveness is `/health`; the port/status API is under `/api/`.)
 3. `curl -s localhost:8080/setup/readiness` returns OK; setup UI loads.
 4. Plug in one on-hand device → detection badge appears with the correct vendor.
 5. Run one full provisioning cycle to COMPLETE.
@@ -41,7 +41,24 @@ Phase-specific additions:
 - **Registry capstone (Story 6):** detect + provision **two different vendors**; CLI vendor list intact; firmware checker enumerates all sources without import errors.
 - **Fingerprint modularization (Story 7):** detection for every vendor type on hand, MikroTik first (`:8728` short-circuit ordering is the fragile part); simple-mode detection if a no-switch unit is available.
 
+## Deploy guardrails
+
+`scripts/deploy.sh` enforces four guardrails so a bad tree can't quietly land on the host:
+
+1. **Pre-deploy test gate.** The full `pytest` suite runs before anything is pushed; a failure aborts the deploy. Bypass only with `--skip-tests` (prints a warning). This is the gate that would have caught PR #98 shipping with two failing `test_setup_api.py` cases.
+2. **Branch guard + loud warning.** Off-`production` deploys still require `--allow-branch`, and now print a prominent banner so a stray feature-branch deploy is never silent.
+3. **Rollback snapshot.** Every deploy first copies the current on-host tree to `/opt/provisioner.prev` (excludes `venv`/`.git`). Roll back the last deploy in one command:
+
+   ```bash
+   ./scripts/deploy.sh --rollback      # restores /opt/provisioner.prev + restarts + health-checks
+   ```
+
+   (The git-based rollback below is still the way to reach an *older* revision than the immediately-previous one.)
+4. **Post-deploy health check.** After the restart the script verifies the service is `active`, has no traceback/import error in the last 60s of logs, and serves `/ports`. A failure exits non-zero and prints the `--rollback` command — the deploy is not reported as successful.
+
 ## Rollback
+
+Immediately-previous deploy: `./scripts/deploy.sh --rollback` (see guardrail 3). To reach an older revision:
 
 ```bash
 cd ../network-provisioner-production
