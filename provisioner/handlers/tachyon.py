@@ -1171,23 +1171,48 @@ class TachyonHandler(BaseHandler):
         sensitive_parts = ("password", "passphrase", "private_key", "public_key", "community")
         return any(part in path.lower() for part in sensitive_parts)
 
-    async def _get_config_curl(self) -> Dict[str, Any]:
-        """Read the device config back for verification.
+    async def _get_config_curl(self, timeout: int = 45) -> Dict[str, Any]:
+        """Read the device config back for verification, tolerating a reload.
 
         Routes over the SAME transport apply used: ``_api_request`` dispatches to
         curl (interface-bound) when ``self._use_curl`` is set, else aiohttp.
-        Returns ``{}`` on any failure and never raises, so callers can treat an
-        empty dict as "could not confirm" and fail closed.
+
+        Applying a config that toggles the eth0 management VLAN makes the device
+        briefly reload its networking; it stays reachable on the provisioning
+        link-local address but drops requests for a few seconds. A single GET
+        races that reload, so we retry a bounded number of times until the
+        device answers with a usable config. Returns ``{}`` only after the
+        retries are exhausted (or on a genuinely unreachable device) so callers
+        still fail closed — this never raises and never claims a config it
+        could not read.
         """
-        try:
-            result = await self._api_request("GET", self.API_CONFIG)
-            if isinstance(result, dict) and "raw" not in result:
-                return result
-            logger.warning(f"[CONFIG VERIFY] Read-back returned no usable config from {self.ip}")
-            return {}
-        except Exception as e:
-            logger.warning(f"[CONFIG VERIFY] Read-back request failed: {e}")
-            return {}
+        interval = 3
+        max_attempts = max(1, timeout // interval)
+        last_reason = "no response"
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = await self._api_request("GET", self.API_CONFIG)
+                if isinstance(result, dict) and "raw" not in result:
+                    if attempt > 1:
+                        logger.info(
+                            f"[CONFIG VERIFY] Read-back succeeded on {self.ip} after {attempt} attempts"
+                        )
+                    return result
+                last_reason = "no usable config in response"
+            except Exception as e:
+                last_reason = str(e)
+
+            if attempt < max_attempts:
+                logger.info(
+                    f"[CONFIG VERIFY] Read-back not ready on {self.ip} ({last_reason}); "
+                    f"retrying ({attempt}/{max_attempts})"
+                )
+                await asyncio.sleep(interval)
+
+        logger.warning(
+            f"[CONFIG VERIFY] Read-back failed on {self.ip} after {max_attempts} attempts: {last_reason}"
+        )
+        return {}
 
     async def _apply_config_curl(self, config: Dict[str, Any]) -> bool:
         """Apply configuration using curl with interface binding.
