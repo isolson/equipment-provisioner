@@ -249,8 +249,12 @@ def _post_then_get(post_resp: Tuple[int, str, str], get_resp: Tuple[int, str, st
 
 
 @pytest.mark.asyncio
-async def test_apply_config_fails_when_readback_raises(monkeypatch):
-    """POST succeeds but the read-back GET errors -> apply_config must fail (not swallow)."""
+async def test_apply_config_fails_when_readback_raises(monkeypatch, fast_sleep):
+    """POST succeeds but the read-back GET errors -> apply_config must fail (not swallow).
+
+    ``fast_sleep`` stubs the read-back retry backoff so the bounded retry loop
+    (which now tolerates a transient post-apply reload) exhausts instantly.
+    """
     responder = _post_then_get(
         post_resp=(0, mk_stdout("{}", 200), ""),          # POST ok
         get_resp=(7, "", "curl: (7) connection refused"),  # read-back GET fails
