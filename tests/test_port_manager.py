@@ -584,3 +584,149 @@ async def test_mikrotik_ip_can_never_be_the_boot_ping_responder():
         "eth0.1992", DeviceLinkLocalIP.MIKROTIK, arp_fallback=False
     )
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Device-swap identity (the "stuck as COMPLETE after a swap" bug)
+# ---------------------------------------------------------------------------
+
+
+def _provisioned_port(manager, port_num, mac, *, seconds_ago=5.0):
+    """Put a port in the state it holds right after a successful provision
+    whose device then disconnected *inside* the grace window."""
+    import time as _time
+
+    state = manager.port_states[port_num]
+    state.link_up = True
+    state.provision_attempted = True
+    state.last_result = "success"
+    state.last_provisioned_mac = mac
+    state.last_provisioned_at = _time.time() - seconds_ago
+    state.provisioning_ended = _time.time() - seconds_ago
+    state.checklist.login = True
+    return state
+
+
+@pytest.mark.asyncio
+async def test_swap_inside_grace_window_provisions_the_new_device(monkeypatch):
+    """A different device plugged in within PROVISIONING_GRACE_PERIOD must be
+    provisioned, not silently skipped.
+
+    Before the fix, _clear_port_state_on_disconnect preserved
+    provision_attempted=True through the grace window, and the MAC
+    comparison lived *inside* the `if not provision_attempted` gate — so the
+    new device hit "provisioning already attempted, skipping callback" and
+    kept the previous device's COMPLETE badge until physically unplugged.
+    """
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+    state = _provisioned_port(manager, 1, "aa:aa:aa:aa:aa:aa")
+
+    called = []
+
+    async def on_detected(port_num, device_type, device_ip):
+        called.append((port_num, device_type, device_ip))
+
+    manager.on_device_detected(on_detected)
+
+    async def fake_ping(interface, ip, arp_fallback=True):
+        return ip == DeviceLinkLocalIP.CAMBIUM
+
+    async def fake_identify(interface, ip, possible_types):
+        return "cambium"
+
+    async def fake_mac(interface, ip):
+        return "bb:bb:bb:bb:bb:bb"  # different physical device
+
+    async def no_passive(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(manager, "_ping_device", fake_ping)
+    monkeypatch.setattr(manager, "_identify_device_type", fake_identify)
+    monkeypatch.setattr(manager, "_lookup_neighbor_mac", fake_mac)
+    monkeypatch.setattr(manager, "_try_passive_detection", no_passive)
+
+    await manager._detect_device_on_port(1)
+
+    assert called == [(1, "cambium", DeviceLinkLocalIP.CAMBIUM)], (
+        "new device on the port was never handed to provisioning"
+    )
+    assert state.last_result is None, "new device inherited the old COMPLETE badge"
+    assert state.checklist.login is None, "new device inherited the old checklist"
+
+
+@pytest.mark.asyncio
+async def test_same_device_returning_inside_grace_is_not_reprovisioned(monkeypatch):
+    """The other half: the grace window exists so a device that briefly drops
+    and comes back keeps its COMPLETE badge and is NOT re-provisioned."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+    state = _provisioned_port(manager, 1, "aa:aa:aa:aa:aa:aa")
+
+    called = []
+
+    async def on_detected(port_num, device_type, device_ip):
+        called.append(port_num)
+
+    manager.on_device_detected(on_detected)
+
+    async def fake_ping(interface, ip, arp_fallback=True):
+        return ip == DeviceLinkLocalIP.CAMBIUM
+
+    async def fake_identify(interface, ip, possible_types):
+        return "cambium"
+
+    async def fake_mac(interface, ip):
+        return "aa:aa:aa:aa:aa:aa"  # same device came back
+
+    async def no_passive(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(manager, "_ping_device", fake_ping)
+    monkeypatch.setattr(manager, "_identify_device_type", fake_identify)
+    monkeypatch.setattr(manager, "_lookup_neighbor_mac", fake_mac)
+    monkeypatch.setattr(manager, "_try_passive_detection", no_passive)
+
+    await manager._detect_device_on_port(1)
+
+    assert called == [], "same device was re-provisioned inside the grace window"
+    assert state.last_result == "success", "same device lost its COMPLETE badge"
+
+
+@pytest.mark.asyncio
+async def test_mac_comparison_is_case_insensitive(monkeypatch):
+    """Vendors return upper-case MACs via update_port_device_info, while
+    _lookup_neighbor_mac lowercases. A raw == compare made the same physical
+    device look new, bypassing the cooldown and spuriously re-provisioning."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+    state = _provisioned_port(manager, 1, "AA:BB:CC:DD:EE:FF")
+
+    called = []
+
+    async def on_detected(port_num, device_type, device_ip):
+        called.append(port_num)
+
+    manager.on_device_detected(on_detected)
+
+    async def fake_ping(interface, ip, arp_fallback=True):
+        return ip == DeviceLinkLocalIP.CAMBIUM
+
+    async def fake_identify(interface, ip, possible_types):
+        return "cambium"
+
+    async def fake_mac(interface, ip):
+        return "aa:bb:cc:dd:ee:ff"  # same device, lower-cased by the kernel
+
+    async def no_passive(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(manager, "_ping_device", fake_ping)
+    monkeypatch.setattr(manager, "_identify_device_type", fake_identify)
+    monkeypatch.setattr(manager, "_lookup_neighbor_mac", fake_mac)
+    monkeypatch.setattr(manager, "_try_passive_detection", no_passive)
+
+    await manager._detect_device_on_port(1)
+
+    assert called == [], "case difference made the same device look new"
+    assert state.last_result == "success"

@@ -65,9 +65,6 @@ class ProvisioningChecklist:
     mac_address: Optional[str] = None
     serial_number: Optional[str] = None
 
-    # Track which device this checklist belongs to (to detect device changes)
-    _device_fingerprint: Optional[str] = None
-
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -109,7 +106,6 @@ class ProvisioningChecklist:
         self.vendor_oui = None
         self.mac_address = None
         self.serial_number = None
-        self._device_fingerprint = None
 
 
 # Canonical registry lives in device_ips.py so config.py can share it without
@@ -680,10 +676,7 @@ class PortManager:
                 state.last_provisioned_at is not None
                 and time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN
             )
-            same_device = (
-                state.last_provisioned_mac is None
-                or mac.lower() == state.last_provisioned_mac.lower()
-            )
+            same_device = not self._is_replacement_device(state, mac)
             if in_cooldown and same_device:
                 elapsed = int(time.time() - state.last_provisioned_at)
                 remaining = int(self.REPROVISION_COOLDOWN - elapsed)
@@ -1040,6 +1033,44 @@ class PortManager:
         except Exception as e:
             logger.warning(f"Carrier-poll link update failed: {e}")
 
+    @staticmethod
+    def _same_mac(a: Optional[str], b: Optional[str]) -> bool:
+        """Compare two MACs case-insensitively.
+
+        ``_lookup_neighbor_mac`` lower-cases what it reads from the kernel,
+        but ``update_port_device_info`` stores whatever the vendor handler
+        returned — and several return upper-case. A raw ``==`` made the same
+        physical device look new.
+        """
+        if a is None or b is None:
+            return True  # unknown identity — treat as "not proven different"
+        return a.lower() == b.lower()
+
+    def _is_replacement_device(self, state: "PortState", current_mac: Optional[str]) -> bool:
+        """True when a *different* physical device is now on this port.
+
+        Fail-safe: unknown identity on either side returns False, so an
+        unreadable neighbor entry never wipes good state.
+        """
+        if state.last_provisioned_mac is None or current_mac is None:
+            return False
+        return not self._same_mac(current_mac, state.last_provisioned_mac)
+
+    def _reset_state_for_new_device(self, port_num: int, state: "PortState") -> None:
+        """Drop provisioning state belonging to a previous device.
+
+        Same field set the post-grace sweep clears, so a swap and a
+        grace-expiry converge on identical state.
+        """
+        state.provision_attempted = False
+        state.last_result = None
+        state.last_error = None
+        state.provisioning_ended = None
+        state.last_provisioned_at = None
+        state.last_provisioned_mac = None
+        state.checklist.reset()
+        self.clear_device_mode(port_num)
+
     async def _detect_device_on_port(self, port_num: int) -> None:
         """Detect what device is connected to a port."""
         config = self.ports[port_num]
@@ -1086,6 +1117,28 @@ class PortManager:
 
                     logger.info(f"Detected {device_type} on port {port_num}")
 
+                    import time as _time
+                    current_mac = await self._lookup_neighbor_mac(config.interface_name, device_ip)
+                    if current_mac:
+                        state.device_mac = current_mac
+
+                    # Identity check BEFORE the provision_attempted gate.
+                    # A disconnect inside the post-provision grace window
+                    # preserves provision_attempted/last_result/checklist so a
+                    # device that briefly drops keeps its COMPLETE badge. If a
+                    # *different* device is now on the port, that preserved
+                    # state belongs to someone else: without this reset the new
+                    # device inherits the badge AND is never provisioned,
+                    # because the gate below short-circuits. Mirrors the check
+                    # the BOOTP listener already does.
+                    if self._is_replacement_device(state, current_mac):
+                        logger.info(
+                            f"Port {port_num} device changed "
+                            f"({state.last_provisioned_mac} -> {current_mac}) — "
+                            f"clearing preserved state for the new device"
+                        )
+                        self._reset_state_for_new_device(port_num, state)
+
                     # Notify callbacks only if provisioning hasn't been attempted yet
                     if not state.provision_attempted:
                         # Check reprovision cooldown — skip auto-provision if
@@ -1093,19 +1146,11 @@ class PortManager:
                         # (e.g. watchdog reboot, brief power cycle). A MAC
                         # change means a different physical device; bypass
                         # the cooldown in that case.
-                        import time as _time
-                        current_mac = await self._lookup_neighbor_mac(config.interface_name, device_ip)
-                        if current_mac:
-                            state.device_mac = current_mac
                         in_cooldown = (
                             state.last_provisioned_at is not None
                             and _time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN
                         )
-                        same_device = (
-                            state.last_provisioned_mac is None
-                            or current_mac is None
-                            or current_mac == state.last_provisioned_mac
-                        )
+                        same_device = not self._is_replacement_device(state, current_mac)
                         if in_cooldown and same_device:
                             elapsed = int(_time.time() - state.last_provisioned_at)
                             remaining = int(self.REPROVISION_COOLDOWN - elapsed)
@@ -1232,6 +1277,18 @@ class PortManager:
                 f"Detected {device_type} at {device_ip} on port {port_num} via subnet sweep"
             )
 
+            # Same identity check as the link-local detect path: preserved
+            # state from a previous device must not suppress provisioning of
+            # a new one. device_mac here is upper-cased by the sweep, which
+            # is why _same_mac normalizes.
+            if self._is_replacement_device(state, device_mac):
+                logger.info(
+                    f"Port {port_num} device changed "
+                    f"({state.last_provisioned_mac} -> {device_mac}) via sweep — "
+                    f"clearing preserved state for the new device"
+                )
+                self._reset_state_for_new_device(port_num, state)
+
             if not state.provision_attempted:
                 state.provision_attempted = True
                 for callback in self._on_device_detected:
@@ -1327,6 +1384,16 @@ class PortManager:
             f"(MAC {mac}, no IP probe)"
         )
 
+        # Identity check before the gate — same reasoning as the link-local
+        # and subnet-sweep paths. The sniffed MAC is authoritative here.
+        if self._is_replacement_device(state, mac):
+            logger.info(
+                f"Port {port_num} device changed "
+                f"({state.last_provisioned_mac} -> {mac}) via passive sniff — "
+                f"clearing preserved state for the new device"
+            )
+            self._reset_state_for_new_device(port_num, state)
+
         if state.provision_attempted:
             logger.debug(
                 f"Port {port_num} provisioning already attempted, skipping callback"
@@ -1338,10 +1405,7 @@ class PortManager:
             state.last_provisioned_at is not None
             and _time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN
         )
-        same_device = (
-            state.last_provisioned_mac is None
-            or mac.lower() == state.last_provisioned_mac.lower()
-        )
+        same_device = not self._is_replacement_device(state, mac)
         if in_cooldown and same_device:
             elapsed = int(_time.time() - state.last_provisioned_at)
             remaining = int(self.REPROVISION_COOLDOWN - elapsed)
