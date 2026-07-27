@@ -131,7 +131,10 @@ class TestPythonRegistries:
         )
 
     def test_device_ips_config_fields_match(self):
-        assert set(DeviceIPsConfig.model_fields) == CANONICAL, (
+        # Story 4 (#74) consolidated this: DeviceIPsConfig now derives its
+        # per-vendor defaults from DeviceLinkLocalIP.ALL, so the check moved
+        # from model fields to the derived table's keys.
+        assert set(DeviceIPsConfig().vendors) == CANONICAL, (
             "DeviceIPsConfig (config.py) out of sync with the vendor set."
         )
 
@@ -223,24 +226,28 @@ class TestSourceParsedRegistries:
             "derive from config.credentials.vendors instead."
         )
 
-    def test_boot_ping_list_covers_the_same_ips_as_probe_list(self):
-        # The boot-wait path keeps its own inline ips_to_try list, separate
-        # from DeviceLinkLocalIP.ALL (the duplication Story 4 / #74 removes).
-        # An IP present in ALL but missing here delays boot detection.
+    def test_port_manager_keeps_no_hand_maintained_ip_list(self):
+        # Story 4 (#74) removed the inline boot-ping `ips_to_try = [...]`
+        # copy; both the boot-wait ping and detection now call
+        # DeviceLinkLocalIP.probe_ips(). An IP present in ALL but missing
+        # from a parallel list used to cost ~120s of boot detection delay.
         source = (REPO_ROOT / "provisioner" / "port_manager.py").read_text()
-        match = re.search(r"ips_to_try\s*=\s*\[([^\]]*)\]", source)
-        assert match, (
-            "port_manager.py: couldn't find the boot-ping `ips_to_try = [...]` "
-            "list — if it now derives from DeviceLinkLocalIP.ALL (Story 4 / "
-            "#74), update this test."
+        assert not re.search(r"ips_to_try\s*=\s*\[\s*\n\s*DeviceLinkLocalIP\.", source), (
+            "port_manager.py re-introduced a hand-maintained boot-ping IP "
+            "list; call DeviceLinkLocalIP.probe_ips() instead."
         )
-        attr_names = re.findall(r"DeviceLinkLocalIP\.(\w+)", match.group(1))
-        boot_ips = {getattr(DeviceLinkLocalIP, name) for name in attr_names}
-        probe_ips = {ip for ip, _vendors in DeviceLinkLocalIP.ALL}
-        assert boot_ips == probe_ips, (
-            "Boot-ping ips_to_try (port_manager.py) covers different IPs than "
-            "DeviceLinkLocalIP.ALL."
+        assert source.count("DeviceLinkLocalIP.probe_ips()") >= 2, (
+            "both the boot-ping and detection paths should derive from "
+            "the registry"
         )
+
+    def test_probe_ips_matches_the_registry_in_order(self):
+        assert DeviceLinkLocalIP.probe_ips() == [
+            ip for ip, _vendors in DeviceLinkLocalIP.ALL
+        ], "probe order is behavioral — first responder wins"
+
+    def test_every_vendor_has_a_primary_ip(self):
+        assert set(DeviceLinkLocalIP.primary_ip_by_vendor()) == CANONICAL
 
     def test_index_html_vendor_map_matches(self):
         html = (

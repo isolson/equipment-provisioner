@@ -551,3 +551,36 @@ async def test_passive_detection_marks_detected_when_link_up_and_match():
     assert state.device_detected is True
     assert state.device_type == "evolution_digital"
     assert state.device_mac == "84:01:12:42:95:fe"
+
+
+def test_boot_ping_derives_its_ip_list_from_the_registry():
+    """Story #74: the boot-wait ping used to keep a hand-maintained copy of
+    the vendor IP list. It now derives from DeviceLinkLocalIP.probe_ips().
+
+    Consolidating changed the probe *order* — MikroTik and Tarana swapped
+    positions. That is safe specifically because the boot ping passes
+    ``arp_fallback=False``, and ``_ping_device`` returns False immediately
+    for the MikroTik address in that mode (the /32 management route sends
+    ICMP to the switch, not the device). MikroTik can therefore never be
+    the boot-ping responder, so its position in the list cannot matter.
+    """
+    assert DeviceLinkLocalIP.probe_ips() == [
+        "169.254.1.1",
+        "192.168.1.1",
+        "192.168.1.20",
+        "169.254.100.1",
+        "192.168.88.1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mikrotik_ip_can_never_be_the_boot_ping_responder():
+    """Guards the assumption the order change above rests on."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    assert DeviceLinkLocalIP.MIKROTIK in DeviceLinkLocalIP.probe_ips()
+    result = await manager._ping_device(
+        "eth0.1992", DeviceLinkLocalIP.MIKROTIK, arp_fallback=False
+    )
+    assert result is False

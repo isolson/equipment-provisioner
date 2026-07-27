@@ -39,7 +39,7 @@ Follow the checklist in `docs/HANDLER_DEVELOPMENT.md` under "Adding a New Vendor
 
 1. `provisioner/handlers/{vendor}.py` — handler class
 2. `provisioner/fingerprint.py` — device detection
-3. `provisioner/port_manager.py` — boot-ping IPs (`DeviceLinkLocalIP`)
+3. `provisioner/device_ips.py` — boot-ping IPs (`DeviceLinkLocalIP.ALL`) *(one row; boot-ping, detection and config defaults all derive)*
 4. `provisioner/handler_manager.py` — `HANDLER_MAP`
 5. `provisioner/firmware.py` — `MODEL_FIRMWARE_PATTERNS` + version regex
 6. `provisioner/config_store.py` — `CONFIG_MODEL_ALIASES` (if needed)

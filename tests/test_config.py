@@ -43,10 +43,12 @@ class TestConfigDefaults:
         assert config.vlan_start == 1991
         assert config.num_ports == 6
         assert config.local_ip == "169.254.1.2"
-        assert config.device_ips.cambium == "169.254.1.1"
-        assert config.device_ips.tachyon == "169.254.1.1"
-        assert config.device_ips.ubiquiti == "192.168.1.20"
-        assert config.device_ips.mikrotik == "192.168.88.1"
+        # #74: derived from DeviceLinkLocalIP.ALL rather than restated here.
+        assert config.device_ips.for_vendor("cambium") == "169.254.1.1"
+        assert config.device_ips.for_vendor("tachyon") == "169.254.1.1"
+        assert config.device_ips.for_vendor("ubiquiti") == "192.168.1.20"
+        assert config.device_ips.for_vendor("mikrotik") == "192.168.88.1"
+        assert config.device_ips.for_vendor("tarana") == "169.254.100.1"
 
     def test_credentials_config_defaults(self):
         """Test CredentialsConfig has correct vendor-specific defaults."""

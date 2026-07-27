@@ -112,30 +112,9 @@ class ProvisioningChecklist:
         self._device_fingerprint = None
 
 
-class DeviceLinkLocalIP:
-    """Known link-local/default IPs for device types."""
-    CAMBIUM = "169.254.1.1"
-    TACHYON = "169.254.1.1"
-    TACHYON_ALT = "192.168.1.1"  # Some Tachyon devices use this
-    TARANA = "169.254.100.1"
-    MIKROTIK = "192.168.88.1"  # Mikrotik default, but often uses DHCP
-    UBIQUITI = "192.168.1.20"  # Ubiquiti AirMax and Wave default
-
-    # All IPs to probe when detecting device type
-    ALL = [
-        ("169.254.1.1", ["cambium", "tachyon"]),
-        ("192.168.1.1", ["tachyon"]),  # Tachyon alternate IP
-        ("192.168.1.20", ["ubiquiti"]),  # Ubiquiti AirMax/Wave default
-        ("169.254.100.1", ["tarana"]),
-        ("192.168.88.1", ["mikrotik"]),
-    ]
-
-    # Some MikroTik units may be reset with different default LAN subnets.
-    # We only probe these if standard defaults do not match.
-    MIKROTIK_FALLBACKS = [
-        "192.168.0.1",
-        "10.0.0.1",
-    ]
+# Canonical registry lives in device_ips.py so config.py can share it without
+# an import cycle. Re-exported here because this is where callers expect it.
+from .device_ips import DeviceLinkLocalIP  # noqa: F401
 
 
 @dataclass
@@ -998,15 +977,8 @@ class PortManager:
 
             async def boot_ping_check(port_num: int, config: PortConfig, state: PortState) -> None:
                 """Ping device during boot wait to detect when it's up."""
-                # Try known device IPs for boot detection
-                ips_to_try = [
-                    DeviceLinkLocalIP.CAMBIUM,      # 169.254.1.1
-                    DeviceLinkLocalIP.TACHYON_ALT,  # 192.168.1.1
-                    DeviceLinkLocalIP.UBIQUITI,     # 192.168.1.20
-                    DeviceLinkLocalIP.MIKROTIK,     # 192.168.88.1
-                    DeviceLinkLocalIP.TARANA,       # 169.254.100.1
-                ]
-                for ip in ips_to_try:
+                # Derived from the registry — no hand-maintained copy here.
+                for ip in DeviceLinkLocalIP.probe_ips():
                     # Skip ARP fallback during boot ping — we just need a
                     # quick liveness check, not thorough MikroTik detection.
                     if await self._ping_device(config.interface_name, ip, arp_fallback=False):
@@ -1073,7 +1045,7 @@ class PortManager:
         config = self.ports[port_num]
         state = self.port_states[port_num]
 
-        ips_to_try = [ip for ip, _ in DeviceLinkLocalIP.ALL]
+        ips_to_try = DeviceLinkLocalIP.probe_ips()
         logger.info(f"Detecting device on port {port_num} ({config.interface_name}), trying IPs: {ips_to_try}")
 
         # Passive fingerprint FIRST: Evolution Digital refurb routers answer

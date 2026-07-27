@@ -44,13 +44,45 @@ class NetworkConfig(BaseModel):
     management: ManagementNetworkConfig = Field(default_factory=ManagementNetworkConfig)
 
 
+def _default_device_ips() -> Dict[str, str]:
+    """Per-vendor link-local IPs, derived from the one registry."""
+    from .device_ips import DeviceLinkLocalIP
+
+    return DeviceLinkLocalIP.primary_ip_by_vendor()
+
+
 class DeviceIPsConfig(BaseModel):
-    """Known link-local IPs for device types."""
-    cambium: str = "169.254.1.1"
-    tachyon: str = "169.254.1.1"
-    tarana: str = "169.254.100.1"
-    ubiquiti: str = "192.168.1.20"
-    mikrotik: str = "192.168.88.1"
+    """Known link-local IPs for device types.
+
+    Reference/reporting only — the probe path reads
+    ``DeviceLinkLocalIP.ALL`` directly, not this model. Kept because
+    existing ``config.yaml`` files carry a ``ports.device_ips`` block;
+    values are derived so the two can no longer disagree.
+    """
+    vendors: Dict[str, str] = Field(default_factory=_default_device_ips)
+
+    @model_validator(mode="before")
+    @classmethod
+    def hoist_legacy_vendor_keys(cls, data: Any) -> Any:
+        """Accept the pre-#74 flat shape (``device_ips: {cambium: ...}``).
+
+        Same rationale as CredentialsConfig: ``extra="ignore"`` would drop
+        legacy keys before any validator could see them.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        vendors = dict(_default_device_ips())
+        legacy = {k: v for k, v in data.items() if k != "vendors"}
+        for source in (legacy, data.get("vendors") or {}):
+            for name, value in source.items():
+                if isinstance(value, str):
+                    vendors[name] = value
+        return {"vendors": vendors}
+
+    def for_vendor(self, device_type: str) -> Optional[str]:
+        """Return the known default IP for a device type, if any."""
+        return self.vendors.get(device_type)
 
 
 class PortsConfig(BaseModel):

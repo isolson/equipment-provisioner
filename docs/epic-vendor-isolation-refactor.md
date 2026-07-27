@@ -18,7 +18,7 @@ Make the provisioner *additively pluggable*, not just *subtractively modular*: a
 |---|---|---|
 | ~~Vendor → handler~~ | ✅ mostly done (#72) — `cli.py`, `VALID_DEVICE_TYPES` and `setup_tools.SUPPORTED_DEVICE_TYPES` now derive from `HandlerManager.provisionable_device_types()`. `index.html` still hardcodes its map (Story 5 / #75). | 1 (derive from `HANDLER_MAP`) |
 | ~~Credentials~~ | ✅ done (#73) — `_default_credentials()` in `config.py` is the one table; `main.py` and `BUILTIN_CREDENTIALS` derive from it. Handler `DEFAULT_CREDENTIALS` (login-retry ladders) stay separate until Story 6. | 1 table |
-| Link-local IPs | `DeviceLinkLocalIP` (`port_manager.py:112`) + inline copy (`:982`) + `DeviceIPsConfig` (`config.py:47`) | 1 registry |
+| ~~Link-local IPs~~ | ✅ done (#74) — `provisioner/device_ips.py` is the one registry; the inline boot-ping copy is gone and `DeviceIPsConfig` derives from it. | 1 registry |
 | Detection knowledge | `HTTP_SIGNATURES` + per-vendor probes + `_extract_device_details` (`fingerprint.py`) | per-vendor contribution |
 | Firmware sources | `SOURCE_MAP` + imports (`firmware_checker.py:20-39`), `firmware_sources/__init__.py` | 1 registry (config is already table-driven; the class map + imports are not) |
 | Setup / readiness | `SUPPORTED_DEVICE_TYPES` + readiness/hint/mode dicts (`setup_tools.py:23,79-126`) | derive from the vendor registry |
@@ -100,10 +100,17 @@ Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M �
 **Acceptance:** ✅ `test_credentials_registry.py` (25 cases) covers the dict form, legacy compat, both silent consumers, and the tarana decision; ✅ removing a vendor no longer requires editing `main.py` (`test_adding_a_vendor_requires_no_main_py_edit`); ✅ `/default-credentials` response shape unchanged; ✅ full suite green (486 passed / 3 skipped).
 **Acceptance:** `test_config.py` covers the dict form; removing a vendor no longer requires editing `main.py`; credential UI (`/default-credentials`) unchanged.
 
-### Story 4 — Centralize the IP / boot-ping registry · S · risk: low
-**Why:** `DeviceLinkLocalIP` is duplicated (`port_manager.py:112` vs inline `:982`) and overlaps `DeviceIPsConfig` (`config.py:47`).
-**Scope:** single structure for vendor→link-local IP(s); the inline list at `:982` and `DeviceIPsConfig` defaults derive from it; config still overrides. Preserve MikroTik fallbacks and simple-mode behavior.
-**Acceptance:** one place defines IPs; `test_port_manager.py` green; simple-mode + multi-port both probe the same set.
+### Story 4 — Centralize the IP / boot-ping registry · S · risk: low — ✅ DONE (#74)
+**Why:** `DeviceLinkLocalIP` was duplicated (class constants vs the inline boot-ping `ips_to_try`) and overlapped `DeviceIPsConfig`.
+**Delivered:** the registry moved to its own module, `provisioner/device_ips.py`, so `config.py` can share it without an import cycle and without pulling port-management dependencies into config loading. `port_manager` re-exports `DeviceLinkLocalIP` so existing imports are unchanged. Two derived helpers — `probe_ips()` and `primary_ip_by_vendor()` — feed the boot-ping path, the detection path, and `DeviceIPsConfig` defaults. The hand-maintained inline list is gone.
+
+**Behavior change (verified benign):** consolidating changed the boot-ping *order* — MikroTik and Tarana swapped positions. This is safe for a specific reason: the boot ping passes `arp_fallback=False`, and `_ping_device` returns `False` immediately for the MikroTik address in that mode (the pinned /32 management route sends ICMP to the switch, not the device). **MikroTik can never be the boot-ping responder**, so its position cannot matter. `test_mikrotik_ip_can_never_be_the_boot_ping_responder` pins the assumption the reordering rests on.
+
+**Finding:** `DeviceIPsConfig` is **dead config** — nothing in `provisioner/` reads `config.ports.device_ips`. It is kept (derived, so it can no longer disagree with the registry) because existing `config.yaml` files carry the block, but it is a candidate for deletion in Story 6.
+
+**Migration note (host):** no `config.yaml` edit needed; a `mode="before"` validator hoists the legacy flat `ports.device_ips.<vendor>` shape, same pattern as #73.
+
+**Acceptance:** ✅ one place defines IPs; ✅ `test_port_manager.py` green (22 tests); ✅ simple-mode and multi-port both probe the same set, since both call `probe_ips()`.
 
 ### Story 5 — Frontend derives vendor metadata from the API · M · risk: med (UI)
 **Why:** `index.html:347` is a hardcoded frontend copy of the vendor list.
