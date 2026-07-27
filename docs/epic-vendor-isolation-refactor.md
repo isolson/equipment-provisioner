@@ -17,7 +17,7 @@ Make the provisioner *additively pluggable*, not just *subtractively modular*: a
 | Concern | Current copies | Target |
 |---|---|---|
 | Vendor → handler | `HANDLER_MAP` (`handler_manager.py:24`), `cli.py:383`, `VALID_DEVICE_TYPES` (`api.py:1156`), `index.html:347` | 1 (derive from `HANDLER_MAP`/`DeviceType`) |
-| Credentials | `CredentialsConfig` (`config.py:114`), `main.py:109` dict, handler `DEFAULT_CREDENTIALS`, `BUILTIN_CREDENTIALS` (`api.py:2086`) | 1 table (mirror `FirmwareSourceConfig`) |
+| ~~Credentials~~ | ✅ done (#73) — `_default_credentials()` in `config.py` is the one table; `main.py` and `BUILTIN_CREDENTIALS` derive from it. Handler `DEFAULT_CREDENTIALS` (login-retry ladders) stay separate until Story 6. | 1 table |
 | Link-local IPs | `DeviceLinkLocalIP` (`port_manager.py:112`) + inline copy (`:982`) + `DeviceIPsConfig` (`config.py:47`) | 1 registry |
 | Detection knowledge | `HTTP_SIGNATURES` + per-vendor probes + `_extract_device_details` (`fingerprint.py`) | per-vendor contribution |
 | Firmware sources | `SOURCE_MAP` + imports (`firmware_checker.py:20-39`), `firmware_sources/__init__.py` | 1 registry (config is already table-driven; the class map + imports are not) |
@@ -80,10 +80,19 @@ Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M �
 **Scope:** make `cli.py`, `VALID_DEVICE_TYPES`, and `setup_tools.SUPPORTED_DEVICE_TYPES` *derive* from `HANDLER_MAP`/`DeviceType` (add a helper like `provisionable_device_types()`), preserving the ED exception explicitly. (The firmware `SOURCE_MAP` maps to imported classes, so it consolidates with the plugin registry in Story 6, not here.) 
 **Acceptance:** deleting an entry from `HANDLER_MAP` propagates everywhere; Story 0 test still green; `test_handler_manager.py` updated.
 
-### Story 3 — Table-drive credentials (kill the crash-coupling) · M · risk: low-med
+### Story 3 — Table-drive credentials (kill the crash-coupling) · M · risk: low-med — ✅ DONE (#73)
 **Why:** removes the `config.py ↔ main.py` AttributeError-on-omission (S1) and collapses 4 credential sources to 1.
-**Scope:** convert `CredentialsConfig` typed fields → `Dict[str, DeviceCredentials]` keyed by device-type (mirror `FirmwareSourceConfig`), with per-vendor defaults supplied by a defaults factory. Reconcile `main.py:109` dict, `BUILTIN_CREDENTIALS` (`api.py:2086`), and handler `DEFAULT_CREDENTIALS` to read from this one table. 
-**Migration note:** `extra=ignore` means existing `config.yaml` `credentials.<vendor>` blocks keep working; defaults backfill. Add host note in PR.
+**Delivered:** `CredentialsConfig.vendors: Dict[str, DeviceCredentials]` fed by `_default_credentials()` (mirrors `_default_firmware_sources()`); the `CambiumCredentials` / `TachyonCredentials` / `UbiquitiCredentials` subclasses are gone. `main.py` builds the handler-manager dict by comprehension over the table, and `BUILTIN_CREDENTIALS` derives from it. Attribute access is replaced by an explicit `for_vendor(name)` accessor (no `__getattr__` magic, so mypy stays usable).
+
+**Deliberate behavior change — tarana.** The four sources *disagreed*: `config.py` shipped an empty password while `BUILTIN_CREDENTIALS` and `TaranaHandler.DEFAULT_CREDENTIALS` both shipped `admin123`. Collapsing forced a choice; `admin123` won because it is what actually logs into hardware. That would have made `_read_primary_credentials` report a factory-credentialed tarana fleet as "Configured", so the factory-default check was widened from a hardcoded `{"cambium","tachyon","ubiquiti"}` set to **every** vendor, derived from the same table via `_factory_default_passwords()`. `TestTaranaDecision` pins both halves.
+
+**Two silent-failure sites the original plan missed** (both nested `getattr` with a default, so they degrade quietly rather than raising, and neither had a test): `setup_tools.py` `_read_primary_credentials` (would have reported *all five* vendors as "Missing or placeholder") and `probe_mikrotik_switch` (would have stopped trying the configured switch password, reporting a working switch as absent). Both now go through `for_vendor()` and both have regression tests.
+
+**Handler `DEFAULT_CREDENTIALS` deliberately untouched** — they are login-retry *ladders* of a different shape (MikroTik iterates a **list of 2**; Tachyon compares a single dict against custom creds). Folding them in belongs to Story 6's `VendorSpec`. A factory-derived `BUILTIN_CREDENTIALS` must not assume one credential per vendor; `test_mikrotik_entry_count_is_pinned` guards that.
+
+**Migration note (host):** existing `/etc/provisioner/config.yaml` needs **no edit**. A `mode="before"` validator hoists legacy flat `credentials.<vendor>` blocks into `vendors` and backfills defaults — necessary because the model's `extra="ignore"` would otherwise drop them silently before any validator ran. Partial blocks (only `password:`) keep their default username. Verified by loading the repo's real `config.yaml`.
+
+**Acceptance:** ✅ `test_credentials_registry.py` (25 cases) covers the dict form, legacy compat, both silent consumers, and the tarana decision; ✅ removing a vendor no longer requires editing `main.py` (`test_adding_a_vendor_requires_no_main_py_edit`); ✅ `/default-credentials` response shape unchanged; ✅ full suite green (486 passed / 3 skipped).
 **Acceptance:** `test_config.py` covers the dict form; removing a vendor no longer requires editing `main.py`; credential UI (`/default-credentials`) unchanged.
 
 ### Story 4 — Centralize the IP / boot-ping registry · S · risk: low

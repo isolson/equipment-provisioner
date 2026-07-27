@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Optional, Dict
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -103,30 +103,77 @@ class DeviceCredentials(BaseModel):
         return v
 
 
-class CambiumCredentials(DeviceCredentials):
-    """Cambium default credentials (admin/admin)."""
-    password: str = "admin"
+def _default_credentials() -> Dict[str, "DeviceCredentials"]:
+    """Factory-default credentials, one entry per vendor.
 
+    This is the single source of truth for vendor credential defaults —
+    ``main.py``'s handler-manager assembly and ``web/api.py``'s
+    ``BUILTIN_CREDENTIALS`` both derive from it. Adding a vendor here is the
+    only edit required; nothing else enumerates vendors for credentials.
 
-class TachyonCredentials(DeviceCredentials):
-    """Tachyon default credentials (root/admin)."""
-    username: str = "root"
-    password: str = "admin"
-
-
-class UbiquitiCredentials(DeviceCredentials):
-    """Ubiquiti default credentials (ubnt/ubnt)."""
-    username: str = "ubnt"
-    password: str = "ubnt"
+    Mirrors :func:`_default_firmware_sources`.
+    """
+    return {
+        "cambium": DeviceCredentials(password="admin"),
+        # MikroTik ships with an empty admin password until one is set.
+        "mikrotik": DeviceCredentials(),
+        "tachyon": DeviceCredentials(username="root", password="admin"),
+        "tarana": DeviceCredentials(password="admin123"),
+        "ubiquiti": DeviceCredentials(username="ubnt", password="ubnt"),
+    }
 
 
 class CredentialsConfig(BaseModel):
-    """All device credentials."""
-    cambium: DeviceCredentials = Field(default_factory=CambiumCredentials)
-    mikrotik: DeviceCredentials = Field(default_factory=DeviceCredentials)
-    tarana: DeviceCredentials = Field(default_factory=DeviceCredentials)
-    tachyon: DeviceCredentials = Field(default_factory=TachyonCredentials)
-    ubiquiti: DeviceCredentials = Field(default_factory=UbiquitiCredentials)
+    """All device credentials, keyed by device type.
+
+    Legacy ``config.yaml`` files spell these as top-level keys
+    (``credentials: {mikrotik: {...}}``); those are hoisted into ``vendors``
+    by the validator below, so existing host configs keep working.
+    """
+    vendors: Dict[str, DeviceCredentials] = Field(default_factory=_default_credentials)
+
+    @model_validator(mode="before")
+    @classmethod
+    def hoist_legacy_vendor_keys(cls, data: Any) -> Any:
+        """Accept the pre-#73 flat shape and backfill defaults.
+
+        Runs in ``mode="before"``, i.e. on the raw input — necessary because
+        the model's default ``extra="ignore"`` would otherwise drop legacy
+        vendor keys silently before any validator could see them.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        vendors = dict(_default_credentials())
+        supplied = data.get("vendors") or {}
+
+        # Legacy flat keys: anything alongside (or instead of) "vendors".
+        legacy = {k: v for k, v in data.items() if k != "vendors"}
+
+        for source in (legacy, supplied):
+            for name, value in source.items():
+                if value is None:
+                    continue
+                if isinstance(value, DeviceCredentials):
+                    vendors[name] = value
+                elif isinstance(value, dict):
+                    # Merge over the vendor's defaults so a config that sets
+                    # only `password:` keeps the default username.
+                    base = vendors.get(name)
+                    merged = base.model_dump() if base else {}
+                    merged.update(value)
+                    vendors[name] = DeviceCredentials(**merged)
+
+        return {"vendors": vendors}
+
+    def for_vendor(self, device_type: str) -> DeviceCredentials:
+        """Return credentials for a device type.
+
+        Unknown vendors get a default-constructed :class:`DeviceCredentials`
+        rather than raising, matching the previous behavior where a missing
+        entry fell back to ``admin`` / empty password.
+        """
+        return self.vendors.get(device_type) or DeviceCredentials()
 
 
 class NotificationsConfig(BaseModel):

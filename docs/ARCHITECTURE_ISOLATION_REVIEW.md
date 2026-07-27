@@ -66,7 +66,7 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 | Sev | Leak | Location | Notes |
 |---|---|---|---|
 | ~~**S1**~~ | ~~`if self.device_type == "mikrotik"` in the engine~~ | ~~`base.py` (`firmware_lookup_key`)~~ | **RESOLVED (#71).** Now `BaseHandler.firmware_lookup_key()` (default: `device_info.model`) with a `MikrotikHandler` override. `base.py` has zero vendor brand strings, comments included. |
-| **S1** | Credentials dict ↔ config schema coupling | `main.py:109-129` ⟷ `config.py:97-120` | `self.config.credentials.tachyon` hardcoded. Remove from one but not the other → **AttributeError at startup**. Must move together. |
+| ~~**S1**~~ | ~~Credentials dict ↔ config schema coupling~~ | ~~`main.py` ⟷ `config.py`~~ | **RESOLVED (#73).** `CredentialsConfig.vendors` is now a `Dict[str, DeviceCredentials]` fed by `_default_credentials()`; `main.py` and `BUILTIN_CREDENTIALS` derive from it. No boot-time AttributeError is possible. Legacy flat `credentials.<vendor>` YAML is hoisted by a `mode="before"` validator. |
 | **S1** | Handler imports | `handler_manager.py:10`, `handlers/__init__.py` | Delete a handler file but leave the import → **ImportError at startup** (hard crash). |
 | **S1** | Firmware-source imports + `SOURCE_MAP` | `firmware_sources/__init__.py`, `firmware_checker.py:20-39` | Delete `firmware_sources/{vendor}.py` but leave the import/map → **ImportError at startup**. |
 | **S2** | `HTTP_SIGNATURES` per-vendor regex blocks | `fingerprint.py:139-186` | Stale entries = harmless dead code; *missing* = device undetected. |

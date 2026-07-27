@@ -53,20 +53,25 @@ class TestConfigDefaults:
         config = CredentialsConfig()
 
         # Cambium: admin/admin
-        assert config.cambium.username == "admin"
-        assert config.cambium.password == "admin"
+        assert config.for_vendor("cambium").username == "admin"
+        assert config.for_vendor("cambium").password == "admin"
 
         # Tachyon: root/admin
-        assert config.tachyon.username == "root"
-        assert config.tachyon.password == "admin"
+        assert config.for_vendor("tachyon").username == "root"
+        assert config.for_vendor("tachyon").password == "admin"
 
         # Ubiquiti: ubnt/ubnt
-        assert config.ubiquiti.username == "ubnt"
-        assert config.ubiquiti.password == "ubnt"
+        assert config.for_vendor("ubiquiti").username == "ubnt"
+        assert config.for_vendor("ubiquiti").password == "ubnt"
 
         # MikroTik: admin/empty
-        assert config.mikrotik.username == "admin"
-        assert config.mikrotik.password == ""
+        assert config.for_vendor("mikrotik").username == "admin"
+        assert config.for_vendor("mikrotik").password == ""
+
+        # Tarana: admin/admin123 — aligned with TaranaHandler and
+        # BUILTIN_CREDENTIALS by #73; previously an empty password here.
+        assert config.for_vendor("tarana").username == "admin"
+        assert config.for_vendor("tarana").password == "admin123"
 
     def test_firmware_config_defaults(self):
         """Test FirmwareConfig has correct defaults."""
@@ -96,7 +101,7 @@ class TestConfigDefaults:
         config = Config()
         assert config.network.interface == "eth0"
         assert config.ports.num_ports == 6
-        assert config.credentials.tachyon.username == "root"
+        assert config.credentials.for_vendor("tachyon").username == "root"
         assert config.firmware.dual_bank_update is True
         assert config.label_printer.enabled is False
 
@@ -271,8 +276,8 @@ credentials:
 
         try:
             config = load_config(config_path)
-            assert config.credentials.tachyon.username == "custom_user"
-            assert config.credentials.tachyon.password == "custom_pass"
+            assert config.credentials.for_vendor("tachyon").username == "custom_user"
+            assert config.credentials.for_vendor("tachyon").password == "custom_pass"
         finally:
             os.unlink(config_path)
 

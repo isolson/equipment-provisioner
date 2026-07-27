@@ -33,6 +33,27 @@ ROOT_BUNDLE_NAMES = {
 IGNORED_BUNDLE_PREFIXES = ("__MACOSX",)
 
 
+def _factory_default_passwords() -> Dict[str, str]:
+    """Vendor -> factory-default password, derived from the credential table.
+
+    Not a new registry: the shipped defaults in ``_default_credentials()``
+    *are* the factory defaults, so a vendor still sitting on its shipped
+    password is one whose configured value still equals the default.
+    Vendors with an empty default (MikroTik) are excluded — an empty
+    password is already reported as "Missing or placeholder".
+    """
+    from .config import _default_credentials
+
+    return {
+        vendor: creds.password
+        for vendor, creds in _default_credentials().items()
+        if creds.password
+    }
+
+
+_FACTORY_DEFAULT_PASSWORDS = _factory_default_passwords()
+
+
 def _is_placeholder_secret(value: Optional[str]) -> bool:
     if value is None:
         return True
@@ -79,13 +100,14 @@ def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
         "cambium": "admin/admin",
         "mikrotik": "admin/(empty until switch password is set)",
         "tachyon": "root/admin",
-        "tarana": "admin/(set your fleet password)",
+        "tarana": "admin/admin123 out of the box — set your fleet password",
         "ubiquiti": "ubnt/ubnt",
     }
 
     result = []
     for device_type in SUPPORTED_DEVICE_TYPES:
-        creds = getattr(getattr(config, "credentials", None), device_type, None)
+        credentials = getattr(config, "credentials", None)
+        creds = credentials.for_vendor(device_type) if credentials else None
         password = getattr(creds, "password", "")
         status = "ready"
         summary = "Configured"
@@ -93,7 +115,7 @@ def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
         if _is_placeholder_secret(password):
             status = "warning"
             summary = "Missing or placeholder"
-        elif device_type in {"cambium", "tachyon", "ubiquiti"} and password in {"admin", "ubnt"}:
+        elif password and password == _FACTORY_DEFAULT_PASSWORDS.get(device_type):
             status = "warning"
             summary = "Still using factory default"
 
@@ -324,7 +346,7 @@ def probe_mikrotik_switch(config: Any) -> Dict[str, Any]:
     """Inspect the provisioning switch, preferring RouterOS API when available."""
     management = getattr(getattr(config, "network", None), "management", None)
     switch_ip = getattr(management, "switch_ip", None) or "192.168.88.1"
-    configured_password = getattr(getattr(config.credentials, "mikrotik", None), "password", "")
+    configured_password = config.credentials.for_vendor("mikrotik").password
     password_candidates = []
     for password in (configured_password, ""):
         if password not in password_candidates:

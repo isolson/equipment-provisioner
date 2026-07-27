@@ -202,7 +202,7 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
             pass
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials.for_vendor("mikrotik").bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -291,7 +291,7 @@ async def test_netinstall_clears_expecting_reboot_when_step_after_flash_fails(tm
             return False  # device never comes back after the flash
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials.for_vendor("mikrotik").bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -377,7 +377,7 @@ async def test_netinstall_ships_wifi_driver_packages_in_flash_payload(tmp_path, 
             pass
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials.for_vendor("mikrotik").bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -469,7 +469,7 @@ async def test_netinstall_fails_before_register_when_wifi_radios_not_bound(tmp_p
             pass
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials.for_vendor("mikrotik").bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     config.label_printer.enabled = True
@@ -560,7 +560,7 @@ def _ship_ready_fake_handler(phone_home_url="https://wifi.example.test/ztp/mikro
 
 def _netinstall_env(monkeypatch, tmp_path, handler_cls, register):
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials.for_vendor("mikrotik").bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -723,7 +723,7 @@ async def test_netinstall_requires_ztp_api_key_before_flash(tmp_path, monkeypatc
             return True
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials.for_vendor("mikrotik").bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     provisioner = SimpleNamespace(
         config=config,
@@ -749,11 +749,11 @@ async def test_netinstall_requires_ztp_api_key_before_flash(tmp_path, monkeypatc
 def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch):
     client, config, data_path = make_client(tmp_path)
 
-    config.credentials.cambium.password = "fleet-pass"
-    config.credentials.mikrotik.password = "switch-pass"
-    config.credentials.tachyon.password = "fleet-pass"
-    config.credentials.tarana.password = "fleet-pass"
-    config.credentials.ubiquiti.password = "fleet-pass"
+    config.credentials.for_vendor("cambium").password = "fleet-pass"
+    config.credentials.for_vendor("mikrotik").password = "switch-pass"
+    config.credentials.for_vendor("tachyon").password = "fleet-pass"
+    config.credentials.for_vendor("tarana").password = "fleet-pass"
+    config.credentials.for_vendor("ubiquiti").password = "fleet-pass"
     config.device_settings.tarana.operator_id = 12345
 
     (data_path / "configs" / "templates" / "cambium").mkdir(parents=True)

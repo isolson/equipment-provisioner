@@ -110,9 +110,12 @@ class TestPythonRegistries:
         )
 
     def test_credentials_config_fields_match(self):
-        assert set(CredentialsConfig.model_fields) == CANONICAL, (
-            "CredentialsConfig (config.py) out of sync — this is one half of "
-            "the config.py/main.py S1 crash-coupling (Story 3 / #73)."
+        # Story 3 (#73) consolidated this: CredentialsConfig is now a single
+        # `vendors` dict fed by config._default_credentials(), so the check
+        # moved from model fields to the table's keys. main.py derives its
+        # assembly from the same table, so the S1 crash-coupling is gone.
+        assert set(CredentialsConfig().vendors) == CANONICAL, (
+            "config._default_credentials() out of sync with the vendor set."
         )
 
     def test_device_ips_config_fields_match(self):
@@ -203,16 +206,19 @@ class TestSourceParsedRegistries:
             "missing-ubiquiti state until Story 2 / #72 lands)."
         )
 
-    def test_main_credentials_assembly_matches(self):
-        # main.py hand-builds the HandlerManager credentials dict from
-        # config.credentials.<vendor> attribute accesses — the other half of
-        # the config.py/main.py S1 crash-coupling (Story 3 / #73): a vendor
-        # present here but absent from CredentialsConfig is an
-        # AttributeError at boot.
+    def test_main_no_longer_enumerates_credential_vendors(self):
+        # Story 3 (#73) killed the S1 crash-coupling: main.py used to
+        # hand-build the HandlerManager dict from five
+        # `config.credentials.<vendor>` accesses, so a vendor present there
+        # but absent from CredentialsConfig was an AttributeError at boot.
+        # It now derives from config.credentials.vendors. The only
+        # remaining per-vendor access is the MikroTik management switch,
+        # which is a specific device, not the vendor table.
         source = (REPO_ROOT / "provisioner" / "main.py").read_text()
-        vendors = set(re.findall(r"self\.config\.credentials\.(\w+)", source))
-        assert vendors == CANONICAL, (
-            "main.py credential assembly out of sync with CredentialsConfig."
+        attribute_access = set(re.findall(r"self\.config\.credentials\.(\w+)", source))
+        assert attribute_access <= {"vendors", "for_vendor"}, (
+            "main.py re-introduced per-vendor credential attribute access; "
+            "derive from config.credentials.vendors instead."
         )
 
     def test_boot_ping_list_covers_the_same_ips_as_probe_list(self):

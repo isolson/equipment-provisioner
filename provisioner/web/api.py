@@ -540,7 +540,7 @@ async def _run_netinstall(provisioner, port_number: int):
     # password, so the post-flash SSH login must use that value. Fetch it from
     # the contract credentials endpoint (same API key); fall back to the local
     # MIKROTIK_BOOTSTRAP_PASS when the endpoint is unavailable.
-    local_bootstrap_pass = config.credentials.mikrotik.bootstrap_password
+    local_bootstrap_pass = config.credentials.for_vendor("mikrotik").bootstrap_password
     canonical_bootstrap_pass = None
     try:
         creds = await MikrotikHandler.fetch_provisioning_credentials(
@@ -2161,23 +2161,14 @@ async def test_api():
 # Default Credentials Management
 # ============================================================================
 
-# Known defaults for each device type (hardcoded fallbacks)
+# Built-in (read-only) credentials shown in the setup UI, derived from the
+# single credential table in config.py rather than restated here. The value is
+# a *list* per vendor because the UI renders multiple login candidates.
+from ..config import _default_credentials
+
 BUILTIN_CREDENTIALS = {
-    "cambium": [
-        {"username": "admin", "password": "admin"},
-    ],
-    "mikrotik": [
-        {"username": "admin", "password": ""},
-    ],
-    "tachyon": [
-        {"username": "root", "password": "admin"},
-    ],
-    "tarana": [
-        {"username": "admin", "password": "admin123"},
-    ],
-    "ubiquiti": [
-        {"username": "ubnt", "password": "ubnt"},
-    ],
+    vendor: [{"username": creds.username, "password": creds.password}]
+    for vendor, creds in _default_credentials().items()
 }
 
 
