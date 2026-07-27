@@ -16,7 +16,7 @@ Make the provisioner *additively pluggable*, not just *subtractively modular*: a
 
 | Concern | Current copies | Target |
 |---|---|---|
-| Vendor → handler | `HANDLER_MAP` (`handler_manager.py:24`), `cli.py:383`, `VALID_DEVICE_TYPES` (`api.py:1156`), `index.html:347` | 1 (derive from `HANDLER_MAP`/`DeviceType`) |
+| ~~Vendor → handler~~ | ✅ mostly done (#72) — `cli.py`, `VALID_DEVICE_TYPES` and `setup_tools.SUPPORTED_DEVICE_TYPES` now derive from `HandlerManager.provisionable_device_types()`. `index.html` still hardcodes its map (Story 5 / #75). | 1 (derive from `HANDLER_MAP`) |
 | ~~Credentials~~ | ✅ done (#73) — `_default_credentials()` in `config.py` is the one table; `main.py` and `BUILTIN_CREDENTIALS` derive from it. Handler `DEFAULT_CREDENTIALS` (login-retry ladders) stay separate until Story 6. | 1 table |
 | Link-local IPs | `DeviceLinkLocalIP` (`port_manager.py:112`) + inline copy (`:982`) + `DeviceIPsConfig` (`config.py:47`) | 1 registry |
 | Detection knowledge | `HTTP_SIGNATURES` + per-vendor probes + `_extract_device_details` (`fingerprint.py`) | per-vendor contribution |
@@ -75,10 +75,15 @@ Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M �
 
 **Acceptance:** ✅ no vendor brand string remains in `base.py` (code or comments); ✅ `tests/test_firmware_lookup_key.py` (11 cases) covers the default, the override, and all 5 vendors; ✅ full suite green (461 passed / 3 skipped), `check_py39` + `check_templates` green.
 
-### Story 2 — One source of truth for the handler registry · M · risk: low
+### Story 2 — One source of truth for the handler registry · M · risk: low — ✅ DONE (#72)
 **Why:** collapse 5 copies of the vendor→handler list (`HANDLER_MAP`, `cli`, `VALID_DEVICE_TYPES`, `setup_tools.SUPPORTED_DEVICE_TYPES`, UI).
-**Scope:** make `cli.py`, `VALID_DEVICE_TYPES`, and `setup_tools.SUPPORTED_DEVICE_TYPES` *derive* from `HANDLER_MAP`/`DeviceType` (add a helper like `provisionable_device_types()`), preserving the ED exception explicitly. (The firmware `SOURCE_MAP` maps to imported classes, so it consolidates with the plugin registry in Story 6, not here.) 
-**Acceptance:** deleting an entry from `HANDLER_MAP` propagates everywhere; Story 0 test still green; `test_handler_manager.py` updated.
+**Delivered:** `HandlerManager.provisionable_device_types()` returns the sorted device-type strings from `HANDLER_MAP` and is now the single source for `cli.py` (both the handler lookup and `choices=[...]`), `VALID_DEVICE_TYPES` (`web/api.py`), and `SUPPORTED_DEVICE_TYPES` (`setup_tools.py`). `cli.py`'s inline `handlers = {...}` dict is gone — it resolves via `HandlerManager.handler_class_for()`.
+
+**Bug fixed as a side effect:** `cli.py` had never listed `ubiquiti` (audit map site #4), so `--type ubiquiti` failed and it was absent from `test --device-type` choices. Deriving from `HANDLER_MAP` closed the gap; `--help` and the unknown-type error message now list all five vendors automatically. The `CLI_VENDORS` documented exception in the contract test is deleted.
+
+**Still hardcoded:** `index.html`'s `deviceVendors` map (name/color/icon/defaultUser) — that is Story 5 (#75), which needs an API endpoint, not a Python derivation. `_read_primary_credentials`'s hint strings and `_template_requirements` also remain per-vendor dicts; they hold real per-vendor *content*, not just membership, so they belong with Story 6's `VendorSpec`.
+
+**Acceptance:** ✅ deleting an entry from `HANDLER_MAP` propagates to CLI, API and setup UI; ✅ contract test updated (`test_cli_keeps_no_vendor_list_of_its_own` now asserts the *absence* of a CLI vendor list); ✅ CLI verified end-to-end for all five vendors; ✅ full suite green (487 passed / 3 skipped).
 
 ### Story 3 — Table-drive credentials (kill the crash-coupling) · M · risk: low-med — ✅ DONE (#73)
 **Why:** removes the `config.py ↔ main.py` AttributeError-on-omission (S1) and collapses 4 credential sources to 1.

@@ -1,7 +1,7 @@
 """Handler manager for routing devices to appropriate handlers."""
 
 import logging
-from typing import Dict, Optional, Type, Callable, Awaitable
+from typing import Dict, Optional, Tuple, Type, Callable, Awaitable
 
 from .fingerprint import DeviceType, DeviceFingerprint
 from .handlers.base import BaseHandler, ProvisioningResult
@@ -94,6 +94,21 @@ class HandlerManager:
     def get_supported_types(self) -> list[str]:
         """Get list of supported device types."""
         return [dt.value for dt in self.HANDLER_MAP.keys()]
+
+    @classmethod
+    def provisionable_device_types(cls) -> Tuple[str, ...]:
+        """Every device type with a handler, sorted, as plain strings.
+
+        The single source of truth for "which vendors can this build
+        provision" — `cli.py`, `web/api.py`'s ``VALID_DEVICE_TYPES``, and
+        ``setup_tools.SUPPORTED_DEVICE_TYPES`` all derive from this instead
+        of restating the list.
+
+        Evolution Digital is intentionally absent, same as ``HANDLER_MAP``:
+        its passive cross-port qualification flow is dispatched directly
+        from ``main.py`` and it has no ``BaseHandler``.
+        """
+        return tuple(sorted(dt.value for dt in cls.HANDLER_MAP))
 
     @classmethod
     def handler_class_for(cls, device_type: str) -> Optional[Type[BaseHandler]]:

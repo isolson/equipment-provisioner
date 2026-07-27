@@ -47,11 +47,11 @@ Follow the checklist in `docs/HANDLER_DEVELOPMENT.md` under "Adding a New Vendor
 8. `provisioner/handlers/__init__.py` — import + `__all__` *(miss this → ImportError at boot)*
 9. `provisioner/config.py` — `_default_credentials()` entry, `DeviceIPsConfig`, firmware-source default, any `apply_config_<vendor>` flag
 10. ~~`provisioner/main.py` — credentials dict~~ *(no longer needed — #73 made `main.py` derive from `config.credentials.vendors`; `BUILTIN_CREDENTIALS` and the setup-UI factory-default check derive from the same table)*
-11. `provisioner/cli.py` — handler dict + `choices`
-12. `provisioner/web/api.py` — `VALID_DEVICE_TYPES` (`BUILTIN_CREDENTIALS` now derives from #9); `provisioner/web/templates/index.html` — vendor metadata map
+11. ~~`provisioner/cli.py` — handler dict + `choices`~~ *(no longer needed — #72 derives both from `HANDLER_MAP`)*
+12. `provisioner/web/api.py` — ~~`VALID_DEVICE_TYPES`~~ *(derives from #4 since #72)*, `BUILTIN_CREDENTIALS` derives from #9; `provisioner/web/templates/index.html` — vendor metadata map
 13. `provisioner/firmware_sources/__init__.py` — import + `__all__` *(miss this → ImportError at boot)*
 14. `provisioner/firmware_checker.py` — `SOURCE_MAP` + the source imports *(miss either → ImportError at boot)*
-15. `provisioner/setup_tools.py` — `SUPPORTED_DEVICE_TYPES` + the per-vendor readiness / credential-hint / config-mode dicts (first-run setup UI)
+15. `provisioner/setup_tools.py` — the per-vendor readiness / credential-hint / config-mode dicts (first-run setup UI). `SUPPORTED_DEVICE_TYPES` derives from #4 since #72.
 
 ⚠️ This list is long *because* vendor enumeration isn't yet consolidated. Miss an **S1** site (#4, #8, #9, #13, #14 — #10 was retired by #73) and the service crashes at boot; miss an **S2** site and the device is silently undetectable or shows dead/missing setup-UI entries. Run `grep -rin <vendor> provisioner/ configs/` before declaring done. The exhaustive table is in `docs/ARCHITECTURE_ISOLATION_REVIEW.md`.
 

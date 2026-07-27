@@ -1232,7 +1232,10 @@ def _get_repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-VALID_DEVICE_TYPES = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
+# Derived from HANDLER_MAP — not a separate vendor list.
+from ..handler_manager import HandlerManager as _HandlerManager
+
+VALID_DEVICE_TYPES = set(_HandlerManager.provisionable_device_types())
 
 
 def _validate_device_type(device_type: str) -> str:

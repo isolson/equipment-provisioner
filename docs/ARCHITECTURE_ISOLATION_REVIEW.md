@@ -45,15 +45,15 @@ To **add or remove one vendor**, you must edit *every* one of these. There is no
 | 1 | `DeviceType` enum | `fingerprint.py:36` | ✅ yes |
 | 2 | `HANDLER_MAP` (+ import) | `handler_manager.py:10,24` | ✅ yes |
 | 3 | `handlers/__init__.py` import + `__all__` | `handlers/__init__.py` | ❌ undocumented |
-| 4 | CLI handler dict + `choices=[...]` | `cli.py:383,522,568` | ❌ **duplicate of #2** |
-| 5 | `VALID_DEVICE_TYPES` set | `web/api.py:1156` (used 2159/2193/2235/2270) | ❌ **duplicate** |
+| 4 | ~~CLI handler dict + `choices=[...]`~~ | `cli.py` | ✅ **RESOLVED (#72)** — derives from `HANDLER_MAP`; also fixed the missing-`ubiquiti` gap |
+| 5 | ~~`VALID_DEVICE_TYPES` set~~ | `web/api.py` | ✅ **RESOLVED (#72)** — derives from `HANDLER_MAP` |
 | 6 | UI vendor metadata map | `index.html:347` | ❌ **duplicate (frontend)** |
 | 7 | Per-vendor pydantic classes + fields | `config.py:47-53` (`DeviceIPsConfig`), `97-120` (`*Credentials`/`CredentialsConfig`), firmware sources, feature flags | ❌ undocumented |
 | 8 | `DeviceLinkLocalIP` consts + `.ALL` + inline copy | `port_manager.py:112` **and** `:982` | ⚠️ partly blessed, **self-duplicated** |
 | 9 | Firmware-source class registry: `SOURCE_MAP` + imports, and `firmware_sources/__init__.py` | `firmware_checker.py:20-39`, `firmware_sources/__init__.py` | ❌ undocumented (**import-crash on removal**) |
 | 10 | `SUPPORTED_DEVICE_TYPES` + readiness / credential-hint / config-mode dicts | `setup_tools.py:23,79-126` | ❌ undocumented (first-run setup UI) |
 
-Credentials specifically have **four** copies: `CredentialsConfig` (`config.py:114`), the `main.py:109` dict, handler `DEFAULT_CREDENTIALS`, and `BUILTIN_CREDENTIALS` (`api.py:2086`).
+~~Credentials specifically have **four** copies.~~ **RESOLVED (#73)** — `config._default_credentials()` is the single table; `main.py` and `BUILTIN_CREDENTIALS` derive from it. Handler `DEFAULT_CREDENTIALS` remain separate by design (login-retry ladders, not defaults) until Story 6.
 
 **Implication:** the registry is not DRY. Forgetting any one site is the dominant failure mode of both extraction directions — and the failure mode varies (see §4).
 
@@ -74,7 +74,7 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 | **S2** | `_extract_device_details` per-vendor `elif` chain | `fingerprint.py:~854-912` | Model/version regex branch per `DeviceType`. |
 | **S2** | `MODEL_FIRMWARE_PATTERNS` | `firmware.py:165-218` | Vendor model→filename-pattern table. Dead rows harmless. |
 | **S2** | Typed per-vendor config classes + IP defaults + feature flags | `config.py:47-53,97-120`, `apply_config_ubiquiti`/`apply_config_tarana`, `device_settings.tarana/.mikrotik` | Schema-level coupling. `apply_config_<vendor>` flags should be generic/table-driven. |
-| **S2** | CLI handler dict + choices | `cli.py:383,522,568` | **Second copy** of the handler registry. |
+| ~~**S2**~~ | ~~CLI handler dict + choices~~ | ~~`cli.py`~~ | **RESOLVED (#72)** — `HandlerManager.provisionable_device_types()` / `handler_class_for()`. |
 | **S2** | `VALID_DEVICE_TYPES` + filename→type inference + UI lists + `BUILTIN_CREDENTIALS` | `web/api.py:1156,1208-1217,2068,2086` | **Third + fourth copies** of the vendor list. Plus MikroTik netinstall/ZTP and Tarana-settings blocks. |
 | **S2** | `SUPPORTED_DEVICE_TYPES` + per-vendor readiness / credential-hint / config-mode dicts | `setup_tools.py:23,79-126` | First-run setup readiness UI; also couples to `apply_config_ubiquiti`. Stale entries = dead UI rows; missing = vendor absent from setup checks. |
 | **S2** | UI vendor map + behavioral branches | `index.html:347` (map), `:966` (`canApplyMode`), `:1307` (Tachyon SSID uppercase) | **Frontend copy** + 2 vendor-specific UI behaviors. |

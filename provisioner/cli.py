@@ -28,6 +28,17 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 console = Console()
 
 
+def _supported_device_types():
+    """Device types the CLI accepts, derived from ``HANDLER_MAP``.
+
+    Imported lazily so building the argument parser doesn't drag the whole
+    handler package (and its aiohttp/paramiko dependencies) into `--help`.
+    """
+    from .handler_manager import HandlerManager
+
+    return HandlerManager.provisionable_device_types()
+
+
 def setup_logging(verbose: bool = False):
     """Setup logging with rich handler."""
     level = logging.DEBUG if verbose else logging.INFO
@@ -372,24 +383,20 @@ async def cmd_reboot(args):
 
 async def get_handler(ip: str, device_type: str, username: str, password: str, mock: bool = False):
     """Get the appropriate handler for a device type."""
-    from .handlers import MikrotikHandler, CambiumHandler, TachyonHandler, TaranaHandler, MockHandler
+    from .handlers import MockHandler
+    from .handler_manager import HandlerManager
 
     if mock:
         # Use mock handler with the specified device type for simulation
         credentials = {"username": username, "password": password}
         return MockHandler(ip=ip, credentials=credentials, device_type=device_type)
 
-    handlers = {
-        "mikrotik": MikrotikHandler,
-        "cambium": CambiumHandler,
-        "tachyon": TachyonHandler,
-        "tarana": TaranaHandler,
-    }
-
-    handler_class = handlers.get(device_type.lower())
+    # Derived from HANDLER_MAP — the CLI does not keep its own vendor list.
+    handler_class = HandlerManager.handler_class_for(device_type.lower())
     if not handler_class:
         console.print(f"[red]Unknown device type: {device_type}[/red]")
-        console.print(f"[dim]Supported types: {', '.join(handlers.keys())}[/dim]")
+        supported = ", ".join(HandlerManager.provisionable_device_types())
+        console.print(f"[dim]Supported types: {supported}[/dim]")
         return None
 
     credentials = {"username": username, "password": password}
@@ -519,7 +526,8 @@ def main():
     # Common device arguments
     def add_device_args(p):
         p.add_argument("ip", help="Device IP address")
-        p.add_argument("--type", "-t", required=True, help="Device type (cambium, mikrotik, tachyon, tarana)")
+        p.add_argument("--type", "-t", required=True,
+                       help=f"Device type ({', '.join(_supported_device_types())})")
         p.add_argument("--username", "-u", default="admin", help="Device username")
         p.add_argument("--password", "-p", default="", help="Device password")
 
@@ -566,7 +574,7 @@ def main():
     # Test command (mock device)
     test_parser = subparsers.add_parser("test", help="Test provisioning with mock device")
     test_parser.add_argument("--device-type", "-t", default="cambium",
-                            choices=["cambium", "mikrotik", "tachyon", "tarana"],
+                            choices=list(_supported_device_types()),
                             help="Device type to simulate")
     test_parser.add_argument("--firmware", "-f", action="store_true",
                             help="Include firmware update in test")

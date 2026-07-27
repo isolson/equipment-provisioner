@@ -20,10 +20,10 @@ Known, documented exceptions:
   directly from ``main.py``.
 - ``MockHandler`` — simulation-only (``provision --mock``); exported from
   the handlers package but absent from every vendor registry.
-- ``cli.py`` (inline handler dict and ``choices=[...]``) lacks
-  ``ubiquiti`` — pre-existing gap, audit map site #4 ("duplicate of #2").
-  Story 2 (#72) derives the CLI list from ``HANDLER_MAP``; remove
-  ``CLI_VENDORS`` when it lands.
+- ``cli.py`` used to lack ``ubiquiti`` (pre-existing gap, audit map site
+  #4). **Resolved by Story 2 (#72)** — the CLI now derives from
+  ``HANDLER_MAP`` via ``HandlerManager.provisionable_device_types()``, so
+  the gap closed and the ``CLI_VENDORS`` exception is gone.
 - No ``tarana`` firmware source exists (``SOURCE_MAP``,
   ``firmware_sources``, config defaults): Tarana's firmware download
   endpoint requires authentication, so firmware is uploaded manually
@@ -66,9 +66,6 @@ CANONICAL = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
 # auto-fetch source joins this exception the same way.
 FIRMWARE_SOURCE_VENDORS = CANONICAL - {"tarana"}
 
-# cli.py predates Ubiquiti support and hardcodes its own handler list
-# (documented exception, fixed by Story 2 / #72).
-CLI_VENDORS = CANONICAL - {"ubiquiti"}
 
 
 class TestPythonRegistries:
@@ -96,6 +93,21 @@ class TestPythonRegistries:
             "handlers/__init__.py __all__ is missing {} — an S1 site: a missing "
             "import crashes the service at boot.".format(sorted(missing))
         )
+
+    def test_provisionable_device_types_is_the_derived_source(self):
+        # Story 2 (#72): the one helper cli.py, VALID_DEVICE_TYPES and
+        # setup_tools.SUPPORTED_DEVICE_TYPES all derive from.
+        assert set(HandlerManager.provisionable_device_types()) == CANONICAL
+        assert HandlerManager.provisionable_device_types() == tuple(
+            sorted(CANONICAL)
+        ), "callers rely on a stable sorted order for UI listing"
+
+    def test_cli_resolves_a_handler_for_every_vendor(self):
+        # Includes ubiquiti, which cli.py's inline dict used to omit.
+        for vendor in CANONICAL:
+            assert HandlerManager.handler_class_for(vendor) is not None, (
+                f"cli.py can no longer resolve a handler for {vendor}"
+            )
 
     def test_valid_device_types_matches(self):
         assert VALID_DEVICE_TYPES == CANONICAL, (
@@ -182,29 +194,19 @@ class TestSourceParsedRegistries:
     """Registries that only exist as literals inside function bodies or
     templates — parsed from source, since they can't be imported."""
 
-    def test_cli_handler_dict_matches(self):
+    def test_cli_keeps_no_vendor_list_of_its_own(self):
+        # Story 2 (#72) removed cli.py's inline handler dict and hardcoded
+        # choices=[...]; both now derive from HANDLER_MAP, which also fixed
+        # the long-standing missing-ubiquiti gap.
         source = (REPO_ROOT / "provisioner" / "cli.py").read_text()
-        match = re.search(r"handlers\s*=\s*\{([^}]*)\}", source)
-        assert match, (
-            "cli.py: couldn't find the inline `handlers = {...}` dict in "
-            "get_handler() — if it moved or was derived from HANDLER_MAP "
-            "(Story 2 / #72), update this test."
+        assert not re.search(r"handlers\s*=\s*\{", source), (
+            "cli.py re-introduced an inline handler dict; derive from "
+            "HandlerManager.handler_class_for() instead."
         )
-        keys = set(re.findall(r'"(\w+)"\s*:', match.group(1)))
-        assert keys == CLI_VENDORS, (
-            "cli.py handler dict drifted (expected the documented "
-            "missing-ubiquiti state until Story 2 / #72 lands)."
-        )
-
-    def test_cli_choices_matches(self):
-        source = (REPO_ROOT / "provisioner" / "cli.py").read_text()
-        match = re.search(r"choices=\[([^\]]*)\]", source)
-        assert match, "cli.py: couldn't find the device-type choices=[...] list."
-        keys = set(re.findall(r'"(\w+)"', match.group(1)))
-        assert keys == CLI_VENDORS, (
-            "cli.py choices=[...] drifted (expected the documented "
-            "missing-ubiquiti state until Story 2 / #72 lands)."
-        )
+        for vendor in CANONICAL:
+            assert not re.search(rf'"{vendor}"\s*:\s*\w+Handler', source), (
+                f"cli.py re-introduced a hardcoded handler entry for {vendor}."
+            )
 
     def test_main_no_longer_enumerates_credential_vendors(self):
         # Story 3 (#73) killed the S1 crash-coupling: main.py used to

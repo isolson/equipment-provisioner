@@ -10,7 +10,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
 STATUS_PRIORITY = {
@@ -20,7 +20,14 @@ STATUS_PRIORITY = {
     "error": 3,
 }
 
-SUPPORTED_DEVICE_TYPES = ("cambium", "mikrotik", "tachyon", "tarana", "ubiquiti")
+def _supported_device_types() -> Tuple[str, ...]:
+    """Derived from HANDLER_MAP — the setup UI keeps no vendor list."""
+    from .handler_manager import HandlerManager
+
+    return HandlerManager.provisionable_device_types()
+
+
+SUPPORTED_DEVICE_TYPES = _supported_device_types()
 ROOT_BUNDLE_NAMES = {
     "configs",
     "firmware",
