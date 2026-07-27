@@ -41,9 +41,18 @@ class SpyHandler(BaseHandler):
         active_bank: int = 1,
         initial_bank1: str = "old",
         initial_bank2: str = "old",
+        device_type: str = "spy",
+        model: Optional[str] = "SPY-MODEL",
+        hardware_version: Optional[str] = None,
     ):
         super().__init__(ip="10.0.0.1", credentials={"username": "x", "password": "y"})
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
+        # Firmware-lookup tests need a handler that can impersonate a real
+        # vendor: the lookup-key branch keys off device_type, and only
+        # MikroTik-class devices report a hardware_version.
+        self._device_type = device_type
+        self._model = model
+        self._hardware_version = hardware_version
         self._props = {
             "supports_dual_bank": supports_dual_bank,
             "update_triggers_reboot": update_triggers_reboot,
@@ -57,7 +66,7 @@ class SpyHandler(BaseHandler):
 
     @property
     def device_type(self) -> str:
-        return "spy"
+        return self._device_type
 
     @property
     def supports_dual_bank(self) -> bool:
@@ -98,11 +107,12 @@ class SpyHandler(BaseHandler):
     async def get_info(self) -> DeviceInfo:
         self._record("get_info")
         return DeviceInfo(
-            device_type="spy",
-            model="SPY-MODEL",
+            device_type=self._device_type,
+            model=self._model,
             mac_address="aa:bb:cc:dd:ee:ff",
             serial_number="SN0001",
             firmware_version=self._bank1,
+            hardware_version=self._hardware_version,
         )
 
     async def backup_config(self) -> bytes:

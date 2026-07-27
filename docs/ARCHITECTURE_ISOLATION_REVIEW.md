@@ -65,7 +65,7 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 
 | Sev | Leak | Location | Notes |
 |---|---|---|---|
-| **S1** | `if self.device_type == "mikrotik"` in the engine | `base.py:395-403` (`firmware_lookup_key`) | **The one true rule violation.** Should be a handler property override. Contained to 1 spot. |
+| ~~**S1**~~ | ~~`if self.device_type == "mikrotik"` in the engine~~ | ~~`base.py` (`firmware_lookup_key`)~~ | **RESOLVED (#71).** Now `BaseHandler.firmware_lookup_key()` (default: `device_info.model`) with a `MikrotikHandler` override. `base.py` has zero vendor brand strings, comments included. |
 | **S1** | Credentials dict ↔ config schema coupling | `main.py:109-129` ⟷ `config.py:97-120` | `self.config.credentials.tachyon` hardcoded. Remove from one but not the other → **AttributeError at startup**. Must move together. |
 | **S1** | Handler imports | `handler_manager.py:10`, `handlers/__init__.py` | Delete a handler file but leave the import → **ImportError at startup** (hard crash). |
 | **S1** | Firmware-source imports + `SOURCE_MAP` | `firmware_sources/__init__.py`, `firmware_checker.py:20-39` | Delete `firmware_sources/{vendor}.py` but leave the import/map → **ImportError at startup**. |

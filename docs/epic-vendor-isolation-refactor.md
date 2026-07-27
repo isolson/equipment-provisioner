@@ -22,7 +22,7 @@ Make the provisioner *additively pluggable*, not just *subtractively modular*: a
 | Detection knowledge | `HTTP_SIGNATURES` + per-vendor probes + `_extract_device_details` (`fingerprint.py`) | per-vendor contribution |
 | Firmware sources | `SOURCE_MAP` + imports (`firmware_checker.py:20-39`), `firmware_sources/__init__.py` | 1 registry (config is already table-driven; the class map + imports are not) |
 | Setup / readiness | `SUPPORTED_DEVICE_TYPES` + readiness/hint/mode dicts (`setup_tools.py:23,79-126`) | derive from the vendor registry |
-| Vendor-in-engine leak | `if self.device_type == "mikrotik"` (`base.py:395-403`) | handler property |
+| ~~Vendor-in-engine leak~~ | ~~`if self.device_type == "mikrotik"` (`base.py`)~~ | ✅ done (#71) — `BaseHandler.firmware_lookup_key()` + MikroTik override |
 
 ## Success criteria
 
@@ -65,10 +65,15 @@ Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M �
 **Scope:** add `tests/test_vendor_registry.py` asserting the *same* vendor set across `DeviceType` (minus `UNKNOWN`/`EVOLUTION_DIGITAL`), `HANDLER_MAP`, `cli.py` handler dict, `VALID_DEVICE_TYPES`, `CredentialsConfig` fields, `BUILTIN_CREDENTIALS`, `DeviceLinkLocalIP.ALL`, `firmware_checker.SOURCE_MAP` (+ `firmware_sources/__init__.__all__`), `setup_tools.SUPPORTED_DEVICE_TYPES`, and (via a parsed-constant or rendered-endpoint check) the `index.html` vendor map. Document ED + Mock as known exceptions.
 **Acceptance:** test passes today; deliberately breaking any one registry makes it fail. **Do this first** — it is the guard for Stories 2–7.
 
-### Story 1 — Remove the MikroTik branch from the engine (S1 fix) · S · risk: low
+### Story 1 — Remove the MikroTik branch from the engine (S1 fix) · S · risk: low — ✅ DONE (#71)
 **Why:** the only true architecture-rule violation; vendor name inside `base.py`.
-**Scope:** replace `base.py:395-403` `firmware_lookup_key()` MikroTik branch with a handler property (e.g. `firmware_lookup_key(device_info) -> Optional[str]`, default `model`; `MikrotikHandler` returns `hardware_version`). 
-**Acceptance:** no vendor string remains in `base.py`; `test_handler_properties.py` covers the override; MikroTik firmware lookup unchanged. Independent of all other stories.
+**Delivered:** `BaseHandler.firmware_lookup_key(device_info)` (default `device_info.model`) with a `MikrotikHandler` override preferring `hardware_version` (the RouterOS CPU arch, which is what `.npk` filenames carry). Both `provision()` call sites now dispatch through it, and the four vendor-naming *comments* in `base.py` were made vendor-neutral so a brand-string gate can be an exact grep.
+
+**Landmine found during review — read before touching this default.** Cambium (`cambium.py`, `hardwareVersion`) and Ubiquiti (`ubiquiti.py`, `hwversion`) **populate `hardware_version` today** without it being their firmware key. The old `device_type == "mikrotik"` guard was therefore load-bearing, not vestigial: broadening the base default to `hardware_version or model` would key those two vendors off a `"V1.0"`-style string, miss every `MODEL_FIRMWARE_PATTERNS` entry, and fail *only on real hardware*. `tests/test_firmware_lookup_key.py` pins this per vendor.
+
+**Semantic change to note:** dispatch moved from the `device_type` *string* to the handler *class*. `MockHandler(device_type="mikrotik")` no longer gets the arch preference. Harmless in practice — mock's `get_info()` never sets `hardware_version`, so both forms return the model — but it is a real change.
+
+**Acceptance:** ✅ no vendor brand string remains in `base.py` (code or comments); ✅ `tests/test_firmware_lookup_key.py` (11 cases) covers the default, the override, and all 5 vendors; ✅ full suite green (461 passed / 3 skipped), `check_py39` + `check_templates` green.
 
 ### Story 2 — One source of truth for the handler registry · M · risk: low
 **Why:** collapse 5 copies of the vendor→handler list (`HANDLER_MAP`, `cli`, `VALID_DEVICE_TYPES`, `setup_tools.SUPPORTED_DEVICE_TYPES`, UI).

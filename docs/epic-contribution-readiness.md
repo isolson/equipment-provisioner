@@ -110,7 +110,7 @@ Implement each as a separate required check; each is a `scripts/` entrypoint run
 **Acceptance:** a deliberate `match` in any module (incl. an unimported one) fails the gate locally and in CI.
 
 **C3 — Vendor-isolation gate · M · risk: low**
-**Scope:** `scripts/check_vendor_isolation.py` (or pytest) fails if shared modules — `base.py`, `port_manager.py`, `fingerprint.py`'s flow, `config_store.py` — contain vendor brand strings / concrete-handler references in flow logic, beyond the sanctioned surface. **Complements** isolation-epic S1: until S1 removes the known `base.py:395-403` MikroTik stray, the gate carries a single, commented allowlist entry that S1's PR deletes.
+**Scope:** `scripts/check_vendor_isolation.py` (or pytest) fails if shared modules — `base.py`, `port_manager.py`, `fingerprint.py`'s flow, `config_store.py` — contain vendor brand strings / concrete-handler references in flow logic, beyond the sanctioned surface. **Complements** isolation-epic S1, which is now done (#71): `base.py` is clean of vendor brand strings in both code *and* comments, so this gate needs **no allowlist entry** and can be an exact case-insensitive grep.
 **Acceptance:** adding `if device_type == "cambium"` to `base.py` fails the gate; the allowlist shrinks to empty once S1 lands.
 
 **C4 — Config-template validation gate (incl. remediating existing placeholders) · M · risk: low-med**

@@ -30,6 +30,14 @@ BaseHandler defines properties that control the provisioning flow. Override them
 | `fw2_skips_reboot` | `False` | Bank 2 update writes to inactive bank without activating. No reboot after FW2. Preserves auto-discovered state (azimuth, location) |
 | `config_after_all_firmware` | `False` | Moves config apply to AFTER all firmware updates and skips config verification. Use when config changes the management network (VLAN, DHCP), making the device unreachable for further operations |
 
+### Overridable Methods
+
+| Method | Default | Override When |
+|--------|---------|---------------|
+| `firmware_lookup_key(device_info)` | `device_info.model` | Your firmware **filenames** are keyed on something other than the product name. `MikrotikHandler` returns `hardware_version` because RouterOS `.npk` files carry the CPU architecture (`routeros-7.15-mipsbe.npk`), not the board name. |
+
+⚠️ **Do not broaden the `firmware_lookup_key` default to `hardware_version or model`.** Cambium and Ubiquiti both populate `hardware_version` for *display* without it being their firmware key — preferring it there would key them off a `"V1.0"`-style string, match no `MODEL_FIRMWARE_PATTERNS` entry, and fail only on real hardware. `tests/test_firmware_lookup_key.py` pins the per-vendor expectations; add a case there when you add a vendor.
+
 ### Class-Level Traits (consulted before instantiation)
 
 Unlike the instance properties above (which may depend on `self._device_info`),
