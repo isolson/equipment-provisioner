@@ -30,11 +30,7 @@ sudo tcpdump -i eth0 -e vlan -c 20
 
 **Check device boot state:**
 
-Devices need time to boot before they respond to HTTP probes. Default wait is 90 seconds. If a device takes longer, check `config.yaml`:
-```yaml
-detection:
-  boot_wait_seconds: 90  # Increase if needed
-```
+Devices need time to boot before they respond to HTTP probes. The port manager waits up to 120 seconds after link-up.
 
 **Check fingerprinting:**
 ```bash
@@ -71,7 +67,7 @@ journalctl -u provisioner-web -f | grep -i "login\|auth\|credential"
 **Firmware upload stuck:**
 - Check if the device web UI is responsive: `curl --interface eth0.199X -sk https://169.254.1.1/`
 - Large firmware files can take several minutes to upload over 100Mbps links
-- The reboot timeout is 10 minutes; some devices need the full duration
+- The firmware reboot timeout is 180 seconds by default. Set `firmware.reboot_wait_timeout` in `config.yaml` when a device needs more time. The valid range is 60 to 600 seconds.
 
 **Config apply stuck:**
 - Cambium `config_import` is asynchronous — the provisioner polls until `applyFinished` is true
@@ -80,7 +76,7 @@ journalctl -u provisioner-web -f | grep -i "login\|auth\|credential"
 **Device rebooted unexpectedly:**
 - Some devices (Tachyon) auto-reboot after firmware flash without explicit reboot command
 - The provisioner handles this, but if the link drops for too long, it may time out
-- Check `wait_for_reboot` timeout in `config.yaml`
+- Check the `firmware.reboot_wait_timeout` value in `config.yaml`
 
 ## VLAN Interface Binding Errors
 
@@ -121,11 +117,12 @@ If another process is using port 8080, change the port in `config.yaml` or start
 
 **Kiosk mode not starting:**
 ```bash
-# Check if X11 is running
-systemctl status display-manager
+# Check the kiosk watchdog
+systemctl status kiosk-watchdog
 
-# Check kiosk user auto-login
-cat /etc/lightdm/lightdm.conf | grep autologin
+# Check the X11 and Chromium processes
+ps -ef | grep '[X]org'
+ps -ef | grep '[c]hromium'
 ```
 
 ## GPIO LEDs Not Working

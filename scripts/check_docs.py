@@ -116,6 +116,19 @@ def check_docs() -> List[Tuple[str, str]]:
         "docs/BRANCHING.md": (
             ("serves `/ports`", "the health and port endpoints are /health and /api/ports"),
         ),
+        "docs/TROUBLESHOOTING.md": (
+            ("boot_wait_seconds", "the boot wait is controlled by the implementation"),
+            ("systemctl status display-manager", "the kiosk uses the kiosk watchdog"),
+            ("/etc/lightdm/", "the kiosk uses startx and Openbox"),
+        ),
+        "docs/plan-ap-config.md": (
+            ("/apply-ap-config", "the mode endpoint is /apply-mode"),
+        ),
+        "docs/SCREENSHOTS.md": (
+            ("Ports / Firmware / Files", "the screenshot guide must describe the current page headers"),
+            ("Tarana device (purple badge)", "Tarana uses the orange vendor color"),
+            ("Tachyon device (green badge)", "Tachyon uses the purple vendor color"),
+        ),
     }
     for path, expected in facts.items():
         if not os.path.exists(path):
@@ -124,6 +137,20 @@ def check_docs() -> List[Tuple[str, str]]:
         for needle, explanation in expected:
             if needle in text:
                 problems.append((path, "stale fact %r: %s" % (needle, explanation)))
+
+    required_facts = {
+        "docs/API.md": (
+            ("device_type` — One of: `cambium`, `mikrotik`, `tachyon`, `tarana`, `ubiquiti`",
+             "API device-type lists must include every supported vendor"),
+        ),
+    }
+    for path, expected in required_facts.items():
+        if not os.path.exists(path):
+            continue
+        text = read_text(path)
+        for needle, explanation in expected:
+            if needle not in text:
+                problems.append((path, "missing current fact %r: %s" % (needle, explanation)))
 
     # The examples and implementation plan may document placeholders for the
     # mode-change flow, but both documents must state the rendering boundary.

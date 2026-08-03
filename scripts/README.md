@@ -106,8 +106,8 @@ sudo ./scripts/setup_switch.sh --rsc /path/to/custom.rsc
 # Skip password change prompt
 sudo ./scripts/setup_switch.sh --skip-password-change
 
-# Non-interactive (auto-confirm)
-sudo ./scripts/setup_switch.sh --yes
+# Non-interactive (auto-confirm). Supply the password through the environment.
+sudo PROVISIONER_SWITCH_PASSWORD='<switch-password>' ./scripts/setup_switch.sh --yes
 ```
 
 **What it does:**
@@ -115,6 +115,9 @@ sudo ./scripts/setup_switch.sh --yes
 2. Connects via SSH (default: admin with empty password)
 3. Uploads and imports the RouterOS config script
 4. Configures VLANs 1990-1996, bridge, trunk port, and webhook scripts
+
+Do not pass a password as a command-line argument. The script accepts an
+interactive prompt or the `PROVISIONER_SWITCH_PASSWORD` environment variable.
 
 The RouterOS template is at `configs/templates/mikrotik_switch_provisioner.rsc`.
 

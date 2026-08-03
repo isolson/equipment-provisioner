@@ -1401,19 +1401,20 @@ async def setup_switch_configure(body: SetupSwitchRequest):
         body.ip,
         "--username",
         body.username,
-        "--password",
-        body.password,
         "--yes",
     ]
     if body.skip_password_change:
         cmd.append("--skip-password-change")
 
     try:
+        child_env = os.environ.copy()
+        child_env["PROVISIONER_SWITCH_PASSWORD"] = body.password
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(_get_repo_root()),
+            env=child_env,
         )
         stdout, _ = await proc.communicate()
     except Exception as exc:

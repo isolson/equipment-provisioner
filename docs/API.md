@@ -295,7 +295,7 @@ Upload a firmware file. Multipart form data.
 
 **Form fields:**
 - `file` — The firmware binary
-- `device_type` — One of: `cambium`, `mikrotik`, `tachyon`, `tarana`
+- `device_type` — One of: `cambium`, `mikrotik`, `tachyon`, `tarana`, `ubiquiti`
 
 ### POST /firmware/url
 
@@ -349,7 +349,7 @@ Upload a config file. Multipart form data.
 **Form fields:**
 - `file` — The config file (`.json`, `.rsc`, `.yaml`, `.tar`, `.tar.gz`)
 - `config_type` — `template` or `override`
-- `device_type` — One of: `cambium`, `mikrotik`, `tachyon`, `tarana`
+- `device_type` — One of: `cambium`, `mikrotik`, `tachyon`, `tarana`, `ubiquiti`
 
 JSON files are validated before saving.
 

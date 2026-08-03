@@ -906,7 +906,7 @@ def test_setup_switch_configure_runs_switch_script(tmp_path, monkeypatch):
         json={
             "ip": "192.168.88.1",
             "username": "admin",
-            "password": "",
+            "password": "test-switch-secret",
             "skip_password_change": True,
         },
     )
@@ -917,6 +917,8 @@ def test_setup_switch_configure_runs_switch_script(tmp_path, monkeypatch):
     assert "six ports" in payload["message"].lower()
     assert captured["cmd"][0] == "/bin/bash"
     assert "--skip-password-change" in captured["cmd"]
+    assert "--password" not in captured["cmd"]
+    assert captured["kwargs"]["env"]["PROVISIONER_SWITCH_PASSWORD"] == "test-switch-secret"
 
 
 def test_setup_seed_templates_copies_repo_templates(tmp_path, monkeypatch):

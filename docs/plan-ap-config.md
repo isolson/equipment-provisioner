@@ -71,7 +71,7 @@ Available variables:
 ### New Endpoint
 
 ```
-POST /api/ports/{port_number}/apply-ap-config
+POST /api/ports/{port_number}/apply-mode
 ```
 
 **Request:**
@@ -160,7 +160,7 @@ Show spinner during config apply, then success/error message.
 
 1. **Phase 1: Backend**
    - [ ] Create `ap_config.py` module with template loading/rendering
-   - [ ] Add API endpoint `/api/ports/{port}/apply-ap-config`
+   - [ ] Add API endpoint `/api/ports/{port}/apply-mode`
    - [ ] Add reconnect logic for idle devices
 
 2. **Phase 2: Config Templates**

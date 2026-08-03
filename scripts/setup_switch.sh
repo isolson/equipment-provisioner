@@ -94,7 +94,6 @@ Detect and configure a MikroTik switch as the provisioner switch.
 Options:
   --ip ADDRESS           IP address of the MikroTik switch (skip auto-detection)
   --username USER        Username for SSH (default: admin)
-  --password PASS        Password for SSH (default: empty)
   --config FILE          Path to custom RSC configuration file
   --skip-password-change Don't generate/set a new admin password
   --yes, -y              Auto-confirm all prompts (non-interactive mode)
@@ -104,8 +103,8 @@ Examples:
   # Interactive mode (recommended for first setup)
   sudo ./setup_switch.sh
 
-  # Non-interactive with factory defaults
-  sudo ./setup_switch.sh --ip 192.168.88.1 --username admin --password "" --yes
+  # Non-interactive with a password from the environment
+  sudo PROVISIONER_SWITCH_PASSWORD='<switch-password>' ./setup_switch.sh --ip 192.168.88.1 --yes
 
   # Keep existing password
   sudo ./setup_switch.sh --skip-password-change
@@ -127,8 +126,8 @@ parse_args() {
                 shift 2
                 ;;
             --password)
-                PASSWORD="$2"
-                shift 2
+                log_error "Do not pass passwords on the command line. Use the prompt or PROVISIONER_SWITCH_PASSWORD."
+                exit 2
                 ;;
             --config)
                 CUSTOM_RSC="$2"
@@ -151,6 +150,10 @@ parse_args() {
                 ;;
         esac
     done
+
+    if [[ -n "${PROVISIONER_SWITCH_PASSWORD+x}" ]]; then
+        PASSWORD="$PROVISIONER_SWITCH_PASSWORD"
+    fi
 }
 
 # Check if a port is open
@@ -326,7 +329,7 @@ test_credentials() {
         # Empty password - try without sshpass
         result=$(ssh $ssh_opts "${user}@${ip}" "/system resource print; /system identity print; /system routerboard print" 2>/dev/null) || return 1
     else
-        result=$(sshpass -p "$pass" ssh $ssh_opts "${user}@${ip}" "/system resource print; /system identity print; /system routerboard print" 2>/dev/null) || return 1
+        result=$(SSHPASS="$pass" sshpass -e ssh $ssh_opts "${user}@${ip}" "/system resource print; /system identity print; /system routerboard print" 2>/dev/null) || return 1
     fi
 
     echo "$result"
@@ -371,7 +374,7 @@ upload_config() {
     if [[ -z "$pass" ]]; then
         scp $scp_opts "$rsc_file" "${user}@${ip}:provisioner_config.rsc"
     else
-        sshpass -p "$pass" scp $scp_opts "$rsc_file" "${user}@${ip}:provisioner_config.rsc"
+        SSHPASS="$pass" sshpass -e scp $scp_opts "$rsc_file" "${user}@${ip}:provisioner_config.rsc"
     fi
 }
 
@@ -389,7 +392,7 @@ apply_config() {
     if [[ -z "$pass" ]]; then
         ssh $ssh_opts "${user}@${ip}" "/import file-name=provisioner_config.rsc" 2>&1
     else
-        sshpass -p "$pass" ssh $ssh_opts "${user}@${ip}" "/import file-name=provisioner_config.rsc" 2>&1
+        SSHPASS="$pass" sshpass -e ssh $ssh_opts "${user}@${ip}" "/import file-name=provisioner_config.rsc" 2>&1
     fi
 }
 
@@ -410,10 +413,11 @@ set_switch_password() {
 
     local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
 
+    local command="/user set [find name=$user] password=\"$new_pass\""
     if [[ -z "$old_pass" ]]; then
-        ssh $ssh_opts "${user}@${ip}" "/user set [find name=$user] password=\"$new_pass\"" 2>/dev/null
+        printf '%s\n' "$command" | ssh $ssh_opts "${user}@${ip}" 2>/dev/null
     else
-        sshpass -p "$old_pass" ssh $ssh_opts "${user}@${ip}" "/user set [find name=$user] password=\"$new_pass\"" 2>/dev/null
+        printf '%s\n' "$command" | SSHPASS="$old_pass" sshpass -e ssh $ssh_opts "${user}@${ip}" 2>/dev/null
     fi
 }
 
@@ -425,12 +429,22 @@ save_password_to_env() {
     mkdir -p "$CONFIG_DIR"
 
     if [[ -f "$ENV_FILE" ]]; then
-        # Update existing MIKROTIK_PASSWORD line or add it
-        if grep -q "^MIKROTIK_PASSWORD=" "$ENV_FILE"; then
-            sed -i "s/^MIKROTIK_PASSWORD=.*/MIKROTIK_PASSWORD=${new_pass}/" "$ENV_FILE"
-        else
-            echo "MIKROTIK_PASSWORD=${new_pass}" >> "$ENV_FILE"
+        local temp_file
+        local found=false
+        temp_file=$(mktemp "${ENV_FILE}.tmp.XXXXXX")
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == MIKROTIK_PASSWORD=* ]]; then
+                printf 'MIKROTIK_PASSWORD=%s\n' "$new_pass" >> "$temp_file"
+                found=true
+            else
+                printf '%s\n' "$line" >> "$temp_file"
+            fi
+        done < "$ENV_FILE"
+        if [[ "$found" != true ]]; then
+            printf 'MIKROTIK_PASSWORD=%s\n' "$new_pass" >> "$temp_file"
         fi
+        chmod 600 "$temp_file"
+        mv -f "$temp_file" "$ENV_FILE"
     else
         # Create new env file
         cat > "$ENV_FILE" << EOF
@@ -470,7 +484,7 @@ verify_config() {
     if [[ -z "$pass" ]]; then
         result=$(ssh $ssh_opts "${user}@${ip}" "$cmd" 2>/dev/null)
     else
-        result=$(sshpass -p "$pass" ssh $ssh_opts "${user}@${ip}" "$cmd" 2>/dev/null)
+        result=$(SSHPASS="$pass" sshpass -e ssh $ssh_opts "${user}@${ip}" "$cmd" 2>/dev/null)
     fi
 
     # Check for provisioner-switch identity

@@ -281,7 +281,7 @@ credentials:
     username: admin
     password: <device-password>
   tachyon:
-    username: admin
+    username: root
     password: <device-password>
 
 firmware:

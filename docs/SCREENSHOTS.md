@@ -15,7 +15,7 @@ This document specifies what screenshots are needed for the README and what they
   - One "Provisioning" (blue, progress checklist)
   - One "Idle" (gray, no device)
 - Browser window should be sized to ~1200×800
-- Include the top navigation tabs (Ports / Firmware / Files)
+- Include the dashboard header with the Labels and Manage links.
 
 **How to capture:**
 1. Provision 2–3 devices so you have a mix of states
@@ -51,9 +51,9 @@ This document specifies what screenshots are needed for the README and what they
 
 **What to capture:**
 - 2–3 port cards side-by-side showing variety:
-  - One Cambium device (blue badge) in "Ready" state
-  - One Tarana device (purple badge) in "Provisioning" state
-  - One Tachyon device (green badge) in "Failed" state (if possible)
+  - One Cambium device (blue vendor badge) in "Ready" state
+  - One Tarana device (orange vendor badge) in "Provisioning" state
+  - One Tachyon device (purple vendor badge) in "Failed" state (if possible)
 - Each card should clearly show:
   - Vendor-colored badge
   - Model text
@@ -96,7 +96,7 @@ This document specifies what screenshots are needed for the README and what they
   - At least one cached firmware file (green checkmark or "Cached" badge)
   - One firmware file downloading (progress bar if available)
   - File sizes and dates
-- Include the page navigation showing "Ports / **Firmware** / Files"
+- Include the page header with the "Manage Assets" and "Console Settings" links.
 
 **How to capture:**
 1. Navigate to `http://192.168.88.10:8080/firmware`

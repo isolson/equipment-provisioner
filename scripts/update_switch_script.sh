@@ -40,17 +40,24 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --ip) SWITCH_IP="$2"; shift 2 ;;
         --user) USERNAME="$2"; shift 2 ;;
-        --password) PASSWORD="$2"; shift 2 ;;
+        --password)
+            log_error "Do not pass passwords on the command line. Use the prompt or PROVISIONER_SWITCH_PASSWORD."
+            exit 2
+            ;;
         --help|-h)
-            echo "Usage: $0 [--ip SWITCH_IP] [--user USERNAME] [--password PASSWORD]"
+            echo "Usage: $0 [--ip SWITCH_IP] [--user USERNAME]"
             echo ""
             echo "Updates the port-monitor script on the MikroTik switch."
-            echo "Password is loaded from $ENV_FILE if available."
+            echo "The password is loaded from $ENV_FILE or PROVISIONER_SWITCH_PASSWORD."
             exit 0
             ;;
         *) log_error "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+if [[ -n "${PROVISIONER_SWITCH_PASSWORD+x}" ]]; then
+    PASSWORD="$PROVISIONER_SWITCH_PASSWORD"
+fi
 
 # Prompt for password if not set
 if [[ -z "$PASSWORD" ]]; then
@@ -88,7 +95,7 @@ if [[ -z "$PASSWORD" ]]; then
         exit 1
     }
 else
-    sshpass -p "$PASSWORD" ssh $SSH_OPTS "${USERNAME}@${SWITCH_IP}" "/system identity print" > /dev/null 2>&1 || {
+    SSHPASS="$PASSWORD" sshpass -e ssh $SSH_OPTS "${USERNAME}@${SWITCH_IP}" "/system identity print" > /dev/null 2>&1 || {
         log_error "Failed to connect to switch"
         exit 1
     }
@@ -100,7 +107,7 @@ log_info "Uploading script file..."
 if [[ -z "$PASSWORD" ]]; then
     scp $SCP_OPTS "$RSC_FILE" "${USERNAME}@${SWITCH_IP}:port-monitor-update.rsc"
 else
-    sshpass -p "$PASSWORD" scp $SCP_OPTS "$RSC_FILE" "${USERNAME}@${SWITCH_IP}:port-monitor-update.rsc"
+    SSHPASS="$PASSWORD" sshpass -e scp $SCP_OPTS "$RSC_FILE" "${USERNAME}@${SWITCH_IP}:port-monitor-update.rsc"
 fi
 
 # Import the script
@@ -108,7 +115,7 @@ log_info "Importing script (this removes old and installs new)..."
 if [[ -z "$PASSWORD" ]]; then
     ssh $SSH_OPTS "${USERNAME}@${SWITCH_IP}" "/import file-name=port-monitor-update.rsc" 2>&1
 else
-    sshpass -p "$PASSWORD" ssh $SSH_OPTS "${USERNAME}@${SWITCH_IP}" "/import file-name=port-monitor-update.rsc" 2>&1
+    SSHPASS="$PASSWORD" sshpass -e ssh $SSH_OPTS "${USERNAME}@${SWITCH_IP}" "/import file-name=port-monitor-update.rsc" 2>&1
 fi
 
 # Verify
@@ -116,7 +123,7 @@ log_info "Verifying script installation..."
 if [[ -z "$PASSWORD" ]]; then
     ssh $SSH_OPTS "${USERNAME}@${SWITCH_IP}" "/system script print where name=port-monitor"
 else
-    sshpass -p "$PASSWORD" ssh $SSH_OPTS "${USERNAME}@${SWITCH_IP}" "/system script print where name=port-monitor"
+    SSHPASS="$PASSWORD" sshpass -e ssh $SSH_OPTS "${USERNAME}@${SWITCH_IP}" "/system script print where name=port-monitor"
 fi
 
 log_info "Done! Port-monitor script updated with speed detection fix."

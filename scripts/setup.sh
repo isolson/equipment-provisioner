@@ -325,7 +325,7 @@ step_configure_switch() {
         if [[ -z "$switch_pass" ]]; then
             result=$(ssh $ssh_opts "${switch_user}@${SWITCH_DEFAULT_IP}" "$test_cmd" 2>/dev/null) && test_ok=true && break
         else
-            result=$(sshpass -p "$switch_pass" ssh $ssh_opts "${switch_user}@${SWITCH_DEFAULT_IP}" "$test_cmd" 2>/dev/null) && test_ok=true && break
+            result=$(SSHPASS="$switch_pass" sshpass -e ssh $ssh_opts "${switch_user}@${SWITCH_DEFAULT_IP}" "$test_cmd" 2>/dev/null) && test_ok=true && break
         fi
         sleep 2
     done
@@ -350,13 +350,7 @@ step_configure_switch() {
 
     # Run setup_switch.sh
     local switch_args=(--ip "$SWITCH_DEFAULT_IP" --username "$switch_user" --yes)
-    if [[ -n "$switch_pass" ]]; then
-        switch_args+=(--password "$switch_pass")
-    else
-        switch_args+=(--password "")
-    fi
-
-    bash "${REPO_DIR}/scripts/setup_switch.sh" "${switch_args[@]}"
+    PROVISIONER_SWITCH_PASSWORD="$switch_pass" bash "${REPO_DIR}/scripts/setup_switch.sh" "${switch_args[@]}"
 
     log_info "Switch configuration applied"
 
