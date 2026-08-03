@@ -106,7 +106,7 @@ Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M �
 ## Recommended sequence
 
 ```
-Story 0 (guard) ──┬─> Story 1 (S1 quick win, parallel)
+Story 0 (guard) ──┬─> Story 1 (S1 low-risk fix, parallel)
                   ├─> Story 2 ─> Story 5 (UI)
                   ├─> Story 3 ─┐
                   └─> Story 4 ─┴─> Story 6 (capstone) ─> Story 7 (stretch)

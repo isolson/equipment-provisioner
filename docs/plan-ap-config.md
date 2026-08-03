@@ -1,24 +1,25 @@
-# AP Config Selection Feature - Implementation Plan
+# AP Configuration Selection Feature - Implementation Plan
 
 ## Overview
 
-After standard provisioning completes (which applies SM/subscriber config by default), allow the user to optionally convert a device to AP mode with custom naming.
+After standard provisioning completes, allow the operator to change a device to AP mode with custom naming. Standard provisioning applies the SM (subscriber module) configuration by default.
 
 ## User Flow
 
-1. Device detected → Auto-provisions with SM config (default behavior, unchanged)
-2. Provisioning completes successfully
-3. Port card shows "Configure as AP" button
-4. User clicks button → Modal appears asking:
+1. The system detects the device.
+2. The system provisions the device with the SM configuration.
+3. Provisioning completes successfully.
+4. The port card shows a "Configure as AP" button.
+5. The operator selects the button. A dialog requests:
    - Tower number (1-99, displayed as tw01-tw99)
    - Direction: North / South / East / West (dropdown or buttons)
-5. System generates naming:
+6. The system generates the names:
    - Hostname: `tw{tower:02d}-{direction}` (e.g., "tw05-north")
    - Systemname: same as hostname
    - SSID (device-specific):
      - **Tachyon**: Just the direction uppercase → `NORTH`, `SOUTH`, `EAST`, `WEST`
-     - **Cambium**: Tower + direction → `tw05-north`, `tw05-south`, etc.
-6. AP config template is loaded, variables injected, and applied to device
+     - **Cambium**: Tower plus direction, such as `tw05-north` or `tw05-south`.
+7. The system loads the AP mode template, renders the approved variables, and applies the configuration.
 
 ## Config File Structure
 
@@ -27,15 +28,15 @@ configs/templates/
 ├── tachyon/
 │   ├── default.json      # SM config (current default)
 │   ├── sm.json           # Explicit SM config (optional alias)
-│   └── ap.json           # AP config template with placeholders
+│   └── ap.json           # AP mode template rendered by mode_config.py
 ├── cambium/
 │   ├── default.json      # SM config
 │   └── ap.json           # AP config template
 ```
 
-## Template Variable Syntax
+## Template Variables
 
-AP config files use `{{variable}}` placeholders:
+AP and PTP mode templates can use the approved `{{variable}}` placeholders below. The renderer in `provisioner/mode_config.py` replaces these values before it applies the template. Standard provisioning uses deep merge with literal values and does not support placeholders.
 
 ```json
 {

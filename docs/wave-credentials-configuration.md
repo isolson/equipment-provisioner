@@ -292,7 +292,7 @@ async def provision_wave_device(ip: str, old_password: str, new_password: str):
         if not await handler.configure_snmp(community="monitoring"):
             print("Warning: SNMP configuration failed")
 
-        # 5. Apply other config (hostname, etc.)
+        # 5. Apply other configuration, such as the hostname
         config = {
             "system": {"hostname": f"site-{info.serial_number}"},
         }

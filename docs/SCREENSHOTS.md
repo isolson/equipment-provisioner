@@ -119,7 +119,7 @@ This document specifies what screenshots are needed for the README and what they
 
 ### Format
 - PNG format, 72 DPI
-- No browser chrome (address bar, bookmarks, etc.) unless showing full context
+- No browser chrome, such as the address bar or bookmarks, unless the context requires it
 
 ### Editing
 - Blur or redact any:

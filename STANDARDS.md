@@ -45,7 +45,7 @@ async def get_firmware_version(self) -> str
 Handlers override properties to control the provisioning flow — do NOT add vendor branching to `base.py`. See `docs/HANDLER_DEVELOPMENT.md` for the full property reference. Key properties: `supports_dual_bank`, `update_triggers_reboot`, `verify_active_bank`, `fw2_skips_reboot`, `config_after_all_firmware`, `supports_password_change`.
 
 ### Device Detection
-- Fingerprinting logic determines device type from HTTP responses, banners, etc.
+- Fingerprinting logic determines device type from HTTP responses, banners, and other protocol evidence.
 - Never assume device type based on IP address alone
 - Detection must work with devices in factory-default state
 
@@ -56,7 +56,7 @@ Handlers override properties to control the provisioning flow — do NOT add ven
 ### Login Flow (Credential Priority)
 The provisioner attempts authentication in this order:
 
-1. **Default/Built-in Credentials** - Hardcoded factory defaults for each device type (e.g., admin/admin for Cambium)
+1. **Default/Built-in Credentials** - The configured factory credentials for each device type
 2. **User-Configured Credential** - A single credential per device type that users can set via the UI settings page
 3. **Interactive Prompt** - If both above fail, the UI prompts the user to enter credentials manually
 
@@ -119,7 +119,7 @@ Cards are clickable when a device is detected, opening the activity log modal.
 ### Activity Log Modal
 Tapping a port card opens a modal with:
 - **Device summary grid** — labeled rows for MAC, Serial, IP, Link Speed, FW Bank 1, FW Bank 2 (with active indicator).
-- **Activity log** — timestamped entries in canonical provisioning order: Login → Model → FW Check → FW Bank 1 → Config → FW Bank 2 → Reboot → Verify. Each entry shows state (✓/✗/●/○), step name, and detail text (firmware version, model name, etc.). Active step has blue highlight. Steps not yet in the log but visible in the checklist appear without timestamps.
+- **Activity log** — timestamped entries in canonical provisioning order: Login → Model → FW Check → FW Bank 1 → Config → FW Bank 2 → Reboot → Verify. Each entry shows state (✓/✗/●/○), step name, and detail text such as firmware version or model name. Active steps have a blue highlight. Steps not yet in the log but visible in the checklist appear without timestamps.
 - **Footer** — "Close" during provisioning; "Retry" + "Close" after completion or failure.
 
 The modal live-updates during active provisioning via WebSocket re-renders.
@@ -171,7 +171,7 @@ provisioner/
 
 ### Naming Conventions
 - Handlers: `{Vendor}Handler` (e.g., `TaranaHandler`)
-- API endpoints: `/api/v1/{resource}/{action}`
+- API endpoints use the `/api/{resource}/{action}` format.
 - Config files: `{vendor}-{serial}.json`
 
 ### Error Handling

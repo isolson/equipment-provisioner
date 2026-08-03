@@ -50,14 +50,14 @@ If curl returns nothing, the device may use a non-standard IP. Check `config.yam
 **Symptom:** Device detected but provisioning stops at login.
 
 The provisioner tries credentials in this order:
-1. Factory defaults (e.g., `admin/admin` for Cambium)
+1. The configured factory credentials for the device type
 2. Custom credentials set via the UI settings page
 3. Falls back to prompting the user via the UI
 
 **Fix:**
 - Tap the port card and enter the correct credentials
 - Or set credentials in the UI settings page (gear icon) to apply fleet-wide
-- For devices with changed passwords, add a custom credential via `POST /api/v1/default-credentials/{device_type}`
+- For devices with changed passwords, add a custom credential with `POST /api/default-credentials/{device_type}`.
 
 **Check logs for the specific error:**
 ```bash
@@ -152,10 +152,15 @@ ls -la /var/lib/provisioner/history.db
 stat /var/lib/provisioner/history.db
 ```
 
-The database is SQLite. If corrupted, you can safely delete it and it will be recreated:
+The database is SQLite. Deleting it removes the job history. Make a backup before
+you continue. Stop the service before you remove the file.
+
+**Warning:** The following commands permanently remove the local job history.
+
 ```bash
 sudo systemctl stop provisioner-web
-sudo rm /var/lib/provisioner/history.db
+sudo cp /var/lib/provisioner/history.db /var/lib/provisioner/history.db.backup
+sudo rm -- /var/lib/provisioner/history.db
 sudo systemctl start provisioner-web
 ```
 

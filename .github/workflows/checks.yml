@@ -8,6 +8,17 @@ on:
 # Static gates that catch the regression classes we keep hitting, separate from
 # the pytest job in test.yml so each shows up as its own required status check.
 jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Documentation validation gate
+        run: python scripts/check_docs.py
+
   py39:
     runs-on: ubuntu-latest
     steps:

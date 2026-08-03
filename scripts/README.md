@@ -48,7 +48,7 @@ sudo ./scripts/install.sh uninstall
 ```
 
 **What it does:**
-1. Installs system dependencies (python3, git, vlan, iproute2, etc.)
+1. Installs system dependencies such as Python, Git, VLAN, and iproute2.
 2. Creates directories: `/opt/provisioner`, `/etc/provisioner`, `/var/lib/provisioner`
 3. Creates Python virtualenv and installs pip dependencies
 4. Copies config files to `/etc/provisioner/`
@@ -97,8 +97,8 @@ Detects and configures a MikroTik switch for the provisioner's VLAN setup.
 # Auto-detect switch and configure
 sudo ./scripts/setup_switch.sh
 
-# Specify switch IP and credentials
-sudo ./scripts/setup_switch.sh --ip 192.168.88.1 --password yourpassword
+# Specify the switch IP. The script prompts for credentials.
+sudo ./scripts/setup_switch.sh --ip 192.168.88.1
 
 # Use a custom RouterOS script instead of the built-in one
 sudo ./scripts/setup_switch.sh --rsc /path/to/custom.rsc

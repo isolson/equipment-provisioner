@@ -43,8 +43,6 @@
     <td class="big">6</td>
     <td class="big">7</td>
     <td class="big">8</td>
-    <td class="big gray">9</td>
-    <td class="big gray">10</td>
   </tr>
   <tr>
     <th>VLAN</th>
@@ -54,25 +52,23 @@
     <td class="mono sm">1994</td>
     <td class="mono sm">1995</td>
     <td class="mono sm">1996</td>
-    <td class="mono sm">1997</td>
-    <td class="mono sm">1998</td>
-    <td class="mono sm gray">Trunk</td>
-    <td class="mono sm gray">Trunk</td>
+    <td class="mono sm gray">WAN</td>
+    <td class="mono sm gray">Host</td>
   </tr>
   <tr>
     <th>Use</th>
-    <td colspan="8">Device provisioning ports (isolated)</td>
-    <td class="gray">Pi</td>
-    <td class="gray">Uplink</td>
+    <td colspan="6">Device provisioning ports (isolated)</td>
+    <td class="gray">WAN</td>
+    <td class="gray">Host</td>
   </tr>
 </table>
 
 <h2>WORKFLOW</h2>
-<div class="step"><span class="step-num">1</span> Plug device into any port (1-8)</div>
-<div class="step"><span class="step-num">2</span> Switch isolates device on dedicated VLAN</div>
-<div class="step"><span class="step-num">3</span> Pi detects link up, identifies device type</div>
-<div class="step"><span class="step-num">4</span> Pi uploads firmware + config automatically</div>
-<div class="step"><span class="step-num">5</span> Check web UI for status</div>
+<div class="step"><span class="step-num">1</span> Connect the device to port 1-6</div>
+<div class="step"><span class="step-num">2</span> The switch isolates the device on a dedicated VLAN</div>
+<div class="step"><span class="step-num">3</span> The host detects the link and identifies the device</div>
+<div class="step"><span class="step-num">4</span> The host uploads firmware and configuration</div>
+<div class="step"><span class="step-num">5</span> Check the web UI for status</div>
 
 <h2>SUPPORTED DEVICES</h2>
 <table>

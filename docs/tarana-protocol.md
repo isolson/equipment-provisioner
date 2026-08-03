@@ -11,7 +11,7 @@
 | Transport          | Used For                              | Endpoint Pattern                          |
 |--------------------|---------------------------------------|-------------------------------------------|
 | HTTP POST (gRPC-web) | gNMI Get/Set, Reboot (unary RPCs)   | `http://<ip>/gnmi.gNMI/Get`, `.../Reboot` |
-| WebSocket          | File/Put, SetPackage (streaming RPCs) | `ws://<ip>/gnoi.file.File/Put`, etc.      |
+| WebSocket          | File/Put and SetPackage (streaming RPCs) | `ws://<ip>/gnoi.file.File/Put` and `.../SetPackage` |
 
 - **WebSocket sub-protocol**: `grpc-websockets`
 - **WebSocket frame prefix**: Each client→server gRPC message is prefixed with a
@@ -32,8 +32,8 @@
 Every request carries credentials as **custom HTTP headers** (no cookies, no bearer tokens):
 
 ```
-user: admin
-password: admin123
+user: <device-user>
+password: <device-password>
 source: device-ui
 content-type: application/grpc-web+proto
 x-grpc-web: 1
@@ -48,7 +48,7 @@ x-grpc-web: 1
 
 | Username | Password   |
 |----------|------------|
-| `admin`  | `admin123` |
+| `<device-user>` | `<factory-password>` |
 
 ### Auth failure detection
 
@@ -273,7 +273,7 @@ target flips to the other bank (A/B alternation).
 
 ---
 
-## Known Issues / Gotchas
+## Known Issues
 
 1. **HTTP 200 on auth failure** — always check `Grpc-Status` header before body.
 2. **Hash type 3 = MD5** — contradicts standard gNOI enum (3 = SHA512).

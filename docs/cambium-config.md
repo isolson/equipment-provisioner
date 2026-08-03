@@ -19,7 +19,7 @@ POST /cgi-bin/luci
 Content-Type: application/x-www-form-urlencoded
 Cookie jar: -c /tmp/cookies.txt
 
-username=admin&password=admin
+username=<device-user>&password=<device-password>
 ```
 
 Response (HTML with embedded token):
@@ -87,7 +87,7 @@ curl -s -k --interface eth0.104 \
 
 **Key details:**
 - `skipIllegal=1` tells the device to skip keys it cannot set (read-only,
-  tables, hardware info, etc.) rather than rejecting the entire upload
+  tables, and hardware information) rather than rejecting the entire upload
 - The `image` field name is required — this is the same field used for TAR uploads
 - Works for both JSON config files and TAR backup archives
 - The JSON file uses flat `device_props` key names directly (no wrapper needed)
@@ -163,7 +163,7 @@ Response:
 ```
 
 **Known behavior:**
-- Works for small sets of writable keys (SSID, hostname, password, etc.)
+- Works for small sets of writable keys such as SSID, hostname, and password
 - Does NOT work for full config dumps (~273+ keys) — returns `success: 0, err: ""`
 - No reboot required — changes take effect immediately
 - Used by `apply_ap_naming()` for post-provisioning SSID/hostname changes
@@ -253,7 +253,7 @@ These are handled automatically by `config_import` with `skipIllegal=1`.
 | `cambiumEffective*` | Computed effective values |
 | `cambiumSystem*`, `cambiumHardware*` | Hardware identifiers |
 | `cambiumLicense*` | License state |
-| `*Table` | Table/list data (MAC filter, QoS rules, etc.) |
+| `*Table` | Table or list data, such as MAC filters and QoS rules |
 | `*Certificate`, `*Pem` | Certificate blobs |
 | `*MacAddress`, `*SerialNumber` | Hardware IDs |
 | `sysUpTime*`, `ethTx*`, `ethRx*` | Counters / statistics |

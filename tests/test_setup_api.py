@@ -774,7 +774,7 @@ def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch
             "board_name": "CRS310-8G+2S+IN",
             "version": "7.15",
             "status": "ready",
-            "summary": "Provisioning switch is configured for the first eight ports.",
+            "summary": "Provisioning switch is configured for six ports, a WAN uplink, and a host trunk.",
             "actions": [],
             "checks": [{"name": "ether8 PVID", "status": "ready"}],
         },
@@ -914,7 +914,7 @@ def test_setup_switch_configure_runs_switch_script(tmp_path, monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["success"] is True
-    assert "first eight ports" in payload["message"].lower()
+    assert "six ports" in payload["message"].lower()
     assert captured["cmd"][0] == "/bin/bash"
     assert "--skip-password-change" in captured["cmd"]
 

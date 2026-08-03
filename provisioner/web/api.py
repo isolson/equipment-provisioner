@@ -1433,7 +1433,7 @@ async def setup_switch_configure(body: SetupSwitchRequest):
 
     return {
         "success": True,
-        "message": "MikroTik switch configured for the first eight ports",
+        "message": "MikroTik switch configured for six ports, a WAN uplink, and a host trunk",
         "output": output[-4000:],
         "port_map": [
             "ether1-ether6: provisioning VLANs 1991-1996",

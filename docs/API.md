@@ -1,14 +1,14 @@
 # REST API & WebSocket Reference
 
-The provisioner web server exposes a REST API and WebSocket endpoint for monitoring and control. All REST endpoints are prefixed with `/api/v1`.
+The provisioner web server exposes a REST API and WebSocket endpoint for monitoring and control. REST endpoints use the `/api` prefix. WebSocket status updates use `/ws/status`.
 
-Base URL: `http://<orangepi-ip>:8080/api/v1`
+Base URL: `http://<host>:8080/api`
 
 ## First-Run Setup
 
 ### GET /setup/readiness
 
-Return a first-run readiness checklist for the current bench.
+Returns a first-run readiness checklist for the current bench.
 
 This report covers:
 
@@ -17,7 +17,7 @@ This report covers:
 - primary and custom credentials
 - default config templates
 - local firmware inventory
-- MikroTik provisioning switch state for the first eight ports
+- MikroTik provisioning switch state for the six provisioning ports, WAN uplink, and host trunk
 
 ### POST /setup/bundle/import
 
@@ -42,7 +42,9 @@ Supported bundle contents:
 Multipart form fields:
 
 - `file` - the archive
-- `apply_system_files` - `true` to apply bundled `config.yaml` and `provisioner.env` into `/etc/provisioner/`
+- `apply_system_files` - `true` to apply the bundled `config.yaml` and `provisioner.env` files to `/etc/provisioner/`
+
+**Warning:** These files can contain credentials. Import them only on a trusted host.
 
 ### GET /setup/bundle/export
 
@@ -56,7 +58,7 @@ Query parameters:
 
 Run the MikroTik provisioning-switch setup flow non-interactively.
 
-This is intended for a directly connected, defaulted MikroTik switch and applies the expected first-eight-port layout:
+This is intended for a directly connected, defaulted MikroTik switch. It applies the six-port provisioning layout with a WAN uplink and a host trunk:
 
 - `ether1-ether6` provisioning ports
 - `ether7` WAN uplink
@@ -67,7 +69,7 @@ This is intended for a directly connected, defaulted MikroTik switch and applies
 {
   "ip": "192.168.88.1",
   "username": "admin",
-  "password": "",
+  "password": "<switch-password>",
   "skip_password_change": false
 }
 ```
@@ -91,7 +93,7 @@ Schedule a delayed `systemctl restart provisioner-web` so imported system files 
 
 ### GET /ports
 
-Get status of all 6 provisioning ports.
+Returns the status of all six provisioning ports.
 
 **Response:**
 ```json
@@ -112,13 +114,13 @@ Get status of all 6 provisioning ports.
 
 ### GET /ports/{port_number}
 
-Get status of a single port.
+Returns the status of one port.
 
 **Response:** Same shape as one element of the `/ports` array.
 
 ### POST /ports/{port_number}/identify
 
-Re-run device fingerprinting on a port. Requires link to be up.
+Runs device fingerprinting again on a port. The port must have link-up status.
 
 **Response:**
 ```json
@@ -133,13 +135,13 @@ Re-run device fingerprinting on a port. Requires link to be up.
 
 ### POST /provision
 
-Trigger manual provisioning for a port.
+Starts manual provisioning for a port.
 
 **Request:**
 ```json
 {
   "port_number": 1,
-  "custom_password": "secret",
+  "custom_password": "<device-password>",
   "custom_username": "admin",
   "skip_firmware": false,
   "skip_config": false,
@@ -166,25 +168,19 @@ Only `port_number` is required. All other fields are optional.
 
 ### POST /netinstall
 
-Run MikroTik Netinstall on a port. Used when the device is in BOOTP / Netinstall
-listening mode (reset button held during power-on). Implements the
-equipment-provisioner contract: fetch the canonical fleet credentials from
-`<ztp_api_url>/ztp/mikrotik/provisioning-credentials` and the served Netinstall
-Configure script from `<ztp_api_url>/ztp/mikrotik/netinstall-bootstrap.rsc`
-(both `X-API-Key`-gated) plus the served Mode script from
-`<ztp_api_url>/ztp/mikrotik/netinstall-mode.rsc` (ungated), flash RouterOS with
-both served scripts, verify `/system/note` carries a
-`base_flash_version` ≥ `universal-v1`, verify `mode=advanced` plus phone-home
-readiness (and bound wifi radios on wifi-capable models), verify the baked
-phone-home URL points at the backend and is reachable *from the bench host*
-(the device deliberately has no internet path), then
-`POST <ztp_api_url>/ztp/mikrotik/register` and assert the ship-ready readback
-(`role=unknown`, `customer_id=null`, `has_checkin_secret=false`), remediating
-stale state via `clear-role-lock` / `clear-checkin-secret` before re-asserting.
+Starts MikroTik Netinstall on a port. The device must be in BOOTP/Netinstall
+listening mode.
 
-This endpoint is also called automatically by the per-port BOOTP sniffer when
-a device is detected in Netinstall mode, so for normal usage the tech does not
-need to invoke it directly. See [docs/mikrotik-netinstall.md](mikrotik-netinstall.md).
+The pipeline fetches the fleet credentials and two scripts from the configured
+backend. It flashes RouterOS, verifies the base-flash and phone-home state, and
+registers the device. The device has no internet path during this process.
+
+The pipeline also verifies the ship-ready response. It clears stale role-lock
+or check-in-secret state and repeats registration when required.
+
+The per-port BOOTP listener calls this endpoint when it detects Netinstall mode.
+An operator normally does not call it directly. See
+[mikrotik-netinstall.md](mikrotik-netinstall.md).
 
 **Request:**
 ```json
@@ -202,9 +198,9 @@ need to invoke it directly. See [docs/mikrotik-netinstall.md](mikrotik-netinstal
 }
 ```
 
-The request returns immediately; the Netinstall pipeline runs in the background
-(typical duration: 2–4 minutes). Progress is surfaced via the same checklist /
-websocket events as other provisioning operations.
+The request returns immediately. The Netinstall pipeline runs in the
+background and normally takes two to four minutes. Progress appears in the
+checklist and WebSocket events used by other provisioning operations.
 
 **Errors:**
 - `404` — Port not found
@@ -215,14 +211,15 @@ websocket events as other provisioning operations.
 
 ### POST /credentials
 
-Set a temporary credential override for a port. Cleared after use or on restart.
+Sets a temporary credential override for a port. The override is cleared after
+use or when the service restarts.
 
 **Request:**
 ```json
 {
   "port_number": 1,
   "username": "admin",
-  "password": "secret",
+  "password": "<device-password>",
   "device_type": "cambium"
 }
 ```
@@ -237,7 +234,7 @@ Clear credential override for a port.
 
 ### GET /default-credentials
 
-Get all credentials (custom + built-in) for all device types. Passwords are masked.
+Returns all custom and built-in credentials for all device types. Passwords are masked.
 
 **Response:**
 ```json
@@ -264,7 +261,7 @@ Add a custom credential for a device type. Persisted to `credentials.json`.
 ```json
 {
   "username": "admin",
-  "password": "newpassword"
+  "password": "<device-password>"
 }
 ```
 
@@ -449,7 +446,7 @@ Get display state and configuration.
 
 Real-time status updates over WebSocket.
 
-**Connection:** `ws://<orangepi-ip>:8080/ws/status`
+**Connection:** `ws://<host>:8080/ws/status`
 
 On connect, the server sends an `initial_status` message with all port states. The server then broadcasts updates every 2 seconds (when clients are connected) and immediately on state changes.
 
