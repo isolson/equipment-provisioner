@@ -101,7 +101,7 @@ sudo ./scripts/setup_switch.sh
 sudo ./scripts/setup_switch.sh --ip 192.168.88.1
 
 # Use a custom RouterOS script instead of the built-in one
-sudo ./scripts/setup_switch.sh --rsc /path/to/custom.rsc
+sudo ./scripts/setup_switch.sh --config /path/to/custom.rsc
 
 # Skip password change prompt
 sudo ./scripts/setup_switch.sh --skip-password-change

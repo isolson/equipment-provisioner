@@ -129,6 +129,9 @@ def check_docs() -> List[Tuple[str, str]]:
             ("Tarana device (purple badge)", "Tarana uses the orange vendor color"),
             ("Tachyon device (green badge)", "Tachyon uses the purple vendor color"),
         ),
+        "scripts/README.md": (
+            ("setup_switch.sh --rsc", "the switch script uses --config for a custom RouterOS file"),
+        ),
     }
     for path, expected in facts.items():
         if not os.path.exists(path):
@@ -142,6 +145,9 @@ def check_docs() -> List[Tuple[str, str]]:
         "docs/API.md": (
             ("device_type` — One of: `cambium`, `mikrotik`, `tachyon`, `tarana`, `ubiquiti`",
              "API device-type lists must include every supported vendor"),
+        ),
+        "scripts/README.md": (
+            ("setup_switch.sh --config", "the switch instructions must use the current option name"),
         ),
     }
     for path, expected in required_facts.items():
