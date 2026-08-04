@@ -48,7 +48,7 @@ sudo ./scripts/install.sh uninstall
 ```
 
 **What it does:**
-1. Installs system dependencies (python3, git, vlan, iproute2, etc.)
+1. Installs system dependencies such as Python, Git, VLAN, and iproute2.
 2. Creates directories: `/opt/provisioner`, `/etc/provisioner`, `/var/lib/provisioner`
 3. Creates Python virtualenv and installs pip dependencies
 4. Copies config files to `/etc/provisioner/`
@@ -97,17 +97,17 @@ Detects and configures a MikroTik switch for the provisioner's VLAN setup.
 # Auto-detect switch and configure
 sudo ./scripts/setup_switch.sh
 
-# Specify switch IP and credentials
-sudo ./scripts/setup_switch.sh --ip 192.168.88.1 --password yourpassword
+# Specify the switch IP. The script prompts for credentials.
+sudo ./scripts/setup_switch.sh --ip 192.168.88.1
 
 # Use a custom RouterOS script instead of the built-in one
-sudo ./scripts/setup_switch.sh --rsc /path/to/custom.rsc
+sudo ./scripts/setup_switch.sh --config /path/to/custom.rsc
 
 # Skip password change prompt
 sudo ./scripts/setup_switch.sh --skip-password-change
 
-# Non-interactive (auto-confirm)
-sudo ./scripts/setup_switch.sh --yes
+# Non-interactive (auto-confirm). Supply the password through the environment.
+sudo PROVISIONER_SWITCH_PASSWORD='<switch-password>' ./scripts/setup_switch.sh --yes
 ```
 
 **What it does:**
@@ -115,6 +115,9 @@ sudo ./scripts/setup_switch.sh --yes
 2. Connects via SSH (default: admin with empty password)
 3. Uploads and imports the RouterOS config script
 4. Configures VLANs 1990-1996, bridge, trunk port, and webhook scripts
+
+Do not pass a password as a command-line argument. The script accepts an
+interactive prompt or the `PROVISIONER_SWITCH_PASSWORD` environment variable.
 
 The RouterOS template is at `configs/templates/mikrotik_switch_provisioner.rsc`.
 

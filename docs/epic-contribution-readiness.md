@@ -13,10 +13,10 @@ The bar: a contributor goes from zero to a conformant PR using only `CONTRIBUTIN
 
 ## Problem (recap)
 
-The repo has unusually strong *architecture* docs but **no contribution process** and **no enforcement**:
+The repo has strong architecture documentation but still needs a complete contribution process and enforcement for all architecture rules:
 
 - **Process gap.** No `CONTRIBUTING.md`, no PR template, no issue templates, no `CODEOWNERS`, no `SECURITY.md` / `CODE_OF_CONDUCT.md` / `LICENSE` file — despite being public and declaring MIT in `pyproject.toml` (which still ships placeholder `authors = "Your Name" / "you@example.com"`).
-- **Enforcement gap.** `ruff`/`black`/`mypy` are configured in `pyproject.toml` but **never run** — CI (`.github/workflows/test.yml`) runs only `pytest`. None of the load-bearing rules are checked: no guard against vendor brand strings in `base.py`, no guard against `{{placeholder}}` templates, no AST-level Python-3.9 guard (running the suite on 3.9 only catches *executed* code). The rules live in prose; nothing blocks a PR that breaks them.
+- **Enforcement gap.** The checks workflow runs the documentation, Python 3.9, and template gates. The test workflow runs `pytest`. `ruff`, `black`, and `mypy` are configured in `pyproject.toml` but are not yet required. Vendor isolation and registry consistency also remain prose or planned checks. The rules need complete hard-blocking enforcement.
 - **Agent-hostile by omission.** Agents thrive on fast machine feedback. Today a wrong assumption surfaces only in human review, which is slow and inconsistent.
 
 This epic closes the *process* and *enforcement* gaps. The *pluggability* gap (collapsing the ~10 vendor registries) is a separate, already-scoped effort — see below.
@@ -82,7 +82,7 @@ Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M �
 **B1 — CONTRIBUTING.md (keystone) · M · risk: none**
 **Scope:** the single entry point. Contains:
 - PR workflow (branch from `main`, one logical change/PR, link the issue, commit/PR style matching history).
-- **"Run before you open a PR"** block, identical to CI: `ruff check .` · `black --check .` · `mypy provisioner` · `python scripts/check_py39.py` · `python scripts/check_templates.py` · `pytest`.
+- **"Run before you open a PR"** block, identical to the current CI gates: `python scripts/check_docs.py` · `python scripts/check_py39.py` · `python scripts/check_templates.py` · `pytest`. Add `ruff`, `black`, and `mypy` when C1 lands.
 - **Four contribution recipes**, each a thin checklist that **links** the authoritative "Adding New Vendors or Hardware" checklist in `CLAUDE.md` (**15 sites today** — `docs/HANDLER_DEVELOPMENT.md` has the conceptual walkthrough) and never restates it. The count shrinks to a single `VendorSpec` edit once the isolation epic lands:
   1. **Add functionality** — handler-property pattern; no vendor branching in shared code; tests required.
   2. **Add a vendor** — all 15 checklist sites, calling out the **S1 boot-crash** sites (`handler_manager.py`, `handlers/__init__.py`, the `config.py`↔`main.py` credentials pair, `firmware_sources/__init__.py`, `firmware_checker.py` `SOURCE_MAP`) and the **S2 silent-break** sites (fingerprint signature, boot-ping IP, firmware pattern, `setup_tools.py` `SUPPORTED_DEVICE_TYPES` + its readiness/hint/mode dicts, CLI/API/UI lists) + `grep -rin <vendor> provisioner/ configs/` + hardware-verification report.
@@ -114,16 +114,16 @@ Implement each as a separate required check; each is a `scripts/` entrypoint run
 **Acceptance:** adding `if device_type == "cambium"` to `base.py` fails the gate; the allowlist shrinks to empty once S1 lands.
 
 **C4 — Config-template validation gate (incl. remediating existing placeholders) · M · risk: low-med**
-**Prereq finding — the current tree is NOT clean.** 6 templates already carry dead `{{placeholder}}` values — `configs/templates/{cambium,tachyon}/{ap,ptp-a,ptp-b}.json` (`{{ssid}}`, `{{hostname}}`) — and the two `ap.json` files even claim in a `_comment` that "Values with {{placeholders}} are auto-replaced." There is **no** substitution engine (`CLAUDE.md` / `AGENTS.md` §4), so deep-merge would write the literal `{{ssid}}`/`{{hostname}}` strings onto devices. These are stale and contradict the architecture. The gate therefore **cannot go green without remediating them first** — this is in scope, not a follow-up.
+**Prereq finding — the current tree has an explicit mode-template exception.** The six AP/PTP templates under `configs/templates/{cambium,tachyon}/` use `{{ssid}}` and `{{hostname}}`. These templates are consumed by `provisioner/mode_config.py`, which renders the allowlisted variables before application. Standard provisioning templates still must not contain placeholders because deep merge writes their values as-is.
 **Scope:**
-1. **Remediate the 6 templates.** Per-device values (hostname/ssid) don't belong in a shared template under deep-merge — drop those keys (they come from `configs/overrides/{MAC}.json`) or replace with real static values from a device export; fix the misleading `_comment` text.
-2. Add `scripts/check_templates.py`: parse every file under `configs/templates/` by extension (`.json`/`.yaml`/`.rsc`), failing on parse errors and on any `{{ }}` syntax (including inside `_comment`).
-3. If any template genuinely can't be resolved without hardware/maintainer input, park it in a **temporary, commented allowlist** with a linked tracking issue — the gate still blocks **new** placeholders, and the allowlist must reach **empty before C5**.
-**Acceptance:** gate is **green against the current tree** (allowlist empty, or every entry linked to a tracking issue); a newly-introduced `{{ssid}}` fails the gate.
+1. **Keep the six mode templates within the exception.** Validate that their placeholders are allowlisted and rendered by `mode_config.py`; reject placeholders in standard provisioning templates.
+2. Keep `scripts/check_templates.py` as the template gate: parse every file under `configs/templates/` by extension (`.json`/`.yaml`/`.rsc`), and reject `{{ }}` syntax outside the AP/PTP mode-template allowlist.
+3. If a new mode requires a placeholder, add it to the mode renderer and the allowlist in the same change.
+**Acceptance:** the gate is green against the current tree; a newly introduced placeholder in a standard provisioning template fails the gate.
 
 **C5 — Make all checks required on `main` (capstone) · S · risk: low**
 **Scope:** after C1–C4 **and** the isolation epic's S0 registry-consistency test are green on `main`, configure branch protection / required status checks so none can merge without every gate passing. This is what turns "configured" into "hard block."
-**Dependency:** isolation-epic **S0** must exist (we promote the real consistency test, not a placeholder); C4's template-placeholder allowlist must be **empty**.
+**Dependency:** isolation-epic **S0** must exist. The mode-template placeholder allowlist must remain limited to templates rendered by `mode_config.py`.
 **Acceptance:** a PR failing any single gate cannot be merged.
 
 ---

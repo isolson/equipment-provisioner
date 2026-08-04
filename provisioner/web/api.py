@@ -1401,19 +1401,20 @@ async def setup_switch_configure(body: SetupSwitchRequest):
         body.ip,
         "--username",
         body.username,
-        "--password",
-        body.password,
         "--yes",
     ]
     if body.skip_password_change:
         cmd.append("--skip-password-change")
 
     try:
+        child_env = os.environ.copy()
+        child_env["PROVISIONER_SWITCH_PASSWORD"] = body.password
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(_get_repo_root()),
+            env=child_env,
         )
         stdout, _ = await proc.communicate()
     except Exception as exc:
@@ -1433,7 +1434,7 @@ async def setup_switch_configure(body: SetupSwitchRequest):
 
     return {
         "success": True,
-        "message": "MikroTik switch configured for the first eight ports",
+        "message": "MikroTik switch configured for six ports, a WAN uplink, and a host trunk",
         "output": output[-4000:],
         "port_map": [
             "ether1-ether6: provisioning VLANs 1991-1996",

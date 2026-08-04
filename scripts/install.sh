@@ -632,7 +632,7 @@ main() {
             echo "Setup-switch options:"
             echo "  --ip ADDRESS   IP address of MikroTik switch (skip auto-detection)"
             echo "  --username     SSH username (default: admin)"
-            echo "  --password     SSH password (default: empty)"
+            echo "  PROVISIONER_SWITCH_PASSWORD=...  Supply the switch password through the environment"
             echo "  --yes          Auto-confirm prompts (non-interactive mode)"
             echo ""
             ;;

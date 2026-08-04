@@ -17,12 +17,12 @@ the device off ready for customer config.
    holding for ~20 seconds, until the power LED goes off (model-dependent
    indicator that the device has entered BOOTP listening mode).
 3. Release the reset button.
-4. Walk away. The provisioner detects the BOOTP request, runs the full
-   Netinstall + Configure-script pipeline, and reports completion on the
+4. Wait for the provisioner to detect the BOOTP request. It runs the full
+   Netinstall and Configure-script pipeline. It reports completion on the
    touchscreen.
 
-The orange "Netinstall" button in the touchscreen UI remains as a manual
-override / debug control but is not part of the normal happy path.
+The orange "Netinstall" button remains available for manual or diagnostic use.
+The automatic BOOTP flow is the normal operator procedure.
 
 ## End-to-end pipeline
 

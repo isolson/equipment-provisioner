@@ -328,7 +328,7 @@ Each port card shows two zones:
    - `NO LINK` (gray) — no cable / no device
    - `DETECTING` (amber spinner) — waiting for device
    - `READY` (green check) — device detected, tap to provision
-   - `LOGGING IN` / `CHECKING FIRMWARE` / `APPLYING CONFIG` / etc. (blue spinner) — active provisioning step with "Step N of 7" subtitle
+   - `LOGGING IN`, `CHECKING FIRMWARE`, or `APPLYING CONFIG` (blue spinner) — active provisioning step with a "Step N of 7" subtitle
    - `COMPLETE` (green check) — all steps passed
    - `FAILED` (red X) — error with truncated message
    - `NEEDS CREDENTIALS` (red alert) — tap to enter password

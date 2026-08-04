@@ -343,7 +343,7 @@ def probe_mikrotik_switch(config: Any) -> Dict[str, Any]:
         "summary": "No MikroTik switch detected at the configured management IP.",
         "actions": [
             "Plug a factory-default MikroTik switch directly into the host NIC.",
-            "Use the first eight ports as: ether1-ether6 provisioning, ether7 WAN, ether8 trunk to the host.",
+            "Use ether1-ether6 for provisioning, ether7 for WAN, and ether8 for the host trunk.",
             "Run the switch setup flow or import a setup bundle that already contains the host settings.",
         ],
         "checks": [],
@@ -480,7 +480,7 @@ def probe_mikrotik_switch(config: Any) -> Dict[str, Any]:
             if identity == "provisioner-switch" and all(item["status"] == "ready" for item in checks):
                 result["mode"] = "configured"
                 result["status"] = "ready"
-                result["summary"] = "Provisioning switch is configured for the first eight ports."
+                result["summary"] = "Provisioning switch is configured for six ports, a WAN uplink, and a host trunk."
             elif password == "" and identity != "provisioner-switch":
                 result["mode"] = "factory-default"
                 result["status"] = "warning"

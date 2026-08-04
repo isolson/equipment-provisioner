@@ -14,7 +14,7 @@
 #   3. Rollback snapshot — the current on-host tree is copied to
 #      /opt/provisioner.prev before every deploy; `--rollback` restores it.
 #   4. Post-deploy health check — verifies the service is active, boots without
-#      a traceback, and serves /ports; a failure exits non-zero and prints the
+#      a traceback, and serves /health and /api/ports; a failure exits non-zero and prints the
 #      rollback command.
 
 set -euo pipefail

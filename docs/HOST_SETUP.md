@@ -22,7 +22,7 @@ The kiosk image creates a `serveradmin` user with sudo and an authorized key. Fr
 ssh -i ~/.ssh/id_conductor serveradmin@<host-ip>
 ```
 
-### Gotcha: 1Password SSH agent
+### 1Password SSH agent
 
 If your dev machine's `~/.ssh/config` sets `IdentityAgent` to the 1Password agent for `Host *`, the agent burns through auth attempts with its own keys before `id_conductor` is offered. The host then disconnects with "Too many authentication failures".
 

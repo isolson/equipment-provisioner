@@ -35,8 +35,8 @@ Until the registry is consolidated, adding or removing a vendor means editing **
 
 Always finish with `grep -rin <vendor> provisioner/ configs/` and a green test suite.
 
-### 4. Config templates: deep-merge, no placeholders
-Templates are merged into the device's live config as-is. There is **no** `{{variable}}` substitution engine — don't add one. Model aliasing lives in `config_store.py` `CONFIG_MODEL_ALIASES`.
+### 4. Config templates: deep-merge, with an explicit mode-template exception
+Standard provisioning templates are deep-merged into the device's live config as-is. They do not support `{{variable}}` substitution. The AP and PTP mode-change templates are an explicit exception: `provisioner/mode_config.py` renders their allowlisted variables before it applies them. Do not use placeholders in standard provisioning templates or in unrelated documentation. Model aliasing lives in `config_store.py` `CONFIG_MODEL_ALIASES`.
 
 ### 5. Python 3.9 target
 No `match`/`case`, no `X | Y` unions (use `Optional[...]` / `Dict[...]`), no `str.removeprefix`, no `datetime.UTC`. CI runs on 3.9; there is no transpile step.

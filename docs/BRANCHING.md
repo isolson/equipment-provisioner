@@ -54,7 +54,7 @@ Phase-specific additions:
    ```
 
    (The git-based rollback below is still the way to reach an *older* revision than the immediately-previous one.)
-4. **Post-deploy health check.** After the restart the script verifies the service is `active`, has no traceback/import error in the last 60s of logs, and serves `/ports`. A failure exits non-zero and prints the `--rollback` command — the deploy is not reported as successful.
+4. **Post-deploy health check.** After the restart the script verifies the service is `active`, has no traceback/import error in the last 60s of logs, and serves `/health` and `/api/ports`. A failure exits non-zero and prints the `--rollback` command — the deploy is not reported as successful.
 
 ## Rollback
 

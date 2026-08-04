@@ -211,14 +211,9 @@ if [[ "$setup_switch" =~ ^[Yy]$ ]]; then
 
         # Run switch setup
         switch_args=(--ip "$SWITCH_DEFAULT_IP" --username "$switch_user" --yes)
-        if [[ -n "$switch_pass" ]]; then
-            switch_args+=(--password "$switch_pass")
-        else
-            switch_args+=(--password "")
-        fi
 
         if [[ -f "${INSTALL_DIR}/scripts/setup_switch.sh" ]]; then
-            bash "${INSTALL_DIR}/scripts/setup_switch.sh" "${switch_args[@]}"
+            PROVISIONER_SWITCH_PASSWORD="$switch_pass" bash "${INSTALL_DIR}/scripts/setup_switch.sh" "${switch_args[@]}"
             log_info "Switch configured"
 
             log_detail "Waiting 15s for switch to apply VLAN configuration..."

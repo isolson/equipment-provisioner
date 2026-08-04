@@ -1,20 +1,19 @@
 # Network Equipment Auto-Provisioner
 
-**Plug in a radio. Walk away. It provisions itself automatically.**
+**Connect a device. The provisioner configures it automatically.**
 
-This system automatically detects, configures, and updates firmware on wireless radios. Works with Cambium, Tarana, and Tachyon radios. Provisions up to 6 devices at the same time.
+The provisioner detects devices, applies configuration, and updates firmware. It supports Cambium, MikroTik, Tachyon, Tarana, and Ubiquiti devices. It can provision up to six devices at the same time.
 
 ---
 
 ## What It Does
 
-![Dashboard Overview](docs/screenshots/dashboard-overview.png)
-*Main dashboard showing 6 ports with real-time status*
+The dashboard displays the status of all six provisioning ports.
 
-1. **Detects**: Plug in a factory-default radio. The system figures out what it is automatically.
-2. **Configures**: Applies your settings (management IPs, passwords, SSIDs, etc.)
-3. **Updates**: Installs the correct firmware version if it’s out of date
-4. **Marks ready**: Shows a green "Ready" indicator when the device is done
+1. **Detects**: Connect a factory-default device. The system identifies its vendor and model.
+2. **Configures**: Applies management addresses, passwords, SSIDs, and other settings.
+3. **Updates**: Installs the required firmware version when the device is out of date.
+4. **Reports status**: Shows a green **Ready** indicator when provisioning is complete.
 
 All status updates appear live on the web dashboard. No manual steps after initial setup.
 
@@ -26,14 +25,14 @@ All status updates appear live on the web dashboard. No manual steps after initi
 
 | Item | Recommended Model | Est. Cost | Notes |
 |------|-------------------|-----------|-------|
-| **Host computer** | Lenovo ThinkPad Yoga 11e | ~$80 used | Best all-around: x86, touchscreen, auto-rotates. Find on eBay/Amazon. |
-| **Switch** | MikroTik [CRS112-8P-4S-IN](https://mikrotik.com/product/CRS112-8P-4S-IN) | ~$200 | PoE-out on all 8 ports: powers devices through the cable. Script configures it automatically. |
+| **Host computer** | Lenovo ThinkPad Yoga 11e | About $80 used | x86 host with a touchscreen and automatic rotation. |
+| **Switch** | MikroTik [CRS112-8P-4S-IN](https://mikrotik.com/product/CRS112-8P-4S-IN) | About $200 | Provides PoE power and VLAN isolation. The setup script configures it. |
 | **Ethernet cables** | Cat5e or better, 1–3 ft | ~$10/pack | Short cables keep the bench tidy. |
-| **Internet connection** | Any broadband | - | Needed for firmware downloads. Can preload offline if needed. |
+| **Internet connection** | Broadband connection | - | Required for firmware downloads unless you preload the files. |
 
-**Other compatible host computers** (if you can’t find the ThinkPad): Dell OptiPlex 3050, Dell Wyse 5070, HP EliteDesk 800 G2. Any x86 Linux machine works. Raspberry Pi 4 also works but can’t run MikroTik Netinstall.
+Other compatible hosts include the Dell OptiPlex 3050, Dell Wyse 5070, and HP EliteDesk 800 G2. Any x86 Linux host works. A Raspberry Pi 4 can run the provisioner, but it cannot run MikroTik Netinstall.
 
-> **What does the switch do?** It gives each device plugged in its own isolated lane: so 6 devices can provision at once without interfering with each other. It also powers devices through the Ethernet cable if your switch model supports it (PoE). **You don’t need to configure the switch yourself: the setup script does it automatically.**
+> **What does the switch do?** The switch places each device on a separate network segment. Up to six devices can be provisioned at the same time. Devices on different ports cannot communicate. A switch with PoE can also power the devices. The setup script configures the switch.
 
 ### Cable Layout
 
@@ -60,10 +59,10 @@ Once installed, open a terminal (Ctrl+Alt+T) and proceed to Step 2.
 
 ### Step 2: Connect the cables
 
-1. Connect the MikroTik switch to power
-2. Plug an Ethernet cable from **switch port 8** to the host computer’s Ethernet port
-3. Plug your internet connection into **switch port 7**
-4. Don’t plug any radios in yet: do that after setup is complete
+1. Connect the MikroTik switch to power.
+2. Connect **switch port 8** to the host computer's Ethernet port.
+3. Connect the internet uplink to **switch port 7**.
+4. Leave the provisioning ports empty until setup is complete.
 
 ### Step 3: Run the setup script
 
@@ -73,12 +72,13 @@ In the terminal on your host computer, run this single command:
 curl -sSL https://raw.githubusercontent.com/isolson/equipment-provisioner/main/scripts/bootstrap.sh | sudo bash
 ```
 
-This downloads and runs the setup script. It will:
-1. Install the software and its dependencies
-2. Ask you for your device passwords (the current admin password on your Cambium/Tarana/Tachyon devices: usually `admin` if they’re factory default)
-3. Detect the MikroTik switch automatically when you plug it in
-4. Configure the switch (VLANs, port assignments, PoE: all automatic)
-5. Start the provisioner service
+This downloads and runs the setup script. The script:
+
+1. Installs the software and its dependencies.
+2. Prompts for device credentials.
+3. Detects the MikroTik switch.
+4. Configures the VLANs, port assignments, and PoE settings.
+5. Starts the provisioner service.
 
 **Expected output when done:**
 ```
@@ -93,25 +93,25 @@ Dashboard: http://192.168.88.10:8080
 
 ### Step 4: Finish setup in the browser
 
-1. Open `http://192.168.88.10:8080` in a browser on the host computer
-   - You should see the dashboard with 6 empty port cards
-2. Click the **Setup** tab (or follow the banner if it appears)
-3. Work through the readiness checklist:
-   - **Credentials**: Confirm your device passwords are entered
-   - **Config templates**: Upload your configuration templates (or use the bundled defaults)
-   - **Firmware**: Pre-download firmware for your device types (optional: it can download on demand if you have internet)
-4. The Setup tab will also verify your switch is wired correctly
+1. Open `http://192.168.88.10:8080` in a browser on the host computer.
+2. Confirm that the dashboard shows six empty port cards.
+3. Select the **Setup** tab.
+4. Complete the readiness checklist.
+5. Enter device credentials.
+6. Upload configuration templates or use the bundled templates.
+7. Preload firmware, or allow downloads when the host has internet access.
+8. Confirm that the Setup tab reports the correct switch wiring.
 
 > If you’re migrating from an existing provisioning bench, you can export its setup bundle and import it here to skip most of this.
 
 ### Step 5: Provision your first device
 
-1. Plug a factory-default radio into **port 1** of the switch
-2. Watch the port card on the dashboard: it will progress through:
+1. Connect a factory-default device to **port 1** of the switch.
+2. Watch the port card as it progresses through these states:
    - **Detecting** (identifying what device it is)
    - **Provisioning** (logging in, configuring, updating firmware)
    - **Ready** (done: green indicator)
-3. The system handles everything automatically: watch the checklist fill in as it goes
+3. Wait for the checklist to show all required steps as complete.
 
 **What success looks like:** The port card turns green with a checkmark and shows "Ready". The checklist on the right shows all steps complete (Login ✓, Config ✓, Firmware ✓, Verify ✓).
 
@@ -146,8 +146,7 @@ When you plug a device into ports 1–6:
 3. **Fingerprinting**: HTTP requests identify the vendor and model
 4. **Provisioning**: The appropriate handler logs in, applies config, and updates firmware
 
-![Device Detection Flow](docs/screenshots/device-detection.png)
-*Port card showing live detection and fingerprinting progress*
+See [SCREENSHOTS.md](docs/SCREENSHOTS.md) for the planned device-detection screenshot.
 
 ### Port Isolation
 
@@ -180,10 +179,9 @@ Management VLAN 1990 (`192.168.88.0/24`) is for switch-to-host communication onl
 
 ### Real-Time Port Cards
 
-![Port Cards](docs/screenshots/port-cards.png)
-*Each port shows vendor, model, link speed, and provisioning progress*
+Each port shows the vendor, model, link speed, and provisioning progress.
 
-The dashboard updates live via WebSocket. No page refresh needed. Each port card shows:
+The dashboard updates through a WebSocket connection. A page refresh is not required. Each port card shows:
 
 - **Vendor badge**: Color-coded by manufacturer
 - **Model name**: Detected via fingerprint
@@ -194,12 +192,11 @@ The dashboard updates live via WebSocket. No page refresh needed. Each port card
   - 🔵 **Provisioning**: Logging in, configuring, updating firmware
   - 🟢 **Ready**: Device is configured and accessible
   - 🔴 **Failed**: Provisioning error (hover for details)
-- **Checklist**: Step-by-step progress (login ✓, config ✓, firmware ✓, etc.)
+- **Checklist**: Progress for login, configuration, firmware, and verification.
 
 ### Mode Configuration
 
-![Mode Configuration](docs/screenshots/mode-config.png)
-*Reconfigure devices as AP or PTP after initial provisioning*
+See [SCREENSHOTS.md](docs/SCREENSHOTS.md) for the planned mode-configuration screenshot.
 
 After a device is provisioned, you can set its operational mode:
 
@@ -254,9 +251,13 @@ The mode configuration applies immediately. No need to unplug and re-provision.
 
 ---
 
+### MikroTik and Ubiquiti
+
+MikroTik Netinstall and Ubiquiti Wave/AirMAX devices use their documented provisioning flows. See [`docs/mikrotik-netinstall.md`](docs/mikrotik-netinstall.md) and [`docs/wave-credentials-configuration.md`](docs/wave-credentials-configuration.md). Model support can vary.
+
 ## Configuration Files
 
-The system reads templates from `/opt/provisioner/config/`:
+The service reads runtime configuration from `/etc/provisioner/config.yaml`. It reads configuration templates and firmware files from `/var/lib/provisioner/repo/`.
 
 ### `config.yaml`
 
@@ -275,24 +276,21 @@ ports:
 credentials:
   cambium:
     username: admin
-    password: your-password-here
+    password: <device-password>
   tarana:
     username: admin
-    password: your-password-here
+    password: <device-password>
   tachyon:
-    username: admin
-    password: your-password-here
+    username: root
+    password: <device-password>
 
 firmware:
   auto_update: true        # Auto-update to latest firmware
   download_timeout: 300    # Seconds to wait for downloads
 
 display:
-  # 0 = let native X DPMS (configured in the kiosk autostart, 2 min blank /
-  # 5 min off) handle idle. Touch wakes via libinput, device-connect wakes
-  # via the controller below. Set >0 to enable the older JS "no-devices-
-  # for-N-seconds" backlight sleep (it doesn't track user input, so most
-  # kiosks should leave this at 0).
+  # 0 = use native X DPMS for idle handling. Set a value greater than 0 to
+  # enable the JavaScript display-sleep timer.
   sleep_timeout: 0
   wake_on_connect: true    # Wake the screen when a device is plugged in
   use_dpms: true           # X DPMS via `sudo -u kiosk env DISPLAY=:0 xset`
@@ -321,8 +319,7 @@ The system automatically downloads firmware from vendor CDNs if needed.
 
 ## Firmware Management
 
-![Firmware Page](docs/screenshots/firmware-page.png)
-*Firmware library showing available versions and download status*
+See [SCREENSHOTS.md](docs/SCREENSHOTS.md) for the planned firmware-page screenshot.
 
 The management UI at `http://<host>:8080/files` lets you seed first-run assets without shell access:
 
@@ -339,7 +336,7 @@ Firmware files are cached locally. Tachyon and MikroTik can auto-download when W
 
 The provisioner exposes a REST API for automation and integration with other tools.
 
-### Get Port Status
+### Return Port Status
 
 ```bash
 curl http://192.168.88.10:8080/api/ports
@@ -376,7 +373,7 @@ curl -X POST http://192.168.88.10:8080/api/provision \
 ### WebSocket for Live Updates
 
 ```javascript
-const ws = new WebSocket('ws://192.168.88.10:8080/ws');
+const ws = new WebSocket('ws://192.168.88.10:8080/ws/status');
 ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
   console.log('Port', data.port_number, 'status:', data);
@@ -408,7 +405,7 @@ See [API.md](docs/API.md) for complete endpoint documentation.
 ### Switch not responding
 
 - Ensure switch IP is `192.168.88.1` on VLAN 1990
-- Check `/opt/provisioner/config/config.yaml` for correct `switch_ip`
+- Check `/etc/provisioner/config.yaml` for the correct `switch_ip` value.
 - Verify trunk port (port 8) is configured correctly:
   ```bash
   /interface/bridge/vlan print
@@ -429,7 +426,7 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for more issues and solutions.
 
 - **Port Manager** (`provisioner/port_manager.py`): Core state machine, device detection, boot wait logic
 - **Switch Listener** (`provisioner/switch_listener.py`): RouterOS API client, listens for link up/down webhooks
-- **Device Handlers** (`provisioner/handlers/`): Vendor-specific provisioning logic (Cambium, Tarana, Tachyon)
+- **Device Handlers** (`provisioner/handlers/`): Vendor-specific provisioning logic for Cambium, MikroTik, Tachyon, Tarana, and Ubiquiti
 - **Firmware Manager** (`provisioner/firmware.py`): Downloads and caches firmware files
 - **Web API** (`provisioner/web/api.py`): FastAPI server, WebSocket broadcaster
 - **Web UI** (`provisioner/web/templates/`): Tailwind CSS dashboard, vanilla JavaScript
@@ -505,20 +502,7 @@ The deploy script:
 
 ### Add a New Device Type
 
-1. Create a handler in `provisioner/handlers/new_vendor.py`:
-
-```python
-from .base import BaseDeviceHandler
-
-class NewVendorHandler(BaseDeviceHandler):
-    async def provision(self, device_info):
-        # Your provisioning logic here
-        pass
-```
-
-2. Register it in `provisioner/handler_manager.py`
-3. Add default IP to `DeviceLinkLocalIP` in `port_manager.py`
-4. Add firmware mappings to `firmware.yaml`
+Follow the complete checklist in [HANDLER_DEVELOPMENT.md](docs/HANDLER_DEVELOPMENT.md). The checklist covers the handler, detection, registration, firmware, templates, and tests.
 
 ---
 
@@ -528,7 +512,7 @@ class NewVendorHandler(BaseDeviceHandler):
 
 - [ ] Persistent PTP link tracking across restarts
 - [ ] Slack/Discord webhook notifications
-- [ ] MikroTik device provisioning (switch config works, device provisioning not yet)
+- [ ] Consolidate vendor registries into a single vendor specification
 
 ### Planned
 

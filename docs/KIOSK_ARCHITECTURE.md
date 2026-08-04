@@ -31,7 +31,9 @@ When the provisioner image is built with `--kiosk` (see `image/chroot-install.sh
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Notably: **there is no display manager** (no lightdm/gdm). The Xorg auth file is at `/tmp/serverauth.XXXXXX` — random per session, not stable across reboots. Don't hardcode `XAUTHORITY` anywhere.
+The kiosk does not use a display manager such as LightDM or GDM. The Xorg
+authorization file is at `/tmp/serverauth.XXXXXX` and changes for each session.
+Do not hardcode `XAUTHORITY`.
 
 ### Same-uid X access
 
@@ -41,7 +43,8 @@ This X server accepts local connections from the same uid **without** `XAUTHORIT
 sudo -u kiosk env DISPLAY=:0 <xclient>
 ```
 
-…and it Just Works. No auth file needed. (`provisioner-web` runs as root, so it uses this sudo-hop too — see "Display sleep/wake" below.)
+No authorization file is required. The `provisioner-web` service runs as root
+and uses the same `sudo` transition. See "Display sleep/wake" below.
 
 ## Companion services
 

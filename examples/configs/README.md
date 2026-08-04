@@ -1,6 +1,6 @@
-# Config Templates
+# Configuration Templates
 
-This folder contains **example** config templates. Copy these to your provisioner's config repository on the Pi.
+This folder contains example configuration templates. Copy them to the provisioner's configuration repository on the host.
 
 ## Directory Structure
 
@@ -15,9 +15,9 @@ On the Pi, templates should be at:
 │   └── ap.json        # AP config
 ```
 
-## AP Config - Auto Field Injection
+## AP and PTP Mode Templates
 
-For AP configs, the system automatically injects values into known fields. You can use your normal config file and these fields will be overwritten:
+The AP and PTP mode flow renders a small set of approved variables in the mode templates. The flow also injects values into known fields for Cambium and Tachyon devices. It does not render variables in standard provisioning templates.
 
 ### Cambium
 | Field | Injected Value | Example |
@@ -42,9 +42,9 @@ SSIDs are generated differently per device type:
 | Tachyon | Direction only (uppercase) | `NORTH` |
 | Cambium | Tower + direction | `tw05-north` |
 
-## Optional: Placeholder Syntax
+## Mode Template Variables
 
-You can also use `{{placeholder}}` syntax anywhere in your config for custom fields:
+Use these variables only in `ap.json`, `ptp-a.json`, and `ptp-b.json` files. `provisioner/mode_config.py` replaces them before it applies the configuration. Do not use them in `default.*` or other standard provisioning templates.
 
 | Variable | Example | Description |
 |----------|---------|-------------|
