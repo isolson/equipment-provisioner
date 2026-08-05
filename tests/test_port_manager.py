@@ -695,9 +695,12 @@ async def test_same_device_returning_inside_grace_is_not_reprovisioned(monkeypat
 
 @pytest.mark.asyncio
 async def test_mac_comparison_is_case_insensitive(monkeypatch):
-    """Vendors return upper-case MACs via update_port_device_info, while
-    _lookup_neighbor_mac lowercases. A raw == compare made the same physical
-    device look new, bypassing the cooldown and spuriously re-provisioning."""
+    """Regression guard for _same_mac (does NOT reproduce the parent bug —
+    on the parent commit the provision_attempted gate short-circuits before
+    any compare is reached). Vendors return upper-case MACs via
+    update_port_device_info while _lookup_neighbor_mac lowercases; a
+    regression to raw == would make the same physical device look new,
+    trigger a reset+reprovision, and fail the asserts below."""
     manager = PortManager(num_ports=1)
     manager._generate_port_configs()
     state = _provisioned_port(manager, 1, "AA:BB:CC:DD:EE:FF")
@@ -730,3 +733,129 @@ async def test_mac_comparison_is_case_insensitive(monkeypatch):
 
     assert called == [], "case difference made the same device look new"
     assert state.last_result == "success"
+
+
+@pytest.mark.asyncio
+async def test_neighbor_mac_lookup_retries_transient_none(monkeypatch):
+    """Finding #1 mitigation: the neighbor entry can read None for a beat
+    right after a successful ping (ARP still resolving). _lookup_neighbor_mac
+    retries so a genuine swap's new MAC isn't lost to a first-poll miss —
+    which would otherwise leave the port stuck on the old COMPLETE badge."""
+    manager = PortManager(num_ports=1)
+
+    calls = {"n": 0}
+
+    async def flaky_once(interface, ip):
+        calls["n"] += 1
+        return None if calls["n"] < 3 else "bb:bb:bb:bb:bb:bb"
+
+    slept = []
+
+    async def fake_sleep(d):
+        slept.append(d)
+
+    monkeypatch.setattr(manager, "_read_neighbor_mac_once", flaky_once)
+    monkeypatch.setattr("provisioner.port_manager.asyncio.sleep", fake_sleep)
+
+    mac = await manager._lookup_neighbor_mac("eth0.1992", "169.254.1.1", attempts=3, delay=0.1)
+
+    assert mac == "bb:bb:bb:bb:bb:bb"
+    assert calls["n"] == 3
+    assert slept == [0.1, 0.1], "should back off between attempts, not after the last"
+
+
+@pytest.mark.asyncio
+async def test_neighbor_mac_lookup_gives_up_after_attempts(monkeypatch):
+    """If every poll misses, it still returns None (the fail-safe input to
+    _is_replacement_device) rather than looping forever."""
+    manager = PortManager(num_ports=1)
+
+    async def always_none(interface, ip):
+        return None
+
+    async def fake_sleep(d):
+        return None
+
+    monkeypatch.setattr(manager, "_read_neighbor_mac_once", always_none)
+    monkeypatch.setattr("provisioner.port_manager.asyncio.sleep", fake_sleep)
+
+    mac = await manager._lookup_neighbor_mac("eth0.1992", "169.254.1.1", attempts=3, delay=0)
+    assert mac is None
+
+
+@pytest.mark.asyncio
+async def test_subnet_sweep_swap_provisions_the_new_device(monkeypatch):
+    """Finding #6 coverage: the simple-mode subnet-sweep detect path has the
+    same identity check; a swap discovered via sweep must provision the new
+    device, not inherit the previous one's badge. device_mac arrives
+    upper-cased from the ARP reply here."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+    manager._simple_subnet = "192.168.1.0/24"
+    state = _provisioned_port(manager, 1, "aa:aa:aa:aa:aa:aa")
+
+    called = []
+
+    async def on_detected(port_num, device_type, device_ip):
+        called.append((port_num, device_type, device_ip))
+
+    manager.on_device_detected(on_detected)
+
+    async def fake_ips(interface):
+        return {"192.168.1.2"}
+
+    async def fake_identify(interface, ip, possible_types):
+        return "cambium"
+
+    # Patch scapy's srp to return one ARP responder that is a different device.
+    def fake_srp(pkt, timeout=3, iface=None, verbose=False):
+        class _R:
+            psrc = "192.168.1.50"
+            hwsrc = "BB:BB:BB:BB:BB:BB"  # sweep upper-cases; different unit
+        return ([(None, _R())], [])
+
+    monkeypatch.setattr("scapy.all.srp", fake_srp)
+    monkeypatch.setattr(manager, "_get_interface_ips", fake_ips)
+    monkeypatch.setattr(manager, "_identify_device_type", fake_identify)
+
+    config = manager.ports[1]
+    result = await manager._detect_via_subnet_scan(1, config, state)
+
+    assert result is True
+    assert called == [(1, "cambium", "192.168.1.50")], "new device never provisioned"
+    assert state.last_result is None, "new device inherited the old COMPLETE badge"
+
+
+@pytest.mark.asyncio
+async def test_passive_ed_swap_provisions_the_new_device(monkeypatch):
+    """Finding #6 / #4 coverage: a passively-detected Evolution Digital unit
+    replacing a previously-qualified ED unit (different MAC) inside the grace
+    window must be qualified, not skipped. Confirms the ED path is NOT a
+    no-op for the identity check (last_provisioned_mac is populated for ED)."""
+    manager = PortManager(num_ports=6)
+    manager._generate_port_configs()
+    # Previously-qualified ED unit, still in grace.
+    state = _provisioned_port(manager, 5, "84:01:12:11:11:11")
+    state.link_up = True
+
+    called = []
+
+    async def on_detected(port_num, device_type, device_ip):
+        called.append((port_num, device_type))
+
+    manager.on_device_detected(on_detected)
+
+    async def fake_sniff(self, interface, timeout_sec, pi_mac=None):
+        return "84:01:12:42:95:fe"  # different ED unit
+
+    monkeypatch.setattr(
+        "provisioner.fingerprint.DeviceFingerprinter.sniff_for_known_mac",
+        fake_sniff,
+    )
+
+    config = manager.ports[5]
+    await manager._try_passive_detection(5, config, state, timeout_sec=1)
+
+    assert called == [(5, "evolution_digital")], "new ED unit was not qualified"
+    assert state.last_result is None, "new ED unit inherited the old badge"
+    assert state.device_mac == "84:01:12:42:95:fe"

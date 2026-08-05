@@ -1057,10 +1057,19 @@ class PortManager:
         return not self._same_mac(current_mac, state.last_provisioned_mac)
 
     def _reset_state_for_new_device(self, port_num: int, state: "PortState") -> None:
-        """Drop provisioning state belonging to a previous device.
+        """Drop provisioning/qualification state belonging to a *previous*
+        device so the unit now on the port is treated as fresh.
 
-        Same field set the post-grace sweep clears, so a swap and a
-        grace-expiry converge on identical state.
+        Deliberately does NOT touch ``device_detected`` / ``device_ip`` /
+        ``device_type`` / ``device_mac``: each detect path sets those to the
+        new device's values *before* calling this, and clearing them would
+        erase the identity we just established.
+
+        Clears a superset of the post-grace sweep's field list — the sweep
+        keeps ``last_provisioned_*`` (cooldown belongs to a same-MAC return)
+        whereas here we know the MAC differs, so the cooldown must go too.
+        Also clears ``last_bootp_fired_*`` for symmetry with the sweep, so a
+        MikroTik→MikroTik swap can't inherit a stale Netinstall cooldown.
         """
         state.provision_attempted = False
         state.last_result = None
@@ -1068,6 +1077,8 @@ class PortManager:
         state.provisioning_ended = None
         state.last_provisioned_at = None
         state.last_provisioned_mac = None
+        state.last_bootp_fired_at = None
+        state.last_bootp_fired_mac = None
         state.checklist.reset()
         self.clear_device_mode(port_num)
 
@@ -1428,12 +1439,35 @@ class PortManager:
             except Exception as e:
                 logger.error(f"Callback error: {e}")
 
-    async def _lookup_neighbor_mac(self, interface: str, ip: str) -> Optional[str]:
-        """Look up a device's MAC from the kernel neighbor table.
+    async def _lookup_neighbor_mac(
+        self, interface: str, ip: str, attempts: int = 3, delay: float = 0.3
+    ) -> Optional[str]:
+        """Look up a device's MAC from the kernel neighbor table, with a
+        bounded retry.
 
-        Called right after a successful ping so the entry should be fresh.
-        Returns None if the neighbor is missing, FAILED, or has no lladdr.
+        Called right after a successful ping, but the neighbor entry can
+        still be transiently absent (ARP mid-resolution, or a STALE entry
+        being revalidated), so a single poll occasionally returns None for a
+        device that is very much present. That matters for device-swap
+        detection: ``_is_replacement_device`` fail-closes on an unknown MAC
+        (it cannot tell "same device, unreadable" from "new device,
+        unreadable"), so a first-poll None on a genuine swap would leave the
+        port stuck on the previous device's COMPLETE badge. Retrying a few
+        times shrinks that window to near zero without changing the
+        fail-safe semantics. Returns None only if every attempt failed.
         """
+        for attempt in range(attempts):
+            mac = await self._read_neighbor_mac_once(interface, ip)
+            if mac is not None:
+                return mac
+            if attempt + 1 < attempts:
+                await asyncio.sleep(delay)
+        return None
+
+    async def _read_neighbor_mac_once(self, interface: str, ip: str) -> Optional[str]:
+        """Single kernel neighbor-table read. See :meth:`_lookup_neighbor_mac`
+        for the retry wrapper. Returns None if the neighbor is missing,
+        FAILED, or has no lladdr."""
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
