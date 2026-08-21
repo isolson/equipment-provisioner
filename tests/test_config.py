@@ -536,6 +536,18 @@ class TestCredentialsBackfill:
             assert config.credentials[device_type].password == ""
         assert config.credentials["mikrotik"].bootstrap_password == ""
 
+    def test_malformed_credentials_block_still_raises(self, tmp_path):
+        """A non-mapping `credentials:` value (e.g. a YAML list) must still
+        fail validation loudly, as the pre-Story-3 typed model did — the
+        backfill must not silently swallow it into full defaults."""
+        with pytest.raises(ValueError):
+            self._load(
+                tmp_path,
+                "credentials:\n"
+                "  - mikrotik\n"
+                "  - cambium\n",
+            )
+
     def test_getattr_on_credentials_table_returns_none(self):
         """Documents the dict-field failure mode: getattr-style consumers
         (the pre-Story-3 pattern) silently get None instead of credentials.

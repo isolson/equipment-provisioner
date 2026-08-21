@@ -336,7 +336,12 @@ class Config(BaseModel):
         ``root`` username. So: defaults first, YAML wins per field. Unknown
         vendor keys pass through unchanged (harmless), and a bare
         ``vendor:`` key (parsed as None) keeps that vendor's defaults.
+        A malformed non-mapping value (e.g. a YAML list) passes through
+        untouched so pydantic raises ValidationError, exactly as the
+        pre-Story-3 typed model did.
         """
+        if v is not None and not isinstance(v, dict):
+            return v
         merged: Dict[str, Any] = {
             vendor: creds.model_dump()
             for vendor, creds in _default_credentials().items()
