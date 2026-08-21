@@ -47,6 +47,7 @@ from provisioner.fingerprint import DeviceType
 from provisioner.firmware_checker import FirmwareChecker
 from provisioner.handler_manager import HandlerManager, provisionable_device_types
 from provisioner.port_manager import DeviceLinkLocalIP
+from provisioner.vendor_ips import VENDOR_LINK_LOCAL_IPS
 from provisioner.setup_tools import (
     _read_primary_credentials,
     _template_requirements,
@@ -118,6 +119,16 @@ class TestPythonRegistries:
     def test_device_ips_config_fields_match(self):
         assert set(DeviceIPsConfig.model_fields) == CANONICAL, (
             "DeviceIPsConfig (config.py) out of sync with the vendor set."
+        )
+
+    def test_vendor_ip_registry_covers_every_vendor(self):
+        # Story 4 / #74: the single vendor-IP registry that
+        # DeviceLinkLocalIP, the boot-ping list, and DeviceIPsConfig
+        # defaults derive from.
+        assert set(VENDOR_LINK_LOCAL_IPS) == CANONICAL, (
+            "VENDOR_LINK_LOCAL_IPS (vendor_ips.py) out of sync — a vendor "
+            "missing from the IP registry is undetectable at link-up and "
+            "adds ~120s detection delay."
         )
 
     def test_link_local_probe_list_covers_every_vendor(self):
@@ -195,22 +206,15 @@ class TestSourceParsedRegistries:
         )
 
     def test_boot_ping_list_covers_the_same_ips_as_probe_list(self):
-        # The boot-wait path keeps its own inline ips_to_try list, separate
-        # from DeviceLinkLocalIP.ALL (the duplication Story 4 / #74 removes).
-        # An IP present in ALL but missing here delays boot detection.
-        source = (REPO_ROOT / "provisioner" / "port_manager.py").read_text()
-        match = re.search(r"ips_to_try\s*=\s*\[([^\]]*)\]", source)
-        assert match, (
-            "port_manager.py: couldn't find the boot-ping `ips_to_try = [...]` "
-            "list — if it now derives from DeviceLinkLocalIP.ALL (Story 4 / "
-            "#74), update this test."
-        )
-        attr_names = re.findall(r"DeviceLinkLocalIP\.(\w+)", match.group(1))
-        boot_ips = {getattr(DeviceLinkLocalIP, name) for name in attr_names}
+        # Story 4 / #74 removed the inline boot-ping ips_to_try literal:
+        # both lists now derive from vendor_ips.VENDOR_LINK_LOCAL_IPS. This
+        # asserts the two derived views stay in agreement (an IP present in
+        # ALL but missing from BOOT_PING delays boot detection).
+        boot_ips = set(DeviceLinkLocalIP.BOOT_PING)
         probe_ips = {ip for ip, _vendors in DeviceLinkLocalIP.ALL}
         assert boot_ips == probe_ips, (
-            "Boot-ping ips_to_try (port_manager.py) covers different IPs than "
-            "DeviceLinkLocalIP.ALL."
+            "DeviceLinkLocalIP.BOOT_PING covers different IPs than "
+            "DeviceLinkLocalIP.ALL — the vendor_ips.py derivations drifted."
         )
 
     def test_index_html_vendor_map_matches(self):

@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any, ClassVar, Optional, Dict
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, create_model, field_validator
 from dotenv import load_dotenv
+
+from .vendor_ips import device_ips_vendors, primary_ip
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +46,23 @@ class NetworkConfig(BaseModel):
     management: ManagementNetworkConfig = Field(default_factory=ManagementNetworkConfig)
 
 
-class DeviceIPsConfig(BaseModel):
-    """Known link-local IPs for device types."""
-    cambium: str = "169.254.1.1"
-    tachyon: str = "169.254.1.1"
-    tarana: str = "169.254.100.1"
-    ubiquiti: str = "192.168.1.20"
-    mikrotik: str = "192.168.88.1"
+# Known link-local IPs for device types (`ports.device_ips` in config.yaml).
+# One typed `str` field per vendor, so a partial override in config.yaml
+# keeps every other vendor's default (pydantic backfills omitted fields).
+# Fields and defaults derive from the single vendor-IP registry
+# (vendor_ips.py, Story 4 / #74) — a new registry vendor appears here
+# automatically. Only the vendor's *primary* IP is overridable here;
+# alternate addresses (e.g. Tachyon's 192.168.1.1) live in the registry
+# only, matching the pre-registry schema. device_ips_vendors() keeps the
+# historical field/serialization order.
+DeviceIPsConfig = create_model(
+    "DeviceIPsConfig",
+    **{vendor: (str, primary_ip(vendor)) for vendor in device_ips_vendors()}
+)
+DeviceIPsConfig.__doc__ = (
+    "Known link-local IPs for device types (derived from "
+    "vendor_ips.VENDOR_LINK_LOCAL_IPS)."
+)
 
 
 class PortsConfig(BaseModel):

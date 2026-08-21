@@ -39,13 +39,13 @@ Follow the checklist in `docs/HANDLER_DEVELOPMENT.md` under "Adding a New Vendor
 
 1. `provisioner/handlers/{vendor}.py` — handler class
 2. `provisioner/fingerprint.py` — device detection
-3. `provisioner/port_manager.py` — boot-ping IPs (`DeviceLinkLocalIP`)
+3. `provisioner/vendor_ips.py` — link-local IP registry (`VENDOR_LINK_LOCAL_IPS`; `DeviceLinkLocalIP`, the boot-ping list, and `DeviceIPsConfig` defaults derive from it)
 4. `provisioner/handler_manager.py` — `HANDLER_MAP`
 5. `provisioner/firmware.py` — `MODEL_FIRMWARE_PATTERNS` + version regex
 6. `provisioner/config_store.py` — `CONFIG_MODEL_ALIASES` (if needed)
 7. `configs/templates/{vendor}/{model}.json` — config template
 8. `provisioner/handlers/__init__.py` — import + `__all__` *(miss this → ImportError at boot)*
-9. `provisioner/config.py` — `CredentialsConfig` field, `DeviceIPsConfig`, firmware-source default, any `apply_config_<vendor>` flag
+9. `provisioner/config.py` — `CredentialsConfig` field, firmware-source default, any `apply_config_<vendor>` flag (`DeviceIPsConfig` derives from the IP registry — no edit needed)
 10. `provisioner/main.py` — credentials dict *(must move in lockstep with #9 or AttributeError at boot)*
 11. `provisioner/cli.py` — *no edit needed*: handler lookup + `choices` derive from `HANDLER_MAP` (Story 2 / #72)
 12. `provisioner/web/api.py` — `BUILTIN_CREDENTIALS` (device-type validation derives from `HANDLER_MAP`); `provisioner/web/templates/index.html` — vendor metadata map
@@ -85,7 +85,7 @@ Minimize the chance of leaking credentials, keys, or other private data — espe
 - Adding vendor branching to `base.py` instead of using handler properties
 - Adding a *new* place that enumerates vendors (another hardcoded list/dict or `if device_type == "..."`) instead of deriving from an existing registry — the vendor list already has ~10 copies; don't make it 11
 - Using Python 3.10+ syntax (Pi runs 3.9)
-- Forgetting to add new device IPs to the boot-ping list (causes 120s detection delay)
+- Forgetting to add new device IPs to the vendor-IP registry (`provisioner/vendor_ips.py` — the boot-ping list derives from it; a missing IP causes 120s detection delay)
 - Putting `{{placeholders}}` in config templates (no substitution engine exists)
 - Only deploying code without copying templates to the repo dir on the Pi
 - Making `config_after_all_firmware` globally true instead of conditional on model

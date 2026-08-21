@@ -501,11 +501,11 @@ print(f"Success: {result.success}, Error: {result.error_message}")
 - Add API probe if the device has a distinctive REST endpoint
 - Detection must work on factory-default devices at their default IP
 
-### 3. Boot-Ping Discovery (`provisioner/port_manager.py`)
+### 3. Boot-Ping Discovery (`provisioner/vendor_ips.py`)
 
-- Add the vendor's default IP(s) to `DeviceLinkLocalIP` class
-- Add to `DeviceLinkLocalIP.ALL` with vendor tag
-- Add to the boot-ping `ips_to_try` list in `_boot_ping_detect()`
+- Add the vendor's default IP(s) to `VENDOR_LINK_LOCAL_IPS` — the single vendor-IP registry
+- `DeviceLinkLocalIP` (constants, the `.ALL` probe list, and the boot-ping `BOOT_PING` list in `port_manager.py`) and `DeviceIPsConfig` defaults (`config.py`) all derive from it — no other edits needed
+- List order matters: dict insertion order is the detection-probe order; the first IP in a vendor's list is its primary/default address
 
 ### 4. Handler Registration (`provisioner/handler_manager.py`)
 

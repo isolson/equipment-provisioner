@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Callable, Awaitable, Tuple, Union
 
 from .fingerprint import is_mikrotik_oui
+from .vendor_ips import VENDOR_LINK_LOCAL_IPS, boot_ping_ips, probe_ip_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -113,25 +114,32 @@ class ProvisioningChecklist:
 
 
 class DeviceLinkLocalIP:
-    """Known link-local/default IPs for device types."""
-    CAMBIUM = "169.254.1.1"
-    TACHYON = "169.254.1.1"
-    TACHYON_ALT = "192.168.1.1"  # Some Tachyon devices use this
-    TARANA = "169.254.100.1"
-    MIKROTIK = "192.168.88.1"  # Mikrotik default, but often uses DHCP
-    UBIQUITI = "192.168.1.20"  # Ubiquiti AirMax and Wave default
+    """Known link-local/default IPs for device types.
 
-    # All IPs to probe when detecting device type
-    ALL = [
-        ("169.254.1.1", ["cambium", "tachyon"]),
-        ("192.168.1.1", ["tachyon"]),  # Tachyon alternate IP
-        ("192.168.1.20", ["ubiquiti"]),  # Ubiquiti AirMax/Wave default
-        ("169.254.100.1", ["tarana"]),
-        ("192.168.88.1", ["mikrotik"]),
-    ]
+    Derived from ``provisioner.vendor_ips.VENDOR_LINK_LOCAL_IPS`` — the
+    single vendor-IP registry (Story 4 / #74). Add or change vendor IPs
+    there, not here.
+    """
+    CAMBIUM = VENDOR_LINK_LOCAL_IPS["cambium"][0]      # 169.254.1.1
+    TACHYON = VENDOR_LINK_LOCAL_IPS["tachyon"][0]      # 169.254.1.1
+    TACHYON_ALT = VENDOR_LINK_LOCAL_IPS["tachyon"][1]  # 192.168.1.1 — some Tachyon devices use this
+    TARANA = VENDOR_LINK_LOCAL_IPS["tarana"][0]        # 169.254.100.1
+    MIKROTIK = VENDOR_LINK_LOCAL_IPS["mikrotik"][0]    # 192.168.88.1 — Mikrotik default, but often uses DHCP
+    UBIQUITI = VENDOR_LINK_LOCAL_IPS["ubiquiti"][0]    # 192.168.1.20 — Ubiquiti AirMax and Wave default
+
+    # All (ip, [candidate vendors]) pairs to probe when detecting device
+    # type — derived; registry order is the probe order.
+    ALL = probe_ip_candidates()
+
+    # IPs pinged during the boot wait for a quick liveness check — derived;
+    # preserves the historical boot-ping order (MikroTik before Tarana).
+    BOOT_PING = boot_ping_ips()
 
     # Some MikroTik units may be reset with different default LAN subnets.
-    # We only probe these if standard defaults do not match.
+    # We only probe these if standard defaults do not match. Deliberately
+    # not part of the vendor-IP registry: fallbacks are conditional
+    # behavior (probed only after every standard probe misses), not part
+    # of the standard probe/boot-ping enumeration.
     MIKROTIK_FALLBACKS = [
         "192.168.0.1",
         "10.0.0.1",
@@ -998,14 +1006,10 @@ class PortManager:
 
             async def boot_ping_check(port_num: int, config: PortConfig, state: PortState) -> None:
                 """Ping device during boot wait to detect when it's up."""
-                # Try known device IPs for boot detection
-                ips_to_try = [
-                    DeviceLinkLocalIP.CAMBIUM,      # 169.254.1.1
-                    DeviceLinkLocalIP.TACHYON_ALT,  # 192.168.1.1
-                    DeviceLinkLocalIP.UBIQUITI,     # 192.168.1.20
-                    DeviceLinkLocalIP.MIKROTIK,     # 192.168.88.1
-                    DeviceLinkLocalIP.TARANA,       # 169.254.100.1
-                ]
+                # Try known device IPs for boot detection — derived from
+                # the vendor-IP registry (Story 4 / #74), historical order
+                # preserved.
+                ips_to_try = DeviceLinkLocalIP.BOOT_PING
                 for ip in ips_to_try:
                     # Skip ARP fallback during boot ping — we just need a
                     # quick liveness check, not thorough MikroTik detection.
