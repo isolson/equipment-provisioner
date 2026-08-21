@@ -52,7 +52,11 @@ from provisioner.setup_tools import (
     _read_primary_credentials,
     _template_requirements,
 )
-from provisioner.web.api import BUILTIN_CREDENTIALS, _validate_device_type
+from provisioner.web.api import (
+    BUILTIN_CREDENTIALS,
+    _validate_device_type,
+    vendor_ui_metadata,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -222,21 +226,26 @@ class TestSourceParsedRegistries:
         )
 
     def test_index_html_vendor_map_matches(self):
+        # Story 5 (#75): index.html no longer hardcodes the map — the
+        # dashboard route (web/app.py) injects vendor_ui_metadata()
+        # (web/api.py), which derives from provisionable_device_types()
+        # plus the documented evolution_digital / unknown exceptions.
         html = (
             REPO_ROOT / "provisioner" / "web" / "templates" / "index.html"
         ).read_text()
-        match = re.search(
-            r"const\s+deviceVendors\s*=\s*\{(.*?)\n\s*\};", html, re.DOTALL
+        assert re.search(
+            r"const\s+deviceVendors\s*=\s*\{\{\s*vendor_metadata\s*\|\s*tojson\s*\}\}",
+            html,
+        ), (
+            "index.html no longer injects the server-derived vendor metadata "
+            "(Story 5 / #75) — vendor cards render without names/colors/icons."
         )
-        assert match, (
-            "index.html: couldn't find `const deviceVendors = {...}` — if the "
-            "frontend now derives vendors from the API (Story 5 / #75), update "
-            "this test."
-        )
-        keys = set(re.findall(r"^\s*(\w+):\s*\{", match.group(1), re.MULTILINE))
-        assert keys == CANONICAL | {"evolution_digital", "unknown"}, (
-            "index.html deviceVendors map out of sync — vendor cards render "
-            "without names/colors/icons."
+        assert set(vendor_ui_metadata()) == CANONICAL | {
+            "evolution_digital",
+            "unknown",
+        }, (
+            "vendor_ui_metadata (web/api.py) out of sync — vendor cards "
+            "render without names/colors/icons."
         )
 
 
