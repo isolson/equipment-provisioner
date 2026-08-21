@@ -970,24 +970,14 @@ class TachyonHandler(BaseHandler):
                     "Added default network.zones.wan.dhcp.enabled_options for Tachyon config apply"
                 )
 
-        ethernet_ports = (
-            config.get("ethernet", {}).get("ports", {})
-            if isinstance(config.get("ethernet"), dict)
-            else {}
-        )
-        try:
-            wlan0_mode = radios.get("wlan0", {}).get("vaps", [{}])[0].get("mode")
-        except (AttributeError, IndexError, TypeError):
-            wlan0_mode = None
-        eth0 = ethernet_ports.get("eth0") if isinstance(ethernet_ports, dict) else None
-        eth0_network = eth0.get("network") if isinstance(eth0, dict) else None
-        if wlan0_mode == "sta" and isinstance(eth0_network, dict):
-            if "mgmt_vlan_enabled" not in eth0_network:
-                eth0_network["mgmt_vlan_enabled"] = True
-                logger.info(
-                    "Added default ethernet.ports.eth0.network.mgmt_vlan_enabled=true for Tachyon config apply"
-                )
-
+        # NOTE: do NOT synthesize `mgmt_vlan_enabled` on eth0 or on any VAP.
+        # These management-VLAN tags must stay coherent as a set — e.g. a
+        # station-mode CPE needs the wired port AND the wireless STA backhaul
+        # both tagged so management/DHCP can traverse the backhaul. Blindly
+        # defaulting them here produced an inconsistent config (eth0 tagged but
+        # the STA backhaul left untagged) that failed to obtain a
+        # management-VLAN DHCP lease. The captured template/export is
+        # authoritative for these fields; the device authors them correctly.
         if not isinstance(radios, dict):
             return
 
@@ -1010,14 +1000,6 @@ class TachyonHandler(BaseHandler):
                     vap["isolate"] = False
                     logger.info(
                         "Added default wireless.radios.%s.vaps[%s].isolate=false for Tachyon config apply",
-                        radio_name,
-                        index,
-                    )
-                network = vap.get("network")
-                if isinstance(network, dict) and "mgmt_vlan_enabled" not in network:
-                    network["mgmt_vlan_enabled"] = False
-                    logger.info(
-                        "Added default wireless.radios.%s.vaps[%s].network.mgmt_vlan_enabled=false for Tachyon config apply",
                         radio_name,
                         index,
                     )

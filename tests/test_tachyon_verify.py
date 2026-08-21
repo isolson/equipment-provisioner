@@ -186,8 +186,10 @@ async def test_apply_config_adds_missing_radio_isolation_default(fake_curl):
     assert radios["wlan1"]["isolation"] is False
     assert radios["wlan0"]["vaps"][0]["isolate"] is False
     assert radios["wlan1"]["vaps"][0]["isolate"] is False
-    assert radios["wlan0"]["vaps"][0]["network"]["mgmt_vlan_enabled"] is False
-    assert radios["wlan1"]["vaps"][0]["network"]["mgmt_vlan_enabled"] is False
+    # mgmt_vlan_enabled is a management-VLAN tag the device authors coherently
+    # (wired + STA backhaul together); normalization must NOT synthesize it.
+    assert "mgmt_vlan_enabled" not in radios["wlan0"]["vaps"][0]["network"]
+    assert "mgmt_vlan_enabled" not in radios["wlan1"]["vaps"][0]["network"]
     assert "isolation" not in radios["wlan2"]
 
 
@@ -239,7 +241,40 @@ async def test_apply_config_adds_missing_full_export_schema_defaults(fake_curl):
         "ntp_server": True,
         "timezone_offset": True,
     }
+    # eth0 mgmt_vlan_enabled must NOT be synthesized — the export is authoritative.
+    assert "mgmt_vlan_enabled" not in posted["ethernet"]["ports"]["eth0"]["network"]
+
+
+async def test_apply_config_preserves_explicit_mgmt_vlan_enabled(fake_curl, fast_sleep):
+    """Regression: normalization must not overwrite device-authored mgmt-VLAN tags.
+
+    A station-mode CPE's management VLAN rides the wireless STA backhaul, so the
+    device sets eth0 AND the STA VAP ``mgmt_vlan_enabled=true`` together. A prior
+    bug forced every VAP to ``false`` (and eth0 to ``true``), producing an
+    inconsistent config that could not obtain a management-VLAN DHCP lease. The
+    captured export is authoritative for these fields.
+    """
+    h = _curl_handler()
+    config = _full_export_config()
+    config["ethernet"]["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] = True
+    config["wireless"]["radios"]["wlan0"]["vaps"][0]["network"]["mgmt_vlan_enabled"] = True
+    posted = {}
+
+    def route(argv):
+        method = argv[argv.index("-X") + 1]
+        if method == "POST":
+            posted.update(json.loads(argv[argv.index("-d") + 1]))
+            return (0, json.dumps({}))
+        if method == "GET":
+            return (0, json.dumps(posted))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_handler(route)
+
+    assert await h.apply_config(config) is True
+    # Device-authored values survive untouched — not flipped to false.
     assert posted["ethernet"]["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] is True
+    assert posted["wireless"]["radios"]["wlan0"]["vaps"][0]["network"]["mgmt_vlan_enabled"] is True
 
 
 async def test_apply_config_file_tar_posts_authoritative_export_without_deep_merge(
