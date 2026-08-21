@@ -226,13 +226,22 @@ def test_same_unit_concurrent_capture_no_collision(tmp_path):
 
 def test_hostile_snapshot_id_is_rejected(store):
     store.save(make_snapshot())
-    for bad_id in ("../../../etc/passwd", "..", ".hidden", "a/b", ""):
+    bad_ids = (
+        "../../../etc/passwd", "..", ".hidden", "a/b", "",
+        # Trailing newline: `$` would match before it (PR #129 review F2) —
+        # fullmatch + \Z must reject it (filename + log-forging vector).
+        "advnl\n", "abc\ndef", "abc\r",
+    )
+    for bad_id in bad_ids:
         with pytest.raises(SnapshotNotFound):
             store.get_redacted(bad_id)
         with pytest.raises(SnapshotNotFound):
             store.delete(bad_id)
-    with pytest.raises(SnapshotStoreError):
-        store.save(make_snapshot(id="../escape"))
+    for bad_id in ("../escape", "advnl\n"):
+        with pytest.raises(SnapshotStoreError):
+            store.save(make_snapshot(id=bad_id))
+    # No newline-named file may have been created.
+    assert all("\n" not in p.name for p in store.base_path.iterdir())
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +301,75 @@ def test_redaction_default_secret_for_unclassified_identity_fields():
     assert "radius_secret" not in redacted["identity"]
     assert "identity.wireless.security_mode" in redacted["redacted_fields"]
     assert "identity.radius_secret" in redacted["redacted_fields"]
+    assert_no_secret_values(redacted)
+
+
+def test_redaction_dotted_key_spoof_is_default_secret():
+    """PR #129 review F1 regression — the reviewer's exact spoof corpus.
+
+    Literal identity keys containing dots must never forge a public path:
+    classification is structural (tuple components), so each of these is an
+    unclassified single-component field and falls to default-secret."""
+    doc = make_snapshot()
+    doc["identity"] = {
+        "mgmt_ip.password": "FAKE-LEAK-A",
+        "routing.secret": "FAKE-LEAK-B",
+        "wireless.ssid": "FAKE-LEAK-C",
+    }
+    redacted = redact_snapshot(doc)
+    blob = json.dumps(redacted)
+    for leaked in ("FAKE-LEAK-A", "FAKE-LEAK-B", "FAKE-LEAK-C"):
+        assert leaked not in blob, "dotted-key spoof leaked: %s" % leaked
+    assert redacted["identity"] == {}
+    for name in (
+        "identity.mgmt_ip.password",
+        "identity.routing.secret",
+        "identity.wireless.ssid",
+    ):
+        assert name in redacted["redacted_fields"]
+
+
+def test_redaction_dotted_key_spoof_nested_variants():
+    """Dotted-key spoofs nested inside real containers, plus the literal
+    'wireless.psk' key — dropped with no misplaced presence marker."""
+    doc = make_snapshot()
+    doc["identity"]["wireless"]["ssid.spoof"] = "FAKE-LEAK-D"
+    doc["identity"]["mgmt_ip"]["address.spoof"] = "FAKE-LEAK-E"
+    doc["identity"]["wireless.psk"] = "FAKE-LEAK-F"
+    doc["identity"]["wireless.ssid"] = {"nested": "FAKE-LEAK-G"}
+    redacted = redact_snapshot(doc)
+    blob = json.dumps(redacted)
+    for leaked in ("FAKE-LEAK-D", "FAKE-LEAK-E", "FAKE-LEAK-F", "FAKE-LEAK-G"):
+        assert leaked not in blob, "nested dotted-key spoof leaked: %s" % leaked
+    # Real fields still classified correctly.
+    assert redacted["identity"]["wireless"]["ssid"] == "NORTH"
+    assert redacted["identity"]["mgmt_ip"]["address"] == "10.20.30.40"
+    # No psk marker forged at the identity top level by the literal key.
+    assert "psk_present" not in redacted["identity"]
+    assert redacted["identity"]["wireless"]["psk_present"] is True
+    for name in (
+        "identity.wireless.ssid.spoof",
+        "identity.mgmt_ip.address.spoof",
+        "identity.wireless.psk",
+        "identity.wireless.ssid",
+    ):
+        assert name in redacted["redacted_fields"]
+
+
+def test_redaction_unknown_keys_inside_public_containers_default_secret():
+    """Review F3: mgmt_ip/routing are enumerated key sets, not wildcard
+    subtrees — an unknown key inside them is default-secret."""
+    doc = make_snapshot()
+    doc["identity"]["mgmt_ip"]["snmp_community"] = FAKE_UNCLASSIFIED_SECRET
+    doc["identity"]["routing"]["auth_key"] = FAKE_UNCLASSIFIED_SECRET
+    redacted = redact_snapshot(doc)
+    assert "snmp_community" not in redacted["identity"]["mgmt_ip"]
+    assert "auth_key" not in redacted["identity"]["routing"]
+    assert "identity.mgmt_ip.snmp_community" in redacted["redacted_fields"]
+    assert "identity.routing.auth_key" in redacted["redacted_fields"]
+    # The schema-enumerated keys are unaffected.
+    assert redacted["identity"]["mgmt_ip"]["vlan"] == 12
+    assert redacted["identity"]["routing"]["area"] == "0.0.0.0"
     assert_no_secret_values(redacted)
 
 

@@ -138,6 +138,36 @@ def test_hostile_snapshot_id_404_not_traversal(tmp_path):
     response = client.get("/api/snapshots/..%2F..%2Fetc%2Fpasswd")
     assert response.status_code == 404
     assert client.delete("/api/snapshots/..%2Fescape").status_code == 404
+    # Encoded-newline ids (PR #129 review F2): must 404, never reach a file
+    # or a log line with an embedded newline.
+    assert client.get("/api/snapshots/advnl%0A").status_code == 404
+    assert client.delete("/api/snapshots/advnl%0A").status_code == 404
+    assert client.get("/api/snapshots/adv%0Anl").status_code == 404
+
+
+def test_dotted_key_spoof_never_leaks_over_http(tmp_path):
+    """PR #129 review F1 regression at the HTTP surface: a hostile document
+    (written directly to disk, bypassing save() validation) with dotted
+    identity keys must not leak values into list or get responses."""
+    client, app = make_client(tmp_path)
+    saved = seed(app)
+    store = app.state.snapshot_store
+    path = store.base_path / (saved["id"] + ".json")
+    doc = json.loads(path.read_text())
+    doc["identity"]["mgmt_ip.password"] = "FAKE-LEAK-A"
+    doc["identity"]["routing.secret"] = "FAKE-LEAK-B"
+    doc["identity"]["wireless.ssid"] = "FAKE-LEAK-C"
+    doc["identity"]["mgmt_ip"]["snmp_community"] = "FAKE-LEAK-H"
+    path.write_text(json.dumps(doc))
+
+    list_response = client.get("/api/snapshots")
+    get_response = client.get("/api/snapshots/%s" % saved["id"])
+    assert list_response.status_code == 200
+    assert get_response.status_code == 200
+    for response in (list_response, get_response):
+        assert_response_has_no_secrets(response)
+        for leaked in ("FAKE-LEAK-A", "FAKE-LEAK-B", "FAKE-LEAK-C", "FAKE-LEAK-H"):
+            assert leaked not in response.text, "spoof leaked over HTTP: %s" % leaked
 
 
 def test_delete_snapshot(tmp_path):

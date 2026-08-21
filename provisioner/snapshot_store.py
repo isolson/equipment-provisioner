@@ -45,7 +45,10 @@ SCHEMA_VERSION = 1
 
 # Snapshot ids are used as filenames: constrain them hard (no separators,
 # no dotfiles) so a crafted id can never traverse outside the store dir.
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
+# Matched with fullmatch() and anchored with \Z, never $ — `$` matches
+# before a trailing newline, which would let "advnl\n" become a filename
+# and forge log lines (PR #129 review F2).
+_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
 
 # Characters allowed in id components synthesized from serial/MAC/vendor.
 _COMPONENT_STRIP_RE = re.compile(r"[^A-Za-z0-9_-]+")
@@ -68,15 +71,39 @@ PUBLIC_METADATA_FIELDS = (
 )
 
 # identity.* paths classified public (everything else in identity is
-# "secret until classified" — the default-secret rule). A path listed here
-# exposes its whole subtree ("mgmt_ip" covers identity.mgmt_ip.*).
-PUBLIC_IDENTITY_SUBTREES = ("mgmt_ip", "routing")
-PUBLIC_IDENTITY_FIELDS = ("wireless.ssid", "ptp_role", "ptp_link_id")
+# "secret until classified" — the default-secret rule).
+#
+# Paths are STRUCTURAL TUPLES, never joined dotted strings: a literal key
+# that *contains* a dot (e.g. {"mgmt_ip.password": ...}) is a single opaque
+# component that matches no tuple here, so it falls to default-secret —
+# string joining would let such a key forge a public path (PR #129 review
+# F1, the dotted-key spoof).
+#
+# Deliberate deviation from R0 §3.3's literal notation (review F3): the map
+# writes `identity.mgmt_ip.*` / `identity.routing.*` as wildcards, but R0's
+# own default-secret principle ("any identity field not explicitly listed is
+# secret until classified") outranks its wildcard shorthand — so the
+# schema-defined keys (§3.2) are enumerated here and an unknown key inside
+# those containers is redacted like any other unclassified identity field.
+# Flagged as a schema-note follow-up for the design doc.
+PUBLIC_IDENTITY_PATHS = frozenset([
+    ("wireless", "ssid"),
+    ("mgmt_ip", "mode"),
+    ("mgmt_ip", "address"),
+    ("mgmt_ip", "prefix"),
+    ("mgmt_ip", "gateway"),
+    ("mgmt_ip", "vlan"),
+    ("routing", "mode"),
+    ("routing", "area"),
+    ("ptp_role",),
+    ("ptp_link_id",),
+])
 
-# identity.* secret paths that get a presence marker instead of silence:
+# identity.* secret path that gets a presence marker instead of silence:
 # identity.wireless.psk -> psk_present: bool (+ psk_length). The value is
-# still omitted everywhere.
-_PSK_PATH = "wireless.psk"
+# still omitted everywhere. Tuple for the same structural-matching reason —
+# a literal top-level "wireless.psk" key is default-secret, no marker.
+_PSK_PATH = ("wireless", "psk")
 # ---------------------------------------------------------------------------
 
 
@@ -121,64 +148,66 @@ def _normalize_mac(value: str) -> str:
     return re.sub(r"[^0-9A-Fa-f]", "", value or "").lower()
 
 
-def _identity_path_is_public(path: str) -> bool:
-    """Is this dotted identity-relative path public per the R0 map?"""
-    if path in PUBLIC_IDENTITY_FIELDS:
-        return True
-    for subtree in PUBLIC_IDENTITY_SUBTREES:
-        if path == subtree or path.startswith(subtree + "."):
+def _identity_path_has_public_descendants(path: Tuple[str, ...]) -> bool:
+    """Should we recurse into this container looking for public fields?
+
+    Tuple-prefix comparison (component by component) — a key containing a
+    literal dot is one component and can never alias a deeper path.
+    """
+    depth = len(path)
+    for public in PUBLIC_IDENTITY_PATHS:
+        if len(public) > depth and public[:depth] == path:
             return True
-    return False
+    # Recurse toward the psk presence marker too.
+    return len(_PSK_PATH) > depth and _PSK_PATH[:depth] == path
 
 
-def _identity_path_has_public_descendants(path: str) -> bool:
-    """Should we recurse into this container looking for public fields?"""
-    prefix = path + "."
-    for field in PUBLIC_IDENTITY_FIELDS:
-        if field.startswith(prefix):
-            return True
-    if _PSK_PATH.startswith(prefix):
-        return True  # recurse so the psk presence marker can be emitted
-    for subtree in PUBLIC_IDENTITY_SUBTREES:
-        if subtree.startswith(prefix):
-            return True
-    return False
+def _dotted(path: Tuple[str, ...]) -> str:
+    """Display form for ``redacted_fields`` — names only, never values.
+
+    Joining with '.' is display-only and plays no part in classification,
+    so a key containing a dot merely renders ambiguously here; it cannot
+    change what gets redacted.
+    """
+    return ".".join(("identity",) + path)
 
 
 def _redact_identity(
-    identity: Dict[str, Any], prefix: str = ""
+    identity: Dict[str, Any], prefix: Tuple[str, ...] = ()
 ) -> Tuple[Dict[str, Any], List[str]]:
     """Allowlist-redact one identity (sub)tree.
 
-    Returns (redacted subtree, dotted paths of omitted fields). Fields not
+    Returns (redacted subtree, names of omitted fields). Fields not
     explicitly classified public are OMITTED — default-secret per §3.3.
+    Classification is by structural tuple path, so crafted keys containing
+    dots cannot spoof a public path (PR #129 review F1).
     """
     result: Dict[str, Any] = {}
     dropped: List[str] = []
     for key in identity:
         value = identity[key]
-        path = key if not prefix else prefix + "." + key
+        path = prefix + (key,)
         if path == _PSK_PATH:
             # Omitted; replaced by presence marker (+ length), never value.
             present = isinstance(value, str) and value != ""
             result["psk_present"] = present
             if present:
                 result["psk_length"] = len(value)
-            dropped.append("identity." + path)
+            dropped.append(_dotted(path))
             continue
-        if _identity_path_is_public(path):
+        if path in PUBLIC_IDENTITY_PATHS:
             result[key] = value
             continue
         if isinstance(value, dict) and _identity_path_has_public_descendants(path):
             sub, sub_dropped = _redact_identity(value, path)
-            if path == "wireless" and "psk_present" not in sub:
+            if path == _PSK_PATH[:-1] and "psk_present" not in sub:
                 # Wireless block without a psk key: state absence explicitly
                 # so the UI "PSK stored" badge has a definitive answer.
                 sub["psk_present"] = False
             result[key] = sub
             dropped.extend(sub_dropped)
             continue
-        dropped.append("identity." + path)
+        dropped.append(_dotted(path))
     return result, dropped
 
 
@@ -324,7 +353,7 @@ class SnapshotStore:
 
         provided_id = doc.get("id")
         if provided_id is not None and not (
-            isinstance(provided_id, str) and _ID_RE.match(provided_id)
+            isinstance(provided_id, str) and _ID_RE.fullmatch(provided_id)
         ):
             raise SnapshotStoreError(
                 "snapshot id must match %s" % _ID_RE.pattern
@@ -423,7 +452,7 @@ class SnapshotStore:
 
     def _path_for(self, snapshot_id: str) -> Optional[Path]:
         """Map an id to its file path; None if the id is not a safe id."""
-        if not isinstance(snapshot_id, str) or not _ID_RE.match(snapshot_id):
+        if not isinstance(snapshot_id, str) or not _ID_RE.fullmatch(snapshot_id):
             return None
         return self.base_path / (snapshot_id + ".json")
 
