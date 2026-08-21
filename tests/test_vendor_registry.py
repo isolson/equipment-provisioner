@@ -39,8 +39,8 @@ from fastapi import HTTPException
 from provisioner import firmware_sources
 from provisioner import handlers as handlers_pkg
 from provisioner.config import (
-    CredentialsConfig,
     DeviceIPsConfig,
+    _default_credentials,
     _default_firmware_sources,
 )
 from provisioner.fingerprint import DeviceType
@@ -110,10 +110,11 @@ class TestPythonRegistries:
             "shows dead or missing vendor entries."
         )
 
-    def test_credentials_config_fields_match(self):
-        assert set(CredentialsConfig.model_fields) == CANONICAL, (
-            "CredentialsConfig (config.py) out of sync — this is one half of "
-            "the config.py/main.py S1 crash-coupling (Story 3 / #73)."
+    def test_credentials_defaults_table_matches(self):
+        # Story 3 (#73): credentials are a Dict keyed by device type, with
+        # defaults supplied by the _default_credentials() factory.
+        assert set(_default_credentials()) == CANONICAL, (
+            "_default_credentials (config.py) out of sync with the vendor set."
         )
 
     def test_device_ips_config_fields_match(self):
@@ -193,16 +194,19 @@ class TestSourceParsedRegistries:
     """Registries that only exist as literals inside function bodies or
     templates — parsed from source, since they can't be imported."""
 
-    def test_main_credentials_assembly_matches(self):
-        # main.py hand-builds the HandlerManager credentials dict from
-        # config.credentials.<vendor> attribute accesses — the other half of
-        # the config.py/main.py S1 crash-coupling (Story 3 / #73): a vendor
-        # present here but absent from CredentialsConfig is an
-        # AttributeError at boot.
+    def test_main_credentials_assembly_is_table_driven(self):
+        # Story 3 (#73): main.py iterates the config.credentials table, so
+        # no per-vendor `self.config.credentials.<vendor>` attribute access
+        # remains — the config.py/main.py S1 crash-coupling is gone. A
+        # vendor name reappearing here would reintroduce it (and, on the
+        # dict field, would silently evaluate to a getattr miss). The
+        # MikroTik ZTP switch-management read uses `["mikrotik"]` indexing,
+        # which is fine: the backfill validator guarantees the key exists.
         source = (REPO_ROOT / "provisioner" / "main.py").read_text()
-        vendors = set(re.findall(r"self\.config\.credentials\.(\w+)", source))
-        assert vendors == CANONICAL, (
-            "main.py credential assembly out of sync with CredentialsConfig."
+        attr_accesses = set(re.findall(r"self\.config\.credentials\.(\w+)", source))
+        assert not (attr_accesses & CANONICAL), (
+            "main.py reads config.credentials.<vendor> attribute-style — "
+            "credentials is a plain dict (Story 3 / #73); use the table."
         )
 
     def test_boot_ping_list_covers_the_same_ips_as_probe_list(self):

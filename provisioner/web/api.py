@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from ..config import _default_credentials
 from ..handler_manager import provisionable_device_types
 from ..setup_tools import (
     build_readiness_report,
@@ -541,7 +542,7 @@ async def _run_netinstall(provisioner, port_number: int):
     # password, so the post-flash SSH login must use that value. Fetch it from
     # the contract credentials endpoint (same API key); fall back to the local
     # MIKROTIK_BOOTSTRAP_PASS when the endpoint is unavailable.
-    local_bootstrap_pass = config.credentials.mikrotik.bootstrap_password
+    local_bootstrap_pass = config.credentials["mikrotik"].bootstrap_password
     canonical_bootstrap_pass = None
     try:
         creds = await MikrotikHandler.fetch_provisioning_credentials(
@@ -2169,24 +2170,23 @@ async def test_api():
 # Default Credentials Management
 # ============================================================================
 
-# Known defaults for each device type (hardcoded fallbacks)
-BUILTIN_CREDENTIALS = {
-    "cambium": [
-        {"username": "admin", "password": "admin"},
-    ],
-    "mikrotik": [
-        {"username": "admin", "password": ""},
-    ],
-    "tachyon": [
-        {"username": "root", "password": "admin"},
-    ],
+# Known factory-shipped logins for each device type, shown as read-only
+# entries in the credentials UI. Username/password derive from the
+# config-level defaults table (config._default_credentials, Story 3 / #73).
+# _BUILTIN_OVERRIDES covers devices whose shipped login differs from our
+# config-level default: Tarana ships admin/admin123, but the config default
+# keeps an empty password because each fleet sets its own.
+_BUILTIN_OVERRIDES = {
     "tarana": [
         {"username": "admin", "password": "admin123"},
     ],
-    "ubiquiti": [
-        {"username": "ubnt", "password": "ubnt"},
-    ],
 }
+
+BUILTIN_CREDENTIALS = {
+    device_type: [{"username": creds.username, "password": creds.password}]
+    for device_type, creds in _default_credentials().items()
+}
+BUILTIN_CREDENTIALS.update(_BUILTIN_OVERRIDES)
 
 
 def _get_credentials_path(request: Request) -> Path:

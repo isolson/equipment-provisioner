@@ -10,8 +10,8 @@ from provisioner.config import (
     DeviceSettingsConfig,
     NetworkConfig,
     PortsConfig,
-    CredentialsConfig,
     DeviceCredentials,
+    _default_credentials,
     FeaturesConfig,
     FirmwareConfig,
     FirmwareCheckerConfig,
@@ -79,25 +79,37 @@ class TestConfigDefaults:
         assert config.device_ips.tarana == "169.254.100.1"
         assert config.device_ips.ubiquiti == "192.168.1.20"
 
-    def test_credentials_config_defaults(self):
-        """Test CredentialsConfig has correct vendor-specific defaults."""
-        config = CredentialsConfig()
+    def test_credentials_table_defaults(self):
+        """The credentials table has correct vendor-specific defaults."""
+        credentials = Config().credentials
 
         # Cambium: admin/admin
-        assert config.cambium.username == "admin"
-        assert config.cambium.password == "admin"
+        assert credentials["cambium"].username == "admin"
+        assert credentials["cambium"].password == "admin"
 
         # Tachyon: root/admin
-        assert config.tachyon.username == "root"
-        assert config.tachyon.password == "admin"
+        assert credentials["tachyon"].username == "root"
+        assert credentials["tachyon"].password == "admin"
 
         # Ubiquiti: ubnt/ubnt
-        assert config.ubiquiti.username == "ubnt"
-        assert config.ubiquiti.password == "ubnt"
+        assert credentials["ubiquiti"].username == "ubnt"
+        assert credentials["ubiquiti"].password == "ubnt"
 
         # MikroTik: admin/empty
-        assert config.mikrotik.username == "admin"
-        assert config.mikrotik.password == ""
+        assert credentials["mikrotik"].username == "admin"
+        assert credentials["mikrotik"].password == ""
+
+        # Tarana: admin/empty
+        assert credentials["tarana"].username == "admin"
+        assert credentials["tarana"].password == ""
+
+    def test_default_credentials_factory_matches_config_defaults(self):
+        """Config() with no credentials block equals the factory table."""
+        factory = _default_credentials()
+        credentials = Config().credentials
+        assert set(credentials) == set(factory)
+        for device_type, creds in factory.items():
+            assert credentials[device_type] == creds
 
     def test_firmware_config_defaults(self):
         """Test FirmwareConfig has correct defaults."""
@@ -127,7 +139,7 @@ class TestConfigDefaults:
         config = Config()
         assert config.network.interface == "eth0"
         assert config.ports.num_ports == 6
-        assert config.credentials.tachyon.username == "root"
+        assert config.credentials["tachyon"].username == "root"
         assert config.firmware.dual_bank_update is True
         assert config.label_printer.enabled is False
 
@@ -302,8 +314,12 @@ credentials:
 
         try:
             config = load_config(config_path)
-            assert config.credentials.tachyon.username == "custom_user"
-            assert config.credentials.tachyon.password == "custom_pass"
+            assert config.credentials["tachyon"].username == "custom_user"
+            assert config.credentials["tachyon"].password == "custom_pass"
+            # Backfill: the other vendors keep their factory defaults even
+            # though the YAML credentials block only listed tachyon.
+            assert config.credentials["cambium"].password == "admin"
+            assert config.credentials["ubiquiti"].username == "ubnt"
         finally:
             os.unlink(config_path)
 
@@ -362,6 +378,179 @@ analytics:
             # Clean up env var that dotenv loaded
             if "TEST_API_KEY" in os.environ:
                 del os.environ["TEST_API_KEY"]
+
+
+class TestCredentialsBackfill:
+    """Tests for the credentials-table backfill validator (Story 3 / #73).
+
+    With a plain Dict field, a partial ``credentials:`` block in a host
+    ``config.yaml`` would replace the whole dict and silently drop the other
+    vendors' factory defaults. The ``Config`` before-validator deep-merges
+    YAML over the ``_default_credentials()`` factory (defaults first, YAML
+    wins per field). Only public factory logins appear here.
+    """
+
+    def _load(self, tmp_path, yaml_text):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml_text)
+        # Point env_file at a nonexistent path so a developer's .env in the
+        # working directory can't leak into these tests.
+        return load_config(str(config_path), env_file=str(tmp_path / "no.env"))
+
+    def test_partial_vendor_set_keeps_other_vendors_defaults(self, tmp_path):
+        """credentials: with only mikrotik must not drop the other vendors."""
+        config = self._load(
+            tmp_path,
+            "credentials:\n"
+            "  mikrotik:\n"
+            "    username: admin\n"
+            "    password: switch-pass\n",
+        )
+        assert config.credentials["mikrotik"].password == "switch-pass"
+        # Factory defaults survive for every vendor the YAML didn't mention.
+        assert config.credentials["cambium"].username == "admin"
+        assert config.credentials["cambium"].password == "admin"
+        assert config.credentials["tachyon"].username == "root"
+        assert config.credentials["tachyon"].password == "admin"
+        assert config.credentials["ubiquiti"].username == "ubnt"
+        assert config.credentials["ubiquiti"].password == "ubnt"
+        assert config.credentials["tarana"].username == "admin"
+
+    def test_partial_fields_keep_vendor_defaults(self, tmp_path):
+        """tachyon: {password: x} must keep the root username default."""
+        config = self._load(
+            tmp_path,
+            "credentials:\n"
+            "  tachyon:\n"
+            "    password: fleet-pass\n",
+        )
+        assert config.credentials["tachyon"].username == "root"
+        assert config.credentials["tachyon"].password == "fleet-pass"
+
+    def test_empty_credentials_block_yields_full_defaults(self, tmp_path):
+        """A bare `credentials:` key (parses as None) keeps all defaults."""
+        config = self._load(tmp_path, "network:\n  interface: eth0\ncredentials:\n")
+        assert config.credentials == _default_credentials()
+
+    def test_absent_credentials_block_yields_full_defaults(self, tmp_path):
+        config = self._load(tmp_path, "network:\n  interface: eth0\n")
+        assert config.credentials == _default_credentials()
+
+    def test_bare_vendor_key_keeps_that_vendors_defaults(self, tmp_path):
+        """`tachyon:` with no fields (parses as None) keeps its defaults."""
+        config = self._load(
+            tmp_path,
+            "credentials:\n"
+            "  tachyon:\n"
+            "  mikrotik:\n"
+            "    password: switch-pass\n",
+        )
+        assert config.credentials["tachyon"].username == "root"
+        assert config.credentials["tachyon"].password == "admin"
+        assert config.credentials["mikrotik"].password == "switch-pass"
+
+    def test_unknown_extra_vendor_key_is_preserved_harmlessly(self, tmp_path):
+        """An unknown vendor key must not crash and must not affect others."""
+        config = self._load(
+            tmp_path,
+            "credentials:\n"
+            "  netgear:\n"
+            "    username: admin\n"
+            "    password: password\n",
+        )
+        assert config.credentials["netgear"].username == "admin"
+        assert config.credentials["netgear"].password == "password"
+        # All known vendors are still present with their defaults.
+        for device_type, creds in _default_credentials().items():
+            assert config.credentials[device_type] == creds
+
+    def test_ztp_extra_fields_survive_partial_merge(self, tmp_path):
+        """bootstrap/onboarding/backup fields survive (main.py + api.py read
+        them for MikroTik ZTP), and unset ones backfill to empty strings."""
+        config = self._load(
+            tmp_path,
+            "credentials:\n"
+            "  mikrotik:\n"
+            "    bootstrap_password: boot-pass\n",
+        )
+        mikrotik = config.credentials["mikrotik"]
+        assert mikrotik.bootstrap_password == "boot-pass"
+        assert mikrotik.username == "admin"
+        assert mikrotik.password == ""
+        assert mikrotik.backup_password == ""
+        assert mikrotik.onboarding_password == ""
+
+    def test_env_var_expansion_survives_in_table(self, tmp_path, monkeypatch):
+        """${VAR} passwords expand inside the table; unset vars become ''."""
+        monkeypatch.setenv("TEST_SWITCH_PASSWORD", "expanded-pass")
+        monkeypatch.delenv("TEST_UNSET_PASSWORD_12345", raising=False)
+        config = self._load(
+            tmp_path,
+            "credentials:\n"
+            "  mikrotik:\n"
+            '    password: "${TEST_SWITCH_PASSWORD}"\n'
+            "  cambium:\n"
+            '    password: "${TEST_UNSET_PASSWORD_12345}"\n',
+        )
+        assert config.credentials["mikrotik"].password == "expanded-pass"
+        # Unset env var: expand_env_vars leaves the literal ${...}, then the
+        # DeviceCredentials validator maps it to empty.
+        assert config.credentials["cambium"].password == ""
+
+    def test_realistic_host_config_parses_identically(self, tmp_path):
+        """A fixture mirroring /etc/provisioner/config.yaml (all vendors,
+        env-var passwords) parses to the same shape as before Story 3."""
+        config = self._load(
+            tmp_path,
+            "credentials:\n"
+            "  cambium:\n"
+            "    username: admin\n"
+            '    password: "${CAMBIUM_PASSWORD}"\n'
+            '    backup_password: "${CAMBIUM_BACKUP_PASSWORD}"\n'
+            "  mikrotik:\n"
+            "    username: admin\n"
+            '    password: "${MIKROTIK_PASSWORD}"\n'
+            '    bootstrap_password: "${MIKROTIK_BOOTSTRAP_PASS}"\n'
+            '    onboarding_password: "${MIKROTIK_ONBOARDING_PASS}"\n'
+            "  tarana:\n"
+            "    username: admin\n"
+            '    password: "${TARANA_PASSWORD}"\n'
+            "  tachyon:\n"
+            "    username: root\n"
+            '    password: "${TACHYON_PASSWORD}"\n'
+            "  ubiquiti:\n"
+            "    username: ubnt\n"
+            '    password: "${UBIQUITI_PASSWORD}"\n',
+        )
+        assert set(config.credentials) == {
+            "cambium", "mikrotik", "tachyon", "tarana", "ubiquiti",
+        }
+        assert config.credentials["cambium"].username == "admin"
+        assert config.credentials["mikrotik"].username == "admin"
+        assert config.credentials["tachyon"].username == "root"
+        assert config.credentials["tarana"].username == "admin"
+        assert config.credentials["ubiquiti"].username == "ubnt"
+        # With the env vars unset, every ${...} password resolves to empty —
+        # same as the pre-Story-3 typed-field model.
+        for device_type in ("cambium", "mikrotik", "tarana", "tachyon", "ubiquiti"):
+            assert config.credentials[device_type].password == ""
+        assert config.credentials["mikrotik"].bootstrap_password == ""
+
+    def test_getattr_on_credentials_table_returns_none(self):
+        """Documents the dict-field failure mode: getattr-style consumers
+        (the pre-Story-3 pattern) silently get None instead of credentials.
+        Every consumer must use .get()/[] — see setup_tools and main.py."""
+        credentials = Config().credentials
+        assert getattr(credentials, "mikrotik", None) is None
+
+    def test_programmatic_device_credentials_instances_pass_through(self):
+        """Direct construction with DeviceCredentials values still works
+        (used by tests and future callers), and other vendors backfill."""
+        config = Config(
+            credentials={"mikrotik": DeviceCredentials(username="admin", password="x")}
+        )
+        assert config.credentials["mikrotik"].password == "x"
+        assert config.credentials["tachyon"].username == "root"
 
 
 class TestFirmwareSourceConfig:

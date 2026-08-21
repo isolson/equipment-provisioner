@@ -45,15 +45,15 @@ Follow the checklist in `docs/HANDLER_DEVELOPMENT.md` under "Adding a New Vendor
 6. `provisioner/config_store.py` — `CONFIG_MODEL_ALIASES` (if needed)
 7. `configs/templates/{vendor}/{model}.json` — config template
 8. `provisioner/handlers/__init__.py` — import + `__all__` *(miss this → ImportError at boot)*
-9. `provisioner/config.py` — `CredentialsConfig` field, firmware-source default, any `apply_config_<vendor>` flag (`DeviceIPsConfig` derives from the IP registry — no edit needed)
-10. `provisioner/main.py` — credentials dict *(must move in lockstep with #9 or AttributeError at boot)*
+9. `provisioner/config.py` — `_default_credentials()` entry, firmware-source default, any `apply_config_<vendor>` flag (`DeviceIPsConfig` derives from the IP registry — no edit needed)
+10. `provisioner/main.py` — *no edit needed for credentials*: the handler credentials dict iterates the `config.credentials` table (Story 3 / #73)
 11. `provisioner/cli.py` — *no edit needed*: handler lookup + `choices` derive from `HANDLER_MAP` (Story 2 / #72)
-12. `provisioner/web/api.py` — `BUILTIN_CREDENTIALS` (device-type validation derives from `HANDLER_MAP`); `provisioner/web/templates/index.html` — vendor metadata map
+12. `provisioner/web/api.py` — `_BUILTIN_OVERRIDES` only if the device's shipped login differs from the config default (`BUILTIN_CREDENTIALS` derives from `_default_credentials()`; device-type validation derives from `HANDLER_MAP`); `provisioner/web/templates/index.html` — vendor metadata map
 13. `provisioner/firmware_sources/__init__.py` — import + `__all__` *(miss this → ImportError at boot)*
 14. `provisioner/firmware_checker.py` — `SOURCE_MAP` + the source imports *(miss either → ImportError at boot)*
 15. `provisioner/setup_tools.py` — the per-vendor readiness / credential-hint / config-mode dicts (first-run setup UI; the device-type list itself derives from `HANDLER_MAP`)
 
-⚠️ This list is long *because* vendor enumeration isn't yet consolidated. Miss an **S1** site (#4, #8, #9, #10, #13, #14) and the service crashes at boot; miss an **S2** site and the device is silently undetectable or shows dead/missing setup-UI entries. Run `grep -rin <vendor> provisioner/ configs/` before declaring done. The exhaustive table is in `docs/ARCHITECTURE_ISOLATION_REVIEW.md`.
+⚠️ This list is long *because* vendor enumeration isn't yet consolidated. Miss an **S1** site (#4, #8, #13, #14; #9's credentials entry is backfilled by the table validator since Story 3 / #73) and the service crashes at boot; miss an **S2** site and the device is silently undetectable or shows dead/missing setup-UI entries. Run `grep -rin <vendor> provisioner/ configs/` before declaring done. The exhaustive table is in `docs/ARCHITECTURE_ISOLATION_REVIEW.md`.
 
 ## Deployment
 

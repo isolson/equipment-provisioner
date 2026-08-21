@@ -115,30 +115,23 @@ class DeviceCredentials(BaseModel):
         return v
 
 
-class CambiumCredentials(DeviceCredentials):
-    """Cambium default credentials (admin/admin)."""
-    password: str = "admin"
+def _default_credentials() -> Dict[str, "DeviceCredentials"]:
+    """Per-vendor factory-default credentials (Story 3 / #73).
 
-
-class TachyonCredentials(DeviceCredentials):
-    """Tachyon default credentials (root/admin)."""
-    username: str = "root"
-    password: str = "admin"
-
-
-class UbiquitiCredentials(DeviceCredentials):
-    """Ubiquiti default credentials (ubnt/ubnt)."""
-    username: str = "ubnt"
-    password: str = "ubnt"
-
-
-class CredentialsConfig(BaseModel):
-    """All device credentials."""
-    cambium: DeviceCredentials = Field(default_factory=CambiumCredentials)
-    mikrotik: DeviceCredentials = Field(default_factory=DeviceCredentials)
-    tarana: DeviceCredentials = Field(default_factory=DeviceCredentials)
-    tachyon: DeviceCredentials = Field(default_factory=TachyonCredentials)
-    ubiquiti: DeviceCredentials = Field(default_factory=UbiquitiCredentials)
+    The single config-level source for vendor credential defaults, keyed by
+    device-type string (mirrors ``_default_firmware_sources``). Adding or
+    removing a vendor's credentials touches only this factory — ``main.py``,
+    the credentials UI, and the setup readiness checks all derive from it.
+    Only public factory logins belong here (admin/admin, root/admin,
+    ubnt/ubnt) — fleet passwords come from ``config.yaml`` / env vars.
+    """
+    return {
+        "cambium": DeviceCredentials(username="admin", password="admin"),
+        "mikrotik": DeviceCredentials(username="admin", password=""),
+        "tachyon": DeviceCredentials(username="root", password="admin"),
+        "tarana": DeviceCredentials(username="admin", password=""),
+        "ubiquiti": DeviceCredentials(username="ubnt", password="ubnt"),
+    }
 
 
 class NotificationsConfig(BaseModel):
@@ -319,7 +312,7 @@ class Config(BaseModel):
     ports: PortsConfig = Field(default_factory=PortsConfig)
     simple_mode: SimpleModeConfig = Field(default_factory=SimpleModeConfig)
     data: DataConfig = Field(default_factory=DataConfig)
-    credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
+    credentials: Dict[str, DeviceCredentials] = Field(default_factory=_default_credentials)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     gpio: GPIOConfig = Field(default_factory=GPIOConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
@@ -330,6 +323,35 @@ class Config(BaseModel):
     device_settings: DeviceSettingsConfig = Field(default_factory=DeviceSettingsConfig)
     equipment_registry: EquipmentRegistryConfig = Field(default_factory=EquipmentRegistryConfig)
     analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
+
+    @field_validator("credentials", mode="before")
+    @classmethod
+    def _backfill_credential_defaults(cls, v: Any) -> Any:
+        """Deep-merge a YAML ``credentials:`` mapping over the factory defaults.
+
+        With a plain ``Dict`` field, a partial ``credentials:`` block in a
+        host ``config.yaml`` would *replace* the whole dict — a file setting
+        only ``mikrotik`` would silently drop the cambium/tachyon/ubiquiti
+        factory logins, and ``tachyon: {password: x}`` would lose the
+        ``root`` username. So: defaults first, YAML wins per field. Unknown
+        vendor keys pass through unchanged (harmless), and a bare
+        ``vendor:`` key (parsed as None) keeps that vendor's defaults.
+        """
+        merged: Dict[str, Any] = {
+            vendor: creds.model_dump()
+            for vendor, creds in _default_credentials().items()
+        }
+        if isinstance(v, dict):
+            for vendor, block in v.items():
+                if isinstance(block, dict):
+                    vendor_creds = dict(merged.get(vendor, {}))
+                    vendor_creds.update(block)
+                    merged[vendor] = vendor_creds
+                elif block is not None:
+                    # Already-built DeviceCredentials (programmatic use) or
+                    # invalid input — hand it to pydantic validation as-is.
+                    merged[vendor] = block
+        return merged
 
 
 def expand_env_vars(obj):

@@ -48,12 +48,12 @@ To **add or remove one vendor**, you must edit *every* one of these. There is no
 | 4 | ~~CLI handler dict + `choices=[...]`~~ | `cli.py` `get_handler()` / `build_parser()` | ✅ **derives from #2** since Story 2 / #72 (`provisionable_device_types()`) |
 | 5 | ~~`VALID_DEVICE_TYPES` set~~ | `web/api.py` `_validate_device_type()` + credential endpoints | ✅ **derives from #2** since Story 2 / #72 |
 | 6 | UI vendor metadata map | `index.html:347` | ❌ **duplicate (frontend)** |
-| 7 | Per-vendor pydantic classes + fields | `config.py:47-53` (`DeviceIPsConfig`), `97-120` (`*Credentials`/`CredentialsConfig`), firmware sources, feature flags | ❌ undocumented |
+| 7 | Per-vendor pydantic classes + fields | `config.py` (`DeviceIPsConfig`, feature flags; credentials + firmware sources are `Dict` tables with defaults factories — `_default_credentials()` since Story 3 / #73) | ❌ undocumented |
 | 8 | `DeviceLinkLocalIP` consts + `.ALL` + inline copy | `port_manager.py:112` **and** `:982` | ⚠️ partly blessed, **self-duplicated** |
 | 9 | Firmware-source class registry: `SOURCE_MAP` + imports, and `firmware_sources/__init__.py` | `firmware_checker.py:20-39`, `firmware_sources/__init__.py` | ❌ undocumented (**import-crash on removal**) |
 | 10 | Per-vendor readiness / credential-hint / config-mode dicts (the device-type list itself derives from #2 since Story 2 / #72) | `setup_tools.py` | ❌ undocumented (first-run setup UI) |
 
-Credentials specifically have **four** copies: `CredentialsConfig` (`config.py:114`), the `main.py:109` dict, handler `DEFAULT_CREDENTIALS`, and `BUILTIN_CREDENTIALS` (`api.py:2086`).
+Credentials consolidated to **one config-level table** in Story 3 / #73: `_default_credentials()` (`config.py`), with the `main.py` handler dict, `BUILTIN_CREDENTIALS` (`web/api.py`), and the setup credential hints deriving from it (a before-validator backfills partial `config.yaml` blocks with the defaults). Handler-internal `DEFAULT_CREDENTIALS` fallback lists stay vendor-local by design (MikroTik's is a multi-candidate retry list).
 
 **Implication:** the registry is not DRY. Forgetting any one site is the dominant failure mode of both extraction directions — and the failure mode varies (see §4).
 
@@ -96,9 +96,9 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 
 **Delete outright (self-contained):** `handlers/tachyon.py`, `firmware_sources/tachyon.py`, `configs/templates/tachyon/`, `web/static/vendor-icons/tachyon.png`, Tachyon test cases.
 
-**Must edit or it crashes (S1):** `handler_manager.py` (import + map), `handlers/__init__.py` (import + `__all__`), `firmware_sources/__init__.py` (import + `__all__`), `firmware_checker.py` (`SOURCE_MAP` + imports), `config.py` (`TachyonCredentials`, `CredentialsConfig.tachyon`, `DeviceIPsConfig.tachyon`, firmware-source entry), `main.py` (credentials-dict key `:118`). (`cli.py` no longer needs an edit — it derives from `HANDLER_MAP` since Story 2 / #72.)
+**Must edit or it crashes (S1):** `handler_manager.py` (import + map), `handlers/__init__.py` (import + `__all__`), `firmware_sources/__init__.py` (import + `__all__`), `firmware_checker.py` (`SOURCE_MAP` + imports), `config.py` (`DeviceIPsConfig.tachyon`, firmware-source entry; the `_default_credentials()` tachyon entry is an S2 cleanup — a stale entry is harmless and a removed one just yields empty creds). (`cli.py` and `main.py` no longer need edits — the CLI derives from `HANDLER_MAP` since Story 2 / #72, and the `main.py` credentials dict iterates the `config.credentials` table since Story 3 / #73.)
 
-**Must edit or you get dead code / an undetectable device (S2):** `fingerprint.py` (enum `:40`, `HTTP_SIGNATURES` `:156`, `_probe_tachyon_api` + its call at `:434`, `_extract_device_details` branch), `firmware.py` (3 rows `:186-193`), `config_store.py` (alias block), `port_manager.py` (`DeviceLinkLocalIP` Tachyon consts + `.ALL` + inline list), `web/api.py` (`BUILTIN_CREDENTIALS` + `_DEVICE_TYPE_FILENAME_HINTS` extras + UI lists; device-type validation derives from `HANDLER_MAP`), `setup_tools.py` (readiness/hint/mode dicts; the device-type list derives from `HANDLER_MAP`), `index.html` (vendor map + `canApplyMode` + SSID-uppercase branch).
+**Must edit or you get dead code / an undetectable device (S2):** `fingerprint.py` (enum `:40`, `HTTP_SIGNATURES` `:156`, `_probe_tachyon_api` + its call at `:434`, `_extract_device_details` branch), `firmware.py` (3 rows `:186-193`), `config_store.py` (alias block), `port_manager.py` (`DeviceLinkLocalIP` Tachyon consts + `.ALL` + inline list), `web/api.py` (`_DEVICE_TYPE_FILENAME_HINTS` extras + UI lists; `BUILTIN_CREDENTIALS` derives from `_default_credentials()` — only a `_BUILTIN_OVERRIDES` entry would need removing; device-type validation derives from `HANDLER_MAP`), `setup_tools.py` (readiness/hint/mode dicts; the device-type list derives from `HANDLER_MAP`, the credential hints from `_default_credentials()`), `index.html` (vendor map + `canApplyMode` + SSID-uppercase branch).
 
 **Risk profile:** the danger is *omission*, not breakage. Forgetting an S1 site stops the service at boot; forgetting an S2 site leaves dead code or a silently-undetectable device. `grep -ri tachyon provisioner/ configs/` is the safety net.
 
