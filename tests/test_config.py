@@ -45,8 +45,31 @@ class TestConfigDefaults:
         assert config.local_ip == "169.254.1.2"
         assert config.device_ips.cambium == "169.254.1.1"
         assert config.device_ips.tachyon == "169.254.1.1"
+        assert config.device_ips.tarana == "169.254.100.1"
         assert config.device_ips.ubiquiti == "192.168.1.20"
         assert config.device_ips.mikrotik == "192.168.88.1"
+
+    def test_device_ips_defaults_derive_from_registry(self):
+        """DeviceIPsConfig fields/defaults derive from the vendor-IP registry
+        (Story 4 / #74): each vendor's default is its primary registry IP."""
+        from provisioner.vendor_ips import VENDOR_LINK_LOCAL_IPS
+
+        config = PortsConfig()
+        assert set(type(config.device_ips).model_fields) == set(
+            VENDOR_LINK_LOCAL_IPS
+        )
+        for vendor, ips in VENDOR_LINK_LOCAL_IPS.items():
+            assert getattr(config.device_ips, vendor) == ips[0]
+
+    def test_device_ips_partial_override_keeps_other_defaults(self):
+        """Overriding one vendor's IP in config.yaml must not lose the other
+        vendors' defaults (pydantic backfills omitted typed fields)."""
+        config = PortsConfig(device_ips={"mikrotik": "10.9.8.1"})
+        assert config.device_ips.mikrotik == "10.9.8.1"
+        assert config.device_ips.cambium == "169.254.1.1"
+        assert config.device_ips.tachyon == "169.254.1.1"
+        assert config.device_ips.tarana == "169.254.100.1"
+        assert config.device_ips.ubiquiti == "192.168.1.20"
 
     def test_credentials_config_defaults(self):
         """Test CredentialsConfig has correct vendor-specific defaults."""

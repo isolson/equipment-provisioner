@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from provisioner import vendor_ips
 from provisioner.port_manager import DeviceLinkLocalIP, PortManager
 
 
@@ -551,3 +552,134 @@ async def test_passive_detection_marks_detected_when_link_up_and_match():
     assert state.device_detected is True
     assert state.device_type == "evolution_digital"
     assert state.device_mac == "84:01:12:42:95:fe"
+
+
+# ============================================================================
+# Vendor IP registry derivation (Story 4 / #74)
+# ============================================================================
+#
+# DeviceLinkLocalIP.ALL, DeviceLinkLocalIP.BOOT_PING, and DeviceIPsConfig
+# defaults all derive from vendor_ips.VENDOR_LINK_LOCAL_IPS. The literals
+# below are golden values locking the pre-registry behavior byte-for-byte:
+# probe order and shared-IP candidate order affect which IP answers first
+# when devices share subnets, and which vendor is the fingerprint fallback.
+
+
+def test_probe_list_derivation_matches_historical_all():
+    """DeviceLinkLocalIP.ALL must equal the pre-registry literal exactly."""
+    assert DeviceLinkLocalIP.ALL == [
+        ("169.254.1.1", ["cambium", "tachyon"]),
+        ("192.168.1.1", ["tachyon"]),
+        ("192.168.1.20", ["ubiquiti"]),
+        ("169.254.100.1", ["tarana"]),
+        ("192.168.88.1", ["mikrotik"]),
+    ]
+
+
+def test_boot_ping_derivation_matches_historical_order():
+    """BOOT_PING must equal the old inline ips_to_try literal exactly.
+
+    Note the order differs from ALL: the boot-ping list has always tried
+    the MikroTik default before Tarana.
+    """
+    assert DeviceLinkLocalIP.BOOT_PING == [
+        "169.254.1.1",    # was DeviceLinkLocalIP.CAMBIUM
+        "192.168.1.1",    # was DeviceLinkLocalIP.TACHYON_ALT
+        "192.168.1.20",   # was DeviceLinkLocalIP.UBIQUITI
+        "192.168.88.1",   # was DeviceLinkLocalIP.MIKROTIK
+        "169.254.100.1",  # was DeviceLinkLocalIP.TARANA
+    ]
+
+
+def test_link_local_constants_match_historical_values():
+    """Per-vendor constants (derived from the registry) keep their values."""
+    assert DeviceLinkLocalIP.CAMBIUM == "169.254.1.1"
+    assert DeviceLinkLocalIP.TACHYON == "169.254.1.1"
+    assert DeviceLinkLocalIP.TACHYON_ALT == "192.168.1.1"
+    assert DeviceLinkLocalIP.TARANA == "169.254.100.1"
+    assert DeviceLinkLocalIP.MIKROTIK == "192.168.88.1"
+    assert DeviceLinkLocalIP.UBIQUITI == "192.168.1.20"
+
+
+def test_registry_probe_and_boot_ping_views_agree():
+    """Registry -> ALL -> BOOT_PING must cover the identical IP set."""
+    probe_ips = [ip for ip, _vendors in DeviceLinkLocalIP.ALL]
+    registry_ips = {
+        ip for ips in vendor_ips.VENDOR_LINK_LOCAL_IPS.values() for ip in ips
+    }
+    assert registry_ips == set(probe_ips)
+    assert set(DeviceLinkLocalIP.BOOT_PING) == set(probe_ips)
+    # Both derived lists are duplicate-free.
+    assert len(probe_ips) == len(set(probe_ips))
+    assert len(DeviceLinkLocalIP.BOOT_PING) == len(set(DeviceLinkLocalIP.BOOT_PING))
+
+
+def test_boot_ping_vendor_order_has_no_stale_vendors():
+    """The boot-order metadata must not list vendors absent from the
+    registry (vendors missing from the order tuple are fine — they are
+    appended in registry order, so a new vendor needs only a
+    VENDOR_LINK_LOCAL_IPS edit)."""
+    assert set(vendor_ips._BOOT_PING_VENDOR_ORDER) <= set(
+        vendor_ips.VENDOR_LINK_LOCAL_IPS
+    )
+
+
+def test_boot_ping_appends_registry_vendors_missing_from_order_tuple():
+    """A vendor added to the registry but not the frozen boot-order tuple
+    still gets boot-pinged (appended in registry order)."""
+    original = vendor_ips.VENDOR_LINK_LOCAL_IPS
+    patched = dict(original)
+    patched["newvendor"] = ["203.0.113.7"]
+    with patch.object(vendor_ips, "VENDOR_LINK_LOCAL_IPS", patched):
+        ips = vendor_ips.boot_ping_ips()
+    assert ips[:-1] == vendor_ips.boot_ping_ips()
+    assert ips[-1] == "203.0.113.7"
+
+
+def test_mikrotik_fallbacks_stay_out_of_the_derived_lists():
+    """Fallback subnets are conditional behavior, not standard probes."""
+    probe_ips = {ip for ip, _vendors in DeviceLinkLocalIP.ALL}
+    for fallback_ip in DeviceLinkLocalIP.MIKROTIK_FALLBACKS:
+        assert fallback_ip not in probe_ips
+        assert fallback_ip not in DeviceLinkLocalIP.BOOT_PING
+
+
+@pytest.mark.asyncio
+async def test_simple_and_multiport_modes_probe_identical_ip_sequences():
+    """Simple mode (no-switch) and multi-port VLAN mode must probe the same
+    vendor link-local IPs, in the same order, during device detection.
+
+    Both paths share _detect_device_on_port; this locks the contract that a
+    refactor of either path keeps probing the full derived registry set
+    (probe list + MikroTik fallbacks once every standard probe misses).
+    """
+    sequences = {}
+
+    for mode, kwargs in (
+        ("multi", {"num_ports": 6, "setup_vlans": True}),
+        ("simple", {"num_ports": 1, "setup_vlans": False}),
+    ):
+        manager = PortManager(**kwargs)
+        manager._generate_port_configs()
+
+        probed = []
+
+        async def fake_ping(_iface, ip, arp_fallback=True, _probed=probed):
+            _probed.append(ip)
+            return False
+
+        async def fake_passive(_port_num, _config, _state, timeout_sec):
+            return None
+
+        manager._ping_device = fake_ping  # type: ignore[method-assign]
+        manager._try_passive_detection = fake_passive  # type: ignore[method-assign]
+
+        await manager._detect_device_on_port(1)
+        sequences[mode] = probed
+
+    expected = [ip for ip, _vendors in DeviceLinkLocalIP.ALL] + list(
+        DeviceLinkLocalIP.MIKROTIK_FALLBACKS
+    )
+    assert sequences["multi"] == expected
+    assert sequences["simple"] == expected
+    assert sequences["multi"] == sequences["simple"]
