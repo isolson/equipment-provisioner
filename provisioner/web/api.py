@@ -62,6 +62,10 @@ class ProvisionRequest(BaseModel):
     skip_config: bool = False
     config_override: Optional[Dict[str, Any]] = None
     operator_id: Optional[int] = None
+    # Site-role config overlay for this job (opaque string, e.g. "tower").
+    # None falls back to config.yaml provisioning.default_role. Absent in
+    # old clients, so requests are wire-compatible. UI exposure is R2.
+    role: Optional[str] = None
 
 
 class ProvisionResponse(BaseModel):

@@ -24,6 +24,7 @@ from .db import init_db, close_db, ProvisioningRecord, ProvisioningStatus
 from .fingerprint import identify_device, DeviceType
 from .firmware import FirmwareManager
 from .config_store import init_store, get_store
+from .config_resolver import ConfigResolver, JobContext, effective_role
 from .mode_config import init_mode_config_manager
 from .gpio import init_gpio, cleanup_gpio, get_gpio
 from .handler_manager import HandlerManager
@@ -51,6 +52,7 @@ class Provisioner:
         self.port_manager: Optional[PortManager] = None
         self.handler_manager: Optional[HandlerManager] = None
         self.firmware_manager: Optional[FirmwareManager] = None
+        self.config_resolver: Optional[ConfigResolver] = None
         self._running = False
         self._provisioning_semaphore = asyncio.Semaphore(8)  # Max concurrent
         self._use_vlan_mode = config.network.mode == "vlan"
@@ -129,6 +131,10 @@ class Provisioner:
                 logger.warning(f"Failed to load alternate credentials: {e}")
 
         self.handler_manager = HandlerManager(credentials, alternate_credentials)
+
+        # Config resolver — decides which ordered config layers (base
+        # template + role overlays) apply to each provisioning job.
+        self.config_resolver = ConfigResolver(store, self.handler_manager)
 
         # Both modes use PortManager. VLAN mode creates per-port VLAN
         # subinterfaces + a management VLAN; simple mode treats the base
@@ -491,6 +497,8 @@ class Provisioner:
             port_status = self.port_manager._get_single_port_status(port_num)
             await notify_port_change(port_num, port_status)
 
+        resolved = None  # ResolvedConfig; set at the config-resolution seam
+
         try:
             # Notify started via WebSocket and notifier
             await notify_provisioning_started(port_num, device_type, job_id)
@@ -584,10 +592,27 @@ class Provisioner:
                         info_result.error_message,
                     )
 
-            config_path = store.get_config_template(
+            # Resolve config layers (base template + optional role overlay).
+            # With no role selected this is byte-identical to the old direct
+            # store.get_config_template() lookup (pass-through fast path).
+            job_context = JobContext(
+                role=effective_role(
+                    getattr(provision_request, "role", None),
+                    self.config.provisioning.default_role,
+                ),
+            )
+            if self.config_resolver is None:
+                # Normally built in setup(); construct on demand for
+                # callers that wire a Provisioner directly (tests).
+                self.config_resolver = ConfigResolver(store, self.handler_manager)
+            resolved = self.config_resolver.resolve(
                 device_type,
                 fingerprint.model,
+                job_context,
             )
+            for note in resolved.notes:
+                logger.info(f"Config resolution note (port {port_num}): {note}")
+            override_cfg, config_path = resolved.as_provision_args()
 
             # Check feature flags for per-device-type config application
             if config_path:
@@ -597,7 +622,7 @@ class Provisioner:
                     config_path = None
 
             # Check for device-specific override (requires MAC, get it from handler)
-            override = None
+            override = override_cfg
 
             # Build device-type-specific config from settings + request overrides
             if device_type == "tarana":
@@ -788,6 +813,10 @@ class Provisioner:
             result = ProvisioningResult(success=False, error_message=str(e))
             await notifier.notify_failed(result, device_ip)
             return False
+        finally:
+            # Composed config artifacts are job-scoped; remove them.
+            if resolved is not None:
+                resolved.cleanup()
 
     async def _provision_evolution_digital(
         self,

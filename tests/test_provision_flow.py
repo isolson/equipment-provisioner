@@ -339,6 +339,59 @@ class ArchKeySpyHandler(SpyHandler):
         return super().firmware_lookup_key(device_info)
 
 
+# ---------------------------------------------------------------------------
+# Config-resolver seam (R1, design §5.3 test 3): with an empty JobContext the
+# resolver hands provision() the exact (config, config_path) pair the direct
+# store lookup produced — for a default-order flow and a
+# config_after_all_firmware flow.
+# ---------------------------------------------------------------------------
+
+from provisioner.config_resolver import ConfigResolver, JobContext
+from provisioner.config_store import ConfigStore
+
+
+def _template_fixture(tmp_path):
+    template = tmp_path / "configs" / "templates" / "tachyon" / "tns-100.json"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_text('{"system": {"hostname": "spy"}}')
+    return ConfigStore(str(tmp_path)), template
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config_after_all_firmware", [False, True])
+async def test_resolver_seam_hands_handler_identical_config_path(
+    spy_handler_factory, tmp_path, config_after_all_firmware
+):
+    store, template = _template_fixture(tmp_path)
+    resolver = ConfigResolver(store, None)
+
+    # Pre-refactor control: the direct lookup main.py used to make.
+    control_path = store.get_config_template("tachyon", "TNS-100")
+
+    # Post-refactor: resolve with the empty context and run a full mocked
+    # provision, mirroring main.py's provision call expression.
+    resolved = resolver.resolve("tachyon", "TNS-100", JobContext())
+    override_cfg, config_path = resolved.as_provision_args()
+
+    spy = spy_handler_factory(
+        supports_dual_bank=True,
+        config_after_all_firmware=config_after_all_firmware,
+    )
+    result = await spy.provision(
+        config=override_cfg,
+        config_path=str(config_path) if config_path else None,
+        firmware_path="/tmp/fw.bin",
+        expected_firmware="new",
+        dual_bank=True,
+    )
+
+    assert result.success, result.error_message
+    file_applies = [c for c in spy.calls if c[0] == "apply_config_file"]
+    assert len(file_applies) == 1
+    assert file_applies[0][1]["path"] == str(control_path)
+    assert "apply_config" not in spy.call_names  # no inline config sneaks in
+
+
 @pytest.mark.asyncio
 async def test_firmware_lookup_callback_honors_handler_override():
     """A handler override of firmware_lookup_key changes the key provision()
