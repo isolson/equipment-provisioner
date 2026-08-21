@@ -105,28 +105,16 @@ class Provisioner:
         )
         logger.info("Firmware checker initialized (enabled=%s)", self.config.firmware.checker.enabled)
 
-        # Initialize handler manager with credentials
+        # Initialize handler manager with credentials. The per-vendor table
+        # comes straight from config.credentials (Story 3 / #73) — adding or
+        # removing a vendor is a config.py defaults-factory change; nothing
+        # to edit here.
         credentials = {
-            "mikrotik": {
-                "username": self.config.credentials.mikrotik.username,
-                "password": self.config.credentials.mikrotik.password,
-            },
-            "cambium": {
-                "username": self.config.credentials.cambium.username,
-                "password": self.config.credentials.cambium.password,
-            },
-            "tachyon": {
-                "username": self.config.credentials.tachyon.username,
-                "password": self.config.credentials.tachyon.password,
-            },
-            "tarana": {
-                "username": self.config.credentials.tarana.username,
-                "password": self.config.credentials.tarana.password,
-            },
-            "ubiquiti": {
-                "username": self.config.credentials.ubiquiti.username,
-                "password": self.config.credentials.ubiquiti.password,
-            },
+            device_type: {
+                "username": creds.username,
+                "password": creds.password,
+            }
+            for device_type, creds in self.config.credentials.items()
         }
 
         # Load alternate credentials from credentials.json
@@ -154,8 +142,8 @@ class Provisioner:
                 netmask=mgmt.netmask,
                 switch_ip=getattr(mgmt, 'switch_ip', None) or getattr(mgmt, 'gateway', None),
                 vlan=mgmt.vlan,
-                switch_username=self.config.credentials.mikrotik.username,
-                switch_password=self.config.credentials.mikrotik.password,
+                switch_username=self.config.credentials["mikrotik"].username,
+                switch_password=self.config.credentials["mikrotik"].password,
             )
 
         self.port_manager = init_port_manager(
