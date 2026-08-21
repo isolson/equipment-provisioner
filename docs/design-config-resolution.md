@@ -1,7 +1,8 @@
 # Design: Config Resolver Contract + Snapshot Schema
 
 > Status: R0 deliverable · Tracking: issue #113 (part of epic #112) · Companion docs:
-> `docs/epic-config-resolution.md` (epic), `docs/ARCHITECTURE_ISOLATION_REVIEW.md`
+> `docs/epic-config-resolution.md` (epic; ships in PR #121 — link dangles until it merges),
+> `docs/ARCHITECTURE_ISOLATION_REVIEW.md`
 > (vendor-touchpoint map), `docs/epic-vendor-isolation-refactor.md` (epic #69),
 > `docs/HANDLER_DEVELOPMENT.md` (handler properties and class traits).
 >
@@ -86,7 +87,9 @@ Two corrections to the epic's shorthand that this trace surfaced:
 
 1. **"The existing deep-merge machinery" is per-handler, not central.** The only
    template→device deep merge in the tree is `TachyonHandler._deep_merge`.
-   Cambium merges device-side (`config_import` with `skipIllegal=1`); Wave PUTs a
+   Cambium applies device-side (`config_import` with `skipIllegal=1`, which skips
+   keys the device cannot set; whether a partial JSON leaves unlisted keys
+   untouched is not established in-repo); Wave PUTs a
    config JSON whose merge-vs-replace semantics are not established in-repo;
    MikroTik and Tarana have no JSON merge at all. Layer composition therefore
    cannot be "handled by the existing merge" — the resolver must compose layers
@@ -207,7 +210,7 @@ in*):
 |---|---|---|---|
 | `supports_config_overlays` | `False` | R1 | resolver may compose role/replacement overlays for this vendor. `False` ⇒ overlays are refused with an operator-visible note (base-only resolution). Enabled per vendor only after bench verification |
 | `supports_config_snapshot` | `False` | R4 | handler implements `capture_config_snapshot()` (§3.4) |
-| `is_full_config_export(config)` | `False` (staticmethod) | R1 | promotion of `TachyonHandler._is_full_config_export` to a class-level hook so the resolver can detect replace-not-merge templates *before instantiation* (§2.4). Tachyon overrides with its existing key-set heuristic |
+| `is_full_config_export(config)` | `False` (staticmethod) | R1 | promotion of `TachyonHandler._is_full_config_export` to a class-level hook so the resolver can detect replace-not-merge templates *before instantiation* (§2.4). Tachyon overrides with its existing key-set heuristic. Deliberately method-shaped while the other traits are plain class attributes: the answer depends on the *loaded config's content* (key sets), not on the vendor alone, so it cannot be a constant — same callable-before-instantiation property as the attribute traits, consulted via `handler_class_for` |
 | `snapshot_identity_paths` | `{}` | R4/R5 | identity field → vendor-native config path map (the §6 tables, expressed in code where they are hardware-confirmed). Used to *generate* replacement overlays and to extract identity blocks at capture time |
 
 ### 1.3 Composing layers into what the engine already accepts
@@ -234,6 +237,11 @@ Why materialize a file instead of passing an inline dict: inline `config`
 suppresses `config_path` in `provision()` and, for Cambium, routes to `set_param`
 (small-key-set apply) instead of `config_import` (full apply) — silently changing
 apply semantics. Materializing keeps every vendor on its current file-apply path.
+One assumption made explicit rather than inherited: for Cambium this holds only
+when interface binding is active — without `self.interface`,
+`apply_config_file` json-loads and falls through to `apply_config` → `set_param`
+(`cambium.py:1293-1299`). The provisioner always binds a VLAN interface in
+practice (STANDARDS.md §1); the resolver contract assumes it.
 Note for R1: the composed artifact for a Tachyon `.tar` base is a *JSON* file,
 which `apply_config_file` still treats as authoritative because the full-export
 key-set heuristic (`_is_full_config_export`) fires on the composed content.
@@ -278,7 +286,19 @@ Rules that follow from this:
 1. **Hand-authored role overlays** (R1) must contain complete list values when
    they touch a list. Overlay review checklist item, enforced by R1 tests on the
    shipped overlays.
-2. **Generated replacement overlays** (R5/R6) do not use dict merge for
+2. **Role overlays must never contain secrets — and therefore must not touch
+   identity fields.** Corollary of rule 1 that must be explicit: for Tachyon the
+   passphrase lives inside `vaps[0]`, so a role overlay carrying a "complete"
+   vap list element would embed a PSK in a git-committed file under
+   `configs/templates/`. Forbidden. Secrets may only ever appear in snapshots
+   and job-scoped data-dir artifacts (§4), never anywhere under
+   `configs/templates/**`. Identity fields (SSID/PSK, static IP, PTP side)
+   belong exclusively to the generated replacement layer (rule 3 below); role
+   overlays are for site-role settings (services, VLAN plans, SNMP toggles,
+   routing posture). R1 adds a lint test that shipped overlays contain no
+   sensitive-shaped keys (reusing the `_is_sensitive_path` name heuristic as a
+   guard, not as the correctness mechanism).
+3. **Generated replacement overlays** (R5/R6) do not use dict merge for
    list-embedded fields at all: they are applied by path injection into the
    composed dict, reusing `mode_config.py`'s existing path grammar
    (`a.b[0].c`). The per-vendor paths come from `snapshot_identity_paths`, so
@@ -378,8 +398,9 @@ document per capture.
 ### 3.2 Document schema
 
 All identity fields are optional (`null` when unknown/not applicable) because
-capture coverage grows vendor-by-vendor; `vendor`, `model`, `captured_at`,
-`source`, `schema_version` are required. Example (all values fake; `psk` shown
+capture coverage grows vendor-by-vendor; `schema_version`, `id`, `vendor`,
+`model`, `captured_at`, and `source` are required (the store synthesizes `id`
+on write if the capturing handler did not). Example (all values fake; `psk` shown
 only because this example *is* the at-rest file in the protected data dir —
 every API/UI/log surface redacts it per §3.3/§4):
 
@@ -463,7 +484,14 @@ level):
 | `raw.content` | **secret-bearing (whole blob)** | omitted from list *and* get responses; readable only server-side at apply time | never rendered | never |
 | `identity.wireless.ssid` | public | yes | yes | yes |
 | `identity.mgmt_ip.*`, `identity.routing.*`, `identity.ptp_*` | public | yes | yes | yes |
-| everything else (metadata) | public | yes | yes | yes |
+| **any `identity.*` field not explicitly listed above** | **secret until classified** | omitted | masked | never |
+| document metadata (`id`, `vendor`, `model`, `serial_number`, `mac_address`, `hostname`, `firmware_at_capture`, `captured_at`, `source`) | public | yes | yes | yes |
+
+The identity block is **default-secret**: a new identity field added by an R4
+vendor capture is redacted everywhere until a schema revision explicitly
+classifies it public. Capture coverage grows vendor-by-vendor, and default-open
+would silently expose each new field; this row settles that argument once
+instead of in every R4 vendor review.
 
 Rationale for whole-blob treatment of `raw`: vendor exports carry admin password
 hashes, SNMP communities, RADIUS material, and keys in vendor-specific places
@@ -510,7 +538,10 @@ enforceable in R3/R4 code review:
    `/var/lib/provisioner/snapshots/` — directory `0700`, files `0600`, owned by
    the service user. Never in git (repo `configs/` and the data repo's template
    tree are for templates, not snapshots), never synced by `deploy.sh` (which
-   touches `/opt/provisioner/` code only).
+   touches `/opt/provisioner/` code only). The inverse also holds: nothing
+   under `configs/templates/**` — base templates *or* role overlays — may ever
+   contain a secret (§2.2 rule 2); secrets exist only in snapshots and
+   job-scoped resolved artifacts inside the data dir.
 2. **API:** list and get endpoints return metadata + redacted identity per the
    §3.3 map — `psk` and `raw.content` never leave the server. The full document
    is read server-side only, at resolve/apply time. (Precedent: the credentials
@@ -567,6 +598,12 @@ Flow: `POST /api/provision` → `_run_provisioning` → `_provision_port_device`
 builds `JobContext(role=req.role, replacement_snapshot_id=req.replacement_snapshot_id)`
 → `config_resolver.resolve(device_type, fingerprint.model, job_context)`.
 
+Pre-existing observation, for the record: `ProvisionRequest.config_override`
+(`web/api.py:61`) is a dead field — accepted by the model, consumed nowhere.
+This design does not repurpose it (its name invites confusion with both the
+resolver's overlays and the MAC device-override pass); removal or reuse is left
+to R1's discretion.
+
 **Auto-provision path** (`_run_port_provisioning`, no request object) constructs
 `JobContext()` — the empty default. R2's kiosk flow will let the operator park a
 pending selection on a port *before* provisioning starts (the three-button
@@ -596,13 +633,14 @@ further design):
 1. **Delegation equivalence (parametrized golden test):** re-run every case in
    `tests/test_config_store.py` (Tachyon fallback gating, timestamped exports,
    alias prefix matching, Cambium legacy fallback, default/no-model cases —
-   11 cases today) through `resolve(dt, model, JobContext())` and assert the
+   9 cases today) through `resolve(dt, model, JobContext())` and assert the
    returned layer path `==` the direct `get_config_template` result, including
    the `None` cases.
 2. **Pass-through byte test:** over a fixture template tree, assert
    `as_provision_args()` returns `(None, str(path))` with the identical string
-   `main.py` builds today, and assert (via filesystem mtime/spy) that the
-   template file was never read or rewritten.
+   `main.py` builds today; assert via a spy (patch `open` /
+   `load_config_template`) that the template file was never *read*, and via
+   mtime that it was never *rewritten* (mtime cannot detect reads).
 3. **Seam test:** extend `tests/test_provision_flow.py` so a full mocked
    provision run with empty context hands the handler the same `config_path`
    as a pre-refactor control run, for a `config_after_all_firmware` vendor and
@@ -628,7 +666,7 @@ this repo. **Empty/unknown cells are not guessed** — they appear in §6.7.
 | PSK (secret) | `wirelessInterfaceEncryptionKey` | `cambium.py:439`, `cambium.py:1502` |
 | admin password (secret; excluded from snapshots) | `admin_password` | `cambium.py:437` |
 | mgmt IP mode | `networkInterfaceIPMethod` — present in read-back but listed read-only for `set_param` ("DHCP-assigned, not settable directly", `cambium.py:1497`) | read side usable for capture; write side → H4 |
-| static IP / prefix / gateway | **not in repo** | → H4 |
+| static IP / prefix / gateway | no *verified* keys. The only candidates in-repo are in `CambiumHandler.set_management_ip` (`cambium.py:2818-2836`), which builds nested `network.management.{ipMode,ip,netmask,gateway}` — **dead code** (zero call sites) whose nested shape does not match the flat `device_props` model the current apply path uses | → H4 |
 | routing / OSPF | **not in repo** | → H7 |
 | PTP master/slave mode keys | **not in repo** (mode templates set SSID/hostname only) | → H6 |
 | capture (read-back) | `get_param act=config_regular` → full `device_props` | CONFIRMED, `docs/cambium-config.md` |
@@ -694,7 +732,7 @@ Out of scope by construction; the resolver is never invoked for it.
 | H1 | Cambium | Which captured `device_props` keys are safe to write back on a *different* unit (config_import of a captured config vs factory template)? Any per-unit keys beyond the known read-only lists? | R4, R5 | bench (per `docs/cambium-config.md` standing rule) |
 | H2 | Tachyon | Snapshot-as-base for replacement: does a full export from unit A apply cleanly to unit B (same model / sibling model)? Any MAC/serial-bound fields to strip? Overlay-onto-export composition validity | R5, R6 | bench (epic follow-up #2) |
 | H3 | Tachyon | Exact PSK/passphrase key path under `vaps[]` / `sta_profiles` (and `security_mode` vocabulary) | R4, R5 | bench |
-| H4 | Cambium | Static-IP field set (address/mask/gateway keys) and whether IP mode is settable via `config_import` even though `set_param` treats `networkInterfaceIPMethod` as read-only | R6 | bench |
+| H4 | Cambium | Static-IP field set (address/mask/gateway keys) and whether IP mode is settable via `config_import` even though `set_param` treats `networkInterfaceIPMethod` as read-only. The only in-repo candidates are in the dead, never-called `set_management_ip` helper (`cambium.py:2818-2836`, nested `network.management.*` shape that does not match the flat `device_props` apply path) — dismissed as evidence, cited so later implementers know it was considered | R6 | bench |
 | H5 | Tachyon | Static-mode `network.zones.wan` field set (address/prefix/gateway) — repo only shows `"mode": "dhcp"` | R6 | bench |
 | H6 | Cambium + Tachyon | PTP radio-role keys (master/slave / mode fields) — repo PTP mode templates only set SSID/hostname | R6 | bench |
 | H7 | all PTP vendors | OSPF parameter shape — **zero** OSPF-shaped fields exist anywhere in the repo; `identity.routing` beyond `{mode, area}` is reserved, not designed | R6 | bench + product (confirm OSPF is actually in scope per vendor) |
