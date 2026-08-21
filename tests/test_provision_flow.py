@@ -292,3 +292,70 @@ async def test_tarana_pattern_verify_active_skip_fw2_reboot(spy_handler_factory,
     )
     assert apply_idx < fw2_idx
     assert "verify_config" in names
+
+
+# ---------------------------------------------------------------------------
+# firmware_lookup_key wiring — provision() asks the handler for the lookup key
+# ---------------------------------------------------------------------------
+
+from conftest import SpyHandler
+
+
+@pytest.mark.asyncio
+async def test_firmware_lookup_callback_receives_handler_key(spy_handler_factory):
+    """No initial firmware path ⇒ provision() resolves firmware via
+    firmware_lookup_callback using the handler's firmware_lookup_key
+    (base default: device model)."""
+    spy = spy_handler_factory()
+    lookups = []
+
+    def lookup(device_type, key):
+        lookups.append((device_type, key))
+        return ("/tmp/fw.bin", "new")
+
+    result = await spy.provision(
+        config={"key": "value"},
+        expected_firmware="new",
+        dual_bank=True,
+        firmware_lookup_callback=lookup,
+    )
+
+    assert result.success, result.error_message
+    assert lookups == [("spy", "SPY-MODEL")]
+
+
+class ArchKeySpyHandler(SpyHandler):
+    """Spy whose firmware lookup is keyed off hardware_version, mirroring the
+    MikrotikHandler override pattern."""
+
+    async def get_info(self):
+        info = await super().get_info()
+        info.hardware_version = "arch-key"
+        return info
+
+    def firmware_lookup_key(self, device_info):
+        if device_info and device_info.hardware_version:
+            return device_info.hardware_version
+        return super().firmware_lookup_key(device_info)
+
+
+@pytest.mark.asyncio
+async def test_firmware_lookup_callback_honors_handler_override():
+    """A handler override of firmware_lookup_key changes the key provision()
+    passes to firmware_lookup_callback — no vendor branching in base.py."""
+    spy = ArchKeySpyHandler()
+    lookups = []
+
+    def lookup(device_type, key):
+        lookups.append((device_type, key))
+        return ("/tmp/fw.bin", "new")
+
+    result = await spy.provision(
+        config={"key": "value"},
+        expected_firmware="new",
+        dual_bank=True,
+        firmware_lookup_callback=lookup,
+    )
+
+    assert result.success, result.error_message
+    assert lookups == [("spy", "arch-key")]

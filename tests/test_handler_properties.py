@@ -197,6 +197,76 @@ def test_ubiquiti_airos_properties():
 
 
 # ---------------------------------------------------------------------------
+# firmware_lookup_key — handler-owned key for model-specific firmware lookup
+# (base default: device model; MikroTik prefers the RouterOS architecture)
+# ---------------------------------------------------------------------------
+
+from provisioner.handlers.mock import MockHandler
+
+
+@pytest.mark.parametrize(
+    "handler_class",
+    [CambiumHandler, TachyonHandler, TaranaHandler, UbiquitiHandler],
+)
+def test_firmware_lookup_key_default_is_model(handler_class):
+    """Non-MikroTik vendors key firmware lookup by model, even when a
+    hardware_version happens to be populated."""
+    handler = handler_class(ip="192.0.2.1", credentials=CREDS)
+    info = DeviceInfo(
+        device_type=handler.device_type,
+        model="MODEL-X",
+        hardware_version="hw-rev-9",
+    )
+    assert handler.firmware_lookup_key(info) == "MODEL-X"
+
+
+@pytest.mark.parametrize(
+    "handler_class",
+    [CambiumHandler, MikrotikHandler, TachyonHandler, TaranaHandler, UbiquitiHandler],
+)
+def test_firmware_lookup_key_none_device_info(handler_class):
+    """No device_info yet ⇒ no key (and no crash), for every vendor."""
+    handler = handler_class(ip="192.0.2.1", credentials=CREDS)
+    assert handler.firmware_lookup_key(None) is None
+
+
+def test_mikrotik_firmware_lookup_key_prefers_hardware_version():
+    """RouterOS packages are per-architecture; get_info() stores the
+    architecture in hardware_version."""
+    handler = MikrotikHandler(ip="192.0.2.1", credentials=CREDS)
+    info = DeviceInfo(device_type="mikrotik", model="hAP ax lite", hardware_version="arm")
+    assert handler.firmware_lookup_key(info) == "arm"
+
+
+@pytest.mark.parametrize("hardware_version", [None, ""])
+def test_mikrotik_firmware_lookup_key_falsy_arch_falls_back_to_model(hardware_version):
+    handler = MikrotikHandler(ip="192.0.2.1", credentials=CREDS)
+    info = DeviceInfo(
+        device_type="mikrotik",
+        model="hAP ax lite",
+        hardware_version=hardware_version,
+    )
+    assert handler.firmware_lookup_key(info) == "hAP ax lite"
+
+
+def test_mikrotik_firmware_lookup_key_no_model_no_arch_is_none():
+    handler = MikrotikHandler(ip="192.0.2.1", credentials=CREDS)
+    info = DeviceInfo(device_type="mikrotik")
+    assert handler.firmware_lookup_key(info) is None
+
+
+def test_mock_simulating_mikrotik_uses_base_lookup():
+    """MockHandler is not a vendor and never reports a hardware_version, so it
+    keys firmware lookup by model even when simulating mikrotik. (The old
+    vendor-string branch in base.py matched the mock's device_type but always
+    fell through to model because hardware_version was never set.)"""
+    handler = MockHandler(ip="192.0.2.1", credentials=CREDS, device_type="mikrotik")
+    info = DeviceInfo(device_type="mikrotik", model="hAP ac2")
+    assert handler.firmware_lookup_key(info) == "hAP ac2"
+    assert handler.firmware_lookup_key(None) is None
+
+
+# ---------------------------------------------------------------------------
 # Class-level traits — consulted via HANDLER_MAP before instantiation
 # (config-template lookup in config_store.py, model preflight in main.py)
 # ---------------------------------------------------------------------------
