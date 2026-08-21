@@ -4,13 +4,24 @@
 
 ## Goal
 
-The provisioner today answers "where does this device's config come from?" with "the one static template for this model." This epic replaces that with a **config resolver** choosing composable layers — **base template → site-role overlay → replacement overlay** — through the *existing* deep-merge machinery, adding:
+The provisioner today answers "where does this device's config come from?" with "the one static template for this model." This epic replaces that with a **config resolver** choosing composable layers — **base template → site-role overlay → replacement overlay** — layered by a shared merge utility the resolver introduces (**R0 correction, review-verified:** the repo has no central template deep-merge today — the only one is internal to the Tachyon handler; Cambium merges device-side), adding:
 
 1. **Roles:** some equipment configures for tower sites, some for business/home (also subsumes the planned infra-ZTP routing split).
 2. **Replacement flows:** a new AP inherits its predecessor's SSID/key; a new PTP radio inherits its side's identity (static IP/subnet, DHCP vs OSPF) — all vendors where applicable.
 3. **An operator UI that never requires spelling a vendor name:** plug in → auto-detected → three big buttons (New Home/Business · New Tower · Replacement).
 
 **Explicitly not a rewrite.** The provisioning engine, handlers, fingerprinting, and kiosk stack stay. The audit (`docs/ARCHITECTURE_ISOLATION_REVIEW.md`) shows the engine is vendor-neutral and behaviorally sound; the recurring cross-vendor breakage comes from registry duplication, which epic #69 is eliminating. This epic adds one new layer *upstream* of handlers; handlers apply whatever config they're given, unchanged.
+
+## R0 design corrections (2026-08-21 — PR #123 reviewed & verified against code)
+
+The R0 design (`docs/design-config-resolution.md`, PR #123) contradicted four assumptions in this epic; all were **confirmed by adversarial review** with file:line evidence:
+
+1. **No shared deep-merge exists** — only `TachyonHandler._deep_merge`; the resolver composes layers itself and materializes one job-scoped config file (also because `provision()` silently ignores `config_path` when inline `config` is present, `base.py:726-732`).
+2. **Tachyon replacement is snapshot-as-base** (raw export replaces the template), not a field overlay — full-export semantics.
+3. **Zero OSPF-shaped fields exist in the repo** — PTP "DHCP vs OSPF" identity mapping is entirely bench territory (H7); the schema only reserves `routing.{mode, area}`.
+4. **Ubiquiti replacement is double-gated** — AirOS has no config-apply path at all; Wave apply defaults off (`apply_config_ubiquiti: False`).
+
+R0 also defines hardware follow-ups H1–H10 and open decisions D1–D9 (see the doc); stories must defer to those instead of re-deciding.
 
 ## Design principles
 
