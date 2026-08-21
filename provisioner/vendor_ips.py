@@ -109,3 +109,21 @@ def primary_ip(vendor):
     # type: (str) -> str
     """The vendor's primary/default link-local IP (first registry entry)."""
     return VENDOR_LINK_LOCAL_IPS[vendor][0]
+
+
+# Historical DeviceIPsConfig field declaration order (the pre-registry typed
+# class in config.py), preserved so config serialization order stays
+# byte-identical (PR #124 review). Cosmetic order metadata only — same
+# partial-order semantics as _BOOT_PING_VENDOR_ORDER: registry vendors
+# missing from this tuple are appended in registry order, so adding a
+# vendor still needs only a VENDOR_LINK_LOCAL_IPS edit.
+_DEVICE_IPS_FIELD_ORDER = ("cambium", "tachyon", "tarana", "ubiquiti", "mikrotik")
+
+
+def device_ips_vendors():
+    # type: () -> List[str]
+    """Vendor order for DeviceIPsConfig fields (historical order first,
+    then any registry vendors added since, in registry order)."""
+    ordered = [v for v in _DEVICE_IPS_FIELD_ORDER if v in VENDOR_LINK_LOCAL_IPS]
+    ordered += [v for v in VENDOR_LINK_LOCAL_IPS if v not in _DEVICE_IPS_FIELD_ORDER]
+    return ordered

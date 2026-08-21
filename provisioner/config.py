@@ -12,7 +12,7 @@ import yaml
 from pydantic import BaseModel, Field, create_model, field_validator
 from dotenv import load_dotenv
 
-from .vendor_ips import VENDOR_LINK_LOCAL_IPS
+from .vendor_ips import device_ips_vendors, primary_ip
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +53,11 @@ class NetworkConfig(BaseModel):
 # (vendor_ips.py, Story 4 / #74) — a new registry vendor appears here
 # automatically. Only the vendor's *primary* IP is overridable here;
 # alternate addresses (e.g. Tachyon's 192.168.1.1) live in the registry
-# only, matching the pre-registry schema.
+# only, matching the pre-registry schema. device_ips_vendors() keeps the
+# historical field/serialization order.
 DeviceIPsConfig = create_model(
     "DeviceIPsConfig",
-    **{vendor: (str, ips[0]) for vendor, ips in VENDOR_LINK_LOCAL_IPS.items()}
+    **{vendor: (str, primary_ip(vendor)) for vendor in device_ips_vendors()}
 )
 DeviceIPsConfig.__doc__ = (
     "Known link-local IPs for device types (derived from "

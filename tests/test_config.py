@@ -51,10 +51,18 @@ class TestConfigDefaults:
 
     def test_device_ips_defaults_derive_from_registry(self):
         """DeviceIPsConfig fields/defaults derive from the vendor-IP registry
-        (Story 4 / #74): each vendor's default is its primary registry IP."""
+        (Story 4 / #74): each vendor's default is its primary registry IP,
+        and field/serialization order matches the pre-registry typed class."""
         from provisioner.vendor_ips import VENDOR_LINK_LOCAL_IPS
 
         config = PortsConfig()
+        assert list(type(config.device_ips).model_fields) == [
+            "cambium",
+            "tachyon",
+            "tarana",
+            "ubiquiti",
+            "mikrotik",
+        ]
         assert set(type(config.device_ips).model_fields) == set(
             VENDOR_LINK_LOCAL_IPS
         )
