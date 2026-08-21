@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .api import router as api_router
+from .snapshots import router as snapshots_router
 from .websocket import router as ws_router
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ def create_app(
     
     # Include routers
     app.include_router(api_router, prefix="/api")
+    app.include_router(snapshots_router, prefix="/api")
     app.include_router(ws_router, prefix="/ws")
     
     # Root route serves the dashboard
