@@ -69,8 +69,8 @@ class ProvisioningResult:
 class BaseHandler(ABC):
     """Abstract base class for device handlers.
 
-    Each device type (Mikrotik, Cambium, etc.) implements this interface
-    to provide provisioning functionality.
+    Each device type implements this interface (in its vendor handler
+    module) to provide provisioning functionality.
     """
 
     # Class-level traits, consulted via HANDLER_MAP *before* a handler is
@@ -273,8 +273,8 @@ class BaseHandler(ABC):
         For dual-bank devices, ``bank`` indicates which bank update is in
         progress (1 = first pass, 2 = second pass). Most vendors flash the
         inactive bank regardless of the pass number — they can ignore the
-        argument. Some vendors (Cambium ePMP) use a different endpoint
-        for the second-pass flash and need this to switch paths.
+        argument. Some vendors use a different endpoint for the
+        second-pass flash and need this to switch paths.
 
         Args:
             firmware_path: Path to the firmware file.
@@ -381,6 +381,24 @@ class BaseHandler(ABC):
         """
         return True, ""
 
+    def firmware_lookup_key(self, device_info: Optional[DeviceInfo]) -> Optional[str]:
+        """Select the key used for model-specific firmware lookup.
+
+        The provisioning flow passes this key to ``firmware_lookup_callback``
+        (which resolves it against ``firmware.py`` ``MODEL_FIRMWARE_PATTERNS``).
+        Subclasses can override this when firmware files are keyed by
+        something other than the model string (for example, a hardware
+        architecture stored in ``device_info.hardware_version``).
+
+        Args:
+            device_info: The device info gathered by ``get_info()``, or None
+                if not available yet.
+
+        Returns:
+            The lookup key, or None if no key can be determined.
+        """
+        return device_info.model if device_info else None
+
     async def provision(
         self,
         config: Optional[Dict[str, Any]] = None,
@@ -468,16 +486,6 @@ class BaseHandler(ABC):
                 info_str = f"mac:{result.device_info.mac_address or ''}|serial:{result.device_info.serial_number or ''}"
                 await notify("device_info", True, info_str)
 
-            def firmware_lookup_key() -> Optional[str]:
-                """Select best key for model-specific firmware lookup."""
-                if (
-                    self.device_type == "mikrotik"
-                    and result.device_info
-                    and result.device_info.hardware_version
-                ):
-                    return result.device_info.hardware_version
-                return model_name
-
             # Get firmware bank versions and determine which need updates
             bank1_ver = "unknown"
             bank2_ver = "unknown"
@@ -540,7 +548,7 @@ class BaseHandler(ABC):
             else:
                 # Bank 1 needs update
                 if not firmware_path:
-                    lookup_model = firmware_lookup_key()
+                    lookup_model = self.firmware_lookup_key(result.device_info)
                     if firmware_lookup_callback and lookup_model:
                         _logger.info(f"[PROVISION] No initial firmware path, re-looking up for model {lookup_model}")
                         new_path, new_version = firmware_lookup_callback(self.device_type, lookup_model)
@@ -562,7 +570,7 @@ class BaseHandler(ABC):
                     if not is_valid:
                         # Try to re-lookup firmware with the now-known model
                         if firmware_lookup_callback:
-                            lookup_model = firmware_lookup_key()
+                            lookup_model = self.firmware_lookup_key(result.device_info)
                             _logger.info(f"[PROVISION] Firmware mismatch, re-looking up for model {lookup_model}")
                             new_path, new_version = firmware_lookup_callback(self.device_type, lookup_model)
                             if new_path:
@@ -625,7 +633,7 @@ class BaseHandler(ABC):
                     # ================================================================
                     _logger.info(f"[PROVISION] Phase 4: Reboot #1")
                     await notify("reboot_started", True, None)
-                    # Some devices (e.g., Tachyon) reboot automatically after update_firmware()
+                    # Some devices reboot automatically after update_firmware()
                     if getattr(self, 'update_triggers_reboot', False):
                         _logger.info(f"[PROVISION] Device reboots automatically after firmware update")
                     else:
@@ -819,7 +827,7 @@ class BaseHandler(ABC):
                         # PHASE 8: REBOOT #2
                         _logger.info(f"[PROVISION] Phase 8: Reboot #2")
                         await notify("reboot_started", True, None)
-                        # Some devices (e.g., Tachyon) reboot automatically after update_firmware()
+                        # Some devices reboot automatically after update_firmware()
                         if getattr(self, 'update_triggers_reboot', False):
                             _logger.info(f"[PROVISION] Device reboots automatically after firmware update")
                         else:

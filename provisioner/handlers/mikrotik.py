@@ -53,6 +53,18 @@ class MikrotikHandler(BaseHandler):
         # RouterOS is single-bank from provisioning perspective.
         return False
 
+    def firmware_lookup_key(self, device_info: Optional[DeviceInfo]) -> Optional[str]:
+        """Prefer the RouterOS architecture over the model name.
+
+        RouterOS packages are per-architecture (mipsbe, arm, arm64, ...), not
+        per-model, and ``get_info()`` stores the architecture in
+        ``hardware_version``. Fall back to the base behavior (model) when the
+        architecture is unknown.
+        """
+        if device_info and device_info.hardware_version:
+            return device_info.hardware_version
+        return super().firmware_lookup_key(device_info)
+
     def validate_firmware_for_model(self, firmware_path: str, model: str) -> tuple[bool, str]:
         """Validate RouterOS package before upload."""
         filename = Path(firmware_path).name.lower()
