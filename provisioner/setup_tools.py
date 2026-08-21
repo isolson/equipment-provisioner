@@ -12,6 +12,8 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from .handler_manager import provisionable_device_types
+
 
 STATUS_PRIORITY = {
     "ready": 0,
@@ -20,7 +22,11 @@ STATUS_PRIORITY = {
     "error": 3,
 }
 
-SUPPORTED_DEVICE_TYPES = ("cambium", "mikrotik", "tachyon", "tarana", "ubiquiti")
+# The supported device-type list derives from HANDLER_MAP — see
+# provisioner.handler_manager.provisionable_device_types() (Story 2 / #72).
+# The per-vendor readiness/hint/mode dicts below stay hand-keyed until
+# Stories 3/6 consolidate them; iteration over the derived list must
+# tolerate a vendor missing from those dicts (.get(), never indexing).
 ROOT_BUNDLE_NAMES = {
     "configs",
     "firmware",
@@ -84,7 +90,7 @@ def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
     }
 
     result = []
-    for device_type in SUPPORTED_DEVICE_TYPES:
+    for device_type in provisionable_device_types():
         creds = getattr(getattr(config, "credentials", None), device_type, None)
         password = getattr(creds, "password", "")
         status = "ready"
@@ -104,7 +110,7 @@ def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
                 "has_password": bool(password),
                 "status": status,
                 "summary": summary,
-                "recommended": defaults[device_type],
+                "recommended": defaults.get(device_type),
             }
         )
 
@@ -239,7 +245,7 @@ def _build_firmware_check(data_path: Path) -> Dict[str, Any]:
     per_vendor = []
     missing_required = []
 
-    for device_type in SUPPORTED_DEVICE_TYPES:
+    for device_type in provisionable_device_types():
         device_dir = firmware_root / device_type
         files = sorted(p.name for p in device_dir.iterdir() if p.is_file()) if device_dir.exists() else []
         status = "ready" if files else "warning"
@@ -293,7 +299,7 @@ def _build_credentials_check(config: Any, data_path: Path) -> Dict[str, Any]:
 
     custom_counts = {
         device_type: len(custom_credentials.get(device_type, []))
-        for device_type in SUPPORTED_DEVICE_TYPES
+        for device_type in provisionable_device_types()
     }
 
     status = "ready"

@@ -45,13 +45,13 @@ To **add or remove one vendor**, you must edit *every* one of these. There is no
 | 1 | `DeviceType` enum | `fingerprint.py:36` | ✅ yes |
 | 2 | `HANDLER_MAP` (+ import) | `handler_manager.py:10,24` | ✅ yes |
 | 3 | `handlers/__init__.py` import + `__all__` | `handlers/__init__.py` | ❌ undocumented |
-| 4 | CLI handler dict + `choices=[...]` | `cli.py:383,522,568` | ❌ **duplicate of #2** |
-| 5 | `VALID_DEVICE_TYPES` set | `web/api.py:1156` (used 2159/2193/2235/2270) | ❌ **duplicate** |
+| 4 | ~~CLI handler dict + `choices=[...]`~~ | `cli.py` `get_handler()` / `build_parser()` | ✅ **derives from #2** since Story 2 / #72 (`provisionable_device_types()`) |
+| 5 | ~~`VALID_DEVICE_TYPES` set~~ | `web/api.py` `_validate_device_type()` + credential endpoints | ✅ **derives from #2** since Story 2 / #72 |
 | 6 | UI vendor metadata map | `index.html:347` | ❌ **duplicate (frontend)** |
 | 7 | Per-vendor pydantic classes + fields | `config.py:47-53` (`DeviceIPsConfig`), `97-120` (`*Credentials`/`CredentialsConfig`), firmware sources, feature flags | ❌ undocumented |
 | 8 | `DeviceLinkLocalIP` consts + `.ALL` + inline copy | `port_manager.py:112` **and** `:982` | ⚠️ partly blessed, **self-duplicated** |
 | 9 | Firmware-source class registry: `SOURCE_MAP` + imports, and `firmware_sources/__init__.py` | `firmware_checker.py:20-39`, `firmware_sources/__init__.py` | ❌ undocumented (**import-crash on removal**) |
-| 10 | `SUPPORTED_DEVICE_TYPES` + readiness / credential-hint / config-mode dicts | `setup_tools.py:23,79-126` | ❌ undocumented (first-run setup UI) |
+| 10 | Per-vendor readiness / credential-hint / config-mode dicts (the device-type list itself derives from #2 since Story 2 / #72) | `setup_tools.py` | ❌ undocumented (first-run setup UI) |
 
 Credentials specifically have **four** copies: `CredentialsConfig` (`config.py:114`), the `main.py:109` dict, handler `DEFAULT_CREDENTIALS`, and `BUILTIN_CREDENTIALS` (`api.py:2086`).
 
@@ -74,9 +74,9 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 | **S2** | `_extract_device_details` per-vendor `elif` chain | `fingerprint.py:~854-912` | Model/version regex branch per `DeviceType`. |
 | **S2** | `MODEL_FIRMWARE_PATTERNS` | `firmware.py:165-218` | Vendor model→filename-pattern table. Dead rows harmless. |
 | **S2** | Typed per-vendor config classes + IP defaults + feature flags | `config.py:47-53,97-120`, `apply_config_ubiquiti`/`apply_config_tarana`, `device_settings.tarana/.mikrotik` | Schema-level coupling. `apply_config_<vendor>` flags should be generic/table-driven. |
-| **S2** | CLI handler dict + choices | `cli.py:383,522,568` | **Second copy** of the handler registry. |
-| **S2** | `VALID_DEVICE_TYPES` + filename→type inference + UI lists + `BUILTIN_CREDENTIALS` | `web/api.py:1156,1208-1217,2068,2086` | **Third + fourth copies** of the vendor list. Plus MikroTik netinstall/ZTP and Tarana-settings blocks. |
-| **S2** | `SUPPORTED_DEVICE_TYPES` + per-vendor readiness / credential-hint / config-mode dicts | `setup_tools.py:23,79-126` | First-run setup readiness UI; also couples to `apply_config_ubiquiti`. Stale entries = dead UI rows; missing = vendor absent from setup checks. |
+| ~~S2~~ | ~~CLI handler dict + choices~~ | `cli.py` | **Resolved (Story 2 / #72):** handler lookup goes through `HandlerManager.handler_class_for`; choices/help derive from `provisionable_device_types()`. |
+| **S2** | UI lists + `BUILTIN_CREDENTIALS` (device-type validation + filename→type inference now derive from `HANDLER_MAP` — Story 2 / #72) | `web/api.py` | **Fourth copy** of the vendor list (`BUILTIN_CREDENTIALS`). Plus MikroTik netinstall/ZTP and Tarana-settings blocks, and the hand-keyed `_DEVICE_TYPE_FILENAME_HINTS` alias extras. |
+| **S2** | Per-vendor readiness / credential-hint / config-mode dicts (device-type list derives from `HANDLER_MAP` — Story 2 / #72) | `setup_tools.py` | First-run setup readiness UI; also couples to `apply_config_ubiquiti`. Stale entries = dead UI rows; missing = vendor absent from setup checks. |
 | **S2** | UI vendor map + behavioral branches | `index.html:347` (map), `:966` (`canApplyMode`), `:1307` (Tachyon SSID uppercase) | **Frontend copy** + 2 vendor-specific UI behaviors. |
 | **S2** | `DeviceLinkLocalIP` self-duplication | `port_manager.py:112` vs inline `:982-986` | Same IP→vendor data twice in one file. |
 | **S2** | Tarana settings injection in main loop | `main.py:568-578` | Vendor `if device_type == "tarana"` in orchestrator. |
@@ -96,9 +96,9 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 
 **Delete outright (self-contained):** `handlers/tachyon.py`, `firmware_sources/tachyon.py`, `configs/templates/tachyon/`, `web/static/vendor-icons/tachyon.png`, Tachyon test cases.
 
-**Must edit or it crashes (S1):** `handler_manager.py` (import + map), `handlers/__init__.py` (import + `__all__`), `firmware_sources/__init__.py` (import + `__all__`), `firmware_checker.py` (`SOURCE_MAP` + imports), `config.py` (`TachyonCredentials`, `CredentialsConfig.tachyon`, `DeviceIPsConfig.tachyon`, firmware-source entry), `main.py` (credentials-dict key `:118`), `cli.py` (handler dict + choices).
+**Must edit or it crashes (S1):** `handler_manager.py` (import + map), `handlers/__init__.py` (import + `__all__`), `firmware_sources/__init__.py` (import + `__all__`), `firmware_checker.py` (`SOURCE_MAP` + imports), `config.py` (`TachyonCredentials`, `CredentialsConfig.tachyon`, `DeviceIPsConfig.tachyon`, firmware-source entry), `main.py` (credentials-dict key `:118`). (`cli.py` no longer needs an edit — it derives from `HANDLER_MAP` since Story 2 / #72.)
 
-**Must edit or you get dead code / an undetectable device (S2):** `fingerprint.py` (enum `:40`, `HTTP_SIGNATURES` `:156`, `_probe_tachyon_api` + its call at `:434`, `_extract_device_details` branch), `firmware.py` (3 rows `:186-193`), `config_store.py` (alias block), `port_manager.py` (`DeviceLinkLocalIP` Tachyon consts + `.ALL` + inline list), `web/api.py` (`VALID_DEVICE_TYPES` + `BUILTIN_CREDENTIALS` + filename inference + UI lists), `setup_tools.py` (`SUPPORTED_DEVICE_TYPES` + readiness/hint/mode dicts), `index.html` (vendor map + `canApplyMode` + SSID-uppercase branch).
+**Must edit or you get dead code / an undetectable device (S2):** `fingerprint.py` (enum `:40`, `HTTP_SIGNATURES` `:156`, `_probe_tachyon_api` + its call at `:434`, `_extract_device_details` branch), `firmware.py` (3 rows `:186-193`), `config_store.py` (alias block), `port_manager.py` (`DeviceLinkLocalIP` Tachyon consts + `.ALL` + inline list), `web/api.py` (`BUILTIN_CREDENTIALS` + `_DEVICE_TYPE_FILENAME_HINTS` extras + UI lists; device-type validation derives from `HANDLER_MAP`), `setup_tools.py` (readiness/hint/mode dicts; the device-type list derives from `HANDLER_MAP`), `index.html` (vendor map + `canApplyMode` + SSID-uppercase branch).
 
 **Risk profile:** the danger is *omission*, not breakage. Forgetting an S1 site stops the service at boot; forgetting an S2 site leaves dead code or a silently-undetectable device. `grep -ri tachyon provisioner/ configs/` is the safety net.
 
