@@ -89,6 +89,25 @@ class DataConfig(BaseModel):
     local_path: str = "/var/lib/provisioner/repo"
 
 
+class SnapshotsConfig(BaseModel):
+    """Device-config snapshot store (epic #112 R3, issue #116).
+
+    ``path`` unset means "a ``snapshots`` sibling of ``data.local_path``"
+    (default install: ``/var/lib/provisioner/snapshots``) — outside the
+    data repo so snapshots (which carry secrets at rest) are never synced
+    or committed. The directory is created 0700 (files 0600) on first
+    write by the service user; no install step is required.
+
+    Retention (design doc D5, conservative defaults): keep the newest
+    ``max_per_unit`` snapshots per (vendor, serial|MAC) unit and the newest
+    ``max_total`` overall; older ones are evicted on capture with a logged
+    eviction. Manual delete via the API always works regardless.
+    """
+    path: Optional[str] = None
+    max_per_unit: int = Field(default=5, ge=1)
+    max_total: int = Field(default=200, ge=1)
+
+
 class DeviceCredentials(BaseModel):
     """Credentials for a device type."""
     username: str = "admin"
@@ -330,6 +349,7 @@ class Config(BaseModel):
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     label_printer: LabelPrinterConfig = Field(default_factory=LabelPrinterConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    snapshots: SnapshotsConfig = Field(default_factory=SnapshotsConfig)
     firmware: FirmwareConfig = Field(default_factory=FirmwareConfig)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     provisioning: ProvisioningConfig = Field(default_factory=ProvisioningConfig)
