@@ -382,17 +382,45 @@ def test_role_ignored_when_no_base_template(tmp_path):
     assert resolved.as_provision_args() == (None, None)
 
 
-def test_unsafe_role_name_is_ignored_with_note(tmp_path):
+@pytest.mark.parametrize(
+    "role",
+    [
+        "../evil",       # path traversal
+        "a/b",           # separator
+        "r" * 256,       # ext4 component limit boundary (ENAMETOOLONG territory)
+        "r" * 5000,      # absurdly long operator input
+    ],
+)
+def test_unsafe_role_name_is_ignored_with_note(tmp_path, role):
     """Roles come from operator input and become path components — path
-    traversal shapes are rejected before any filesystem lookup."""
+    traversal shapes and overlong names are rejected *before* any
+    filesystem lookup (an overlong component would otherwise raise
+    OSError/ENAMETOOLONG and fail the job instead of soft-proceeding)."""
     base = tmp_path / T / "acme" / "widget-1.json"
     _write(base, json.dumps(BASE_CONTENT))
     store, resolver = _resolver(tmp_path, handler_class=OverlayHandler)
 
-    resolved = resolver.resolve("acme", "widget-1", JobContext(role="../evil"))
+    resolved = resolver.resolve("acme", "widget-1", JobContext(role=role))
 
     assert [layer.kind for layer in resolved.layers] == ["base"]
     assert any("not a valid role name" in note for note in resolved.notes)
+    assert resolved.as_provision_args() == (None, str(base))
+
+
+def test_max_length_role_name_passes_the_guard(tmp_path):
+    """A 63-char role is valid — it reaches overlay lookup and, absent an
+    overlay, soft-proceeds with the missing-overlay note (not the
+    invalid-name note)."""
+    base = tmp_path / T / "acme" / "widget-1.json"
+    _write(base, json.dumps(BASE_CONTENT))
+    store, resolver = _resolver(tmp_path, handler_class=OverlayHandler)
+    role = "r" * 63
+
+    resolved = resolver.resolve("acme", "widget-1", JobContext(role=role))
+
+    assert [layer.kind for layer in resolved.layers] == ["base"]
+    assert any(f"no '{role}' role overlay" in note for note in resolved.notes)
+    assert not any("not a valid role name" in note for note in resolved.notes)
     assert resolved.as_provision_args() == (None, str(base))
 
 

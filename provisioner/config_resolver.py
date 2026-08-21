@@ -43,8 +43,11 @@ RESOLVED_CONFIG_DIR = Path("/var/lib/provisioner/run/resolved")
 ROLES_SUBDIR = "roles"
 
 #: Roles come from operator input (API) and config.yaml, and become path
-#: components — restrict them to a filesystem-safe shape.
-_SAFE_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+#: components — restrict them to a filesystem-safe shape AND length (63
+#: chars) so an overlong role is refused with the standard note *before*
+#: any filesystem call (path components >=256 chars would otherwise raise
+#: ENAMETOOLONG and fail the job instead of soft-proceeding).
+_SAFE_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 
 #: Role overlays are dict deltas deep-merged over a JSON base, so only
 #: plain JSON files participate in overlay lookup. Full exports (tar) and

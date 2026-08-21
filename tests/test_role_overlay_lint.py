@@ -17,6 +17,7 @@ enforcement hook for when they land. All fixture values below are fakes.
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -25,19 +26,28 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = REPO_ROOT / "configs" / "templates"
 
 # Superset of the handler-side _is_sensitive_path tokens, plus the obvious
-# wireless-secret spellings. Matched against key names, case-insensitive.
+# wireless-secret spellings. Tokens are in *normalized* form (lowercase,
+# separators stripped) and key names are normalized the same way before
+# matching, so camelCase / kebab-case / snake_case variants (``wpaKey``,
+# ``shared-secret``, ``private_key``) all match the same token.
 SENSITIVE_KEY_TOKENS = (
     "password",
     "passphrase",
-    "private_key",
-    "public_key",
+    "privatekey",
+    "publickey",
     "community",
     "psk",
     "secret",
-    "wpa_key",
-    "encryption_key",
+    "wpakey",
     "encryptionkey",
+    "authkey",
 )
+
+_NORMALIZE_RE = re.compile(r"[^a-z0-9]")
+
+
+def _normalize_key(key):
+    return _NORMALIZE_RE.sub("", str(key).lower())
 
 
 def find_sensitive_paths(value, path="$"):
@@ -46,8 +56,8 @@ def find_sensitive_paths(value, path="$"):
     if isinstance(value, dict):
         for key, child in value.items():
             child_path = f"{path}.{key}"
-            key_lower = str(key).lower()
-            if any(token in key_lower for token in SENSITIVE_KEY_TOKENS):
+            key_normalized = _normalize_key(key)
+            if any(token in key_normalized for token in SENSITIVE_KEY_TOKENS):
                 found.append(child_path)
             found.extend(find_sensitive_paths(child, child_path))
     elif isinstance(value, list):
@@ -109,6 +119,15 @@ def test_shipped_role_overlays_are_json_only():
         ({"snmp": {"community": "fake-not-real"}}, True),
         ({"mgmt": {"encryptionKey": "fake-not-real"}}, True),
         ({"radius": {"shared_secret": "fake-not-real"}}, True),
+        # camelCase / kebab-case variants of underscore tokens must match
+        # too (keys are normalized before token matching).
+        ({"wireless": {"wpaKey": "fake-not-real"}}, True),
+        ({"radius": {"authKey": "fake-not-real"}}, True),
+        ({"radius": {"sharedSecret": "fake-not-real"}}, True),
+        ({"mgmt": {"shared-secret": "fake-not-real"}}, True),
+        ({"wireless": {"privateKey": "fake-not-real"}}, True),
+        # ...but ordinary camelCase settings stay clean.
+        ({"network": {"linkSpeed": 1000, "keepAlive": True}}, False),
     ],
 )
 def test_sensitive_key_heuristic(overlay, expect_flagged):
