@@ -44,6 +44,8 @@ Never branch on vendor names in shared modules; add/override a trait instead.
 | `allows_arbitrary_template_fallback` | `True` | `False`: when no model/alias/default template matches, do NOT fall back to an arbitrary file in the vendor's template dir. Disable for vendors with product-family templates where cross-applying configs is dangerous. Tachyon: `False` |
 | `config_alias_prefix_matching` | `False` | `True`: `CONFIG_MODEL_ALIASES` keys also match as model-name prefixes (`tna-305` covers `tna-305-xyz`). Tachyon: `True` |
 | `requires_model_preflight` | `False` | `True`: when fingerprinting identifies the vendor but not the model, run a read-only login/get-info preflight (`HandlerManager.login_and_get_info`) before firmware/config asset lookup. Enable for vendors with model-specific assets. Tachyon: `True` |
+| `supports_config_overlays` | `False` | `True`: the config resolver (`config_resolver.py`) may compose site-role overlays over this vendor's base template. `False` refuses overlays with an operator-visible note (base-only resolution). Enable per vendor **only after bench verification** — no vendor sets it yet. See "Site-Role Config Overlays" below |
+| `is_full_config_export(config)` | `False` (staticmethod) | Returns `True` when a loaded JSON config is a full device export (applied replace-not-merge), so the resolver refuses to compose partial overlays over it. Method-shaped because the answer depends on the config's content, not the vendor alone — still callable before instantiation. Tachyon: key-set heuristic |
 
 ### Property Combinations by Vendor
 
@@ -384,6 +386,61 @@ configs/
 1. `templates/{device_type}/{model}.json` - Model-specific
 2. `templates/{device_type}/default.json` - Default for type
 3. `templates/{device_type}/*.json` - First file found
+
+## Site-Role Config Overlays
+
+Provisioning jobs can carry a **site role** (e.g. a tower deployment vs a
+business/home install). The config resolver (`provisioner/config_resolver.py`,
+the seam `main.py` calls instead of `store.get_config_template()` directly —
+design: `docs/design-config-resolution.md`) composes an optional role overlay
+over the base template:
+
+```
+configs/templates/{vendor}/roles/{role}/{model|alias|default}.json
+```
+
+Rules:
+
+- **Roles are opaque strings derived from the template tree** — adding a role
+  is a data change (create the directory), never a code change. No module may
+  grow a role enum or role list.
+- **Lookup reuses the base chain**: model → `CONFIG_MODEL_ALIASES` alias →
+  `default.json`, honoring the same class traits
+  (`allows_prefixed_config_exports`, `config_alias_prefix_matching`). There is
+  **no** arbitrary-file fallback for overlays, and overlays are `.json` only —
+  they are dict deltas, deep-merged over the base (dicts merge recursively,
+  overlay wins per key; **lists and scalars replace wholesale**).
+- **Overlays that touch a list must carry the complete list value** — and
+  therefore **role overlays must never contain secrets or identity fields**
+  (PSKs, passwords, SNMP communities, static IPs, SSIDs). Those belong to
+  snapshots/replacement flows, never to git-committed files under
+  `configs/templates/**`. `tests/test_role_overlay_lint.py` enforces the
+  secret-shaped-key check on every shipped overlay.
+- **Refusals soft-proceed**: if the vendor's handler has
+  `supports_config_overlays = False` (the default), the base is a `.tar`
+  full export, or `is_full_config_export()` fires on the JSON base, the
+  resolver resolves base-only and records an operator-visible note. A missing
+  overlay for a selected role also soft-proceeds with a note (roles roll out
+  vendor-by-vendor).
+- **No role selected ⇒ byte-identical passthrough** of the plain template
+  lookup — the template file is not even opened. When an overlay does apply,
+  the merged result is materialized as a job-scoped `0600` artifact under
+  `/var/lib/provisioner/run/resolved/` and handed to the handler as a normal
+  config file; the artifact is deleted after the job.
+
+Role selection: per-job via the API (`ProvisionRequest.role`; kiosk UI
+exposure is a follow-up story) with a fallback default in `config.yaml`:
+
+```yaml
+provisioning:
+  default_role: tower    # optional; omit for role-less resolution
+```
+
+**Host note:** like all template content, role overlay files must exist in the
+data repo on the host (`/var/lib/provisioner/repo/configs/templates/...`) —
+`deploy.sh` syncs code only. The `provisioning:` config section is likewise a
+`/etc/provisioner/config.yaml` edit on the host (deploy does not touch it);
+existing configs without the section keep working — the default is no role.
 
 ## Firmware File Locations
 

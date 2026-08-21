@@ -98,6 +98,25 @@ class BaseHandler(ABC):
     #: vendors whose firmware/config assets are model-specific.
     requires_model_preflight = False
 
+    #: The config resolver may compose role/replacement overlays for this
+    #: vendor. False ⇒ overlays are refused with an operator-visible note
+    #: (base-only resolution). Enable per vendor only after bench
+    #: verification. See docs/design-config-resolution.md.
+    supports_config_overlays = False
+
+    @staticmethod
+    def is_full_config_export(config: Dict[str, Any]) -> bool:
+        """Return True when a loaded JSON config is a full device export
+        (applied replace-not-merge, so partial overlays must not be
+        composed over it).
+
+        Method-shaped (unlike the plain attribute traits) because the
+        answer depends on the loaded config's *content*, not on the vendor
+        alone — but still callable before instantiation, via
+        ``HandlerManager.handler_class_for``.
+        """
+        return False
+
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None):
         """Initialize the handler.
 

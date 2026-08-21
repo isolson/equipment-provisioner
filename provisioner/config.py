@@ -242,6 +242,18 @@ class FeaturesConfig(BaseModel):
     apply_config_tarana: bool = False   # Tarana config application (stub)
 
 
+class ProvisioningConfig(BaseModel):
+    """Cross-vendor provisioning job defaults.
+
+    ``default_role`` selects the site-role config overlay
+    (``configs/templates/{vendor}/roles/{role}/``) applied to jobs that do
+    not choose a role explicitly. Roles are opaque strings derived from the
+    template tree — there is no role enum. None (the default) resolves
+    configs exactly as before role overlays existed.
+    """
+    default_role: Optional[str] = None
+
+
 class TaranaDeviceConfig(BaseModel):
     """Tarana-specific provisioning settings."""
     operator_id: Optional[int] = None
@@ -327,6 +339,7 @@ class Config(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     firmware: FirmwareConfig = Field(default_factory=FirmwareConfig)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
+    provisioning: ProvisioningConfig = Field(default_factory=ProvisioningConfig)
     device_settings: DeviceSettingsConfig = Field(default_factory=DeviceSettingsConfig)
     equipment_registry: EquipmentRegistryConfig = Field(default_factory=EquipmentRegistryConfig)
     analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
