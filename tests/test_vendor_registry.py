@@ -20,10 +20,6 @@ Known, documented exceptions:
   directly from ``main.py``.
 - ``MockHandler`` — simulation-only (``provision --mock``); exported from
   the handlers package but absent from every vendor registry.
-- ``cli.py`` (inline handler dict and ``choices=[...]``) lacks
-  ``ubiquiti`` — pre-existing gap, audit map site #4 ("duplicate of #2").
-  Story 2 (#72) derives the CLI list from ``HANDLER_MAP``; remove
-  ``CLI_VENDORS`` when it lands.
 - No ``tarana`` firmware source exists (``SOURCE_MAP``,
   ``firmware_sources``, config defaults): Tarana's firmware download
   endpoint requires authentication, so firmware is uploaded manually
@@ -33,8 +29,12 @@ Known, documented exceptions:
   deep-merge config templates, so it has no template readiness check.
 """
 
+import asyncio
 import re
 from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
 
 from provisioner import firmware_sources
 from provisioner import handlers as handlers_pkg
@@ -45,14 +45,13 @@ from provisioner.config import (
 )
 from provisioner.fingerprint import DeviceType
 from provisioner.firmware_checker import FirmwareChecker
-from provisioner.handler_manager import HandlerManager
+from provisioner.handler_manager import HandlerManager, provisionable_device_types
 from provisioner.port_manager import DeviceLinkLocalIP
 from provisioner.setup_tools import (
-    SUPPORTED_DEVICE_TYPES,
     _read_primary_credentials,
     _template_requirements,
 )
-from provisioner.web.api import BUILTIN_CREDENTIALS, VALID_DEVICE_TYPES
+from provisioner.web.api import BUILTIN_CREDENTIALS, _validate_device_type
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -65,10 +64,6 @@ CANONICAL = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
 # manually and no source class exists. A newly added vendor without an
 # auto-fetch source joins this exception the same way.
 FIRMWARE_SOURCE_VENDORS = CANONICAL - {"tarana"}
-
-# cli.py predates Ubiquiti support and hardcodes its own handler list
-# (documented exception, fixed by Story 2 / #72).
-CLI_VENDORS = CANONICAL - {"ubiquiti"}
 
 
 class TestPythonRegistries:
@@ -97,11 +92,16 @@ class TestPythonRegistries:
             "import crashes the service at boot.".format(sorted(missing))
         )
 
-    def test_valid_device_types_matches(self):
-        assert VALID_DEVICE_TYPES == CANONICAL, (
-            "VALID_DEVICE_TYPES (web/api.py) out of sync — API rejects valid "
-            "vendors or accepts unknown ones."
-        )
+    def test_api_device_type_validation_matches(self):
+        # web/api.py no longer keeps its own VALID_DEVICE_TYPES copy — it
+        # validates against provisionable_device_types() (Story 2 / #72).
+        for vendor in CANONICAL:
+            assert _validate_device_type(vendor) == vendor, (
+                "web/api.py device-type validation rejects a valid vendor."
+            )
+        for rejected in ("evolution_digital", "unknown", "netgear"):
+            with pytest.raises(HTTPException):
+                _validate_device_type(rejected)
 
     def test_builtin_credentials_cover_every_vendor(self):
         assert set(BUILTIN_CREDENTIALS) == CANONICAL, (
@@ -129,21 +129,24 @@ class TestPythonRegistries:
             "missing from the boot-ping list adds ~120s detection delay."
         )
 
-    def test_setup_tools_supported_device_types_match(self):
-        assert set(SUPPORTED_DEVICE_TYPES) == CANONICAL, (
-            "SUPPORTED_DEVICE_TYPES (setup_tools.py) out of sync — the "
-            "first-run setup UI shows dead or missing vendor entries."
+    def test_provisionable_device_types_derives_from_handler_map(self):
+        # The Story 2 (#72) derivation helper behind the CLI, API
+        # validation, and setup tooling. Sorted, because the order is
+        # user-visible (setup-UI row order, argparse choices display).
+        assert provisionable_device_types() == sorted(CANONICAL), (
+            "provisionable_device_types (handler_manager.py) drifted from "
+            "the canonical vendor set."
         )
 
     def test_setup_readiness_credential_hints_cover_every_vendor(self):
-        # _read_primary_credentials iterates SUPPORTED_DEVICE_TYPES and
-        # indexes its inline `defaults` dict — a vendor missing there makes
-        # /setup/readiness raise KeyError. The getattr chains all have
-        # defaults, so a bare object() exercises exactly that lookup.
+        # _read_primary_credentials iterates the derived vendor list and
+        # reads its hand-keyed `defaults` hint dict with .get() (the dict
+        # consolidates in Stories 3/6). The getattr chains all have
+        # defaults, so a bare object() exercises exactly that iteration.
         entries = _read_primary_credentials(object())
         assert {e["device_type"] for e in entries} == CANONICAL, (
-            "_read_primary_credentials defaults (setup_tools.py) out of sync "
-            "with SUPPORTED_DEVICE_TYPES."
+            "_read_primary_credentials (setup_tools.py) out of sync with "
+            "the derived vendor list."
         )
 
     def test_setup_template_requirements_cover_template_vendors(self):
@@ -178,30 +181,6 @@ class TestPythonRegistries:
 class TestSourceParsedRegistries:
     """Registries that only exist as literals inside function bodies or
     templates — parsed from source, since they can't be imported."""
-
-    def test_cli_handler_dict_matches(self):
-        source = (REPO_ROOT / "provisioner" / "cli.py").read_text()
-        match = re.search(r"handlers\s*=\s*\{([^}]*)\}", source)
-        assert match, (
-            "cli.py: couldn't find the inline `handlers = {...}` dict in "
-            "get_handler() — if it moved or was derived from HANDLER_MAP "
-            "(Story 2 / #72), update this test."
-        )
-        keys = set(re.findall(r'"(\w+)"\s*:', match.group(1)))
-        assert keys == CLI_VENDORS, (
-            "cli.py handler dict drifted (expected the documented "
-            "missing-ubiquiti state until Story 2 / #72 lands)."
-        )
-
-    def test_cli_choices_matches(self):
-        source = (REPO_ROOT / "provisioner" / "cli.py").read_text()
-        match = re.search(r"choices=\[([^\]]*)\]", source)
-        assert match, "cli.py: couldn't find the device-type choices=[...] list."
-        keys = set(re.findall(r'"(\w+)"', match.group(1)))
-        assert keys == CLI_VENDORS, (
-            "cli.py choices=[...] drifted (expected the documented "
-            "missing-ubiquiti state until Story 2 / #72 lands)."
-        )
 
     def test_main_credentials_assembly_matches(self):
         # main.py hand-builds the HandlerManager credentials dict from
@@ -251,3 +230,60 @@ class TestSourceParsedRegistries:
             "index.html deviceVendors map out of sync — vendor cards render "
             "without names/colors/icons."
         )
+
+
+class TestHandlerMapDerivation:
+    """Story 2 (#72): the CLI, API validation, and setup tooling derive
+    their vendor lists from ``HANDLER_MAP`` instead of keeping copies."""
+
+    def test_cli_builds_a_handler_for_every_vendor(self):
+        # The CLI resolves handlers through HandlerManager.handler_class_for,
+        # so every HANDLER_MAP vendor is constructible via the CLI path —
+        # including ubiquiti, which the old hardcoded dict was missing.
+        from provisioner import cli
+
+        for vendor in sorted(CANONICAL):
+            handler = asyncio.run(cli.get_handler("192.0.2.1", vendor, "admin", ""))
+            assert handler is not None, f"CLI built no handler for {vendor}"
+            assert type(handler) is HandlerManager.HANDLER_MAP[DeviceType(vendor)]
+
+    def test_cli_rejects_side_door_and_unknown_types(self):
+        # Evolution Digital is a DeviceType but intentionally has no handler
+        # (main.py side-door dispatch); unknown strings fail the same way.
+        from provisioner import cli
+
+        for rejected in ("evolution_digital", "netgear"):
+            assert asyncio.run(
+                cli.get_handler("192.0.2.1", rejected, "admin", "")
+            ) is None
+
+    def test_cli_choices_cover_every_vendor(self):
+        from provisioner import cli
+
+        args = cli.build_parser().parse_args(["test", "--device-type", "ubiquiti"])
+        assert args.device_type == "ubiquiti"
+
+    def test_handler_map_deletion_propagates_everywhere(self, monkeypatch):
+        from provisioner import cli
+
+        trimmed = {
+            device_type: handler_class
+            for device_type, handler_class in HandlerManager.HANDLER_MAP.items()
+            if device_type is not DeviceType.TARANA
+        }
+        monkeypatch.setattr(HandlerManager, "HANDLER_MAP", trimmed)
+
+        assert "tarana" not in provisionable_device_types()
+
+        # CLI: handler lookup and argparse choices both drop the vendor.
+        assert asyncio.run(cli.get_handler("192.0.2.1", "tarana", "admin", "")) is None
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(["test", "--device-type", "tarana"])
+
+        # API: device-type validation rejects it.
+        with pytest.raises(HTTPException):
+            _validate_device_type("tarana")
+
+        # Setup tooling: readiness rows drop it.
+        entries = _read_primary_credentials(object())
+        assert {e["device_type"] for e in entries} == CANONICAL - {"tarana"}

@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from ..handler_manager import provisionable_device_types
 from ..setup_tools import (
     build_readiness_report,
     import_setup_bundle,
@@ -1232,13 +1233,14 @@ def _get_repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-VALID_DEVICE_TYPES = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
+# Valid device types derive from HANDLER_MAP — see
+# provisioner.handler_manager.provisionable_device_types() (Story 2 / #72).
 
 
 def _validate_device_type(device_type: str) -> str:
     """Validate device_type is a known type. Raises HTTPException if not."""
     sanitized = os.path.basename(device_type).lower().strip()
-    if sanitized not in VALID_DEVICE_TYPES:
+    if sanitized not in provisionable_device_types():
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
     return sanitized
 
@@ -1281,19 +1283,24 @@ def _extract_version_from_filename(filename: str) -> str:
     return "unknown"
 
 
+# Filename keywords that identify a vendor beyond its own device-type
+# string. Hand-keyed per-vendor extras (like _template_requirements in
+# setup_tools.py) — a vendor absent here simply matches on its
+# device-type string alone, so use .get(), never direct indexing.
+_DEVICE_TYPE_FILENAME_HINTS = {
+    "cambium": ("epmp",),
+    "mikrotik": ("routeros",),
+    "ubiquiti": ("airos", "ubnt"),
+}
+
+
 def _get_device_type_from_filename(filename: str) -> Optional[str]:
     """Try to detect device type from filename."""
     filename_lower = filename.lower()
-    if 'epmp' in filename_lower or 'cambium' in filename_lower:
-        return 'cambium'
-    elif 'routeros' in filename_lower or 'mikrotik' in filename_lower:
-        return 'mikrotik'
-    elif 'tachyon' in filename_lower:
-        return 'tachyon'
-    elif 'tarana' in filename_lower:
-        return 'tarana'
-    elif 'ubiquiti' in filename_lower or 'airos' in filename_lower or 'ubnt' in filename_lower:
-        return 'ubiquiti'
+    for device_type in provisionable_device_types():
+        hints = (device_type,) + _DEVICE_TYPE_FILENAME_HINTS.get(device_type, ())
+        if any(hint in filename_lower for hint in hints):
+            return device_type
     return None
 
 
@@ -2235,8 +2242,8 @@ async def get_all_default_credentials(request: Request):
         custom_creds = _load_credentials(request)
 
         result = []
-        # Use sorted list for consistent ordering
-        for device_type in sorted(VALID_DEVICE_TYPES):
+        # provisionable_device_types() is sorted, for consistent ordering
+        for device_type in provisionable_device_types():
             builtin = BUILTIN_CREDENTIALS.get(device_type, [])
             custom = custom_creds.get(device_type, [])
 
@@ -2270,7 +2277,7 @@ async def get_all_default_credentials(request: Request):
 @router.get("/default-credentials/{device_type}")
 async def get_device_credentials(request: Request, device_type: str):
     """Get credentials for a specific device type."""
-    if device_type not in VALID_DEVICE_TYPES:
+    if device_type not in provisionable_device_types():
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
 
     custom_creds = _load_credentials(request)
@@ -2312,7 +2319,7 @@ async def add_credential(
     """Add a custom credential for a device type."""
     logger.info(f"POST /default-credentials/{device_type} - Adding credential for user: {credential.username}")
 
-    if device_type not in VALID_DEVICE_TYPES:
+    if device_type not in provisionable_device_types():
         logger.warning(f"Invalid device type: {device_type}")
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
 
@@ -2347,7 +2354,7 @@ async def delete_credential(
     index: int,
 ):
     """Delete a custom credential by index."""
-    if device_type not in VALID_DEVICE_TYPES:
+    if device_type not in provisionable_device_types():
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
 
     credentials = _load_credentials(request)
