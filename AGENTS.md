@@ -14,7 +14,7 @@ This file is the **tool-agnostic** statement of how this codebase is structured 
 A device plugged into a VLAN-isolated port is detected by `port_manager`, classified by `fingerprint`, routed by `handler_manager` (`HANDLER_MAP`), and provisioned by `base.py`'s property-driven `provision()` flow calling into a vendor handler. The system has **two layers with very different isolation quality**:
 
 - **Behavior layer (well isolated, keep it that way):** each vendor's logic lives entirely in `handlers/{vendor}.py` (+ `firmware_sources/{vendor}.py` + `configs/templates/{vendor}/`). No handler imports another. The provisioning *order* is decided by handler **properties**, never by `if vendor ==` in the engine.
-- **Registration layer (currently leaky, being consolidated):** the list of which vendors exist is duplicated across ~10 registries. There is not yet a single add/remove point.
+- **Registration layer (currently leaky, being consolidated):** the list of which vendors exist was duplicated across ~10 registries; Phase 1 of the isolation epic (Stories 1–4, merged 2026-08) collapsed the handler-derived lists, credentials, and link-local IPs, with the kiosk UI map in flight (Story 5 / PR #128). There is still not a single add/remove point.
 
 The standards below exist to protect the first and shrink the second.
 
@@ -23,20 +23,20 @@ The standards below exist to protect the first and shrink the second.
 ## Standards (must-follow)
 
 ### 1. Vendor *behavior* belongs in handlers; flow is property-driven
-Change device behavior by overriding a handler **property** (`supports_dual_bank`, `config_after_all_firmware`, `update_triggers_reboot`, `verify_active_bank`, `fw2_skips_reboot`, `supports_password_change`, …). Properties may be conditional on `self._device_info.model`. **Never** add vendor branching to `base.py`, `port_manager.py`, or `fingerprint`'s flow. `base.py` must contain **zero** vendor brand strings (today it has exactly one stray `mikrotik` check at `base.py:395-403` — that is debt, not a pattern to copy; replace it with a property when you touch it).
+Change device behavior by overriding a handler **property** (`supports_dual_bank`, `config_after_all_firmware`, `update_triggers_reboot`, `verify_active_bank`, `fw2_skips_reboot`, `supports_password_change`, …). Properties may be conditional on `self._device_info.model`. **Never** add vendor branching to `base.py`, `port_manager.py`, or `fingerprint`'s flow. `base.py` must contain **zero** vendor brand strings — and does, since Story 1 / #122 replaced the last stray `mikrotik` branch with the `firmware_lookup_key()` handler override. Keep it at zero.
 
 ### 2. Never add a *new* source of truth for vendor enumeration
-The vendor list already exists in: `DeviceType` enum, `HANDLER_MAP`, `handlers/__init__.py`, `index.html` vendor map, `config.py` (`_default_credentials()`, `DeviceIPsConfig`, firmware sources, feature flags), `port_manager.py` `DeviceLinkLocalIP`, `firmware_checker.py` `SOURCE_MAP` (+ `firmware_sources/__init__.py` imports), and `setup_tools.py`'s readiness/hint/mode dicts. (The CLI, API device-type validation, and setup device-type list derive from `HANDLER_MAP` via `handler_manager.provisionable_device_types()` — Story 2 / #72. Config-level credentials are one table — `config.py` `_default_credentials()` — and `main.py`'s handler dict, `BUILTIN_CREDENTIALS`, and the setup credential hints derive from it — Story 3 / #73; handler-internal `DEFAULT_CREDENTIALS` fallbacks stay vendor-local by design.) When you need "the list of vendors," **derive it from an existing registry** (prefer `HANDLER_MAP`/`DeviceType`) — do not hardcode a new list, dict, or `if device_type == "..."`. The target end-state is a single `VendorSpec` registry (see the epic); move toward it, never away.
+The vendor list already exists in: `DeviceType` enum, `HANDLER_MAP`, `handlers/__init__.py`, `index.html` vendor map (being derived via in-flight Story 5 / PR #128), `config.py` (`_default_credentials()`, firmware sources, feature flags), `vendor_ips.py` `VENDOR_LINK_LOCAL_IPS` (from which `port_manager.py`'s `DeviceLinkLocalIP`/boot-ping lists and `DeviceIPsConfig` derive — Story 4 / #74), `firmware_checker.py` `SOURCE_MAP` (+ `firmware_sources/__init__.py` imports), and `setup_tools.py`'s readiness/hint/mode dicts. (The CLI, API device-type validation, and setup device-type list derive from `HANDLER_MAP` via `handler_manager.provisionable_device_types()` — Story 2 / #72. Config-level credentials are one table — `config.py` `_default_credentials()` — and `main.py`'s handler dict, `BUILTIN_CREDENTIALS`, and the setup credential hints derive from it — Story 3 / #73; handler-internal `DEFAULT_CREDENTIALS` fallbacks stay vendor-local by design.) When you need "the list of vendors," **derive it from an existing registry** (prefer `HANDLER_MAP`/`DeviceType`) — do not hardcode a new list, dict, or `if device_type == "..."`. The target end-state is a single `VendorSpec` registry (see the epic); move toward it, never away.
 
 ### 3. Adding/removing a vendor is a checklist, not a guess
-Until the registry is consolidated, adding or removing a vendor means editing **all** of the sites in `CLAUDE.md` → "Adding New Vendors or Hardware" (12 touchpoints). Failure modes differ:
-- **S1 / crash at boot** if you miss handler imports (`handler_manager.py`, `handlers/__init__.py`). (The old `config.py ↔ main.py` credentials pair is gone — Story 3 / #73 made `main.py` iterate the `config.credentials` table.)
-- **S2 / silently undetectable device or dead code** if you miss a fingerprint signature, IP entry, firmware pattern, or UI/CLI/API list.
+Until the registry is consolidated, adding or removing a vendor means editing **all** of the sites in `CLAUDE.md` → "Adding New Vendors or Hardware" (15 numbered sites; several are now derive-automatically no-ops and marked as such). Failure modes differ:
+- **S1 / crash at boot** if you miss handler or firmware-source imports (`handler_manager.py`, `handlers/__init__.py`, `firmware_sources/__init__.py`, `firmware_checker.py` `SOURCE_MAP`). (The old `config.py ↔ main.py` credentials pair is gone — Story 3 / #73 made `main.py` iterate the `config.credentials` table.)
+- **S2 / silently undetectable device or dead code** if you miss a fingerprint signature, a `vendor_ips.py` entry, a firmware pattern, the setup-tools per-vendor dicts, or the UI vendor map (the CLI/API lists derive from `HANDLER_MAP` — Story 2 / #72).
 
 Always finish with `grep -rin <vendor> provisioner/ configs/` and a green test suite.
 
 ### 4. Config templates: deep-merge, with an explicit mode-template exception
-Standard provisioning templates are deep-merged into the device's live config as-is. They do not support `{{variable}}` substitution. The AP and PTP mode-change templates are an explicit exception: `provisioner/mode_config.py` renders their allowlisted variables before it applies them. Do not use placeholders in standard provisioning templates or in unrelated documentation. Model aliasing lives in `config_store.py` `CONFIG_MODEL_ALIASES`.
+Standard provisioning templates are deep-merged into the device's live config as-is (shared semantics in `provisioner/config_merge.py`). They do not support `{{variable}}` substitution. The AP and PTP mode-change templates are an explicit exception: `provisioner/mode_config.py` renders their allowlisted variables before it applies them. Do not use placeholders in standard provisioning templates or in unrelated documentation. Model aliasing lives in `config_store.py` `CONFIG_MODEL_ALIASES`. Template lookup runs through the vendor-neutral resolver seam (`provisioner/config_resolver.py` — R1 / #114), which can compose site-role overlays from `configs/templates/{vendor}/roles/{role}/`; see `docs/HANDLER_DEVELOPMENT.md` → "Site-Role Config Overlays". Role overlays must never contain secrets or identity fields.
 
 ### 5. Python 3.9 target
 No `match`/`case`, no `X | Y` unions (use `Optional[...]` / `Dict[...]`), no `str.removeprefix`, no `datetime.UTC`. CI runs on 3.9; there is no transpile step.
@@ -64,7 +64,7 @@ Credentials, keys, tokens, and PSKs (device passwords, `MIKROTIK_ZTP_API_KEY`, t
 ## Anti-patterns (do not do)
 
 - Vendor branching in `base.py` / shared modules instead of a handler property.
-- Introducing a 9th place that enumerates vendors instead of deriving from an existing registry.
+- Introducing another place that enumerates vendors instead of deriving from an existing registry.
 - `{{placeholder}}` syntax in config templates.
 - Python 3.10+ syntax.
 - Removing a vendor by deleting its handler or firmware-source file but leaving its import / `SOURCE_MAP` / credentials / fingerprint / setup-tools per-vendor dict entries (S1 crash or S2 silent breakage).
@@ -76,4 +76,4 @@ Credentials, keys, tokens, and PSKs (device passwords, `MIKROTIK_ZTP_API_KEY`, t
 
 ## Definition of a clean vendor change
 
-A vendor addition or removal is "done" when: the 12-point checklist is fully applied (or, post-consolidation, the single `VendorSpec` registry edited), `grep -rin <vendor>` shows no stragglers outside intended locations, the registry-consistency test passes, and the full suite is green on the Python 3.9 target.
+A vendor addition or removal is "done" when: the `CLAUDE.md` vendor checklist is fully applied (or, post-consolidation, the single `VendorSpec` registry edited), `grep -rin <vendor>` shows no stragglers outside intended locations, the registry-consistency test passes, and the full suite is green on the Python 3.9 target.
