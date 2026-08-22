@@ -72,7 +72,26 @@ def _ordered_vendor_ips():
 # vendor -> ordered list of link-local/default IPs, derived from the
 # VendorSpec registry (add or change vendor IPs in vendor_registry.py).
 # Insertion order here IS the detection-probe order — see module docstring.
+# Filtered by the PROVISIONER_VENDORS allowlist: this map is the
+# detection-candidate registry.
 VENDOR_LINK_LOCAL_IPS = _ordered_vendor_ips()  # type: Dict[str, List[str]]
+
+
+def registered_vendor_ips():
+    # type: () -> Dict[str, List[str]]
+    """vendor -> ordered IPs for EVERY registered spec, ignoring the
+    PROVISIONER_VENDORS allowlist, in the same historical order.
+
+    For static per-vendor address facts (the generated
+    ``DeviceLinkLocalIP.<VENDOR>`` constants in ``port_manager.py``) that
+    must stay defined in a single-vendor build — an allowlist filters
+    detection *candidates* (``VENDOR_LINK_LOCAL_IPS``), it does not
+    un-know what addresses excluded vendors ship with.
+    """
+    registry = _registry_link_local_ips(enabled_only=False)
+    ordered = [v for v in _PROBE_VENDOR_ORDER if v in registry]
+    ordered += [v for v in registry if v not in _PROBE_VENDOR_ORDER]
+    return {vendor: list(registry[vendor]) for vendor in ordered}
 
 # Historical boot-wait quick-ping vendor order, preserved exactly per #74's
 # zero-behavior-change requirement. It differs from the detection-probe

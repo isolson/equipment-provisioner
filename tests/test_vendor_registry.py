@@ -36,6 +36,7 @@ Known, documented exceptions:
   via netinstall/ZTP ``.rsc`` scripts, not deep-merge config templates.
 """
 
+import ast
 import asyncio
 import json
 import os
@@ -83,6 +84,28 @@ CANONICAL = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
 # Vendors with an auto-fetch firmware source (documented exception:
 # tarana has none).
 FIRMWARE_SOURCE_VENDORS = CANONICAL - {"tarana"}
+
+
+def _module_level_vendor_imports(source, vendor_modules):
+    """Module-level import statements in ``source`` that reference a
+    vendor module, in any style (relative from inside the package,
+    relative from the package root, absolute, plain ``import``).
+
+    Only ``tree.body`` (module level) is scanned: function-level lazy
+    imports are the documented side-door pattern and cannot crash at
+    boot. A dotted path is offending when any segment names a vendor.
+    """
+    tree = ast.parse(source)
+    offending = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            if set((node.module or "").split(".")) & vendor_modules:
+                offending.append(ast.unparse(node))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if set(alias.name.split(".")) & vendor_modules:
+                    offending.append(ast.unparse(node))
+    return offending
 
 
 class TestSpecEnumConsistency:
@@ -283,11 +306,16 @@ class TestDerivedViews:
         """The ImportError-on-removal S1 class is gone: no module other
         than vendor_registry imports per-vendor handler/firmware-source
         modules at module level, so deleting a vendor's modules plus its
-        spec entry cannot crash the service at boot."""
-        vendor_import = re.compile(
-            r"^\s*from\s+\.+(?:handlers|firmware_sources)\.(?!base\b)\w+\s+import",
-            re.MULTILINE,
-        )
+        spec entry cannot crash the service at boot.
+
+        AST-based (not regex): it must catch every module-level import
+        style — `from .mikrotik import X` inside the package __init__s,
+        `from .handlers.mikrotik import X` / `from
+        provisioner.handlers.mikrotik import X` / `import
+        provisioner.handlers.mikrotik` elsewhere — and is
+        mutation-proved against each of those below."""
+        vendor_modules = {s.device_type.value for s in vendor_registry.all_specs()}
+
         for rel in (
             "handlers/__init__.py",
             "firmware_sources/__init__.py",
@@ -295,17 +323,53 @@ class TestDerivedViews:
             "handler_manager.py",
         ):
             source = (REPO_ROOT / "provisioner" / rel).read_text()
-            # handlers/__init__ legitimately imports .mock (outside the
-            # registry by design).
-            offending = [
-                line
-                for line in source.splitlines()
-                if vendor_import.match(line) and ".mock" not in line
-            ]
+            offending = _module_level_vendor_imports(source, vendor_modules)
             assert not offending, (
                 "provisioner/{} enumerates vendor modules again: {}".format(
                     rel, offending
                 )
+            )
+
+    def test_vendor_import_guard_catches_every_import_style(self):
+        """Mutation-proof the guard above: each style of re-added vendor
+        import must be flagged (the reviewer's `from .mikrotik import`
+        relative style was regex-blind in an earlier version), and the
+        legitimate imports must not be."""
+        vendor_modules = {s.device_type.value for s in vendor_registry.all_specs()}
+
+        caught_mutations = [
+            # package-__init__ relative style (the reviewer's mutation)
+            "from .mikrotik import MikrotikHandler",
+            "from .evolution_digital import EvolutionDigitalHandler",
+            # package-root relative style (the pre-#76 handler_manager /
+            # firmware_checker style)
+            "from .handlers.mikrotik import MikrotikHandler",
+            "from ..firmware_sources.tachyon import TachyonFirmwareSource",
+            # absolute styles
+            "from provisioner.handlers.cambium import CambiumHandler",
+            "import provisioner.firmware_sources.ubiquiti",
+            "import provisioner.handlers.tarana as tarana_handler",
+        ]
+        for mutation in caught_mutations:
+            assert _module_level_vendor_imports(mutation, vendor_modules), (
+                "import guard is blind to: {}".format(mutation)
+            )
+
+        allowed = [
+            # base/mock and non-vendor imports stay legal
+            "from .base import BaseHandler, DeviceInfo",
+            "from .mock import MockHandler",
+            "from .firmware_sources.base import BaseFirmwareSource",
+            "from .vendor_registry import handler_map",
+            "import logging",
+            # function-level (lazy) vendor imports are the documented
+            # side-door pattern (main.py) — module-level is what crashes
+            # at boot, so only tree.body is scanned.
+            "def _side_door():\n    from .handlers.evolution_digital import EvolutionDigitalHandler\n",
+        ]
+        for source in allowed:
+            assert not _module_level_vendor_imports(source, vendor_modules), (
+                "import guard false-positive on: {}".format(source)
             )
 
     def test_main_credentials_assembly_is_table_driven(self):
@@ -485,13 +549,15 @@ class TestFakeVendorPropagation:
 # --- Determinism and the VENDORS allowlist (decisions #3 and #6) -----------
 
 
-def _run_subprocess(code, extra_env=None):
+def _spawn_subprocess(code, extra_env=None):
+    """Run ``code`` in a fresh interpreter; return the CompletedProcess.
+    PROVISIONER_VENDORS is scrubbed unless supplied via extra_env."""
     env = dict(os.environ)
     env["PYTHONPATH"] = str(REPO_ROOT)
     env.pop("PROVISIONER_VENDORS", None)
     if extra_env:
         env.update(extra_env)
-    result = subprocess.run(
+    return subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
@@ -499,6 +565,10 @@ def _run_subprocess(code, extra_env=None):
         env=env,
         timeout=120,
     )
+
+
+def _run_subprocess(code, extra_env=None):
+    result = _spawn_subprocess(code, extra_env=extra_env)
     assert result.returncode == 0, (
         "subprocess failed\nstdout: {}\nstderr: {}".format(
             result.stdout, result.stderr
@@ -551,10 +621,18 @@ class TestRegistrationDeterminism:
 
 _SINGLE_VENDOR_BOOT = """
 import json, re
+
+# The SERVICE entry point: importing provisioner.main pulls in
+# port_manager (DeviceLinkLocalIP class body) and every other consumer —
+# this import crashing under an allowlist is exactly the reviewer-found
+# regression this guards against.
+import provisioner.main as main_module
+
 from fastapi.testclient import TestClient
 from provisioner import cli
 from provisioner.config import Config
 from provisioner.handler_manager import provisionable_device_types
+from provisioner.port_manager import DeviceLinkLocalIP, PortManager
 from provisioner.vendor_ips import VENDOR_LINK_LOCAL_IPS, probe_ip_candidates
 from provisioner.web.app import create_app
 
@@ -565,6 +643,12 @@ class DummyProvisioner:
 
 
 config = Config()
+
+# Provisioner + PortManager construction (the sync part of service boot;
+# async setup() needs real interfaces/db paths).
+provisioner_obj = main_module.Provisioner(config)
+port_manager = PortManager(base_interface="eth0", num_ports=2, setup_vlans=False)
+
 client = TestClient(create_app(provisioner=DummyProvisioner(config)))
 page = client.get("/")
 creds = client.get("/api/default-credentials")
@@ -589,6 +673,34 @@ print(json.dumps({
     "cli_rejects_cambium": cli_rejects_cambium,
     "cli_accepts_mikrotik": cli.build_parser().parse_args(
         ["test", "--device-type", "mikrotik"]).device_type,
+    "port_manager_ports": port_manager.num_ports,
+    "boot_ping": DeviceLinkLocalIP.BOOT_PING,
+    # Excluded vendors' address constants stay defined (facts about
+    # vendor gear, not detection candidates).
+    "cambium_const": DeviceLinkLocalIP.CAMBIUM,
+    "tachyon_alt_const": DeviceLinkLocalIP.TACHYON_ALT,
+    "switch_creds": list(main_module._switch_management_credentials(config)),
+}))
+"""
+
+# A non-mikrotik subset: exercises the switch-management credential
+# fallback (the bench switch is infrastructure — its login must resolve
+# even when mikrotik is filtered out of the credentials table).
+_NON_MIKROTIK_BOOT = """
+import json
+import provisioner.main as main_module
+from provisioner.config import Config
+from provisioner.port_manager import DeviceLinkLocalIP, PortManager
+
+config = Config()
+main_module.Provisioner(config)
+PortManager(base_interface="eth0", num_ports=2, setup_vlans=False)
+
+print(json.dumps({
+    "config_credentials": sorted(config.credentials),
+    "switch_creds": list(main_module._switch_management_credentials(config)),
+    "mikrotik_const": DeviceLinkLocalIP.MIKROTIK,
+    "probe": [[ip, vendors] for ip, vendors in DeviceLinkLocalIP.ALL],
 }))
 """
 
@@ -619,11 +731,74 @@ class TestSingleVendorBuild:
         assert out["device_ips_fields"] == ["mikrotik"]
         assert out["cli_rejects_cambium"] is True
         assert out["cli_accepts_mikrotik"] == "mikrotik"
+        # The service entry point booted: provisioner.main imported (the
+        # port_manager/DeviceLinkLocalIP import path), Provisioner and
+        # PortManager constructed.
+        assert out["port_manager_ports"] == 1  # setup_vlans=False → 1 port
+        assert out["boot_ping"] == ["192.168.88.1"]
+        # Excluded vendors' address constants stay defined (unfiltered
+        # facts), while detection candidates are filtered.
+        assert out["cambium_const"] == "169.254.1.1"
+        assert out["tachyon_alt_const"] == "192.168.1.1"
+        assert out["switch_creds"] == ["admin", ""]
 
-    def test_full_build_is_the_default(self):
-        # Without the env var the allowlist is None (all vendors) — the
-        # in-process suite run is itself the regression test; just pin
-        # the parsing contract.
-        assert vendor_registry._parse_vendors_env() is None or (
-            "PROVISIONER_VENDORS" in os.environ
+    def test_non_mikrotik_build_boots_with_switch_credential_fallback(self):
+        out = json.loads(
+            _run_subprocess(
+                _NON_MIKROTIK_BOOT,
+                extra_env={"PROVISIONER_VENDORS": "cambium"},
+            )
         )
+        assert out["config_credentials"] == ["cambium"]
+        # The bench switch is infrastructure: its login resolves to the
+        # MikroTik factory default even with mikrotik filtered out.
+        assert out["switch_creds"] == ["admin", ""]
+        assert out["mikrotik_const"] == "192.168.88.1"
+        assert out["probe"] == [["169.254.1.1", ["cambium"]]]
+
+    def test_unset_and_blank_allowlists_yield_the_full_vendor_set(self):
+        dump = (
+            "import json\n"
+            "from provisioner.handler_manager import provisionable_device_types\n"
+            "from provisioner import vendor_registry as vr\n"
+            "print(json.dumps({'pdt': provisionable_device_types(),"
+            " 'vendors': vr.VENDORS is None}))\n"
+        )
+        for env in (None, {"PROVISIONER_VENDORS": ""}, {"PROVISIONER_VENDORS": "  "}):
+            out = json.loads(_run_subprocess(dump, extra_env=env))
+            assert out["pdt"] == sorted(CANONICAL)
+            assert out["vendors"] is True
+
+    def test_typo_in_allowlist_fails_fast_naming_the_bad_entry(self):
+        result = _spawn_subprocess(
+            "import provisioner.vendor_registry",
+            extra_env={"PROVISIONER_VENDORS": "mikrotik,netgear"},
+        )
+        assert result.returncode != 0
+        assert "netgear" in result.stderr
+        # The error names the valid set so the fix is obvious.
+        for vendor in sorted(CANONICAL):
+            assert vendor in result.stderr
+
+    def test_separators_only_allowlist_fails_fast(self):
+        for value in (",", " , ,, "):
+            result = _spawn_subprocess(
+                "import provisioner.vendor_registry",
+                extra_env={"PROVISIONER_VENDORS": value},
+            )
+            assert result.returncode != 0, (
+                "PROVISIONER_VENDORS={!r} must be an error, not a "
+                "zero-vendor kiosk".format(value)
+            )
+            assert "selects no vendors" in result.stderr
+
+    def test_active_allowlist_is_logged_at_info(self):
+        result = _spawn_subprocess(
+            "import logging\n"
+            "logging.basicConfig(level=logging.INFO)\n"
+            "import provisioner.vendor_registry\n",
+            extra_env={"PROVISIONER_VENDORS": "mikrotik,tarana"},
+        )
+        assert result.returncode == 0, result.stderr
+        assert "PROVISIONER_VENDORS active" in result.stderr
+        assert "mikrotik" in result.stderr and "tarana" in result.stderr

@@ -21,8 +21,14 @@ derives from the specs registered here:
 Adding a vendor is now: ``handlers/x.py`` + ``firmware_sources/x.py`` (if
 it has an auto-fetch source) + templates + a ``DeviceType`` enum member +
 one ``register(VendorSpec(...))`` call below. Removing one is the
-reverse; nothing else imports the vendor's modules, so deletion cannot
-leave a crashing stale import behind.
+reverse for everything *enumerated*: nothing else imports the vendor's
+modules (so deletion cannot leave a crashing stale import behind), and
+the derived views — including the generated per-vendor
+``DeviceLinkLocalIP`` address constants — drop the vendor automatically.
+Vendor-specific *behavior* remains a documented exception: MikroTik's
+netinstall/BOOTP paths in ``port_manager.py`` and the Evolution Digital
+side-door in ``main.py`` reference their vendors by name and would need
+code removal too.
 
 Design decisions (issue #76; keep these invariants):
 
@@ -64,10 +70,13 @@ environment variable to a comma-separated allowlist (e.g.
 ``PROVISIONER_VENDORS=mikrotik``) before the service starts. Specs stay
 registered (spec <-> enum consistency is checked against the full set),
 but every derived view — detection probe list, handler map, CLI/API/setup
-lists, UI metadata — only sees the allowlisted vendors. Unknown names in
-the allowlist are ignored.
+lists, UI metadata — only sees the allowlisted vendors. An unknown
+vendor name or an allowlist that selects nothing fails fast at import
+with an error naming the valid set (``_validate_vendor_allowlist``);
+when the knob is active, the effective filter is logged at INFO.
 """
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Type
@@ -87,9 +96,17 @@ from .firmware_sources.cambium import CambiumFirmwareSource
 from .firmware_sources.tachyon import TachyonFirmwareSource
 from .firmware_sources.ubiquiti import UbiquitiFirmwareSource
 
+logger = logging.getLogger(__name__)
+
 
 def _parse_vendors_env() -> Optional[FrozenSet[str]]:
-    """Parse the ``PROVISIONER_VENDORS`` allowlist (None = all vendors)."""
+    """Parse the ``PROVISIONER_VENDORS`` allowlist.
+
+    None = unset or blank = all vendors. Entries are validated against
+    the registered specs after the register() block below runs
+    (``_validate_vendor_allowlist``): a typo or an all-separators value
+    fails fast at import instead of silently disabling vendors.
+    """
     raw = os.environ.get("PROVISIONER_VENDORS", "").strip()
     if not raw:
         return None
@@ -249,16 +266,23 @@ def model_firmware_patterns() -> Dict[str, List[str]]:
     return merged
 
 
-def link_local_ips() -> Dict[str, List[str]]:
+def link_local_ips(enabled_only: bool = True) -> Dict[str, List[str]]:
     """vendor -> ordered link-local IPs, in registration order.
 
     ``vendor_ips.py`` re-orders this into the historical detection-probe
     order (order metadata lives there, next to the other probe-order
     tuples) and is what ``port_manager`` / ``config`` consume.
+
+    ``enabled_only=False`` ignores the VENDORS allowlist: used for the
+    static per-vendor address constants (``DeviceLinkLocalIP.<VENDOR>``),
+    which are facts about vendor gear and must stay importable in a
+    single-vendor build. Detection *candidates* always use the filtered
+    default.
     """
+    source = specs() if enabled_only else all_specs()
     return {
         s.device_type.value: list(s.link_local_ips)
-        for s in specs()
+        for s in source
         if s.link_local_ips
     }
 
@@ -469,3 +493,39 @@ register(VendorSpec(
     # (DHCP + OUI) and only qualified, never logged into.
     ui_style={"name": "Evolution", "color": "#ec4899"},
 ))
+
+
+def _validate_vendor_allowlist() -> None:
+    """Fail fast on a bad PROVISIONER_VENDORS value.
+
+    Runs after the register() block so the valid vendor set is known. A
+    typo'd vendor name or an all-separators value (e.g. ``","``) would
+    otherwise silently disable vendors — a zero- or wrong-vendor kiosk
+    with no error anywhere.
+    """
+    raw = os.environ.get("PROVISIONER_VENDORS")
+    if raw is None or not raw.strip():
+        # Unset or blank = full build; nothing to validate or log.
+        return
+    valid = ", ".join(sorted(_SPECS))
+    if not VENDORS:
+        raise RuntimeError(
+            "PROVISIONER_VENDORS is set but selects no vendors "
+            "(value: {!r}). Unset it for a full build, or set a "
+            "comma-separated subset of: {}".format(raw, valid)
+        )
+    unknown = sorted(set(VENDORS) - set(_SPECS))
+    if unknown:
+        raise RuntimeError(
+            "PROVISIONER_VENDORS names unknown vendor(s) {}. Valid "
+            "vendors: {}. Refusing to start — a typo here would "
+            "silently disable the vendor.".format(unknown, valid)
+        )
+    logger.info(
+        "PROVISIONER_VENDORS active: enabled vendors = %s (registered: %s)",
+        sorted(VENDORS),
+        sorted(_SPECS),
+    )
+
+
+_validate_vendor_allowlist()
