@@ -5,11 +5,7 @@ from typing import Dict, List, Optional, Type, Callable, Awaitable
 
 from .fingerprint import DeviceType, DeviceFingerprint
 from .handlers.base import BaseHandler, ProvisioningResult
-from .handlers.mikrotik import MikrotikHandler
-from .handlers.cambium import CambiumHandler
-from .handlers.tachyon import TachyonHandler
-from .handlers.tarana import TaranaHandler
-from .handlers.ubiquiti import UbiquitiHandler
+from .vendor_registry import handler_map
 
 logger = logging.getLogger(__name__)
 
@@ -17,20 +13,15 @@ logger = logging.getLogger(__name__)
 class HandlerManager:
     """Manages device handlers and routes provisioning requests."""
 
-    # Map device types to handler classes.
-    # NOTE: Evolution Digital is intentionally absent — it runs a passive
-    # qualification flow that needs port_manager cross-port access and is
-    # dispatched directly from main.py._provision_evolution_digital.
-    # This map is the single source of truth for vendor enumeration:
-    # derive vendor lists via provisionable_device_types() (below), never
+    # Map device types to handler classes — derived from the VendorSpec
+    # registry (vendor_registry.py, Story 6 / #76), bound once at import.
+    # NOTE: Evolution Digital is intentionally absent — its spec registers
+    # with provisionable=False because its passive qualification flow needs
+    # port_manager cross-port access and is dispatched directly from
+    # main.py._provision_evolution_digital.
+    # Derive vendor lists via provisionable_device_types() (below), never
     # by hand-copying these keys.
-    HANDLER_MAP: Dict[DeviceType, Type[BaseHandler]] = {
-        DeviceType.MIKROTIK: MikrotikHandler,
-        DeviceType.CAMBIUM: CambiumHandler,
-        DeviceType.TACHYON: TachyonHandler,
-        DeviceType.TARANA: TaranaHandler,
-        DeviceType.UBIQUITI: UbiquitiHandler,
-    }
+    HANDLER_MAP: Dict[DeviceType, Type[BaseHandler]] = handler_map()
 
     def __init__(self, credentials: Dict[str, Dict[str, str]],
                  alternate_credentials: Dict[str, list] = None):

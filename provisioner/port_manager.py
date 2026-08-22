@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Callable, Awaitable, Tuple, Union
 
 from .fingerprint import is_mikrotik_oui
-from .vendor_ips import VENDOR_LINK_LOCAL_IPS, boot_ping_ips, probe_ip_candidates
+from .vendor_ips import boot_ping_ips, probe_ip_candidates, registered_vendor_ips
 
 logger = logging.getLogger(__name__)
 
@@ -116,16 +116,19 @@ class ProvisioningChecklist:
 class DeviceLinkLocalIP:
     """Known link-local/default IPs for device types.
 
-    Derived from ``provisioner.vendor_ips.VENDOR_LINK_LOCAL_IPS`` — the
-    single vendor-IP registry (Story 4 / #74). Add or change vendor IPs
-    there, not here.
+    Derived from the vendor-IP views in ``provisioner.vendor_ips``
+    (Stories 4/#74 and 6/#76). Add or change vendor IPs in the vendor's
+    ``VendorSpec`` (``vendor_registry.py``), not here.
+
+    Per-vendor address attributes (``CAMBIUM``, ``TACHYON``,
+    ``TACHYON_ALT``, ``TARANA``, ``MIKROTIK``, ``UBIQUITI``, ...) are
+    generated below from ``registered_vendor_ips()`` — the *unfiltered*
+    registry — so they stay defined under a ``PROVISIONER_VENDORS``
+    allowlist (they are facts about vendor gear, not detection
+    candidates) and disappear automatically when a vendor's spec is
+    removed. ``ALL`` / ``BOOT_PING`` derive from the *filtered* views:
+    an allowlisted build only probes for enabled vendors.
     """
-    CAMBIUM = VENDOR_LINK_LOCAL_IPS["cambium"][0]      # 169.254.1.1
-    TACHYON = VENDOR_LINK_LOCAL_IPS["tachyon"][0]      # 169.254.1.1
-    TACHYON_ALT = VENDOR_LINK_LOCAL_IPS["tachyon"][1]  # 192.168.1.1 — some Tachyon devices use this
-    TARANA = VENDOR_LINK_LOCAL_IPS["tarana"][0]        # 169.254.100.1
-    MIKROTIK = VENDOR_LINK_LOCAL_IPS["mikrotik"][0]    # 192.168.88.1 — Mikrotik default, but often uses DHCP
-    UBIQUITI = VENDOR_LINK_LOCAL_IPS["ubiquiti"][0]    # 192.168.1.20 — Ubiquiti AirMax and Wave default
 
     # All (ip, [candidate vendors]) pairs to probe when detecting device
     # type — derived; registry order is the probe order.
@@ -144,6 +147,21 @@ class DeviceLinkLocalIP:
         "192.168.0.1",
         "10.0.0.1",
     ]
+
+
+def _generate_vendor_address_constants():
+    """Attach <VENDOR> / <VENDOR>_ALT[n] address attributes to
+    DeviceLinkLocalIP: <VENDOR> is the primary IP (e.g. CAMBIUM =
+    "169.254.1.1"), <VENDOR>_ALT the second (e.g. TACHYON_ALT =
+    "192.168.1.1"), <VENDOR>_ALT2... any further alternates."""
+    for vendor, ips in registered_vendor_ips().items():
+        setattr(DeviceLinkLocalIP, vendor.upper(), ips[0])
+        for alt_index, alt_ip in enumerate(ips[1:], start=1):
+            suffix = "_ALT" if alt_index == 1 else "_ALT{}".format(alt_index)
+            setattr(DeviceLinkLocalIP, vendor.upper() + suffix, alt_ip)
+
+
+_generate_vendor_address_constants()
 
 
 @dataclass

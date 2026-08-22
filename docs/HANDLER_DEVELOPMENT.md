@@ -558,30 +558,42 @@ print(f"Success: {result.success}, Error: {result.error_message}")
 - Add API probe if the device has a distinctive REST endpoint
 - Detection must work on factory-default devices at their default IP
 
-### 3. Boot-Ping Discovery (`provisioner/vendor_ips.py`)
+### 3. Firmware Source (`provisioner/firmware_sources/{vendor}.py`, optional)
 
-- Add the vendor's default IP(s) to `VENDOR_LINK_LOCAL_IPS` — the single vendor-IP registry
-- `DeviceLinkLocalIP` (constants, the `.ALL` probe list, and the boot-ping `BOOT_PING` list in `port_manager.py`) and `DeviceIPsConfig` defaults (`config.py`) all derive from it — no other edits needed
-- List order matters: dict insertion order is the detection-probe order; the first IP in a vendor's list is its primary/default address
+- Subclass `BaseFirmwareSource` and implement `check_for_updates()` — only if the vendor has an unauthenticated download endpoint (Tarana doesn't; its firmware is uploaded manually)
+- Do **not** add it to `firmware_sources/__init__.py` — that package deliberately no longer imports vendor modules; the class is referenced only from the vendor's spec (step 4)
+- Add firmware version extraction regex in `firmware.py` if the vendor uses non-standard naming, and create the `firmware/{vendor}/` directory in the data repo
 
-### 4. Handler Registration (`provisioner/handler_manager.py`)
+### 4. VendorSpec Registration (`provisioner/vendor_registry.py`)
 
-- Add `DeviceType.{VENDOR}: {Vendor}Handler` to `HANDLER_MAP`
+One `register(VendorSpec(...))` call per vendor — together with the `DeviceType` enum member (step 2), this is the whole shared-registration budget (Story 6 / #76). Every other vendor enumeration derives from the spec:
 
-### 5. Firmware Matching (`provisioner/firmware.py`)
+| Spec field | Derived views |
+|---|---|
+| `handler_cls` | `HandlerManager.HANDLER_MAP`, and via `provisionable_device_types()` the CLI choices, API device-type validation, and setup rows |
+| `firmware_source_cls` + `firmware_source_defaults` | `FirmwareChecker.SOURCE_MAP`, `config._default_firmware_sources()` |
+| `default_credentials` (+ `builtin_ui_credentials` if the shipped login differs) | `config._default_credentials()`, `BUILTIN_CREDENTIALS`, setup credential hints |
+| `link_local_ips` | `vendor_ips.VENDOR_LINK_LOCAL_IPS`, the `.ALL` probe list, the boot-ping list, `DeviceIPsConfig` defaults. The first IP is the vendor's primary/default address. New vendors append to the probe order; existing vendors' probe positions are pinned by the historical order tuples in `vendor_ips.py`/`config.py` — don't touch those when adding |
+| `model_firmware_patterns` | `FirmwareManager.MODEL_FIRMWARE_PATTERNS` (firmware-file lookup; distinct from any handler-local validation dict, which is a class trait) |
+| `config_template_dir` | consistency-tested against `configs/templates/` |
+| `ui_style` (`name`, `color`) | kiosk vendor cards via `vendor_ui_metadata()`; drop an icon at `web/static/vendor-icons/{vendor}.png` |
 
-- Add model-to-filename patterns in `MODEL_FIRMWARE_PATTERNS`
-- Add firmware version extraction regex if the vendor uses non-standard naming
-- Create `firmware/{vendor}/` directory
+Rules:
 
-### 6. Config Templates (`configs/templates/{vendor}/`)
+- Register in `DeviceType` declaration order (a test asserts it) — registration is explicit and deterministic, never filesystem discovery
+- Specs hold enumeration **data** only; behavior and class-level traits stay on the handler class (the spec points at the class)
+- Documented exceptions: Evolution Digital registers with `provisionable=False` (dispatched via the `main.py` side-door, no `HANDLER_MAP` entry); `MockHandler` stays outside the registry
+- `tests/test_vendor_registry.py` enforces spec↔enum↔view consistency; `tests/test_vendor_golden.py` locks the derived values — update both in the same commit as an intentional vendor change
+- Single-vendor builds: set `PROVISIONER_VENDORS=<vendor>[,<vendor>...]` in the service environment to filter every derived view (excluded vendors vanish from detection, CLI, API, setup, and UI with no ImportError)
+
+### 5. Config Templates (`configs/templates/{vendor}/`)
 
 - Create vendor subdirectory
 - Add model-specific templates as `{model}.json` (or `.rsc`, `.yaml`, `.tar`)
 - Add model aliases to `CONFIG_MODEL_ALIASES` in `config_store.py` if needed
 - Template format is vendor-specific — match what the handler's `apply_config_file()` expects
 
-### 7. Testing
+### 6. Testing
 
 - [ ] Device detection works (factory-default state)
 - [ ] Boot-ping finds the device after power-on
@@ -599,7 +611,7 @@ print(f"Success: {result.success}, Error: {result.error_message}")
 
 If the new model has different provisioning behavior than existing models (e.g., a switch vs AP from the same vendor):
 
-1. Add firmware patterns to `MODEL_FIRMWARE_PATTERNS`
+1. Add firmware patterns to the vendor's `model_firmware_patterns` in its `VendorSpec` (`provisioner/vendor_registry.py`)
 2. Add config template as `configs/templates/{vendor}/{model}.json`
 3. If the model needs different flow (e.g., `config_after_all_firmware`), make the handler property conditional on model name
 4. Add model alias to `CONFIG_MODEL_ALIASES` if the API-reported model name differs from the template filename

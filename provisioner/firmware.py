@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 import yaml
 
+from .vendor_registry import model_firmware_patterns
+
 logger = logging.getLogger(__name__)
 
 
@@ -160,66 +162,12 @@ class FirmwareManager:
         """
         return self._find_all_firmware_by_convention(device_type, model)
 
-    # Model to firmware filename pattern mapping
-    # Maps device models to the firmware filename patterns they accept
-    MODEL_FIRMWARE_PATTERNS: Dict[str, list] = {
-        # Cambium ePMP AX series (WiFi 6) - uses ePMP-ax firmware
-        "epmp 4518": ["epmp-ax", "epmp_ax"],
-        "epmp 4525": ["epmp-ax", "epmp_ax"],
-        "epmp 4600": ["epmp-ax", "epmp_ax"],
-        "epmp 4600c": ["epmp-ax", "epmp_ax"],
-        "epmp 4625": ["epmp-ax", "epmp_ax"],
-        # Cambium Force 300 series - uses AC firmware
-        "force 300-25": ["epmp-ac", "epmp_ac", "force300", "force-300"],
-        "force 300-19": ["epmp-ac", "epmp_ac", "force300", "force-300"],
-        "force 300-16": ["epmp-ac", "epmp_ac", "force300", "force-300"],
-        "force 300-13": ["epmp-ac", "epmp_ac", "force300", "force-300"],
-        "force 300 csm": ["epmp-ac", "epmp_ac", "force300", "force-300"],
-        # Cambium ePMP 3000 series - uses AC firmware
-        "epmp 3000": ["epmp-ac", "epmp_ac"],
-        "epmp 3000l": ["epmp-ac", "epmp_ac"],
-        "epmp 3000 mp": ["epmp-ac", "epmp_ac"],
-        # Cambium ePMP 2000/1000 series
-        "epmp 2000": ["epmp-nongps", "epmp2000"],
-        "epmp 1000": ["epmp1000", "epmp-nongps"],
-        # Tachyon TNA-30x series (standard 60 GHz) - uses tna-30x firmware
-        "tna-303x": ["tna-30x", "tna30x"],
-        "tna-301": ["tna-30x", "tna30x"],
-        "tna-302": ["tna-30x", "tna30x"],
-        # Tachyon TNA-303L series (long range) - uses tna-303l firmware
-        "tna-303l": ["tna-303l", "tna303l"],
-        "tna-303l-65": ["tna-303l", "tna303l"],
-        "tna-303l-lib": ["tna-303l", "tna303l"],
-        # Tachyon TNA-305 series (60 GHz + 5/6 GHz) - uses tna-305 firmware
-        "tna-305a": ["tna-305", "tna305"],
-        "tna-305x": ["tna-305", "tna305"],
-        # Tachyon TNS-100 series (subscriber) - uses tns-100 firmware
-        "tns-100": ["tns-100", "tns100"],
-        # Ubiquiti Wave series - mapped to specific firmware variants
-        # GMC (75ba) = GigaBeam Connect: Wave-AP, Wave-Pro, Wave-AP-Micro, Wave-Pico
-        # MGMP (02da) = Mini GigaBeam Micro/Pico: Wave-Nano, Wave-Micro, Wave-LR
-        "wave-pro": ["75ba-wave", "gmc"],
-        "wave-ap": ["75ba-wave", "gmc"],
-        "wave-ap-micro": ["75ba-wave", "gmc"],
-        "wave-pico": ["75ba-wave", "gmc"],
-        "wave-nano": ["02da-wave", "mgmp"],
-        "wave-micro": ["02da-wave", "mgmp"],
-        "wave-lr": ["02da-wave", "mgmp"],
-        # Ubiquiti AirMax series
-        "rocket": ["airmax"],
-        "nanostation": ["airmax"],
-        "litebeam": ["airmax"],
-        "powerbeam": ["airmax"],
-        "nanobeam": ["airmax"],
-        # Ubiquiti AirFiber series. Each AF SKU has its own firmware prefix in
-        # the Ubiquiti manifest; "airfiber" alone is too broad to disambiguate.
-        # 322c = AF-5XHD (LTU PtP, 1.x firmware line, per repo manifest.yaml).
-        "af-5xhd": ["322c-airfiber"],
-        "af60-lr": ["airfiber"],
-        "af60-xr": ["airfiber"],
-        "af60-hd": ["airfiber"],
-        "af-11fx": ["airfiber"],
-    }
+    # Model to firmware filename pattern mapping (model -> accepted
+    # firmware filename patterns), derived from the per-vendor
+    # model_firmware_patterns in the VendorSpec registry (Story 6 / #76)
+    # and bound once at import. Add or edit patterns in the vendor's
+    # register(VendorSpec(...)) block, not here.
+    MODEL_FIRMWARE_PATTERNS: Dict[str, list] = model_firmware_patterns()
 
     def _find_firmware_by_convention(
         self,

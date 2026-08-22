@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, create_model, field_validator
 from dotenv import load_dotenv
 
 from .vendor_ips import device_ips_vendors, primary_ip
+from .vendor_registry import credential_defaults, firmware_source_config_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -137,19 +138,19 @@ class DeviceCredentials(BaseModel):
 def _default_credentials() -> Dict[str, "DeviceCredentials"]:
     """Per-vendor factory-default credentials (Story 3 / #73).
 
-    The single config-level source for vendor credential defaults, keyed by
-    device-type string (mirrors ``_default_firmware_sources``). Adding or
-    removing a vendor's credentials touches only this factory — ``main.py``,
-    the credentials UI, and the setup readiness checks all derive from it.
-    Only public factory logins belong here (admin/admin, root/admin,
-    ubnt/ubnt) — fleet passwords come from ``config.yaml`` / env vars.
+    The config-level source for vendor credential defaults, keyed by
+    device-type string (mirrors ``_default_firmware_sources``) —
+    ``main.py``, the credentials UI, and the setup readiness checks all
+    derive from it. Since Story 6 (#76) the credential *data* lives in
+    each vendor's VendorSpec (``vendor_registry.py``
+    ``default_credentials``); this factory wraps it in typed
+    ``DeviceCredentials`` models (the registry cannot construct them
+    without importing this module). ``credential_defaults()`` sorts by
+    vendor, preserving the historical alphabetical declaration order.
     """
     return {
-        "cambium": DeviceCredentials(username="admin", password="admin"),
-        "mikrotik": DeviceCredentials(username="admin", password=""),
-        "tachyon": DeviceCredentials(username="root", password="admin"),
-        "tarana": DeviceCredentials(username="admin", password=""),
-        "ubiquiti": DeviceCredentials(username="ubnt", password="ubnt"),
+        vendor: DeviceCredentials(**kwargs)
+        for vendor, kwargs in credential_defaults().items()
     }
 
 
@@ -216,14 +217,26 @@ class FirmwareSourceConfig(BaseModel):
         return self.channel if self.channel in valid_channels else "release"
 
 
+# Historical _default_firmware_sources declaration order, preserved so
+# config serialization and the firmware checker's source-init/check order
+# stay byte-identical (#76). Cosmetic order metadata with the same
+# partial-order semantics as vendor_ips.py's tuples: registry vendors
+# missing from this tuple are appended in registration order, so adding a
+# vendor still needs only its register(VendorSpec(...)) entry; a
+# consistency test rejects stale (removed) vendors here.
+_FIRMWARE_SOURCE_DEFAULTS_ORDER = ("tachyon", "mikrotik", "ubiquiti", "cambium")
+
+
 def _default_firmware_sources():
-    """Default firmware sources — Tachyon enabled, others stubbed."""
-    return {
-        "tachyon": FirmwareSourceConfig(enabled=True, auto_download=True),
-        "mikrotik": FirmwareSourceConfig(enabled=True, auto_download=True, channel="long-term"),
-        "ubiquiti": FirmwareSourceConfig(enabled=False),
-        "cambium": FirmwareSourceConfig(enabled=False),
-    }
+    """Default firmware-checker source configs, one per vendor with an
+    auto-fetch source class. Since Story 6 (#76) the per-vendor defaults
+    live in each vendor's VendorSpec (``vendor_registry.py``
+    ``firmware_source_defaults``); this factory wraps them in typed
+    ``FirmwareSourceConfig`` models."""
+    defaults = firmware_source_config_defaults()
+    ordered = [v for v in _FIRMWARE_SOURCE_DEFAULTS_ORDER if v in defaults]
+    ordered += [v for v in defaults if v not in _FIRMWARE_SOURCE_DEFAULTS_ORDER]
+    return {vendor: FirmwareSourceConfig(**defaults[vendor]) for vendor in ordered}
 
 
 class FirmwareCheckerConfig(BaseModel):

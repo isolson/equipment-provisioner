@@ -14,7 +14,7 @@ import signal
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -35,6 +35,23 @@ from . import telemetry
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+
+def _switch_management_credentials(config: Config) -> Tuple[str, str]:
+    """(username, password) for the bench management switch.
+
+    The switch is *infrastructure* — present regardless of which device
+    vendors are enabled — so this must not assume a ``mikrotik`` entry
+    exists in the credentials table: a ``PROVISIONER_VENDORS`` allowlist
+    without mikrotik filters that entry out of the derived defaults.
+    Falls back to the MikroTik factory default (admin, empty password),
+    which is exactly what the table's backfilled default holds in a full
+    build.
+    """
+    creds = config.credentials.get("mikrotik")
+    if creds is None:
+        return "admin", ""
+    return creds.username, creds.password
 
 
 class Provisioner:
@@ -142,14 +159,17 @@ class Provisioner:
         mgmt_config = None
         if self._use_vlan_mode and hasattr(self.config.network, 'management'):
             mgmt = self.config.network.management
+            switch_username, switch_password = _switch_management_credentials(
+                self.config
+            )
             mgmt_config = ManagementConfig(
                 enabled=mgmt.enabled,
                 ip=mgmt.ip,
                 netmask=mgmt.netmask,
                 switch_ip=getattr(mgmt, 'switch_ip', None) or getattr(mgmt, 'gateway', None),
                 vlan=mgmt.vlan,
-                switch_username=self.config.credentials["mikrotik"].username,
-                switch_password=self.config.credentials["mikrotik"].password,
+                switch_username=switch_username,
+                switch_password=switch_password,
             )
 
         self.port_manager = init_port_manager(

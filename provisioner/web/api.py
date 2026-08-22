@@ -19,8 +19,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from ..config import _default_credentials
 from ..handler_manager import provisionable_device_types
+from ..vendor_registry import (
+    builtin_ui_credentials,
+    nonprovisionable_device_types,
+    ui_styles,
+)
 from ..setup_tools import (
     build_readiness_report,
     import_setup_bundle,
@@ -2175,22 +2179,12 @@ async def test_api():
 # ============================================================================
 
 # Known factory-shipped logins for each device type, shown as read-only
-# entries in the credentials UI. Username/password derive from the
-# config-level defaults table (config._default_credentials, Story 3 / #73).
-# _BUILTIN_OVERRIDES covers devices whose shipped login differs from our
-# config-level default: Tarana ships admin/admin123, but the config default
-# keeps an empty password because each fleet sets its own.
-_BUILTIN_OVERRIDES = {
-    "tarana": [
-        {"username": "admin", "password": "admin123"},
-    ],
-}
-
-BUILTIN_CREDENTIALS = {
-    device_type: [{"username": creds.username, "password": creds.password}]
-    for device_type, creds in _default_credentials().items()
-}
-BUILTIN_CREDENTIALS.update(_BUILTIN_OVERRIDES)
+# entries in the credentials UI, derived from the
+# VendorSpec registry (Story 6 / #76): each vendor's default_credentials,
+# unless its spec sets builtin_ui_credentials (Tarana ships
+# admin/admin123, but the config default keeps an empty password because
+# each fleet sets its own).
+BUILTIN_CREDENTIALS = builtin_ui_credentials()
 
 
 def _get_credentials_path(request: Request) -> Path:
@@ -2707,20 +2701,14 @@ async def _run_apply_mode(
 #     side-door, intentionally absent from HANDLER_MAP.
 #   - unknown: a UI-only fallback card, not a vendor.
 #
-# _VENDOR_UI_STYLE is presentation data (display name, accent color), not a
-# vendor registry: entries are looked up with .get() and any vendor missing
-# from it still renders with derived defaults. It folds into VendorSpec in
-# Story 6 (#76).
+# _VENDOR_UI_STYLE is presentation data (display name, accent color),
+# derived from each VendorSpec's ui_style (Story 6 / #76): entries are
+# looked up with .get() and any vendor missing from it still renders with
+# derived defaults. `unknown` is the UI-only fallback card, not a vendor,
+# so its style stays here rather than in the registry.
 
-_VENDOR_UI_STYLE: Dict[str, Dict[str, str]] = {
-    "cambium": {"name": "Cambium", "color": "#1A73E9"},
-    "mikrotik": {"name": "MikroTik", "color": "#0E0E10"},
-    "tachyon": {"name": "Tachyon", "color": "#a855f7"},
-    "tarana": {"name": "Tarana", "color": "#d97706"},
-    "ubiquiti": {"name": "Ubiquiti", "color": "#0559C9"},
-    "evolution_digital": {"name": "Evolution", "color": "#ec4899"},
-    "unknown": {"name": "Unknown", "color": "#6b7280"},
-}
+_VENDOR_UI_STYLE: Dict[str, Dict[str, str]] = dict(ui_styles())
+_VENDOR_UI_STYLE["unknown"] = {"name": "Unknown", "color": "#6b7280"}
 
 # Fallback accent for a vendor without a style entry (same gray as `unknown`).
 _DEFAULT_VENDOR_COLOR = "#6b7280"
@@ -2734,11 +2722,8 @@ def _vendor_default_user(device_type: str) -> str:
     Read-only indirection over the credentials source so the UI hint can
     never drift from it (it is the first builtin entry's username; "" when
     the vendor has no builtin credentials, e.g. evolution_digital).
-
-    NOTE: reads BUILTIN_CREDENTIALS today; once Story 3 (#73 / PR #127)
-    lands, BUILTIN_CREDENTIALS itself derives from
-    provisioner.config._default_credentials() — switch this helper to read
-    that table directly when the credentials consolidation settles.
+    BUILTIN_CREDENTIALS itself derives from the VendorSpec registry
+    (Story 6 / #76).
     """
     builtin = BUILTIN_CREDENTIALS.get(device_type, [])
     if not builtin:
@@ -2780,7 +2765,11 @@ def vendor_ui_metadata() -> Dict[str, Dict[str, str]]:
         device_type: _vendor_ui_entry(device_type)
         for device_type in provisionable_device_types()
     }
-    metadata["evolution_digital"] = _vendor_ui_entry("evolution_digital")
+    # Non-provisionable vendors (evolution_digital) still get a card —
+    # they are real device types, just dispatched via the main.py
+    # side-door instead of HANDLER_MAP.
+    for device_type in nonprovisionable_device_types():
+        metadata[device_type] = _vendor_ui_entry(device_type)
     unknown = _vendor_ui_entry("unknown")
     # The unknown-device card offers "admin" as the generic username hint
     # (matches the JS `vendor.defaultUser || 'admin'` fallback); it is a UI

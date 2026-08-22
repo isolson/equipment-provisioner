@@ -1,8 +1,12 @@
-"""Single registry for vendor link-local / factory-default device IPs.
+"""Derived vendor link-local / factory-default device IP views.
 
-Story 4 of the vendor-isolation epic (#74). This module is the one place
-that defines which link-local IPs each vendor's factory-default devices
-answer on. Three previously drifting copies now derive from it:
+Story 4 of the vendor-isolation epic (#74) made this module the one
+place defining which link-local IPs each vendor's factory-default
+devices answer on; Story 6 (#76) moved the per-vendor IP *data* into the
+VendorSpec registry (``vendor_registry.py`` ``link_local_ips``), so this
+module now holds only the load-bearing *orderings* (the historical
+partial-order tuples below) and the derived views. Three previously
+drifting copies derive from it:
 
 - ``DeviceLinkLocalIP`` constants and ``DeviceLinkLocalIP.ALL``
   (``port_manager.py``) — the device-detection probe list.
@@ -43,15 +47,51 @@ enumeration).
 
 from typing import Dict, List, Tuple
 
-# vendor -> ordered list of link-local/default IPs.
-# THE single source of truth — add or change vendor IPs here only.
-VENDOR_LINK_LOCAL_IPS = {
-    "cambium": ["169.254.1.1"],
-    "tachyon": ["169.254.1.1", "192.168.1.1"],  # 192.168.1.1: some Tachyon devices use this
-    "ubiquiti": ["192.168.1.20"],  # Ubiquiti AirMax and Wave default
-    "tarana": ["169.254.100.1"],
-    "mikrotik": ["192.168.88.1"],  # Mikrotik default, but often uses DHCP
-}  # type: Dict[str, List[str]]
+from .vendor_registry import link_local_ips as _registry_link_local_ips
+
+# Historical detection-probe vendor order, preserved exactly per the
+# zero-behavior-change requirement (#74/#76): dict insertion order is the
+# probe order, and the pre-registry literal listed vendors in this order.
+# Same partial-order semantics as the other tuples below: registry
+# vendors missing from this tuple are appended in registration order, so
+# adding a vendor needs only its register(VendorSpec(...)) entry; a
+# consistency test rejects stale (removed) vendors here.
+_PROBE_VENDOR_ORDER = ("cambium", "tachyon", "ubiquiti", "tarana", "mikrotik")
+
+
+def _ordered_vendor_ips():
+    # type: () -> Dict[str, List[str]]
+    """vendor -> ordered IPs from the VendorSpec registry, re-ordered
+    into the historical detection-probe vendor order."""
+    registry = _registry_link_local_ips()
+    ordered = [v for v in _PROBE_VENDOR_ORDER if v in registry]
+    ordered += [v for v in registry if v not in _PROBE_VENDOR_ORDER]
+    return {vendor: list(registry[vendor]) for vendor in ordered}
+
+
+# vendor -> ordered list of link-local/default IPs, derived from the
+# VendorSpec registry (add or change vendor IPs in vendor_registry.py).
+# Insertion order here IS the detection-probe order — see module docstring.
+# Filtered by the PROVISIONER_VENDORS allowlist: this map is the
+# detection-candidate registry.
+VENDOR_LINK_LOCAL_IPS = _ordered_vendor_ips()  # type: Dict[str, List[str]]
+
+
+def registered_vendor_ips():
+    # type: () -> Dict[str, List[str]]
+    """vendor -> ordered IPs for EVERY registered spec, ignoring the
+    PROVISIONER_VENDORS allowlist, in the same historical order.
+
+    For static per-vendor address facts (the generated
+    ``DeviceLinkLocalIP.<VENDOR>`` constants in ``port_manager.py``) that
+    must stay defined in a single-vendor build — an allowlist filters
+    detection *candidates* (``VENDOR_LINK_LOCAL_IPS``), it does not
+    un-know what addresses excluded vendors ship with.
+    """
+    registry = _registry_link_local_ips(enabled_only=False)
+    ordered = [v for v in _PROBE_VENDOR_ORDER if v in registry]
+    ordered += [v for v in registry if v not in _PROBE_VENDOR_ORDER]
+    return {vendor: list(registry[vendor]) for vendor in ordered}
 
 # Historical boot-wait quick-ping vendor order, preserved exactly per #74's
 # zero-behavior-change requirement. It differs from the detection-probe
