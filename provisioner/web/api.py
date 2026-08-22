@@ -2688,3 +2688,103 @@ async def _run_apply_mode(
 
     except Exception as e:
         logger.exception(f"Error applying mode on port {port_number}: {e}")
+
+
+# ============================================================================
+# Vendor UI Metadata (Story 5 / #75)
+# ============================================================================
+#
+# The kiosk dashboard's `deviceVendors` map is no longer hardcoded in
+# index.html: the dashboard route (web/app.py) injects vendor_ui_metadata()
+# into the template server-side, so adding a vendor to HANDLER_MAP needs
+# zero JS edits and the long-lived kiosk Chromium can never serve a stale
+# vendor list (see docs/KIOSK_ARCHITECTURE.md on kiosk uptimes).
+#
+# The vendor *list* derives from provisionable_device_types() (HANDLER_MAP,
+# Story 2 / #72) plus two documented exceptions (same as
+# tests/test_vendor_registry.py):
+#   - evolution_digital: a real DeviceType dispatched via the main.py
+#     side-door, intentionally absent from HANDLER_MAP.
+#   - unknown: a UI-only fallback card, not a vendor.
+#
+# _VENDOR_UI_STYLE is presentation data (display name, accent color), not a
+# vendor registry: entries are looked up with .get() and any vendor missing
+# from it still renders with derived defaults. It folds into VendorSpec in
+# Story 6 (#76).
+
+_VENDOR_UI_STYLE: Dict[str, Dict[str, str]] = {
+    "cambium": {"name": "Cambium", "color": "#1A73E9"},
+    "mikrotik": {"name": "MikroTik", "color": "#0E0E10"},
+    "tachyon": {"name": "Tachyon", "color": "#a855f7"},
+    "tarana": {"name": "Tarana", "color": "#d97706"},
+    "ubiquiti": {"name": "Ubiquiti", "color": "#0559C9"},
+    "evolution_digital": {"name": "Evolution", "color": "#ec4899"},
+    "unknown": {"name": "Unknown", "color": "#6b7280"},
+}
+
+# Fallback accent for a vendor without a style entry (same gray as `unknown`).
+_DEFAULT_VENDOR_COLOR = "#6b7280"
+
+_VENDOR_ICONS_DIR = Path(__file__).parent / "static" / "vendor-icons"
+
+
+def _vendor_default_user(device_type: str) -> str:
+    """Default-username hint for the kiosk's custom-credentials form.
+
+    Read-only indirection over the credentials source so the UI hint can
+    never drift from it (it is the first builtin entry's username; "" when
+    the vendor has no builtin credentials, e.g. evolution_digital).
+
+    NOTE: reads BUILTIN_CREDENTIALS today; once Story 3 (#73 / PR #127)
+    lands, BUILTIN_CREDENTIALS itself derives from
+    provisioner.config._default_credentials() — switch this helper to read
+    that table directly when the credentials consolidation settles.
+    """
+    builtin = BUILTIN_CREDENTIALS.get(device_type, [])
+    if not builtin:
+        return ""
+    return builtin[0].get("username", "")
+
+
+def _vendor_icon(device_type: str) -> str:
+    """Static icon URL for a vendor, or "" when no icon file is bundled.
+
+    Icons live at web/static/vendor-icons/<device_type>.png by convention;
+    the empty string preserves the kiosk's no-icon rendering path (used by
+    `unknown` today and by any newly added vendor until an icon ships).
+    """
+    if (_VENDOR_ICONS_DIR / f"{device_type}.png").is_file():
+        return f"/static/vendor-icons/{device_type}.png"
+    return ""
+
+
+def _vendor_ui_entry(device_type: str) -> Dict[str, str]:
+    """Build one kiosk metadata entry (name, color, defaultUser, icon)."""
+    style = _VENDOR_UI_STYLE.get(device_type, {})
+    return {
+        "name": style.get("name", device_type.replace("_", " ").title()),
+        "color": style.get("color", _DEFAULT_VENDOR_COLOR),
+        "defaultUser": _vendor_default_user(device_type),
+        "icon": _vendor_icon(device_type),
+    }
+
+
+def vendor_ui_metadata() -> Dict[str, Dict[str, str]]:
+    """Vendor metadata map injected into the dashboard template.
+
+    Keys: every provisionable device type (from HANDLER_MAP) plus the
+    documented `evolution_digital` and `unknown` exceptions. Values are the
+    exact shape the kiosk JS consumes: name, color, defaultUser, icon.
+    """
+    metadata = {
+        device_type: _vendor_ui_entry(device_type)
+        for device_type in provisionable_device_types()
+    }
+    metadata["evolution_digital"] = _vendor_ui_entry("evolution_digital")
+    unknown = _vendor_ui_entry("unknown")
+    # The unknown-device card offers "admin" as the generic username hint
+    # (matches the JS `vendor.defaultUser || 'admin'` fallback); it is a UI
+    # affordance, not a credential-source entry.
+    unknown["defaultUser"] = "admin"
+    metadata["unknown"] = unknown
+    return metadata

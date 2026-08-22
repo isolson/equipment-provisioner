@@ -366,16 +366,14 @@
         };
         let readinessRefreshTimer = null;
 
-        // Device vendors
-        const deviceVendors = {
-            cambium: { name: 'Cambium', color: '#1A73E9', defaultUser: 'admin', icon: '/static/vendor-icons/cambium.png' },
-            mikrotik: { name: 'MikroTik', color: '#0E0E10', defaultUser: 'admin', icon: '/static/vendor-icons/mikrotik.png' },
-            tachyon: { name: 'Tachyon', color: '#a855f7', defaultUser: 'root', icon: '/static/vendor-icons/tachyon.png' },
-            tarana: { name: 'Tarana', color: '#d97706', defaultUser: 'admin', icon: '/static/vendor-icons/tarana.png' },
-            ubiquiti: { name: 'Ubiquiti', color: '#0559C9', defaultUser: 'ubnt', icon: '/static/vendor-icons/ubiquiti.png' },
-            evolution_digital: { name: 'Evolution', color: '#ec4899', defaultUser: '', icon: '/static/vendor-icons/evolution_digital.png' },
-            unknown: { name: 'Unknown', color: '#6b7280', defaultUser: 'admin', icon: '' },
-        };
+        // Device vendors — server-injected from the vendor registry
+        // (vendor_ui_metadata() in web/api.py, Story 5 / #75). Derived from
+        // HANDLER_MAP + the credentials defaults, plus the documented
+        // evolution_digital / unknown exceptions. Adding a vendor needs no
+        // edit here. Behavioral branches (canApplyMode, Tachyon SSID
+        // uppercasing) are behavior, not enumeration — they stay hardcoded
+        // where they are used below.
+        const deviceVendors = {{ vendor_metadata | tojson }};
 
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {

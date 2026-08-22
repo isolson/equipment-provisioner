@@ -1,10 +1,14 @@
 """Smoke tests for rendered web pages."""
 
+import json
+import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from provisioner.config import Config
+from provisioner.handler_manager import provisionable_device_types
+from provisioner.web.api import BUILTIN_CREDENTIALS
 from provisioner.web.app import create_app
 
 
@@ -32,6 +36,131 @@ def test_dashboard_renders_setup_banner_hook():
     assert 'href="/files"' in html
     assert 'href="/labels"' in html
     assert "loadSetupReadiness()" in html
+
+
+def _rendered_device_vendors(html):
+    """Parse the server-injected `deviceVendors` literal out of the page."""
+    match = re.search(r"const deviceVendors = (\{.*\});", html)
+    assert match, (
+        "dashboard no longer injects the deviceVendors literal (Story 5 / "
+        "#75) — the kiosk would render vendor cards without names/colors/"
+        "icons."
+    )
+    return json.loads(match.group(1))
+
+
+def test_dashboard_injects_vendor_metadata_for_every_registry_vendor():
+    """Story 5 (#75) acceptance: the rendered page carries metadata for
+    every HANDLER_MAP vendor plus the documented evolution_digital and
+    unknown exceptions, as a parse-time literal (no async fetch race)."""
+    client = make_client()
+
+    response = client.get("/")
+    assert response.status_code == 200
+    vendors = _rendered_device_vendors(response.text)
+
+    expected_keys = set(provisionable_device_types()) | {
+        "evolution_digital",
+        "unknown",
+    }
+    assert set(vendors) == expected_keys
+
+    for device_type, entry in vendors.items():
+        assert set(entry) == {"name", "color", "defaultUser", "icon"}, (
+            f"{device_type} metadata entry missing kiosk fields"
+        )
+        assert entry["name"]
+        assert re.fullmatch(r"#[0-9a-fA-F]{6}", entry["color"])
+
+    # defaultUser hints agree with the credentials source (first builtin
+    # entry's username), rather than keeping a third hardcoded copy.
+    for device_type in provisionable_device_types():
+        builtin = BUILTIN_CREDENTIALS.get(device_type, [])
+        expected_user = builtin[0]["username"] if builtin else ""
+        assert vendors[device_type]["defaultUser"] == expected_user, (
+            f"{device_type} defaultUser hint drifted from the credentials "
+            "source"
+        )
+
+    # The empty-icon rendering path is preserved for `unknown`.
+    assert vendors["unknown"]["icon"] == ""
+    # Every other vendor's icon resolves to a bundled static file.
+    icons_dir = (
+        Path(__file__).resolve().parents[1]
+        / "provisioner"
+        / "web"
+        / "static"
+        / "vendor-icons"
+    )
+    for device_type, entry in vendors.items():
+        if device_type == "unknown":
+            continue
+        assert entry["icon"] == f"/static/vendor-icons/{device_type}.png"
+        assert (icons_dir / f"{device_type}.png").is_file()
+
+
+def test_dashboard_vendor_metadata_renders_identically_to_the_old_map():
+    """The kiosk is production: lock the exact pre-#75 name/color/
+    defaultUser/icon values so the touchscreen renders identically."""
+    client = make_client()
+    vendors = _rendered_device_vendors(client.get("/").text)
+
+    assert vendors == {
+        "cambium": {
+            "name": "Cambium",
+            "color": "#1A73E9",
+            "defaultUser": "admin",
+            "icon": "/static/vendor-icons/cambium.png",
+        },
+        "mikrotik": {
+            "name": "MikroTik",
+            "color": "#0E0E10",
+            "defaultUser": "admin",
+            "icon": "/static/vendor-icons/mikrotik.png",
+        },
+        "tachyon": {
+            "name": "Tachyon",
+            "color": "#a855f7",
+            "defaultUser": "root",
+            "icon": "/static/vendor-icons/tachyon.png",
+        },
+        "tarana": {
+            "name": "Tarana",
+            "color": "#d97706",
+            "defaultUser": "admin",
+            "icon": "/static/vendor-icons/tarana.png",
+        },
+        "ubiquiti": {
+            "name": "Ubiquiti",
+            "color": "#0559C9",
+            "defaultUser": "ubnt",
+            "icon": "/static/vendor-icons/ubiquiti.png",
+        },
+        "evolution_digital": {
+            "name": "Evolution",
+            "color": "#ec4899",
+            "defaultUser": "",
+            "icon": "/static/vendor-icons/evolution_digital.png",
+        },
+        "unknown": {
+            "name": "Unknown",
+            "color": "#6b7280",
+            "defaultUser": "admin",
+            "icon": "",
+        },
+    }
+
+
+def test_dashboard_keeps_behavioral_vendor_branches_hardcoded():
+    """canApplyMode (cambium/tachyon) and the Tachyon SSID uppercasing are
+    behavior, not enumeration — they stay in the JS (Story 5 / #75)."""
+    client = make_client()
+    html = client.get("/").text
+
+    assert (
+        "port.device_type === 'cambium' || port.device_type === 'tachyon'"
+    ) in html
+    assert "port.device_type === 'tachyon' ? dir.toUpperCase() : hostname" in html
 
 
 def test_labels_page_renders_guarded_templates():
