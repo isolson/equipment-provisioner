@@ -145,11 +145,18 @@ Starts manual provisioning for a port.
   "custom_username": "admin",
   "skip_firmware": false,
   "skip_config": false,
-  "config_override": null
+  "config_override": null,
+  "role": null
 }
 ```
 
 Only `port_number` is required. All other fields are optional.
+
+`role` selects a site-role config overlay for this job (an opaque string, for
+example `tower`). When omitted or `null`, the server falls back to
+`provisioning.default_role` in `config.yaml`; when neither is set, the job runs
+role-less resolution. See
+[HANDLER_DEVELOPMENT.md](HANDLER_DEVELOPMENT.md) "Site-Role Config Overlays".
 
 **Response:**
 ```json
@@ -367,6 +374,43 @@ Update a config file's content in place.
 ### DELETE /configs/{config_type}/{device_type}/{filename}
 
 Delete a config file.
+
+## Snapshots
+
+Config snapshots captured from devices (R3 of the config-resolution epic).
+Every response is **redacted** at a single choke point on the server: secrets
+never leave the service. `identity.wireless.psk` is replaced by
+`psk_present`/`psk_length`, the raw vendor blob is replaced by a
+`content_present` marker, and any identity field not explicitly classified
+public is omitted and listed in `redacted_fields`. There is **no** HTTP write
+endpoint — snapshots are written in-process by the capture path.
+
+### GET /snapshots
+
+List snapshots, newest first.
+
+**Query parameters** (all optional): `vendor`, `serial_number`, `mac_address`
+filters; `limit` (default 50, maximum 200); `offset` (default 0).
+
+Corrupt or newer-schema files on disk are skipped and counted in
+`skipped_unreadable`.
+
+### GET /snapshots/{id}
+
+Get one snapshot, masked per the redaction map.
+
+**Errors:**
+- `404` — Unknown or invalid snapshot id
+- `409` — Snapshot has a newer schema version than this service reads
+- `422` — Snapshot file is corrupt or unreadable (it can still be deleted)
+
+### DELETE /snapshots/{id}
+
+Delete a snapshot. Allowed even for corrupt or newer-schema files, so manual
+cleanup always works regardless of retention.
+
+**Errors:**
+- `404` — Unknown snapshot id
 
 ## System
 
