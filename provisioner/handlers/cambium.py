@@ -2009,6 +2009,13 @@ class CambiumHandler(BaseHandler):
                     http_status,
                     len(response_body),
                 )
+                application_success = self._curl_application_success(
+                    "Firmware upload",
+                    response_body,
+                )
+                if application_success is False:
+                    logger.error("Firmware upload was rejected by the device")
+                    return False
 
                 # Check for error indicators
                 if "error" in response.lower() and "success" not in response.lower():
@@ -2130,6 +2137,13 @@ class CambiumHandler(BaseHandler):
                 upload_status,
                 len(upload_body),
             )
+            application_success = self._curl_application_success(
+                "Alt-bank upload",
+                upload_body,
+            )
+            if application_success is False:
+                logger.error("Alt-bank upload was rejected by the device")
+                return False
             if "error" in upload_resp.lower() and "success" not in upload_resp.lower():
                 logger.error("Alt-bank upload response reported an error")
                 return False
@@ -2159,6 +2173,10 @@ class CambiumHandler(BaseHandler):
                 return False
             upgrade_body, upgrade_status = self._split_curl_http_response(stdout)
             if upgrade_status is None or not 200 <= upgrade_status < 300:
+                self._curl_application_success(
+                    "upgrade_sw_image_local",
+                    upgrade_body,
+                )
                 logger.error("upgrade_sw_image_local returned HTTP %r", upgrade_status)
                 return False
             logger.info(
@@ -2166,6 +2184,13 @@ class CambiumHandler(BaseHandler):
                 upgrade_status,
                 len(upgrade_body),
             )
+            application_success = self._curl_application_success(
+                "upgrade_sw_image_local",
+                upgrade_body,
+            )
+            if application_success is False:
+                logger.error("upgrade_sw_image_local was rejected by the device")
+                return False
 
             # Step 3: poll get_upgrade_status (same form body) until done
             ready = await self._poll_upgrade_status_curl(
@@ -2404,6 +2429,28 @@ class CambiumHandler(BaseHandler):
         if separator and re.fullmatch(rb"\d{3}", status_text.strip()):
             return body, int(status_text.strip())
         return stdout, None
+
+    @staticmethod
+    def _curl_application_success(operation: str, body: bytes) -> Optional[bool]:
+        """Return a JSON endpoint's application success without logging its body."""
+        try:
+            data = json.loads(body.decode("utf-8", errors="ignore"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        success = data.get("success")
+        logger.info(
+            "%s application result: success=%r status=%r error=%r",
+            operation,
+            success,
+            data.get("status"),
+            data.get("error"),
+        )
+        if success is None:
+            return None
+        return success in (True, 1, "1")
 
     async def get_firmware_status(self) -> Dict[str, Any]:
         """Get firmware bank status."""

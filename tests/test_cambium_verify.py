@@ -88,6 +88,17 @@ def test_curl_http_response_split_keeps_body_separate_from_status():
     assert status == 200
 
 
+def test_curl_application_result_rejects_success_zero():
+    h = _handler()
+
+    result = h._curl_application_success(
+        "test",
+        b'{"success":0,"msg":"rejected"}',
+    )
+
+    assert result is False
+
+
 async def test_upload_status_fails_immediately_on_http_error(monkeypatch):
     h = _handler()
     h.interface = "eth0.1996"
@@ -181,6 +192,29 @@ async def test_ax_explicit_upgrade_uses_release_debug_value(monkeypatch, tmp_pat
     ) is True
     assert any("type=sw&debug=0" in args for args in process_args)
     assert poll_args[0][1]["debug_value"] == "0"
+
+
+async def test_explicit_upgrade_stops_on_application_upload_failure(
+    monkeypatch,
+    tmp_path,
+):
+    h = _handler()
+    h.interface = "eth0.1996"
+    firmware = tmp_path / "ePMP-AX-v5.11.1.img"
+    firmware.write_bytes(b"firmware")
+    process_args = []
+
+    async def fake_exec(*args, **kwargs):
+        process_args.append(args)
+        return _CurlResult(b'{"success":0,"msg":"rejected"}\n200')
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    assert await h._upload_firmware_curl_alt_bank(
+        str(firmware),
+        upgrade_type="sw",
+    ) is False
+    assert len(process_args) == 1
 
 
 async def test_firmware_upload_fails_when_ready_status_is_not_confirmed(
