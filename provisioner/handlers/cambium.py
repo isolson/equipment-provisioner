@@ -25,8 +25,6 @@ class CambiumHandler(BaseHandler):
     JSON API calls depending on firmware version.
     """
 
-    supported_post_provision_modes = ("ap", "ptp")
-
     # Model to firmware filename pattern mapping
     MODEL_FIRMWARE_PATTERNS = {
         # ePMP AX series (WiFi 6) - uses ePMP-AX firmware

@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 from provisioner.handler_manager import HandlerManager
+from provisioner.handlers.tachyon import TachyonHandler
 from provisioner.workflow_actions import workflow_for_port
 
 
@@ -25,13 +26,21 @@ def _action_ids(workflow, key="available_actions"):
     return [action["id"] for action in workflow[key]]
 
 
-def test_handler_capabilities_own_mode_support():
+def _qualify_tachyon_modes(monkeypatch):
+    monkeypatch.setattr(
+        TachyonHandler,
+        "qualified_post_provision_modes",
+        ("ap", "ptp"),
+    )
+
+
+def test_handler_capabilities_require_explicit_qualification():
     assert HandlerManager.operator_capabilities_for("tachyon")[
         "post_provision_modes"
-    ] == ["ap", "ptp"]
+    ] == []
     assert HandlerManager.operator_capabilities_for("cambium")[
         "post_provision_modes"
-    ] == ["ap", "ptp"]
+    ] == []
     assert HandlerManager.operator_capabilities_for("tarana")[
         "post_provision_modes"
     ] == []
@@ -42,7 +51,8 @@ def test_handler_capabilities_own_mode_support():
     }
 
 
-def test_success_actions_respect_feature_flag_and_handler_capability():
+def test_success_actions_respect_feature_flag_and_qualification(monkeypatch):
+    _qualify_tachyon_modes(monkeypatch)
     disabled = workflow_for_port(
         _state(last_result="success"), mode_config_enabled=False
     )
@@ -60,7 +70,8 @@ def test_success_actions_respect_feature_flag_and_handler_capability():
     assert _action_ids(unsupported) == []
 
 
-def test_required_mode_is_not_reported_ready():
+def test_required_mode_is_not_reported_ready(monkeypatch):
+    _qualify_tachyon_modes(monkeypatch)
     workflow = workflow_for_port(
         _state(last_result="success", mode_selection_required=True),
         mode_config_enabled=True,
@@ -70,7 +81,8 @@ def test_required_mode_is_not_reported_ready():
     assert workflow["required_action"] == "choose_device_mode"
 
 
-def test_configured_mode_finishes_required_follow_up():
+def test_configured_mode_finishes_required_follow_up(monkeypatch):
+    _qualify_tachyon_modes(monkeypatch)
     workflow = workflow_for_port(
         _state(
             last_result="success",

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from provisioner.config import Config
+from provisioner.handlers.tachyon import TachyonHandler
 from provisioner.web.app import create_app
 
 
@@ -85,10 +86,10 @@ def test_netinstall_accepts_capable_device_with_mikrotik_oui(monkeypatch):
     assert calls == [4]
 
 
-def test_mode_endpoint_rejects_handler_without_mode_capability(monkeypatch):
+def test_mode_endpoint_rejects_unqualified_vendor_with_templates(monkeypatch):
     client = _client(
         monkeypatch,
-        _status("tarana", "00:11:22:33:44:55"),
+        _status("tachyon", "78:5E:E8:D0:4C:38"),
         mode_config=True,
     )
 
@@ -99,7 +100,7 @@ def test_mode_endpoint_rejects_handler_without_mode_capability(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["detail"] == (
-        "Mode configuration not supported for tarana"
+        "Mode configuration not supported for tachyon"
     )
 
 
@@ -109,6 +110,11 @@ def test_mode_endpoint_uses_handler_capability(monkeypatch):
     async def fake_run(provisioner, port_number, device_type, device_ip, req):
         calls.append((port_number, device_type, req.mode))
 
+    monkeypatch.setattr(
+        TachyonHandler,
+        "qualified_post_provision_modes",
+        ("ap", "ptp"),
+    )
     monkeypatch.setattr("provisioner.web.api._run_apply_mode", fake_run)
     client = _client(
         monkeypatch,

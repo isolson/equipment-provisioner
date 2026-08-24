@@ -125,7 +125,7 @@ class HandlerManager:
             }
         return {
             "post_provision_modes": list(
-                getattr(handler_class, "supported_post_provision_modes", ())
+                getattr(handler_class, "qualified_post_provision_modes", ())
             ),
             "manual_netinstall": bool(
                 getattr(handler_class, "supports_manual_netinstall", False)

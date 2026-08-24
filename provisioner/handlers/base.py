@@ -104,10 +104,11 @@ class BaseHandler(ABC):
     #: verification. See docs/design-config-resolution.md.
     supports_config_overlays = False
 
-    #: Post-provisioning deployment modes the operator can apply through the
-    #: shared mode workflow. This is behavior/capability data, so it belongs
-    #: on the handler rather than in the kiosk or VendorSpec registry.
-    supported_post_provision_modes = ()  # type: Tuple[str, ...]
+    #: Post-provisioning deployment modes that are production-qualified for
+    #: this handler. Declare a mode only after its vendor-specific template,
+    #: identity/radio-role fields, apply path, and hardware result have been
+    #: verified. A template or theoretical capability alone is not enough.
+    qualified_post_provision_modes = ()  # type: Tuple[str, ...]
 
     #: Whether the kiosk may expose this handler's manual recovery workflow.
     #: The recovery implementation remains vendor-local; the shared UI only
