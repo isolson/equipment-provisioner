@@ -1,7 +1,7 @@
 """Handler manager for routing devices to appropriate handlers."""
 
 import logging
-from typing import Dict, List, Optional, Type, Callable, Awaitable
+from typing import Any, Dict, List, Optional, Type, Callable, Awaitable
 
 from .fingerprint import DeviceType, DeviceFingerprint
 from .handlers.base import BaseHandler, ProvisioningResult
@@ -113,7 +113,7 @@ class HandlerManager:
         dual_bank: bool = True,
         interface: Optional[str] = None,
         firmware_current: bool = False,
-        on_progress: Optional[Callable[[str, bool, Optional[str]], Awaitable[None]]] = None,
+        on_progress: Optional[Callable[[str, Any, Optional[Any]], Awaitable[None]]] = None,
         firmware_lookup_callback: Optional[Callable[[str, str], tuple]] = None,
         custom_credentials: Optional[Dict[str, str]] = None,
         config_backup: bool = False,

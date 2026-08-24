@@ -84,7 +84,10 @@ class _StubPortManager:
     def update_port_device_info(self, port_num, **kwargs):
         self.device_info_updates.append((port_num, kwargs))
 
-    def update_checklist(self, port_num, step, value):
+    def set_step_plan(self, port_num, steps):
+        return None
+
+    def update_checklist(self, port_num, step, value, detail=None):
         return None
 
     def _get_single_port_status(self, port_num):
@@ -133,7 +136,9 @@ class _StubHandlerManager:
                 device_type="tachyon",
                 model="TNA-303L-65",
                 firmware_version="1.15.0.8503",
-                mac_address="78:5E:E8:D1:65:30",
+                # A final handler result can have model/serial without a MAC.
+                # The port summary must still restore the available fields.
+                mac_address=None,
                 serial_number="TNA303L462500013",
             ),
         )
@@ -197,3 +202,11 @@ async def test_tachyon_preflight_model_selects_family_config_not_tns100(tmp_path
     assert provision_call["fingerprint"].model == "TNA-303L-65"
     assert provision_call["config_path"] == str(tna_template)
     assert "tns-100" not in provision_call["config_path"]
+    assert provisioner.port_manager.device_info_updates[-1] == (
+        6,
+        {
+            "mac": None,
+            "serial": "TNA303L462500013",
+            "model": "TNA-303L-65",
+        },
+    )

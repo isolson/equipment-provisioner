@@ -66,3 +66,56 @@ async def test_verify_config_true_on_match(monkeypatch, fast_sleep):
 
     monkeypatch.setattr(h, "_get_config_curl", readback)
     assert await h.verify_config() is True
+
+
+class _CurlResult:
+    returncode = 0
+
+    async def communicate(self):
+        return b'{"success":1}', b""
+
+
+async def test_firmware_upload_fails_when_ready_status_is_not_confirmed(
+    monkeypatch, tmp_path
+):
+    """A status timeout must stop the run before Cambium is rebooted.
+
+    The old fail-open path returned success after an unconfirmed five-minute
+    poll, which caused the bench to reboot unchanged firmware and fail later.
+    """
+    h = _handler()
+    h.interface = "eth0.1996"
+    firmware = tmp_path / "ePMP-AX-v5.11.1.img"
+    firmware.write_bytes(b"firmware")
+
+    async def fake_exec(*args, **kwargs):
+        return _CurlResult()
+
+    async def not_ready(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(h, "_poll_upload_status_curl", not_ready)
+
+    assert await h._upload_firmware_curl(str(firmware)) is False
+
+
+async def test_alt_bank_upload_fails_when_upgrade_status_is_not_confirmed(
+    monkeypatch, tmp_path
+):
+    """The confirmed alternate-bank endpoint sequence is also fail closed."""
+    h = _handler()
+    h.interface = "eth0.1996"
+    firmware = tmp_path / "ePMP-AX-v5.11.1.img"
+    firmware.write_bytes(b"firmware")
+
+    async def fake_exec(*args, **kwargs):
+        return _CurlResult()
+
+    async def not_ready(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(h, "_poll_upgrade_status_curl", not_ready)
+
+    assert await h._upload_firmware_curl_alt_bank(str(firmware)) is False

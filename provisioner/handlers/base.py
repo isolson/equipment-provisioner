@@ -418,6 +418,56 @@ class BaseHandler(ABC):
         """
         return device_info.model if device_info else None
 
+    def provisioning_step_plan(
+        self,
+        has_config: bool,
+        dual_bank: bool,
+        need_fw1: bool,
+        need_fw2: bool,
+    ) -> list[Dict[str, str]]:
+        """Build the validation plan for this concrete provisioning run.
+
+        The plan is derived from handler capabilities and the work selected
+        for the job. It is presentation metadata only; the properties that
+        drive :meth:`provision` remain the source of truth for behavior.
+        """
+        labels = {
+            "login": "Login",
+            "model_confirmed": "Model",
+            "firmware_banks": "Firmware check",
+            "firmware_update_1": "Firmware bank 1",
+            "config_upload": "Config",
+            "config_verify": "Config verify",
+            "firmware_update_2": "Firmware bank 2",
+            "reboot": "Reboot",
+            "verify": "Firmware verify",
+        }
+        keys = ["login", "model_confirmed"]
+        if hasattr(self, "get_firmware_banks"):
+            keys.append("firmware_banks")
+
+        firmware_steps = ["firmware_update_1"]
+        if dual_bank and self.supports_dual_bank:
+            firmware_steps.append("firmware_update_2")
+
+        config_steps = ["config_upload"]
+        if has_config:
+            config_steps.append("config_verify")
+
+        if self.config_after_all_firmware:
+            keys.extend(firmware_steps)
+            if need_fw1 or (dual_bank and self.supports_dual_bank and need_fw2):
+                keys.extend(["reboot", "verify"])
+            keys.extend(config_steps)
+        else:
+            keys.append(firmware_steps[0])
+            keys.extend(config_steps)
+            keys.extend(firmware_steps[1:])
+            if need_fw1 or (dual_bank and self.supports_dual_bank and need_fw2):
+                keys.extend(["reboot", "verify"])
+
+        return [{"key": key, "label": labels[key]} for key in keys]
+
     async def provision(
         self,
         config: Optional[Dict[str, Any]] = None,
@@ -427,7 +477,7 @@ class BaseHandler(ABC):
         dual_bank: bool = True,
         new_password: Optional[str] = None,
         firmware_current: bool = False,
-        on_progress: Optional[Callable[[str, bool, Optional[str]], Awaitable[None]]] = None,
+        on_progress: Optional[Callable[[str, Any, Optional[Any]], Awaitable[None]]] = None,
         firmware_lookup_callback: Optional[Callable[[str, str], tuple]] = None,
         config_backup: bool = False,
     ) -> ProvisioningResult:
@@ -469,7 +519,7 @@ class BaseHandler(ABC):
             phases_completed=[],
         )
 
-        async def notify(step: str, success, detail: Optional[str] = None):
+        async def notify(step: str, success, detail: Optional[Any] = None):
             """Call progress callback if set."""
             if on_progress:
                 try:
@@ -540,6 +590,17 @@ class BaseHandler(ABC):
                 # No get_firmware_banks method but firmware_current hint is set
                 need_fw1 = False
                 need_fw2 = False
+
+            await notify(
+                "step_plan",
+                True,
+                self.provisioning_step_plan(
+                    has_config=bool(config or config_path),
+                    dual_bank=dual_bank,
+                    need_fw1=need_fw1,
+                    need_fw2=need_fw2,
+                ),
+            )
 
             # Config backup (gated by feature flag)
             if config_backup:
@@ -916,7 +977,9 @@ class BaseHandler(ABC):
             # PHASE 10: FINAL VERIFICATION
             _logger.info(f"[PROVISION] Phase 10: Final verification")
             result.new_firmware = await self.get_firmware_version()
-            did_firmware_update = need_fw1 or need_fw2
+            did_firmware_update = need_fw1 or (
+                dual_bank and self.supports_dual_bank and need_fw2
+            )
             if did_firmware_update:
                 await notify("reboot", True, None)
                 await notify("verify", True, result.new_firmware)

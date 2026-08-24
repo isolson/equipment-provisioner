@@ -40,6 +40,84 @@ async def test_single_bank_skips_fw2_phase(spy_handler_factory):
 
 
 @pytest.mark.asyncio
+async def test_step_plan_uses_handler_capabilities(spy_handler_factory):
+    """Single-bank handlers must not advertise a second firmware-bank step."""
+    spy = spy_handler_factory(supports_dual_bank=False)
+    events = []
+
+    async def progress(step, status, detail=None):
+        events.append((step, status, detail))
+
+    result = await spy.provision(**PROVISION_KWARGS, on_progress=progress)
+
+    assert result.success, result.error_message
+    plan = next(detail for step, _status, detail in events if step == "step_plan")
+    keys = [item["key"] for item in plan]
+    assert keys == [
+        "login",
+        "model_confirmed",
+        "firmware_banks",
+        "firmware_update_1",
+        "config_upload",
+        "config_verify",
+        "reboot",
+        "verify",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_step_plan_omits_reboot_verify_when_banks_are_current(spy_handler_factory):
+    """Already-current dual-bank devices have seven checks, not a fixed nine."""
+    spy = spy_handler_factory(
+        supports_dual_bank=True,
+        initial_bank1="new",
+        initial_bank2="new",
+    )
+    events = []
+
+    async def progress(step, status, detail=None):
+        events.append((step, status, detail))
+
+    result = await spy.provision(**PROVISION_KWARGS, on_progress=progress)
+
+    assert result.success, result.error_message
+    plan = next(detail for step, _status, detail in events if step == "step_plan")
+    keys = [item["key"] for item in plan]
+    assert keys == [
+        "login",
+        "model_confirmed",
+        "firmware_banks",
+        "firmware_update_1",
+        "config_upload",
+        "config_verify",
+        "firmware_update_2",
+    ]
+    assert not any(step in ("reboot", "verify") for step, _status, _detail in events)
+
+
+@pytest.mark.asyncio
+async def test_current_single_bank_does_not_report_a_firmware_reboot(spy_handler_factory):
+    """An unused second-bank value must not invent reboot and verify checks."""
+    spy = spy_handler_factory(
+        supports_dual_bank=False,
+        initial_bank1="new",
+        initial_bank2="old",
+    )
+    events = []
+
+    async def progress(step, status, detail=None):
+        events.append((step, status, detail))
+
+    result = await spy.provision(**PROVISION_KWARGS, on_progress=progress)
+
+    assert result.success, result.error_message
+    plan = next(detail for step, _status, detail in events if step == "step_plan")
+    assert "reboot" not in [item["key"] for item in plan]
+    assert "verify" not in [item["key"] for item in plan]
+    assert not any(step in ("reboot", "verify") for step, _status, _detail in events)
+
+
+@pytest.mark.asyncio
 async def test_dual_bank_runs_fw2_phase(spy_handler_factory):
     """supports_dual_bank=True ⇒ FW1 (bank=1) and FW2 (bank=2) both run."""
     spy = spy_handler_factory(supports_dual_bank=True)

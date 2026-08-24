@@ -330,7 +330,7 @@ Each port card shows two zones:
    - `NO LINK` (gray) — no cable / no device
    - `DETECTING` (amber spinner) — waiting for device
    - `READY` (green check) — device detected, tap to provision
-   - `LOGGING IN`, `CHECKING FIRMWARE`, or `APPLYING CONFIG` (blue spinner) — active provisioning step with a "Step N of 7" subtitle
+   - `LOGGING IN`, `CHECKING FIRMWARE`, or `APPLYING CONFIG` (blue spinner) — active step with a `Step N of M` subtitle
    - `COMPLETE` (green check) — all steps passed
    - `FAILED` (red X) — error with truncated message
    - `NEEDS CREDENTIALS` (red alert) — tap to enter password
@@ -343,7 +343,13 @@ Opens an activity log view with:
 - MAC Address, Serial, IP, Link Speed
 - FW Bank 1 and FW Bank 2 with version and active indicator
 
-**Activity log** — timestamped step-by-step entries in provisioning order:
+**Activity log** — timestamped entries from the validation plan for the run.
+
+The backend derives the standard plan from handler capabilities and the selected work. It omits validations that do not apply.
+
+Vendor-specific flows can publish additional validations. For example, MikroTik Netinstall publishes ZTP, WiFi, phone-home, registration, and ship-ready validations.
+
+Standard provisioning uses these validation keys:
 
 | Step | Checklist Key | Detail Shown |
 |------|---------------|--------------|

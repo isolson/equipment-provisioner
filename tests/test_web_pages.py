@@ -163,6 +163,17 @@ def test_dashboard_keeps_behavioral_vendor_branches_hardcoded():
     assert "port.device_type === 'tachyon' ? dir.toUpperCase() : hostname" in html
 
 
+def test_dashboard_progress_uses_run_specific_validation_plan():
+    """The kiosk must not turn nine nullable checklist fields into nine steps."""
+    client = make_client()
+    html = client.get("/").text
+
+    assert "port.step_plan" in html
+    assert "port.step_status" in html
+    assert "cl[k] === undefined || cl[k] === null" in html
+    assert "return { done, total: plan.length };" in html
+
+
 def test_labels_page_renders_guarded_templates():
     client = make_client()
 

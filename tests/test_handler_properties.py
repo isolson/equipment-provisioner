@@ -101,6 +101,21 @@ def test_mikrotik_properties():
     }
 
 
+def test_mikrotik_standard_step_plan_uses_routeros_labels():
+    handler = MikrotikHandler(ip="192.0.2.1", credentials=CREDS)
+    plan = handler.provisioning_step_plan(
+        has_config=True,
+        dual_bank=True,
+        need_fw1=True,
+        need_fw2=False,
+    )
+    labels = {item["key"]: item["label"] for item in plan}
+    assert labels["firmware_banks"] == "Software check"
+    assert labels["firmware_update_1"] == "RouterOS software"
+    assert labels["verify"] == "Software verify"
+    assert "firmware_update_2" not in labels
+
+
 # ---------------------------------------------------------------------------
 # Tachyon — auto-reboot; config_after_all_firmware is conditional on TNS- models
 # ---------------------------------------------------------------------------

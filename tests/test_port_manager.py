@@ -287,6 +287,36 @@ def test_firmware_banks_initial_is_preserved_across_updates():
     assert checklist.firmware_banks == "bank1:7.20.8|bank2:7.20.8|active:1"
 
 
+def test_dynamic_validation_plan_serializes_vendor_specific_steps():
+    """Run-specific checks must not require fixed checklist dataclass fields."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    plan = [
+        {"key": "netinstall", "label": "Netinstall"},
+        {"key": "ztp_ready", "label": "ZTP readiness"},
+        {"key": "ship_ready", "label": "Ship-ready state"},
+    ]
+    manager.set_step_plan(1, plan)
+    manager.update_checklist(1, "netinstall", True, "Firmware flashed")
+    manager.update_checklist(1, "ztp_ready", "loading", "Checking contract")
+
+    status = manager._get_single_port_status(1)
+    assert status["step_plan"] == plan
+    assert status["step_status"] == {
+        "netinstall": True,
+        "ztp_ready": "loading",
+    }
+    assert status["step_details"]["netinstall"] == "Firmware flashed"
+    assert status["step_details"]["ztp_ready"] == "Checking contract"
+
+    manager.reset_checklist(1)
+    status = manager._get_single_port_status(1)
+    assert status["step_plan"] == []
+    assert status["step_status"] == {}
+    assert status["step_details"] == {}
+
+
 def test_port_configs_include_mikrotik_secondary_source_ip():
     """Each provisioning VLAN should carry the shared MikroTik /32 source IP by default."""
     manager = PortManager(num_ports=2)
