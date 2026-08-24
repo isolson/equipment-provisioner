@@ -564,6 +564,8 @@
                     if (message.data?.checklist && ports[message.port_number]) {
                         const oldCl = ports[message.port_number].checklist || {};
                         const newCl = message.data.checklist;
+                        const oldSteps = ports[message.port_number].step_status || {};
+                        const newSteps = message.data.step_status || {};
                         const deviceType = message.data?.device_type || ports[message.port_number]?.device_type;
                         const pn = message.port_number;
                         if (!portActivityLogs[pn]) portActivityLogs[pn] = [];
@@ -573,17 +575,24 @@
                             firmware_update_2: firmwareStepLabel(deviceType, 'firmware_update_2'),
                             config_upload: 'Config', config_verify: 'Verify',
                             reboot: 'Reboot', verify: 'Verify FW' };
+                        for (const item of (message.data.step_plan || [])) {
+                            if (item?.key) stepNames[item.key] = item.label || item.key;
+                        }
                         // Parse FW versions for detail on fw update steps
                         let fwVersions = {};
                         const fwSrc = newCl.firmware_banks || oldCl.firmware_banks;
                         if (fwSrc) fwVersions = parseFirmwareBanks(fwSrc);
                         for (const key of Object.keys(stepNames)) {
-                            if (newCl[key] !== undefined && newCl[key] !== oldCl[key]) {
-                                const state = getIconState(newCl, key);
-                                let detail = '';
-                                if (key === 'model_confirmed' && typeof newCl[key] === 'string') detail = newCl[key];
-                                if (key === 'firmware_banks' && typeof newCl[key] === 'string') {
-                                    detail = firmwareBanksDetail(parseFirmwareBanks(newCl[key]), deviceType);
+                            const hasNewDynamic = Object.prototype.hasOwnProperty.call(newSteps, key);
+                            const hasOldDynamic = Object.prototype.hasOwnProperty.call(oldSteps, key);
+                            const newValue = hasNewDynamic ? newSteps[key] : newCl[key];
+                            const oldValue = hasOldDynamic ? oldSteps[key] : oldCl[key];
+                            if (newValue !== undefined && newValue !== null && newValue !== oldValue) {
+                                const state = getIconState({ [key]: newValue }, key);
+                                let detail = message.data.step_details?.[key] || '';
+                                if (key === 'model_confirmed' && typeof newValue === 'string') detail = newValue;
+                                if (key === 'firmware_banks' && typeof newValue === 'string') {
+                                    detail = firmwareBanksDetail(parseFirmwareBanks(newValue), deviceType);
                                 }
                                 if (key === 'firmware_update_1') {
                                     detail = deviceType === 'mikrotik'
@@ -771,11 +780,29 @@
 
         function getStepProgress(port) {
             const cl = port.checklist || {};
-            // Only count steps that are present in the checklist (not all possible steps)
+            const dynamic = port.step_status || {};
+            const plan = Array.isArray(port.step_plan) ? port.step_plan : [];
+            if (plan.length > 0) {
+                let done = 0;
+                for (const item of plan) {
+                    const key = typeof item === 'string' ? item : item.key;
+                    const v = Object.prototype.hasOwnProperty.call(dynamic, key)
+                        ? dynamic[key]
+                        : cl[key];
+                    if (v === true || v === false || v === 'skipped' || v === 'unverified'
+                        || (typeof v === 'string' && v.length > 0 && v !== 'loading' && v !== 'running')) {
+                        done++;
+                    }
+                }
+                return { done, total: plan.length };
+            }
+
+            // Backward-compatible fallback for hosts without a run-specific
+            // plan. Null means not applicable; it must not inflate the total.
             const allKeys = ['login', 'model_confirmed', 'firmware_banks', 'firmware_update_1', 'config_upload', 'config_verify', 'firmware_update_2', 'reboot', 'verify'];
             let done = 0, total = 0;
             for (const k of allKeys) {
-                if (cl[k] === undefined) continue;
+                if (cl[k] === undefined || cl[k] === null) continue;
                 total++;
                 const v = cl[k];
                 if (v === true || v === 'skipped' || (typeof v === 'string' && v.length > 0 && v !== 'loading')) done++;
@@ -830,9 +857,23 @@
                 let text = stepLabels[port.current_step];
                 if (!text) {
                     const cl = port.checklist || {};
+                    const dynamic = port.step_status || {};
+                    const plan = Array.isArray(port.step_plan) ? port.step_plan : [];
+                    for (const item of plan) {
+                        const key = typeof item === 'string' ? item : item.key;
+                        const value = Object.prototype.hasOwnProperty.call(dynamic, key)
+                            ? dynamic[key]
+                            : cl[key];
+                        if (value === 'loading' || value === 'running') {
+                            text = (typeof item === 'string' ? item : (item.label || key))
+                                .replace(/_/g, ' ')
+                                .toUpperCase();
+                            break;
+                        }
+                    }
                     const stepOrder = ['login', 'model_confirmed', 'firmware_banks', 'firmware_update_1', 'config_upload', 'config_verify', 'firmware_update_2', 'reboot', 'verify'];
                     for (const k of stepOrder) {
-                        if (cl[k] === 'loading') { text = stepLabels[k]; break; }
+                        if (!text && cl[k] === 'loading') { text = stepLabels[k]; break; }
                     }
                     if (!text) text = 'STARTING';
                 }
@@ -1057,10 +1098,10 @@
                 const color = stateColors[entry.state] || '#6b7280';
                 const loadingAnim = entry.state === 'loading' ? 'animation:icon-pulse 1.5s infinite;' : '';
                 return `<div class="log-entry" ${entry.state === 'loading' ? 'style="background:#eff6ff;border-radius:4px;margin:0 -4px;padding:5px 4px;"' : ''}>
-                    <span class="log-time">${entry.time || ''}</span>
+                    <span class="log-time">${escapeHtml(entry.time || '')}</span>
                     <span class="log-icon" style="color:${color};${loadingAnim}">${icon}</span>
-                    <span class="log-step" style="color:${color};${entry.state === 'loading' ? 'font-weight:600;' : ''}">${entry.step}</span>
-                    ${entry.detail ? `<span class="log-detail">${entry.detail}</span>` : ''}
+                    <span class="log-step" style="color:${color};${entry.state === 'loading' ? 'font-weight:600;' : ''}">${escapeHtml(entry.step)}</span>
+                    ${entry.detail ? `<span class="log-detail">${escapeHtml(entry.detail)}</span>` : ''}
                 </div>`;
             }
 
@@ -1099,14 +1140,33 @@
 
             // Build unified list in canonical provisioning order
             // Steps that never appear in checklist or log are omitted (e.g. reboot when no FW update)
-            const allSteps = [
+            const defaultSteps = [
                 ['login', 'Login'], ['model_confirmed', 'Model'], ['firmware_banks', 'FW Check'],
                 ['firmware_update_1', isMikrotik ? 'Software' : 'FW Bank 1'], ['config_upload', 'Config'], ['config_verify', 'Verify'],
                 ['firmware_update_2', isMikrotik ? 'RouterBOARD' : 'FW Bank 2'], ['reboot', 'Reboot'], ['verify', 'Verify FW']
             ];
             const checklist = port?.checklist || {};
+            const dynamic = port?.step_status || {};
+            const details = port?.step_details || {};
+            const planned = Array.isArray(port?.step_plan) ? port.step_plan : [];
+            const allSteps = planned.length > 0
+                ? planned.map(item => [
+                    typeof item === 'string' ? item : item.key,
+                    typeof item === 'string' ? item.replace(/_/g, ' ') : (item.label || item.key),
+                ])
+                : defaultSteps;
             const isActive = port && (port.provisioning || port.waiting_for_boot);
             const curStep = port?.current_step;
+
+            function stepValue(key) {
+                return Object.prototype.hasOwnProperty.call(dynamic, key)
+                    ? dynamic[key]
+                    : checklist[key];
+            }
+
+            function stepState(key) {
+                return getIconState({ [key]: stepValue(key) }, key);
+            }
 
             // Index logged entries by step label (use last entry for each label)
             const logByLabel = {};
@@ -1121,7 +1181,7 @@
             if (logByLabel['Started']) {
                 const startEntry = { ...logByLabel['Started'] };
                 const hasAnyStep = Object.keys(logByLabel).some(k => k !== 'Started' && k !== 'Complete' && k !== 'Failed')
-                    || allSteps.some(([k]) => { const s = getIconState(checklist, k); return s === 'success' || s === 'error' || s === 'skipped'; });
+                    || allSteps.some(([k]) => { const s = stepState(k); return s === 'success' || s === 'error' || s === 'skipped'; });
                 if (hasAnyStep) startEntry.state = 'success';
                 html += renderEntry(startEntry);
             }
@@ -1131,17 +1191,18 @@
             let lastLoadingKey = null;
             if (isActive) {
                 for (const [key] of allSteps) {
-                    if (getIconState(checklist, key) === 'loading') lastLoadingKey = key;
+                    if (stepState(key) === 'loading') lastLoadingKey = key;
                 }
             }
 
             for (const [key, label] of allSteps) {
                 // Skip steps that never appeared in checklist or log — they weren't part of this run
                 const logged = logByLabel[label];
-                if (checklist[key] === undefined && !logged) continue;
+                const value = stepValue(key);
+                if ((value === undefined || value === null) && !logged && planned.length === 0) continue;
 
                 // Determine state from checklist
-                let state = getIconState(checklist, key);
+                let state = stepState(key);
 
                 // Only the LAST loading step should actually show as loading.
                 // Earlier 'loading' steps have implicitly succeeded (we moved past them).
@@ -1152,8 +1213,8 @@
                 if (isActive && state === 'pending' && curStep === key) state = 'loading';
 
                 // Build detail text
-                let detail = '';
-                if (key === 'model_confirmed' && typeof checklist[key] === 'string') detail = checklist[key];
+                let detail = details[key] || '';
+                if (key === 'model_confirmed' && typeof value === 'string') detail = value;
                 if (key === 'firmware_update_1') {
                     detail = formatFromTo(
                         firmwareValueForStep(fwStart, port?.device_type, key),

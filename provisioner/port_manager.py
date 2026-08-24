@@ -199,6 +199,13 @@ class PortState:
     last_result: Optional[str] = None  # "success" or "failed"
     last_error: Optional[str] = None  # Error message if failed
     checklist: ProvisioningChecklist = field(default_factory=ProvisioningChecklist)  # Step-by-step progress
+    # Ordered, run-specific validation plan plus generic status/detail maps.
+    # The legacy checklist remains the compatibility surface for existing API
+    # clients, while these fields let capability-driven flows (and MikroTik
+    # Netinstall) expose only the checks they actually run.
+    step_plan: List[Dict[str, str]] = field(default_factory=list)
+    step_status: Dict[str, Union[bool, str]] = field(default_factory=dict)
+    step_details: Dict[str, str] = field(default_factory=dict)
     provision_attempted: bool = False  # True once provisioning has been attempted (prevents re-trigger)
     last_provisioned_at: Optional[float] = None  # Timestamp of last successful provisioning (survives disconnect)
     last_provisioned_mac: Optional[str] = None  # MAC of the last successfully provisioned device — cooldown is bypassed when a different MAC appears
@@ -888,7 +895,7 @@ class PortManager:
                 state.last_error = None
                 state.provision_attempted = False
                 state.provisioning_ended = None
-                state.checklist.reset()
+                self.reset_checklist(port_num)
                 self.clear_device_mode(port_num)
 
     # Grace period after provisioning before marking device as disconnected (seconds)
@@ -979,7 +986,7 @@ class PortManager:
                 state.provisioning_ended = None
                 state.last_bootp_fired_at = None
                 state.last_bootp_fired_mac = None
-                state.checklist.reset()
+                self.reset_checklist(port_num)
                 self.clear_device_mode(port_num)
                 try:
                     from provisioner.web.websocket import notify_port_change
@@ -1684,7 +1691,7 @@ class PortManager:
             state.last_bootp_fired_at = None
             state.last_bootp_fired_mac = None
             state.provisioning_ended = None
-            state.checklist.reset()
+            self.reset_checklist(port_num)
             self.clear_device_mode(port_num)
 
     def update_port_device_info(
@@ -1718,6 +1725,7 @@ class PortManager:
         port_num: int,
         step: str,
         status: Optional[Union[bool, str]],
+        detail: Optional[str] = None,
     ) -> None:
         """Update a specific checklist step for a port.
 
@@ -1728,12 +1736,39 @@ class PortManager:
         """
         if port_num in self.port_states:
             state = self.port_states[port_num]
+            if status is not None:
+                state.step_status[step] = status
+            if detail:
+                state.step_details[step] = detail
             if hasattr(state.checklist, step):
                 if step == "firmware_banks" and isinstance(status, str):
                     if not state.checklist.firmware_banks_initial:
                         state.checklist.firmware_banks_initial = status
                 setattr(state.checklist, step, status)
                 logger.debug(f"Port {port_num} checklist: {step} = {status}")
+
+    def set_step_plan(self, port_num: int, steps: List[Dict[str, str]]) -> None:
+        """Set the ordered validation plan for the current port run.
+
+        Each entry has a stable ``key`` and a user-facing ``label``. Unknown
+        keys are intentional: vendor-specific flows can publish their checks
+        without adding another fixed field to :class:`ProvisioningChecklist`.
+        """
+        if port_num not in self.port_states:
+            return
+
+        normalized = []
+        seen = set()
+        for item in steps:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()
+            if not key or key in seen:
+                continue
+            label = str(item.get("label", key.replace("_", " ").title())).strip()
+            normalized.append({"key": key, "label": label or key})
+            seen.add(key)
+        self.port_states[port_num].step_plan = normalized
 
     def reset_checklist(self, port_num: int) -> None:
         """Reset the checklist for a port (for new device or re-provisioning).
@@ -1744,6 +1779,9 @@ class PortManager:
         if port_num in self.port_states:
             state = self.port_states[port_num]
             state.checklist.reset()
+            state.step_plan.clear()
+            state.step_status.clear()
+            state.step_details.clear()
             logger.debug(f"Port {port_num} checklist reset")
 
     def get_link_events_since(
@@ -1785,6 +1823,9 @@ class PortManager:
                 "last_result": state.last_result,
                 "last_error": state.last_error,
                 "checklist": state.checklist.to_dict(),
+                "step_plan": state.step_plan,
+                "step_status": state.step_status,
+                "step_details": state.step_details,
                 "device_mode": state.device_mode,
                 "mode_config": state.mode_config,
                 "ptp_link_id": state.ptp_link_id,
@@ -1815,6 +1856,9 @@ class PortManager:
             "last_result": state.last_result,
             "last_error": state.last_error,
             "checklist": state.checklist.to_dict(),
+            "step_plan": state.step_plan,
+            "step_status": state.step_status,
+            "step_details": state.step_details,
             "device_mode": state.device_mode,
             "mode_config": state.mode_config,
             "ptp_link_id": state.ptp_link_id,
@@ -1906,7 +1950,7 @@ class PortManager:
                     state.last_error = None
                     state.provision_attempted = False
                     state.provisioning_ended = None
-                    state.checklist.reset()
+                    self.reset_checklist(port_num)
                     self.clear_device_mode(port_num)
 
                 # Start boot wait timer - will ping until device responds, then wait for web init

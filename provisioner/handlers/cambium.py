@@ -1995,9 +1995,10 @@ class CambiumHandler(BaseHandler):
                 if ready:
                     logger.info(f"Firmware ready on {self.ip} via {self.interface}")
                     return True
-                else:
-                    logger.warning(f"Firmware upload status unclear, assuming success")
-                    return True
+                logger.error(
+                    "Firmware upload was not confirmed ready; refusing to reboot"
+                )
+                return False
             else:
                 # Clean up cookie file on error
                 try:
@@ -2124,8 +2125,10 @@ class CambiumHandler(BaseHandler):
             if ready:
                 logger.info(f"Alt-bank firmware ready on {self.ip}")
                 return True
-            logger.warning("Alt-bank upgrade status unclear, assuming success")
-            return True
+            logger.error(
+                "Alt-bank firmware upgrade was not confirmed ready; refusing to reboot"
+            )
+            return False
 
         except Exception as e:
             logger.error(f"Failed to upload firmware to alt bank via curl: {e}")
@@ -2140,6 +2143,7 @@ class CambiumHandler(BaseHandler):
         import time as _time
         start_time = _time.time()
         url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/get_upgrade_status"
+        last_summary = None
 
         while _time.time() - start_time < timeout:
             try:
@@ -2165,6 +2169,20 @@ class CambiumHandler(BaseHandler):
                     logger.debug(f"Upgrade status: {response}")
                     try:
                         data = json.loads(response)
+                        summary = (
+                            data.get("status"),
+                            data.get("success"),
+                            data.get("percent"),
+                            data.get("progress"),
+                            data.get("error"),
+                        )
+                        if summary != last_summary:
+                            logger.info(
+                                "Cambium alt-bank status: status=%r success=%r "
+                                "percent=%r progress=%r error=%r",
+                                *summary,
+                            )
+                            last_summary = summary
                         if data.get("status") == 7:
                             logger.info("Alt-bank upgrade complete (status=7)")
                             return True
@@ -2173,7 +2191,7 @@ class CambiumHandler(BaseHandler):
                         if data.get("percent") == 100 or data.get("progress") == 100:
                             return True
                         if data.get("error") and data.get("error") != 0:
-                            logger.error(f"Upgrade status error: {data}")
+                            logger.error("Cambium alt-bank status error: %r", data.get("error"))
                             return False
                         logger.debug(f"Alt-bank upgrade in progress (status={data.get('status', '?')})")
                     except json.JSONDecodeError:
@@ -2200,6 +2218,7 @@ class CambiumHandler(BaseHandler):
         import time
         start_time = time.time()
         url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/get_upload_status"
+        last_summary = None
 
         while time.time() - start_time < timeout:
             try:
@@ -2227,6 +2246,20 @@ class CambiumHandler(BaseHandler):
 
                     try:
                         data = json.loads(response)
+                        summary = (
+                            data.get("status"),
+                            data.get("success"),
+                            data.get("percent"),
+                            data.get("progress"),
+                            data.get("error"),
+                        )
+                        if summary != last_summary:
+                            logger.info(
+                                "Cambium upload status: status=%r success=%r "
+                                "percent=%r progress=%r error=%r",
+                                *summary,
+                            )
+                            last_summary = summary
                         # Status 7 = firmware unpacked and ready for reboot (confirmed from Cambium web UI)
                         if data.get("status") == 7:
                             logger.info(f"Firmware unpacked and ready (status=7)")
@@ -2238,7 +2271,7 @@ class CambiumHandler(BaseHandler):
                             return True
                         # Check for error (error field > 0 indicates failure)
                         if data.get("error") and data.get("error") != 0:
-                            logger.error(f"Upload status error: {data}")
+                            logger.error("Cambium upload status error: %r", data.get("error"))
                             return False
                         # Log current status while waiting
                         current_status = data.get("status", "unknown")

@@ -31,6 +31,9 @@ class DummyPortManager:
                 last_error=None,
                 device_mac=None,
                 expecting_reboot=False,
+                step_plan=[],
+                step_status={},
+                step_details={},
             )
         }
         # Ordered log of set_expecting_reboot(bool) calls for bracketing tests.
@@ -65,8 +68,20 @@ class DummyPortManager:
         self.port_states[port_number].expecting_reboot = expecting
         self.expecting_reboot_calls.append(expecting)
 
-    def update_checklist(self, port_number, step, value):
-        pass
+    def reset_checklist(self, port_number):
+        state = self.port_states[port_number]
+        state.step_plan = []
+        state.step_status = {}
+        state.step_details = {}
+
+    def set_step_plan(self, port_number, steps):
+        self.port_states[port_number].step_plan = list(steps)
+
+    def update_checklist(self, port_number, step, value, detail=None):
+        state = self.port_states[port_number]
+        state.step_status[step] = value
+        if detail:
+            state.step_details[step] = detail
 
     def _get_single_port_status(self, port_number):
         state = self.port_states[port_number]
@@ -75,6 +90,9 @@ class DummyPortManager:
             "last_result": state.last_result,
             "last_error": state.last_error,
             "checklist": {},
+            "step_plan": state.step_plan,
+            "step_status": state.step_status,
+            "step_details": state.step_details,
         }
 
     def update_port_device_info(self, port_number, mac=None, serial=None, model=None):
@@ -228,6 +246,24 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
     assert args[:3] == (5, 0, True)
     assert "label" not in args[3]
     assert provisioner.port_manager.port_states[5].last_result == "success"
+    progress_state = provisioner.port_manager.port_states[5]
+    plan_keys = [item["key"] for item in progress_state.step_plan]
+    assert plan_keys == [
+        "script_fetch",
+        "netinstall",
+        "reboot",
+        "login",
+        "model_confirmed",
+        "base_flash",
+        "ztp_ready",
+        "wifi_bind",
+        "phone_home_url",
+        "register",
+        "ship_ready",
+    ]
+    assert progress_state.step_status["ztp_ready"] is True
+    assert progress_state.step_status["wifi_bind"] is True
+    assert progress_state.step_status["ship_ready"] is True
     assert FakeMikrotikHandler.last_netinstall_kwargs["firmware_paths"] == [tmp_path / "routeros-arm64.npk"]
     # Both first-boot scripts are backend-owned: the served Mode script body
     # must reach netinstall-cli's -sm exactly as fetched.

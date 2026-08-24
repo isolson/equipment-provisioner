@@ -484,6 +484,21 @@ async def _run_netinstall(provisioner, port_number: int):
 
     port_manager = provisioner.port_manager
     port_manager.mark_port_provisioning(port_number, True)
+    port_manager.reset_checklist(port_number)
+
+    netinstall_step_plan = [
+        {"key": "script_fetch", "label": "Fetch served scripts"},
+        {"key": "netinstall", "label": "Netinstall"},
+        {"key": "reboot", "label": "First boot"},
+        {"key": "login", "label": "Login"},
+        {"key": "model_confirmed", "label": "Device identity"},
+        {"key": "base_flash", "label": "Base flash marker"},
+        {"key": "ztp_ready", "label": "ZTP readiness"},
+        {"key": "phone_home_url", "label": "Phone-home endpoint"},
+        {"key": "register", "label": "Equipment registration"},
+        {"key": "ship_ready", "label": "Ship-ready state"},
+    ]
+    port_manager.set_step_plan(port_number, netinstall_step_plan)
 
     state = port_manager.port_states.get(port_number)
     if state:
@@ -495,7 +510,11 @@ async def _run_netinstall(provisioner, port_number: int):
 
     # Progress callback for UI
     async def on_progress(step, success, detail=None):
-        port_manager.update_checklist(port_number, step, detail if detail else success)
+        status = "loading" if success == "running" else success
+        # device_info carries MAC/serial for internal state transfer. Do not
+        # copy those identifiers into the generic validation-detail map.
+        if step != "device_info":
+            port_manager.update_checklist(port_number, step, status, detail)
         port_status = port_manager._get_single_port_status(port_number)
         await notify_port_change(port_number, port_status)
 
@@ -580,17 +599,16 @@ async def _run_netinstall(provisioner, port_number: int):
         await finish(False, "No bootstrap password (fetch failed, MIKROTIK_BOOTSTRAP_PASS unset)")
         return
 
-    await on_progress("config", "running", "Fetching served netinstall-bootstrap.rsc...")
+    await on_progress("script_fetch", "running", "Fetching served Netinstall scripts...")
     try:
         configure_script_body = await MikrotikHandler.fetch_netinstall_bootstrap(
             ztp_api_url,
             ztp_api_key,
         )
     except Exception as exc:
-        await on_progress("config", False, f"Fetch failed: {str(exc)[:100]}")
+        await on_progress("script_fetch", False, f"Fetch failed: {str(exc)[:100]}")
         await finish(False, f"netinstall-bootstrap fetch failed: {exc}")
         return
-    await on_progress("config", True, "Fetched served netinstall-bootstrap.rsc")
 
     # The Mode script is also backend-owned (served ungated — a single static
     # device-mode command, no secrets). Stage 1 of the wifi runbook requires
@@ -598,9 +616,10 @@ async def _run_netinstall(provisioner, port_number: int):
     try:
         mode_script_body = await MikrotikHandler.fetch_netinstall_mode(ztp_api_url)
     except Exception as exc:
-        await on_progress("config", False, f"Mode-script fetch failed: {str(exc)[:100]}")
+        await on_progress("script_fetch", False, f"Mode-script fetch failed: {str(exc)[:100]}")
         await finish(False, f"netinstall-mode fetch failed: {exc}")
         return
+    await on_progress("script_fetch", True, "Fetched Configure and Mode scripts")
 
     try:
         # Step 1: Netinstall with the served Mode script plus the served
@@ -652,6 +671,7 @@ async def _run_netinstall(provisioner, port_number: int):
         # Step 3: Connect and get device info
         await on_progress("login", "running")
         if not await handler.connect():
+            await on_progress("login", False, "Failed to connect after Netinstall")
             await finish(False, "Failed to connect after Netinstall")
             return
         await on_progress("login", True)
@@ -672,7 +692,7 @@ async def _run_netinstall(provisioner, port_number: int):
         # rather than POST `UNKNOWN` to the wifi-api and pollute the registry.
         serial = info.serial_number
         if not serial or serial.upper() == "UNKNOWN":
-            await on_progress("config", False, "No serial — cannot register")
+            await on_progress("model_confirmed", False, "No serial — cannot register")
             await finish(False, "Could not read RouterBOARD serial; refusing to register")
             return
 
@@ -683,7 +703,7 @@ async def _run_netinstall(provisioner, port_number: int):
                 "Netinstall pipeline failed on port %s: base_flash_version marker missing",
                 port_number,
             )
-            await on_progress("config", False, "base_flash_version marker missing")
+            await on_progress("base_flash", False, "base_flash_version marker missing")
             await finish(
                 False,
                 f"/system/note missing base_flash_version "
@@ -696,7 +716,7 @@ async def _run_netinstall(provisioner, port_number: int):
             port_number,
             detected_bf,
         )
-        await on_progress("config", True, f"Configure script verified ({detected_bf})")
+        await on_progress("base_flash", True, f"Configure script verified ({detected_bf})")
 
         # Step 5: Verify the served Configure script left the device ZTP-ready.
         ztp_ready, ztp_detail = await handler.verify_ztp_ready(serial)
@@ -718,6 +738,14 @@ async def _run_netinstall(provisioner, port_number: int):
         # unit would ship a wifi-dead router.
         device_arch = (getattr(info, "hardware_version", "") or "").lower()
         if MikrotikHandler.wifi_driver_for_model(info.model, device_arch):
+            wifi_step = {"key": "wifi_bind", "label": "WiFi radio binding"}
+            phone_home_index = next(
+                index
+                for index, item in enumerate(netinstall_step_plan)
+                if item["key"] == "phone_home_url"
+            )
+            netinstall_step_plan.insert(phone_home_index, wifi_step)
+            port_manager.set_step_plan(port_number, netinstall_step_plan)
             if not await handler.verify_wifi_radios_bound():
                 logger.error(
                     "Netinstall pipeline failed on port %s: /interface/wifi is "
@@ -792,7 +820,9 @@ async def _run_netinstall(provisioner, port_number: int):
             ),
         )
         try:
+            await on_progress("register", "running", "Registering equipment")
             readback = await register_mikrotik(**register_kwargs)
+            await on_progress("register", True, "Equipment registered")
 
             if not any(
                 key in readback for key in ("role", "customer_id", "has_checkin_secret")

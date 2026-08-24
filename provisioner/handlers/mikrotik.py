@@ -65,6 +65,30 @@ class MikrotikHandler(BaseHandler):
             return device_info.hardware_version
         return super().firmware_lookup_key(device_info)
 
+    def provisioning_step_plan(
+        self,
+        has_config: bool,
+        dual_bank: bool,
+        need_fw1: bool,
+        need_fw2: bool,
+    ) -> list[Dict[str, str]]:
+        """Use RouterOS terminology for the standard (non-Netinstall) flow."""
+        plan = super().provisioning_step_plan(
+            has_config=has_config,
+            dual_bank=dual_bank,
+            need_fw1=need_fw1,
+            need_fw2=need_fw2,
+        )
+        labels = {
+            "firmware_banks": "Software check",
+            "firmware_update_1": "RouterOS software",
+            "verify": "Software verify",
+        }
+        for item in plan:
+            if item["key"] in labels:
+                item["label"] = labels[item["key"]]
+        return plan
+
     def validate_firmware_for_model(self, firmware_path: str, model: str) -> tuple[bool, str]:
         """Validate RouterOS package before upload."""
         filename = Path(firmware_path).name.lower()

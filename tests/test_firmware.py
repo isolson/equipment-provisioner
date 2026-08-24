@@ -58,6 +58,12 @@ class TestVersionExtraction:
         expected3 = "1.12.3.54970"
         assert self.manager._extract_version_from_filename(filename3) == expected3
 
+        # Current Tachyon releases include a v prefix. Keep the build/revision
+        # component so an already-current device is not needlessly reflashed.
+        filename4 = "tna-30x-v1.15.1-r55177-20260728-sysupgrade.bin"
+        expected4 = "1.15.1.55177"
+        assert self.manager._extract_version_from_filename(filename4) == expected4
+
     def test_extract_unknown_format(self):
         """Test handling of unrecognized filename formats."""
         assert self.manager._extract_version_from_filename("random_file.bin") == "unknown"
