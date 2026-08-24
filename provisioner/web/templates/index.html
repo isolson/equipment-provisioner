@@ -187,6 +187,72 @@
             backdrop-filter: blur(4px);
         }
 
+        #modal-title,
+        #modal-footer,
+        .workflow-actions {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        .modal-action {
+            min-height: 48px;
+            padding: 0 18px;
+            border: 1px solid transparent;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 700;
+            line-height: 1.2;
+            white-space: nowrap;
+        }
+        .modal-action-primary { background: #2563eb; color: #ffffff; }
+        .modal-action-primary:hover { background: #1d4ed8; }
+        .modal-action-secondary {
+            background: #ffffff;
+            border-color: #cbd5e1;
+            color: #334155;
+        }
+        .modal-action-secondary:hover { background: #f8fafc; }
+        .workflow-actions {
+            margin-top: 16px;
+            padding: 14px;
+            border: 1px solid #dbeafe;
+            border-radius: 12px;
+            background: #eff6ff;
+        }
+        .workflow-actions-title { color: #1e3a8a; font-size: 14px; font-weight: 750; }
+        .workflow-actions-help { color: #475569; font-size: 12px; margin-top: 2px; }
+        .workflow-actions-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 12px;
+        }
+        .workflow-actions-grid .modal-action { width: 100%; }
+        .service-actions {
+            margin-top: 14px;
+            border-top: 1px solid #e5e7eb;
+            padding-top: 10px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        .service-actions summary {
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+            color: #64748b;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 650;
+        }
+        .service-action-button {
+            width: 100%;
+            min-height: 48px;
+            border: 1px solid #f59e0b;
+            border-radius: 10px;
+            background: #fffbeb;
+            color: #92400e;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: #f3f4f6; }
         ::-webkit-scrollbar-thumb { background: #9ca3af; border-radius: 4px; }
@@ -268,14 +334,14 @@
         <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md bg-white rounded-xl shadow-xl overflow-hidden flex flex-col max-h-[80vh] border border-gray-300">
             <div class="px-5 py-3 border-b border-gray-300 flex items-center justify-between">
                 <h3 class="text-lg font-bold" id="modal-title">Port Actions</h3>
-                <button onclick="closeModal()" class="p-2 rounded-lg hover:bg-gray-100">
+                <button onclick="closeModal()" class="w-11 h-11 flex items-center justify-center rounded-lg hover:bg-gray-100" aria-label="Close port details">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                     </svg>
                 </button>
             </div>
             <div class="flex-1 overflow-y-auto p-5" id="modal-content"></div>
-            <div class="px-5 py-3 border-t border-gray-300 flex gap-2" id="modal-footer"></div>
+            <div class="px-5 py-3 border-t border-gray-300 flex flex-wrap justify-end gap-2" id="modal-footer"></div>
         </div>
     </div>
 
@@ -695,30 +761,6 @@
             return speed.replace('bps', '').replace('Gbps', 'G').replace('Mbps', 'M');
         }
 
-        function provisionSucceeded(port) {
-            return port.last_result === 'complete' || port.last_result === 'success';
-        }
-
-        function supportsModeConfiguration(port) {
-            return port.device_type === 'cambium' || port.device_type === 'tachyon';
-        }
-
-        function deploymentReadiness(port) {
-            if (!provisionSucceeded(port)) return null;
-
-            // Standard provisioning must establish and verify the SM baseline
-            // before a Cambium or Tachyon radio is deployable. AP/PTP are
-            // optional post-provision conversions, never substitutes for a
-            // missing SM template.
-            if (supportsModeConfiguration(port) && !port.device_mode) {
-                const checklist = port.checklist || {};
-                if (checklist.config_upload !== true) return 'sm-config-missing';
-                if (checklist.config_verify !== true) return 'sm-config-unverified';
-            }
-
-            return 'ready';
-        }
-
         function getCardState(port) {
             const checklist = port.checklist || {};
 
@@ -727,12 +769,13 @@
             // not paint the card COMPLETE during that uncertainty window: it
             // may be a rapid equipment swap rather than the old unit rebooting.
             if (port.waiting_for_boot) return 'warning';
-
-            const readiness = deploymentReadiness(port);
-            if (readiness === 'sm-config-missing' || readiness === 'sm-config-unverified') return 'warning';
+            if (port.provisioning) return 'active';
 
             // Provisioning result survives link-down (e.g. device changed networks after config)
-            if (readiness === 'ready') return 'success';
+            if (port.workflow?.state === 'action_required'
+                || port.workflow?.state === 'config_required'
+                || port.workflow?.state === 'config_unverified') return 'warning';
+            if (port.last_result === 'complete' || port.last_result === 'success') return 'success';
             if (port.last_result === 'failed') return 'error';
 
             if (!port.link_up) return 'idle';
@@ -873,22 +916,27 @@
                 const sub = port.link_up ? 'Checking connected device...' : 'Waiting for link...';
                 return { text: 'BOOTING', sub, cls: 'booting', icon: 'spinner' };
             }
-            const readiness = deploymentReadiness(port);
-            if (readiness === 'sm-config-missing') {
-                return { text: 'SM CONFIG MISSING', sub: 'Cannot deploy', cls: 'warning', icon: 'alert' };
-            }
-            if (readiness === 'sm-config-unverified') {
-                return { text: 'SM CONFIG UNVERIFIED', sub: 'Applied but not confirmed', cls: 'warning', icon: 'alert' };
-            }
             // Provisioning result survives link-down (device may have changed networks)
-            if (readiness === 'ready') {
+            const isDone = (port.last_result === 'complete' || port.last_result === 'success')
+                && port.workflow?.state !== 'running';
+            if (isDone) {
+                const baselineMode = (port.workflow?.baseline_mode || 'standard').toUpperCase();
+                if (port.workflow?.state === 'config_required') {
+                    return { text: `${baselineMode} CONFIG MISSING`, sub: 'Cannot deploy', cls: 'warning', icon: 'alert' };
+                }
+                if (port.workflow?.state === 'config_unverified') {
+                    return { text: `${baselineMode} CONFIG UNVERIFIED`, sub: 'Applied but not confirmed', cls: 'warning', icon: 'alert' };
+                }
+                if (port.workflow?.state === 'action_required') {
+                    return { text: 'ACTION REQUIRED', sub: 'Choose AP or PTP', cls: 'warning', icon: 'alert' };
+                }
                 let sub = 'Ready to deploy';
                 if (port.device_mode) {
                     const mc = port.mode_config || {};
                     if (port.device_mode === 'ap') sub = `AP \u2014 ${mc.hostname || ''}`;
                     else if (port.device_mode.startsWith('ptp')) sub = `PTP ${mc.side || ''} \u2014 ${mc.hostname || ''}`;
-                } else if (supportsModeConfiguration(port)) {
-                    sub = 'SM \u2014 Ready to deploy';
+                } else if (port.workflow?.baseline_mode) {
+                    sub = `${port.workflow.baseline_mode.toUpperCase()} \u2014 Ready to deploy`;
                 }
                 return { text: 'COMPLETE', sub, cls: 'complete', icon: 'check' };
             }
@@ -946,10 +994,12 @@
             }
             // last_result already handled at top of function
             const loginOk = checklist.login === true;
+            const requiresBaseline = Boolean(port.workflow?.baseline_mode)
+                && !port.device_mode;
             const configOk = checklist.config_upload === true
-                || (checklist.config_upload === 'skipped' && !supportsModeConfiguration(port))
+                || (checklist.config_upload === 'skipped' && !requiresBaseline)
                 || Boolean(port.device_mode);
-            const verifyOk = supportsModeConfiguration(port)
+            const verifyOk = requiresBaseline
                 ? checklist.config_verify === true || Boolean(port.device_mode)
                 : checklist.verify === true || checklist.config_verify === true
                     || checklist.config_verify === 'skipped';
@@ -1033,6 +1083,130 @@
             return div;
         }
 
+        // Modal workflow actions
+        function setPortModalFooter(html) {
+            const footer = document.getElementById('modal-footer');
+            footer.innerHTML = html;
+            footer.style.display = html.trim() ? 'flex' : 'none';
+        }
+
+        function workflowForPort(port) {
+            const active = !!(port?.provisioning || port?.waiting_for_boot);
+            const failed = port?.last_result === 'failed';
+
+            // Provisioning lifecycle events arrive just ahead of the next
+            // fully serialized port update. Suppress stale actions during
+            // that brief handoff while keeping capabilities server-owned.
+            if (active) {
+                return {
+                    state: 'running',
+                    required_action: null,
+                    available_actions: [],
+                    service_actions: [],
+                };
+            }
+            if (port?.workflow && Array.isArray(port.workflow.available_actions)) {
+                if (failed && port.workflow.state !== 'failed') {
+                    return {
+                        state: 'failed',
+                        required_action: null,
+                        available_actions: [{
+                            id: port?.needs_credentials ? 'retry_credentials' : 'retry_provisioning',
+                            label: port?.needs_credentials ? 'Enter credentials and retry' : 'Retry provisioning',
+                            kind: 'primary',
+                        }],
+                        service_actions: [],
+                    };
+                }
+                return port.workflow;
+            }
+            // Compatibility fallback during rolling deploys. It deliberately
+            // has no vendor capabilities; an old server cannot safely claim
+            // that a device supports a behavior.
+            return {
+                state: failed ? 'failed' : 'ready',
+                required_action: null,
+                available_actions: failed ? [{
+                    id: port?.needs_credentials ? 'retry_credentials' : 'retry_provisioning',
+                    label: port?.needs_credentials ? 'Enter credentials and retry' : 'Retry provisioning',
+                    kind: 'primary',
+                }] : [],
+                service_actions: [],
+            };
+        }
+
+        function runPortWorkflowAction(actionId, portNum) {
+            if (actionId === 'configure_ap') return openAPModal(portNum);
+            if (actionId === 'configure_ptp') return openPTPModal(portNum);
+            if (actionId === 'retry_credentials') return openCredentialModal(portNum);
+            if (actionId === 'retry_provisioning') return openProvisionModal(portNum);
+            if (actionId === 'manual_netinstall') return startNetinstall(portNum);
+            showToast('This action is not available yet', 'warning');
+        }
+
+        function renderWorkflowActionButton(action, portNum) {
+            return `<button onclick="runPortWorkflowAction('${escapeHtml(action.id)}', ${portNum})"
+                class="modal-action modal-action-primary">${escapeHtml(action.label)}</button>`;
+        }
+
+        function renderWorkflowActionPanel(portNum, port) {
+            const workflow = workflowForPort(port);
+            const modeActions = workflow.available_actions.filter(action =>
+                action.id === 'configure_ap' || action.id === 'configure_ptp'
+            );
+            const serviceActions = Array.isArray(workflow.service_actions)
+                ? workflow.service_actions : [];
+            let html = '';
+
+            if (modeActions.length) {
+                const required = workflow.required_action === 'choose_device_mode';
+                html += `<div class="workflow-actions">
+                    <div class="workflow-actions-title">${required ? 'Next step' : 'Deployment options'}</div>
+                    <div class="workflow-actions-help">${required
+                        ? 'Choose how this infrastructure radio will be deployed.'
+                        : 'Use these only when this radio is being deployed at a tower.'}</div>
+                    <div class="workflow-actions-grid">
+                        ${modeActions.map(action => renderWorkflowActionButton(action, portNum)).join('')}
+                    </div>
+                </div>`;
+            }
+
+            if (serviceActions.length) {
+                html += `<details class="service-actions">
+                    <summary>Service actions</summary>
+                    ${serviceActions.map(action => `
+                        <button onclick="runPortWorkflowAction('${escapeHtml(action.id)}', ${portNum})"
+                            class="service-action-button">${escapeHtml(action.label)}</button>
+                    `).join('')}
+                </details>`;
+            }
+            return html;
+        }
+
+        function renderPortModalFooter(portNum, port, printableLabel) {
+            const workflow = workflowForPort(port);
+            if (workflow.state === 'running') return '';
+
+            if (port.device_type === 'evolution_digital') {
+                return `
+                    <button onclick="openProvisionModal(${portNum})" class="modal-action modal-action-primary">Re-qualify</button>
+                    <button onclick="closeModal()" class="modal-action modal-action-secondary">Dismiss</button>
+                `;
+            }
+
+            const retryAction = workflow.available_actions.find(action =>
+                action.id === 'retry_credentials' || action.id === 'retry_provisioning'
+            );
+            const retryButton = retryAction
+                ? renderWorkflowActionButton(retryAction, portNum) : '';
+            const reprintButton = printableLabel ? `
+                <button onclick="reprintLastLabel(${portNum})" class="modal-action modal-action-secondary">Reprint label</button>
+            ` : '';
+            const dismissLabel = workflow.state === 'failed' ? 'Dismiss' : 'Done';
+            return `${retryButton}${reprintButton}
+                <button onclick="closeModal()" class="modal-action modal-action-secondary">${dismissLabel}</button>`;
+        }
+
         // Modal functions
         function openPortModal(portNum) {
             selectedPort = portNum;
@@ -1093,47 +1267,11 @@
                         ${port.last_error}
                     </div>
                 ` : ''}
+
+                ${renderWorkflowActionPanel(portNum, port)}
             `;
-            const isActive = port.provisioning || port.waiting_for_boot;
-            const canApplyMode = supportsModeConfiguration(port)
-                && deploymentReadiness(port) === 'ready';
-            const isEvolutionDigital = port.device_type === 'evolution_digital';
             const printableLabel = lastLabelByPort[portNum] || port.last_label;
-            document.getElementById('modal-footer').innerHTML = isActive ? `
-                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
-                    Close
-                </button>
-            ` : isEvolutionDigital ? `
-                <button onclick="openProvisionModal(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
-                    Re-qualify
-                </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
-                    Close
-                </button>
-            ` : `
-                ${canApplyMode ? `
-                <button onclick="openAPModal(${portNum})" class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm text-white">
-                    Configure as AP
-                </button>
-                <button onclick="openPTPModal(${portNum})" class="flex-1 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium text-sm text-white">
-                    Configure as PTP
-                </button>
-                ` : ''}
-                ${printableLabel ? `
-                <button onclick="reprintLastLabel(${portNum})" class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg font-medium text-sm text-white">
-                    Reprint Label
-                </button>
-                ` : ''}
-                <button onclick="startNetinstall(${portNum})" class="flex-1 py-2 bg-orange-600 hover:bg-orange-500 rounded-lg font-medium text-sm text-white">
-                    Netinstall
-                </button>
-                <button onclick="openProvisionModal(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
-                    Retry
-                </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
-                    Close
-                </button>
-            `;
+            setPortModalFooter(renderPortModalFooter(portNum, port, printableLabel));
             document.getElementById('port-modal').classList.remove('hidden');
         }
 
@@ -1372,14 +1510,14 @@
                     </div>
                 </div>
             `;
-            document.getElementById('modal-footer').innerHTML = `
-                <button onclick="startProvisioning(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
+            setPortModalFooter(`
+                <button onclick="startProvisioning(${portNum})" class="modal-action modal-action-primary">
                     Start Provisioning
                 </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                <button onclick="closeModal()" class="modal-action modal-action-secondary">
                     Cancel
                 </button>
-            `;
+            `);
             document.getElementById('port-modal').classList.remove('hidden');
         }
 
@@ -1425,15 +1563,15 @@
                     </div>
                 </div>
             `;
-            document.getElementById('modal-footer').innerHTML = `
+            setPortModalFooter(`
                 <button id="ap-apply-btn" onclick="applyAPMode(${portNum})" disabled
-                    class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-300 disabled:cursor-not-allowed rounded-lg font-medium text-sm text-white">
+                    class="modal-action modal-action-primary disabled:bg-gray-300 disabled:cursor-not-allowed">
                     Apply AP Config
                 </button>
-                <button onclick="openPortModal(${portNum})" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                <button onclick="openPortModal(${portNum})" class="modal-action modal-action-secondary">
                     Back
                 </button>
-            `;
+            `);
             document.getElementById('port-modal').classList.remove('hidden');
             // Reset state
             window._apDirection = null;
@@ -1533,15 +1671,15 @@
                     </div>
                 </div>
             `;
-            document.getElementById('modal-footer').innerHTML = `
+            setPortModalFooter(`
                 <button id="ptp-apply-btn" onclick="applyPTPMode(${portNum})" disabled
-                    class="flex-1 py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-300 disabled:cursor-not-allowed rounded-lg font-medium text-sm text-white">
+                    class="modal-action modal-action-primary disabled:bg-gray-300 disabled:cursor-not-allowed">
                     Apply PTP Config
                 </button>
-                <button onclick="openPortModal(${portNum})" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                <button onclick="openPortModal(${portNum})" class="modal-action modal-action-secondary">
                     Back
                 </button>
-            `;
+            `);
             document.getElementById('port-modal').classList.remove('hidden');
         }
 
@@ -1643,14 +1781,14 @@
                     </div>
                 </div>
             `;
-            document.getElementById('modal-footer').innerHTML = `
-                <button onclick="retryWithCredentials(${portNum})" class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm text-white">
+            setPortModalFooter(`
+                <button onclick="retryWithCredentials(${portNum})" class="modal-action modal-action-primary">
                     Retry with Credentials
                 </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                <button onclick="closeModal()" class="modal-action modal-action-secondary">
                     Cancel
                 </button>
-            `;
+            `);
             document.getElementById('port-modal').classList.remove('hidden');
             // Focus password field after modal opens
             setTimeout(() => document.getElementById('custom-password')?.focus(), 100);

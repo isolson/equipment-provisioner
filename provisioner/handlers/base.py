@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, Any, Callable, Awaitable
+from typing import Optional, Dict, Any, Callable, Awaitable, Tuple
 
 _logger = logging.getLogger(__name__)
 
@@ -103,6 +103,25 @@ class BaseHandler(ABC):
     #: (base-only resolution). Enable per vendor only after bench
     #: verification. See docs/design-config-resolution.md.
     supports_config_overlays = False
+
+    #: Post-provisioning deployment modes that are production-qualified for
+    #: this handler. Declare a mode only after its vendor-specific template,
+    #: identity/radio-role fields, apply path, and hardware result have been
+    #: verified. A template or theoretical capability alone is not enough.
+    qualified_post_provision_modes = ()  # type: Tuple[str, ...]
+
+    #: Baseline deployment mode that must be applied and verified during the
+    #: standard provisioning run before the unit is deployable or eligible
+    #: for a post-provision mode conversion. ``None`` means the handler has no
+    #: such prerequisite. This is a handler trait so shared workflow code does
+    #: not maintain a vendor allowlist.
+    required_baseline_mode = None  # type: Optional[str]
+
+    #: Whether the kiosk may expose this handler's manual recovery workflow.
+    #: The recovery implementation remains vendor-local; the shared UI only
+    #: consumes this capability flag.
+    supports_manual_netinstall = False
+    manual_netinstall_label = "Recovery (Netinstall)"
 
     @staticmethod
     def is_full_config_export(config: Dict[str, Any]) -> bool:

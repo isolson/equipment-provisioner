@@ -151,16 +151,34 @@ def test_dashboard_vendor_metadata_renders_identically_to_the_old_map():
     }
 
 
-def test_dashboard_keeps_behavioral_vendor_branches_hardcoded():
-    """canApplyMode (cambium/tachyon) and the Tachyon SSID uppercasing are
-    behavior, not enumeration — they stay in the JS (Story 5 / #75)."""
+def test_dashboard_uses_server_owned_workflow_actions():
+    """The modal renders capabilities from port workflow state, not a new
+    frontend vendor allowlist. Tachyon's SSID preview remains a separate,
+    pre-existing mode-config behavior pending its handler-trait migration."""
     client = make_client()
     html = client.get("/").text
 
-    assert (
-        "port.device_type === 'cambium' || port.device_type === 'tachyon'"
-    ) in html
+    assert "port.device_type === 'cambium' || port.device_type === 'tachyon'" not in html
+    assert "workflow.available_actions" in html
+    assert "workflow.service_actions" in html
+    assert "renderWorkflowActionPanel(portNum, port)" in html
     assert "port.device_type === 'tachyon' ? dir.toUpperCase() : hostname" in html
+
+
+def test_dashboard_footer_is_contextual_and_touch_friendly():
+    client = make_client()
+    html = client.get("/").text
+
+    assert "function renderPortModalFooter(portNum, port, printableLabel)" in html
+    assert "Retry provisioning" in html
+    assert "Enter credentials and retry" in html
+    assert "Reprint label" in html
+    assert "if (active)" in html
+    assert "port.workflow.state !== 'failed'" in html
+    assert "MikroTik recovery (Netinstall)" not in html
+    assert re.search(r"\.modal-action\s*\{[^}]*min-height:\s*48px", html)
+    assert "flex flex-wrap justify-end gap-2" in html
+    assert "const canApplyMode" not in html
 
 
 def test_dashboard_progress_uses_run_specific_validation_plan():
@@ -188,14 +206,14 @@ def test_dashboard_rechecks_identity_before_showing_preserved_complete():
         "function getIconState", 1
     )[0]
     assert card_state.index("if (port.waiting_for_boot)") < card_state.index(
-        "const readiness = deploymentReadiness(port)"
+        "port.last_result === 'complete'"
     )
 
     status_center = html.split("function getStatusCenterInfo(port, portNum) {", 1)[1].split(
         "function statusIconSVG", 1
     )[0]
     assert status_center.index("if (port.waiting_for_boot)") < status_center.index(
-        "const readiness = deploymentReadiness(port)"
+        "const isDone"
     )
     assert "Checking connected device..." in status_center
     assert "Waiting for link..." in status_center
@@ -211,39 +229,19 @@ def test_dashboard_requires_verified_config_before_deploy_ready():
     client = make_client()
     html = client.get("/").text
 
-    readiness = html.split("function deploymentReadiness(port) {", 1)[1].split(
-        "function getCardState", 1
-    )[0]
-    assert "if (!provisionSucceeded(port)) return null" in readiness
-    assert "supportsModeConfiguration(port) && !port.device_mode" in readiness
-    assert "checklist.config_upload !== true" in readiness
-    assert "return 'sm-config-missing'" in readiness
-    assert "checklist.config_verify !== true" in readiness
-    assert "return 'sm-config-unverified'" in readiness
-    assert readiness.index("return 'sm-config-missing'") < readiness.index(
-        "return 'ready'"
-    )
-
     status_center = html.split("function getStatusCenterInfo(port, portNum) {", 1)[1].split(
         "function statusIconSVG", 1
     )[0]
-    assert "text: 'SM CONFIG MISSING'" in status_center
+    assert "port.workflow?.state === 'config_required'" in html
+    assert "port.workflow?.state === 'config_unverified'" in html
+    assert "`${baselineMode} CONFIG MISSING`" in status_center
     assert "sub: 'Cannot deploy'" in status_center
-    assert "text: 'SM CONFIG UNVERIFIED'" in status_center
-    assert "if (readiness === 'ready')" in status_center
+    assert "`${baselineMode} CONFIG UNVERIFIED`" in status_center
     assert "sub = 'Ready to deploy'" in status_center
-    assert "sub = 'SM \\u2014 Ready to deploy'" in status_center
-    assert "const verifyOk = supportsModeConfiguration(port)" in status_center
-    assert "? checklist.config_verify === true || Boolean(port.device_mode)" in status_center
-
-    # AP/PTP are post-provision conversions. A firmware-only success must not
-    # unlock them as a workaround for the missing SM baseline.
-    assert (
-        "const canApplyMode = supportsModeConfiguration(port)"
-    ) in html
-    assert (
-        "&& deploymentReadiness(port) === 'ready';"
-    ) in html
+    assert "port.workflow.baseline_mode.toUpperCase()" in status_center
+    assert "function deploymentReadiness" not in html
+    assert "supportsModeConfiguration" not in html
+    assert "const requiresBaseline = Boolean(port.workflow?.baseline_mode)" in html
 
 
 def test_labels_page_renders_guarded_templates():

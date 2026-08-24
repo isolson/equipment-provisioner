@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 class MikrotikHandler(BaseHandler):
     """Handler for MikroTik RouterOS devices."""
 
+    supports_manual_netinstall = True
+    manual_netinstall_label = "MikroTik recovery (Netinstall)"
+
     # Try common MikroTik defaults before failing to UI prompt
     DEFAULT_CREDENTIALS = [
         {"username": "admin", "password": "admin"},

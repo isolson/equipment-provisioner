@@ -19,7 +19,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from ..handler_manager import provisionable_device_types
+from ..fingerprint import is_mikrotik_oui
+from ..handler_manager import HandlerManager, provisionable_device_types
 from ..vendor_registry import (
     builtin_ui_credentials,
     nonprovisionable_device_types,
@@ -59,6 +60,7 @@ class PortStatus(BaseModel):
     link_speed: Optional[str] = None
     last_result: Optional[str] = None
     last_error: Optional[str] = None
+    needs_credentials: bool = False
     checklist: Dict[str, Any] = Field(default_factory=dict)
     step_plan: List[Dict[str, str]] = Field(default_factory=list)
     step_status: Dict[str, Any] = Field(default_factory=dict)
@@ -66,6 +68,7 @@ class PortStatus(BaseModel):
     device_mode: Optional[str] = None
     mode_config: Optional[Dict[str, Any]] = None
     ptp_link_id: Optional[str] = None
+    workflow: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ProvisionRequest(BaseModel):
@@ -402,6 +405,24 @@ async def netinstall_device(
     status = port_status[req.port_number]
     if status.get("provisioning"):
         raise HTTPException(status_code=409, detail="Port already provisioning")
+
+    capabilities = HandlerManager.operator_capabilities_for(
+        status.get("device_type")
+    )
+    if not capabilities["manual_netinstall"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Netinstall is not supported for the detected device",
+        )
+
+    # Manual recovery is destructive. Match the automatic BOOTP path's OUI
+    # safety boundary instead of trusting a possibly stale device-type tag.
+    device_mac = status.get("device_mac")
+    if not device_mac or not is_mikrotik_oui(device_mac):
+        raise HTTPException(
+            status_code=400,
+            detail="Netinstall requires a detected MikroTik MAC address",
+        )
 
     background_tasks.add_task(
         _run_netinstall,
@@ -2567,7 +2588,11 @@ async def apply_device_mode(
     device_type = status["device_type"]
     device_ip = status["device_ip"]
 
-    if device_type not in ("cambium", "tachyon"):
+    if req.mode not in ("ap", "ptp"):
+        raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
+
+    capabilities = HandlerManager.operator_capabilities_for(device_type)
+    if req.mode not in capabilities["post_provision_modes"]:
         raise HTTPException(
             status_code=400,
             detail=f"Mode configuration not supported for {device_type}",
@@ -2575,20 +2600,29 @@ async def apply_device_mode(
 
     # AP/PTP are post-provision conversions. They must never become a way to
     # bypass a missing or unverified standard SM configuration.
+    baseline_mode = capabilities.get("required_baseline_mode") or ""
+    baseline_label = baseline_mode.upper() if baseline_mode else "Standard"
     if status.get("last_result") not in ("success", "complete"):
         raise HTTPException(
             status_code=409,
-            detail="Standard SM provisioning must complete before AP/PTP conversion",
+            detail=(
+                f"{baseline_label} provisioning must complete before "
+                "AP/PTP conversion"
+            ),
         )
-    checklist = status.get("checklist") or {}
-    if (
-        checklist.get("config_upload") is not True
-        or checklist.get("config_verify") is not True
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Verified SM configuration is required before AP/PTP conversion",
-        )
+    if baseline_mode:
+        checklist = status.get("checklist") or {}
+        if (
+            checklist.get("config_upload") is not True
+            or checklist.get("config_verify") is not True
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Verified {baseline_mode.upper()} configuration is required "
+                    "before AP/PTP conversion"
+                ),
+            )
 
     # Validate mode-specific parameters
     if req.mode == "ap":
@@ -2603,9 +2637,6 @@ async def apply_device_mode(
                 status_code=400,
                 detail="PTP mode requires 'my_tower' and 'remote_tower'",
             )
-    else:
-        raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
-
     # Run config application in background
     background_tasks.add_task(
         _run_apply_mode,

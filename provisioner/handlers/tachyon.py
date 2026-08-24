@@ -59,6 +59,7 @@ class TachyonHandler(BaseHandler):
     allows_arbitrary_template_fallback = False
     config_alias_prefix_matching = True
     requires_model_preflight = True
+    required_baseline_mode = "sm"
 
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None,
                  alternate_credentials: list = None):
