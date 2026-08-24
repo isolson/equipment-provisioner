@@ -17,6 +17,7 @@ def _state(**overrides):
         "needs_credentials": False,
         "device_mode": None,
         "mode_selection_required": False,
+        "checklist": {"config_upload": True, "config_verify": True},
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -38,17 +39,51 @@ def test_handler_capabilities_require_explicit_qualification():
     assert HandlerManager.operator_capabilities_for("tachyon")[
         "post_provision_modes"
     ] == []
+    assert HandlerManager.operator_capabilities_for("tachyon")[
+        "required_baseline_mode"
+    ] == "sm"
     assert HandlerManager.operator_capabilities_for("cambium")[
         "post_provision_modes"
     ] == []
+    assert HandlerManager.operator_capabilities_for("cambium")[
+        "required_baseline_mode"
+    ] == "sm"
     assert HandlerManager.operator_capabilities_for("tarana")[
         "post_provision_modes"
     ] == []
     assert HandlerManager.operator_capabilities_for("not-a-vendor") == {
         "post_provision_modes": [],
+        "required_baseline_mode": "",
         "manual_netinstall": False,
         "manual_netinstall_label": "",
     }
+
+
+def test_radio_success_requires_verified_handler_owned_baseline(monkeypatch):
+    _qualify_tachyon_modes(monkeypatch)
+
+    missing = workflow_for_port(
+        _state(
+            last_result="success",
+            checklist={"config_upload": "skipped", "config_verify": None},
+        ),
+        mode_config_enabled=True,
+    )
+    unverified = workflow_for_port(
+        _state(
+            last_result="success",
+            checklist={"config_upload": True, "config_verify": "unverified"},
+        ),
+        mode_config_enabled=True,
+    )
+
+    assert missing["state"] == "config_required"
+    assert missing["required_action"] == "apply_baseline_config"
+    assert missing["baseline_mode"] == "sm"
+    assert _action_ids(missing) == []
+    assert unverified["state"] == "config_unverified"
+    assert unverified["required_action"] == "verify_baseline_config"
+    assert _action_ids(unverified) == []
 
 
 def test_success_actions_respect_feature_flag_and_qualification(monkeypatch):

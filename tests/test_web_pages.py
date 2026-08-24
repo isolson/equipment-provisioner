@@ -192,6 +192,58 @@ def test_dashboard_progress_uses_run_specific_validation_plan():
     assert "return { done, total: plan.length };" in html
 
 
+def test_dashboard_rechecks_identity_before_showing_preserved_complete():
+    """Rapid swaps must render BOOTING while the returning MAC is unknown.
+
+    The backend intentionally preserves a successful result during reboot
+    grace. The kiosk must not let that old result visually outrank the boot
+    wait for a newly connected, not-yet-identified unit.
+    """
+    client = make_client()
+    html = client.get("/").text
+
+    card_state = html.split("function getCardState(port) {", 1)[1].split(
+        "function getIconState", 1
+    )[0]
+    assert card_state.index("if (port.waiting_for_boot)") < card_state.index(
+        "port.last_result === 'complete'"
+    )
+
+    status_center = html.split("function getStatusCenterInfo(port, portNum) {", 1)[1].split(
+        "function statusIconSVG", 1
+    )[0]
+    assert status_center.index("if (port.waiting_for_boot)") < status_center.index(
+        "const isDone"
+    )
+    assert "Checking connected device..." in status_center
+    assert "Waiting for link..." in status_center
+
+
+def test_dashboard_requires_verified_config_before_deploy_ready():
+    """Firmware-only success must not be presented as deployable.
+
+    Cambium and Tachyon can finish firmware work without a resolved config.
+    Treat that as a missing SM baseline and keep AP/PTP conversion locked
+    until standard SM configuration has been applied and verified.
+    """
+    client = make_client()
+    html = client.get("/").text
+
+    status_center = html.split("function getStatusCenterInfo(port, portNum) {", 1)[1].split(
+        "function statusIconSVG", 1
+    )[0]
+    assert "port.workflow?.state === 'config_required'" in html
+    assert "port.workflow?.state === 'config_unverified'" in html
+    assert "`${baselineMode} CONFIG MISSING`" in status_center
+    assert "sub: 'Cannot deploy'" in status_center
+    assert "`${baselineMode} CONFIG UNVERIFIED`" in status_center
+    assert "sub = 'Ready to deploy'" in status_center
+    assert "port.workflow.baseline_mode.toUpperCase()" in status_center
+    assert "function deploymentReadiness" not in html
+    assert "supportsModeConfiguration" not in html
+    assert "const requiresBaseline = Boolean(port.workflow?.baseline_mode)" in html
+
+
 def test_labels_page_renders_guarded_templates():
     client = make_client()
 

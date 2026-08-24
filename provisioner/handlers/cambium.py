@@ -25,6 +25,8 @@ class CambiumHandler(BaseHandler):
     JSON API calls depending on firmware version.
     """
 
+    required_baseline_mode = "sm"
+
     # Model to firmware filename pattern mapping
     MODEL_FIRMWARE_PATTERNS = {
         # ePMP AX series (WiFi 6) - uses ePMP-AX firmware
@@ -1714,18 +1716,23 @@ class CambiumHandler(BaseHandler):
                 username = self.credentials.get("username", "admin")
                 password = self.credentials.get("password", "admin")
                 login_url = f"{self._base_url}/cgi-bin/luci"
+                login_form = (
+                    f"username={urllib.parse.quote(username, safe='')}"
+                    f"&password={urllib.parse.quote(password, safe='')}"
+                ).encode()
 
                 proc = await asyncio.create_subprocess_exec(
                     "curl", "-s", "-k", "-m", "10",
                     "--interface", self.interface,
                     "-c", cookie_path, "-b", cookie_path,
                     "-X", "POST",
-                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
+                    "--data-binary", "@-",
                     login_url,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await proc.communicate()
+                stdout, stderr = await proc.communicate(login_form)
 
                 if proc.returncode != 0:
                     logger.error(f"Login failed: {stderr.decode()}")
@@ -1824,8 +1831,8 @@ class CambiumHandler(BaseHandler):
     async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
         """Upload firmware to the device.
 
-        Cambium ePMP uses different endpoint sequences for the first vs.
-        second bank-update pass:
+        Cambium ePMP uses different endpoint sequences by device family and
+        bank-update pass:
 
         - First pass (bank in {None, 1}): POST local_upload_image, then poll
           get_upload_status until status=7. Suitable for the initial flash
@@ -1838,8 +1845,10 @@ class CambiumHandler(BaseHandler):
           a prior bank-swap reboot — the first-pass endpoint silently no-ops
           in that state.
 
-        Endpoint set confirmed via HAR capture on Cambium Force 300-25
-        firmware 5.11.1; see docs/cambium-config.md.
+        - ePMP AX: use the explicit upload/upgrade/status sequence for both
+          passes. Its web UI does not expose the legacy first-pass endpoints.
+
+        Endpoint sets are hardware-confirmed; see docs/cambium-config.md.
         """
         try:
             firmware_file = Path(firmware_path)
@@ -1851,7 +1860,9 @@ class CambiumHandler(BaseHandler):
 
             # Use curl when interface binding is needed (VLAN mode)
             if self.interface:
-                if bank == 2:
+                model = self._device_info.model if self._device_info else None
+                is_ax = self._is_ax_model(model)
+                if bank == 2 or is_ax:
                     return await self._upload_firmware_curl_alt_bank(firmware_path)
                 return await self._upload_firmware_curl(firmware_path)
 
@@ -1925,18 +1936,23 @@ class CambiumHandler(BaseHandler):
                 username = self.credentials.get("username", "admin")
                 password = self.credentials.get("password", "admin")
                 login_url = f"{self._base_url}/cgi-bin/luci"
+                login_form = (
+                    f"username={urllib.parse.quote(username, safe='')}"
+                    f"&password={urllib.parse.quote(password, safe='')}"
+                ).encode()
 
                 proc = await asyncio.create_subprocess_exec(
                     "curl", "-s", "-k", "-m", "10",
                     "--interface", self.interface,
                     "-c", cookie_path, "-b", cookie_path,
                     "-X", "POST",
-                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
+                    "--data-binary", "@-",
                     login_url,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await proc.communicate()
+                stdout, stderr = await proc.communicate(login_form)
 
                 if proc.returncode != 0:
                     logger.error(f"Login failed: {stderr.decode()}")
@@ -1965,6 +1981,7 @@ class CambiumHandler(BaseHandler):
             curl_args = [
                 "curl", "-s", "-k", "-m", "600",  # 10 min timeout for large files
                 "--interface", self.interface,
+                "-w", "\n%{http_code}",
                 "-X", "POST",
                 "-F", f"image=@{firmware_path}",
             ]
@@ -1980,12 +1997,27 @@ class CambiumHandler(BaseHandler):
             stdout, stderr = await proc.communicate()
 
             if proc.returncode == 0:
-                response = stdout.decode("utf-8", errors="ignore")
-                logger.debug(f"Firmware upload response: {response[:500]}")
+                response_body, http_status = self._split_curl_http_response(stdout)
+                if http_status is None or not 200 <= http_status < 300:
+                    logger.error("Firmware upload returned HTTP %r", http_status)
+                    return False
+                response = response_body.decode("utf-8", errors="ignore")
+                logger.info(
+                    "Firmware upload returned HTTP %s (%s-byte body)",
+                    http_status,
+                    len(response_body),
+                )
+                application_success = self._curl_application_success(
+                    "Firmware upload",
+                    response_body,
+                )
+                if application_success is False:
+                    logger.error("Firmware upload was rejected by the device")
+                    return False
 
                 # Check for error indicators
                 if "error" in response.lower() and "success" not in response.lower():
-                    logger.error(f"Firmware upload failed: {response[:200]}")
+                    logger.error("Firmware upload response reported an error")
                     return False
 
                 # Poll upload status until ready
@@ -2014,17 +2046,16 @@ class CambiumHandler(BaseHandler):
             return False
 
     async def _upload_firmware_curl_alt_bank(self, firmware_path: str) -> bool:
-        """Upload firmware to the second (alternate) bank via curl.
+        """Upload firmware with the explicit upload-and-upgrade sequence.
 
-        Used for FW2 — see upload_firmware() docstring for why this differs
-        from _upload_firmware_curl. Hits the upload_sw_image_local +
-        upgrade_sw_image_local + get_upgrade_status endpoint set captured
-        from the Cambium web UI HAR on Force 300-25 firmware 5.11.1.
+        Force-series FW2 and ePMP AX both send ``type=device&debug=true``.
+        A 2026-08-24 AX HAR capture confirmed this sequence through status 7.
         """
         import tempfile
 
         try:
             firmware_file = Path(firmware_path)
+            debug_value = "true"
             logger.info(
                 f"Uploading firmware {firmware_file.name} to {self.ip} via {self.interface} "
                 f"(alt-bank path)"
@@ -2033,7 +2064,7 @@ class CambiumHandler(BaseHandler):
             cookie_path = None
             stok = self._stok
             if stok:
-                logger.debug(f"Reusing existing stok for alt-bank upload: {stok[:16]}...")
+                logger.debug("Reusing the existing session for alt-bank upload")
                 cookie_path = self._cookie_file
             else:
                 logger.debug("No existing stok, logging in via curl for alt-bank upload...")
@@ -2045,19 +2076,22 @@ class CambiumHandler(BaseHandler):
                 password = self.credentials.get("password", "admin")
                 login_url = f"{self._base_url}/cgi-bin/luci"
 
-                proc = await asyncio.create_subprocess_exec(
-                    "curl", "-s", "-k", "-m", "10",
-                    "--interface", self.interface,
-                    "-c", cookie_path, "-b", cookie_path,
-                    "-X", "POST",
-                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
-                    login_url,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                login_form = (
+                    f"username={urllib.parse.quote(username, safe='')}"
+                    f"&password={urllib.parse.quote(password, safe='')}"
                 )
-                stdout, stderr = await proc.communicate()
+                proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                    [
+                        "curl", "-s", "-k", "-m", "10",
+                        "--interface", self.interface,
+                        "-c", cookie_path, "-b", cookie_path,
+                        "-X", "POST",
+                    ],
+                    login_url,
+                    form_data=login_form,
+                )
                 if proc.returncode != 0:
-                    logger.error(f"Login failed: {stderr.decode()}")
+                    logger.error("Cambium login curl failed with exit %s", proc.returncode)
                     return False
                 response = stdout.decode("utf-8", errors="ignore")
                 match = re.search(r'"stok":"([^"]+)"', response)
@@ -2073,26 +2107,39 @@ class CambiumHandler(BaseHandler):
             curl_args = [
                 "curl", "-s", "-k", "-m", "600",
                 "--interface", self.interface,
+                "-w", "\n%{http_code}",
                 "-X", "POST",
+                "-H", "cache-control: no-cache",
                 "-F", f"image=@{firmware_path}",
             ]
             if cookie_path:
                 curl_args.extend(["-b", cookie_path])
-            curl_args.append(upload_url)
-
-            proc = await asyncio.create_subprocess_exec(
-                *curl_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                curl_args,
+                upload_url,
             )
-            stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                logger.error(f"Alt-bank upload curl failed: {stderr.decode()}")
+                logger.error("Alt-bank upload curl failed with exit %s", proc.returncode)
                 return False
-            upload_resp = stdout.decode("utf-8", errors="ignore")
-            logger.info(f"Alt-bank upload response: {upload_resp[:300]}")
+            upload_body, upload_status = self._split_curl_http_response(stdout)
+            if upload_status is None or not 200 <= upload_status < 300:
+                logger.error("Alt-bank upload returned HTTP %r", upload_status)
+                return False
+            upload_resp = upload_body.decode("utf-8", errors="ignore")
+            logger.info(
+                "Alt-bank upload returned HTTP %s (%s-byte body)",
+                upload_status,
+                len(upload_body),
+            )
+            application_success = self._curl_application_success(
+                "Alt-bank upload",
+                upload_body,
+            )
+            if application_success is False:
+                logger.error("Alt-bank upload was rejected by the device")
+                return False
             if "error" in upload_resp.lower() and "success" not in upload_resp.lower():
-                logger.error(f"Alt-bank upload failed: {upload_resp[:300]}")
+                logger.error("Alt-bank upload response reported an error")
                 return False
 
             # Step 2: trigger upgrade via upgrade_sw_image_local (form body: type=device&debug=true)
@@ -2100,28 +2147,52 @@ class CambiumHandler(BaseHandler):
             curl_args = [
                 "curl", "-s", "-k", "-m", "30",
                 "--interface", self.interface,
+                "-w", "\n%{http_code}",
                 "-X", "POST",
-                "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", "type=device&debug=true",
+                "-H", "cache-control: no-cache",
+                "-H", "X-Requested-With: XMLHttpRequest",
+                "-H", "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
+                "-d", f"type=device&debug={debug_value}",
             ]
             if cookie_path:
                 curl_args.extend(["-b", cookie_path])
-            curl_args.append(upgrade_url)
-
-            proc = await asyncio.create_subprocess_exec(
-                *curl_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                curl_args,
+                upgrade_url,
             )
-            stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                logger.error(f"upgrade_sw_image_local curl failed: {stderr.decode()}")
+                logger.error(
+                    "upgrade_sw_image_local curl failed with exit %s",
+                    proc.returncode,
+                )
                 return False
-            upgrade_resp = stdout.decode("utf-8", errors="ignore")
-            logger.info(f"upgrade_sw_image_local response: {upgrade_resp[:300]}")
+            upgrade_body, upgrade_status = self._split_curl_http_response(stdout)
+            if upgrade_status is None or not 200 <= upgrade_status < 300:
+                self._curl_application_success(
+                    "upgrade_sw_image_local",
+                    upgrade_body,
+                )
+                logger.error("upgrade_sw_image_local returned HTTP %r", upgrade_status)
+                return False
+            logger.info(
+                "upgrade_sw_image_local returned HTTP %s (%s-byte body)",
+                upgrade_status,
+                len(upgrade_body),
+            )
+            application_success = self._curl_application_success(
+                "upgrade_sw_image_local",
+                upgrade_body,
+            )
+            if application_success is False:
+                logger.error("upgrade_sw_image_local was rejected by the device")
+                return False
 
             # Step 3: poll get_upgrade_status (same form body) until done
-            ready = await self._poll_upgrade_status_curl(stok, cookie_file=cookie_path)
+            ready = await self._poll_upgrade_status_curl(
+                stok,
+                cookie_file=cookie_path,
+                debug_value=debug_value,
+            )
             if ready:
                 logger.info(f"Alt-bank firmware ready on {self.ip}")
                 return True
@@ -2134,7 +2205,13 @@ class CambiumHandler(BaseHandler):
             logger.error(f"Failed to upload firmware to alt bank via curl: {e}")
             return False
 
-    async def _poll_upgrade_status_curl(self, stok: str, timeout: int = 300, cookie_file: Optional[str] = None) -> bool:
+    async def _poll_upgrade_status_curl(
+        self,
+        stok: str,
+        timeout: int = 300,
+        cookie_file: Optional[str] = None,
+        debug_value: str = "true",
+    ) -> bool:
         """Poll /admin/get_upgrade_status (alt-bank path) until upgrade is ready.
 
         Mirrors _poll_upload_status_curl but uses the get_upgrade_status
@@ -2143,30 +2220,46 @@ class CambiumHandler(BaseHandler):
         import time as _time
         start_time = _time.time()
         url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/get_upgrade_status"
-        last_summary = None
+        last_observation = None
 
         while _time.time() - start_time < timeout:
             try:
                 curl_args = [
                     "curl", "-s", "-k", "-m", "10",
                     "--interface", self.interface,
+                    "-w", "\n%{http_code}",
                     "-X", "POST",
-                    "-H", "Content-Type: application/x-www-form-urlencoded",
-                    "-d", "type=device&debug=true",
+                    "-H", "cache-control: no-cache",
+                    "-H", "X-Requested-With: XMLHttpRequest",
+                    "-H", "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
+                    "-d", f"type=device&debug={debug_value}",
                 ]
                 if cookie_file:
                     curl_args.extend(["-b", cookie_file])
-                curl_args.append(url)
-
-                proc = await asyncio.create_subprocess_exec(
-                    *curl_args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                proc, stdout, _ = await self._run_curl_with_stdin_config(
+                    curl_args,
+                    url,
                 )
-                stdout, _ = await proc.communicate()
-                if proc.returncode == 0 and stdout:
-                    response = stdout.decode("utf-8", errors="ignore")
-                    logger.debug(f"Upgrade status: {response}")
+                if proc.returncode != 0:
+                    observation = ("curl_exit", proc.returncode)
+                    if observation != last_observation:
+                        logger.info("Cambium alt-bank status poll: curl exit=%s", proc.returncode)
+                        last_observation = observation
+                    await asyncio.sleep(2)
+                    continue
+
+                response_body, http_status = self._split_curl_http_response(stdout)
+                if http_status is None or not 200 <= http_status < 300:
+                    logger.error("Cambium alt-bank status poll returned HTTP %r", http_status)
+                    return False
+
+                if not response_body:
+                    observation = ("empty",)
+                    if observation != last_observation:
+                        logger.info("Cambium alt-bank status poll: empty response")
+                        last_observation = observation
+                else:
+                    response = response_body.decode("utf-8", errors="ignore")
                     try:
                         data = json.loads(response)
                         summary = (
@@ -2176,13 +2269,14 @@ class CambiumHandler(BaseHandler):
                             data.get("progress"),
                             data.get("error"),
                         )
-                        if summary != last_summary:
+                        observation = ("json",) + summary
+                        if observation != last_observation:
                             logger.info(
                                 "Cambium alt-bank status: status=%r success=%r "
                                 "percent=%r progress=%r error=%r",
                                 *summary,
                             )
-                            last_summary = summary
+                            last_observation = observation
                         if data.get("status") == 7:
                             logger.info("Alt-bank upgrade complete (status=7)")
                             return True
@@ -2195,7 +2289,14 @@ class CambiumHandler(BaseHandler):
                             return False
                         logger.debug(f"Alt-bank upgrade in progress (status={data.get('status', '?')})")
                     except json.JSONDecodeError:
-                        pass
+                        observation = ("non_json", len(response_body))
+                        if observation != last_observation:
+                            logger.info(
+                                "Cambium alt-bank status poll: non-JSON response (%s bytes)",
+                                len(response_body),
+                            )
+                            last_observation = observation
+                        return False
                 await asyncio.sleep(2)
             except Exception as e:
                 logger.debug(f"Upgrade status poll error: {e}")
@@ -2218,7 +2319,7 @@ class CambiumHandler(BaseHandler):
         import time
         start_time = time.time()
         url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/get_upload_status"
-        last_summary = None
+        last_observation = None
 
         while time.time() - start_time < timeout:
             try:
@@ -2226,6 +2327,7 @@ class CambiumHandler(BaseHandler):
                 curl_args = [
                     "curl", "-s", "-k", "-m", "10",
                     "--interface", self.interface,
+                    "-w", "\n%{http_code}",
                     "-X", "POST",
                     "-d", "",
                 ]
@@ -2240,9 +2342,26 @@ class CambiumHandler(BaseHandler):
                 )
                 stdout, _ = await proc.communicate()
 
-                if proc.returncode == 0 and stdout:
-                    response = stdout.decode("utf-8", errors="ignore")
-                    logger.debug(f"Upload status: {response}")
+                if proc.returncode != 0:
+                    observation = ("curl_exit", proc.returncode)
+                    if observation != last_observation:
+                        logger.info("Cambium upload status poll: curl exit=%s", proc.returncode)
+                        last_observation = observation
+                    await asyncio.sleep(2)
+                    continue
+
+                response_body, http_status = self._split_curl_http_response(stdout)
+                if http_status is None or not 200 <= http_status < 300:
+                    logger.error("Cambium upload status poll returned HTTP %r", http_status)
+                    return False
+
+                if not response_body:
+                    observation = ("empty",)
+                    if observation != last_observation:
+                        logger.info("Cambium upload status poll: empty response")
+                        last_observation = observation
+                else:
+                    response = response_body.decode("utf-8", errors="ignore")
 
                     try:
                         data = json.loads(response)
@@ -2253,13 +2372,14 @@ class CambiumHandler(BaseHandler):
                             data.get("progress"),
                             data.get("error"),
                         )
-                        if summary != last_summary:
+                        observation = ("json",) + summary
+                        if observation != last_observation:
                             logger.info(
                                 "Cambium upload status: status=%r success=%r "
                                 "percent=%r progress=%r error=%r",
                                 *summary,
                             )
-                            last_summary = summary
+                            last_observation = observation
                         # Status 7 = firmware unpacked and ready for reboot (confirmed from Cambium web UI)
                         if data.get("status") == 7:
                             logger.info(f"Firmware unpacked and ready (status=7)")
@@ -2277,7 +2397,14 @@ class CambiumHandler(BaseHandler):
                         current_status = data.get("status", "unknown")
                         logger.debug(f"Firmware unpack in progress (status={current_status})")
                     except json.JSONDecodeError:
-                        pass
+                        observation = ("non_json", len(response_body))
+                        if observation != last_observation:
+                            logger.info(
+                                "Cambium upload status poll: non-JSON response (%s bytes)",
+                                len(response_body),
+                            )
+                            last_observation = observation
+                        return False
 
                 await asyncio.sleep(2)
 
@@ -2287,6 +2414,68 @@ class CambiumHandler(BaseHandler):
 
         logger.warning(f"Upload status poll timed out after {timeout}s")
         return False
+
+    @staticmethod
+    def _split_curl_http_response(stdout: bytes) -> Tuple[bytes, Optional[int]]:
+        """Split a curl body from the trailing HTTP status written by ``-w``."""
+        body, separator, status_text = stdout.rpartition(b"\n")
+        if separator and re.fullmatch(rb"\d{3}", status_text.strip()):
+            return body, int(status_text.strip())
+        return stdout, None
+
+    @staticmethod
+    async def _run_curl_with_stdin_config(
+        curl_args: list,
+        url: str,
+        form_data: Optional[str] = None,
+    ):
+        """Run curl without putting a session URL or form secret in argv."""
+        def config_value(value: str) -> str:
+            return (
+                value.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+            )
+
+        config_lines = ['url = "{}"'.format(config_value(url))]
+        if form_data is not None:
+            config_lines.append(
+                'data-binary = "{}"'.format(config_value(form_data))
+            )
+        config_input = ("\n".join(config_lines) + "\n").encode("utf-8")
+
+        proc = await asyncio.create_subprocess_exec(
+            *curl_args,
+            "--config", "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate(config_input)
+        return proc, stdout, stderr
+
+    @staticmethod
+    def _curl_application_success(operation: str, body: bytes) -> Optional[bool]:
+        """Return a JSON endpoint's application success without logging its body."""
+        try:
+            data = json.loads(body.decode("utf-8", errors="ignore"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        success = data.get("success")
+        logger.info(
+            "%s application result: success=%r status=%r error=%r",
+            operation,
+            success,
+            data.get("status"),
+            data.get("error"),
+        )
+        if success is None:
+            return None
+        return success in (True, 1, "1")
 
     async def get_firmware_status(self) -> Dict[str, Any]:
         """Get firmware bank status."""

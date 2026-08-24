@@ -37,6 +37,8 @@ def _status(device_type, mac):
         "device_ip": "192.0.2.1",
         "device_mac": mac,
         "provisioning": False,
+        "last_result": "success",
+        "checklist": {"config_upload": True, "config_verify": True},
     }
 
 
@@ -129,6 +131,27 @@ def test_mode_endpoint_uses_handler_capability(monkeypatch):
 
     assert response.status_code == 200
     assert calls == [(4, "tachyon", "ap")]
+
+
+def test_mode_endpoint_requires_verified_handler_baseline(monkeypatch):
+    monkeypatch.setattr(
+        TachyonHandler,
+        "qualified_post_provision_modes",
+        ("ap", "ptp"),
+    )
+    status = _status("tachyon", "78:5E:E8:D0:4C:38")
+    status["checklist"] = {"config_upload": "skipped", "config_verify": None}
+    client = _client(monkeypatch, status, mode_config=True)
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "ap", "tower": 5, "direction": "north"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Verified SM configuration is required before AP/PTP conversion"
+    )
 
 
 def test_ap_qualification_does_not_authorize_ptp(monkeypatch):

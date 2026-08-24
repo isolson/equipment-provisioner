@@ -39,6 +39,14 @@ def _mode_actions(modes: List[str]) -> List[Dict[str, str]]:
     return actions
 
 
+def _checklist_value(state: Any, key: str) -> Any:
+    """Read one checklist value from a real or test port state."""
+    checklist = getattr(state, "checklist", None)
+    if isinstance(checklist, dict):
+        return checklist.get(key)
+    return getattr(checklist, key, None)
+
+
 def workflow_for_port(state: Any, mode_config_enabled: bool) -> Dict[str, Any]:
     """Build the workflow contract for one ``PortState``-like object."""
     capabilities = HandlerManager.operator_capabilities_for(
@@ -55,6 +63,7 @@ def workflow_for_port(state: Any, mode_config_enabled: bool) -> Dict[str, Any]:
     result = getattr(state, "last_result", None)
     is_success = result in ("complete", "success")
     is_failed = result == "failed"
+    baseline_mode = capabilities["required_baseline_mode"]
 
     if is_active:
         workflow_state = "running"
@@ -74,13 +83,29 @@ def workflow_for_port(state: Any, mode_config_enabled: bool) -> Dict[str, Any]:
             })
     elif is_success:
         workflow_state = "ready"
-        mode_actions = []
-        if mode_config_enabled and not getattr(state, "device_mode", None):
-            mode_actions = _mode_actions(capabilities["post_provision_modes"])
-            actions.extend(mode_actions)
-        if mode_actions and getattr(state, "mode_selection_required", False):
-            workflow_state = "action_required"
-            required_action = "choose_device_mode"
+        has_configured_mode = bool(getattr(state, "device_mode", None))
+        if (
+            baseline_mode
+            and not has_configured_mode
+            and _checklist_value(state, "config_upload") is not True
+        ):
+            workflow_state = "config_required"
+            required_action = "apply_baseline_config"
+        elif (
+            baseline_mode
+            and not has_configured_mode
+            and _checklist_value(state, "config_verify") is not True
+        ):
+            workflow_state = "config_unverified"
+            required_action = "verify_baseline_config"
+        else:
+            mode_actions = []
+            if mode_config_enabled and not has_configured_mode:
+                mode_actions = _mode_actions(capabilities["post_provision_modes"])
+                actions.extend(mode_actions)
+            if mode_actions and getattr(state, "mode_selection_required", False):
+                workflow_state = "action_required"
+                required_action = "choose_device_mode"
     elif getattr(state, "device_detected", False):
         workflow_state = "detected"
     else:
@@ -96,6 +121,7 @@ def workflow_for_port(state: Any, mode_config_enabled: bool) -> Dict[str, Any]:
     return {
         "state": workflow_state,
         "required_action": required_action,
+        "baseline_mode": baseline_mode or None,
         "available_actions": actions,
         "service_actions": service_actions,
     }

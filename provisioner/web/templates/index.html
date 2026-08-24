@@ -764,8 +764,17 @@
         function getCardState(port) {
             const checklist = port.checklist || {};
 
+            // A preserved success belongs to the previous observed identity
+            // until the device that came back on the link is identified. Do
+            // not paint the card COMPLETE during that uncertainty window: it
+            // may be a rapid equipment swap rather than the old unit rebooting.
+            if (port.waiting_for_boot) return 'warning';
+            if (port.provisioning) return 'active';
+
             // Provisioning result survives link-down (e.g. device changed networks after config)
-            if (port.workflow?.state === 'action_required') return 'warning';
+            if (port.workflow?.state === 'action_required'
+                || port.workflow?.state === 'config_required'
+                || port.workflow?.state === 'config_unverified') return 'warning';
             if (port.last_result === 'complete' || port.last_result === 'success') return 'success';
             if (port.last_result === 'failed') return 'error';
 
@@ -784,7 +793,6 @@
             if (checklist.login === true && (checklist.verify === true || checklist.config_verify === true || checklist.config_verify === 'skipped')) return 'success';
             // Failed
             if (checklist.login === false || checklist.firmware_update_1 === false) return 'error';
-            if (port.waiting_for_boot) return 'warning';
             if (port.device_detected) return 'success';
             return 'warning';
         }
@@ -893,9 +901,32 @@
                 }
                 if (port.link_up) return { text: 'DETECTED', sub: 'Starting qualification...', cls: 'booting', icon: 'spinner' };
             }
+            // During reboot grace, last_result can intentionally still be
+            // success. Identity is not yet known, so BOOTING must take visual
+            // precedence over the previous device's COMPLETE result. Once
+            // detection observes the same MAC, COMPLETE returns; a different
+            // MAC clears the preserved run and starts the replacement flow.
+            if (port.waiting_for_boot) {
+                const bootStart = bootStartTimes[portNum];
+                const bootingMinutes = bootStart ? Math.floor((Date.now() - bootStart) / 60000) : 0;
+                // Show reset suggestion after 5 minutes (except for Tarana)
+                if (bootingMinutes >= 5 && port.device_type !== 'tarana') {
+                    return { text: 'BOOTING', sub: 'May need factory reset', cls: 'booting', icon: 'spinner', showResetHint: true };
+                }
+                const sub = port.link_up ? 'Checking connected device...' : 'Waiting for link...';
+                return { text: 'BOOTING', sub, cls: 'booting', icon: 'spinner' };
+            }
             // Provisioning result survives link-down (device may have changed networks)
-            const isDone = port.last_result === 'complete' || port.last_result === 'success';
+            const isDone = (port.last_result === 'complete' || port.last_result === 'success')
+                && port.workflow?.state !== 'running';
             if (isDone) {
+                const baselineMode = (port.workflow?.baseline_mode || 'standard').toUpperCase();
+                if (port.workflow?.state === 'config_required') {
+                    return { text: `${baselineMode} CONFIG MISSING`, sub: 'Cannot deploy', cls: 'warning', icon: 'alert' };
+                }
+                if (port.workflow?.state === 'config_unverified') {
+                    return { text: `${baselineMode} CONFIG UNVERIFIED`, sub: 'Applied but not confirmed', cls: 'warning', icon: 'alert' };
+                }
                 if (port.workflow?.state === 'action_required') {
                     return { text: 'ACTION REQUIRED', sub: 'Choose AP or PTP', cls: 'warning', icon: 'alert' };
                 }
@@ -904,6 +935,8 @@
                     const mc = port.mode_config || {};
                     if (port.device_mode === 'ap') sub = `AP \u2014 ${mc.hostname || ''}`;
                     else if (port.device_mode.startsWith('ptp')) sub = `PTP ${mc.side || ''} \u2014 ${mc.hostname || ''}`;
+                } else if (port.workflow?.baseline_mode) {
+                    sub = `${port.workflow.baseline_mode.toUpperCase()} \u2014 Ready to deploy`;
                 }
                 return { text: 'COMPLETE', sub, cls: 'complete', icon: 'check' };
             }
@@ -951,15 +984,6 @@
                 const stepNum = Math.min(prog.done + 1, prog.total);
                 return { text, sub: `Step ${stepNum} of ${prog.total}`, cls: 'active', icon: 'spinner' };
             }
-            if (port.waiting_for_boot) {
-                const bootStart = bootStartTimes[portNum];
-                const bootingMinutes = bootStart ? Math.floor((Date.now() - bootStart) / 60000) : 0;
-                // Show reset suggestion after 5 minutes (except for Tarana)
-                if (bootingMinutes >= 5 && port.device_type !== 'tarana') {
-                    return { text: 'BOOTING', sub: 'May need factory reset', cls: 'booting', icon: 'spinner', showResetHint: true };
-                }
-                return { text: 'BOOTING', sub: 'Waiting for device...', cls: 'booting', icon: 'spinner' };
-            }
             if (checklist.firmware_update_1 === 'loading' || checklist.firmware_update_2 === 'loading') {
                 const prog = getStepProgress(port);
                 const stepNum = Math.min(prog.done + 1, prog.total);
@@ -970,8 +994,15 @@
             }
             // last_result already handled at top of function
             const loginOk = checklist.login === true;
-            const configOk = checklist.config_upload === true || checklist.config_upload === 'skipped';
-            const verifyOk = checklist.verify === true || checklist.config_verify === true || checklist.config_verify === 'skipped';
+            const requiresBaseline = Boolean(port.workflow?.baseline_mode)
+                && !port.device_mode;
+            const configOk = checklist.config_upload === true
+                || (checklist.config_upload === 'skipped' && !requiresBaseline)
+                || Boolean(port.device_mode);
+            const verifyOk = requiresBaseline
+                ? checklist.config_verify === true || Boolean(port.device_mode)
+                : checklist.verify === true || checklist.config_verify === true
+                    || checklist.config_verify === 'skipped';
             if (loginOk && configOk && verifyOk) {
                 return { text: 'COMPLETE', sub: 'Ready to deploy', cls: 'complete', icon: 'check' };
             }

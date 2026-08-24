@@ -113,6 +113,7 @@ class HandlerManager:
         if not device_type:
             return {
                 "post_provision_modes": [],
+                "required_baseline_mode": "",
                 "manual_netinstall": False,
                 "manual_netinstall_label": "",
             }
@@ -120,12 +121,16 @@ class HandlerManager:
         if handler_class is None:
             return {
                 "post_provision_modes": [],
+                "required_baseline_mode": "",
                 "manual_netinstall": False,
                 "manual_netinstall_label": "",
             }
         return {
             "post_provision_modes": list(
                 getattr(handler_class, "qualified_post_provision_modes", ())
+            ),
+            "required_baseline_mode": str(
+                getattr(handler_class, "required_baseline_mode", "") or ""
             ),
             "manual_netinstall": bool(
                 getattr(handler_class, "supports_manual_netinstall", False)

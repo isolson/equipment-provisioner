@@ -110,6 +110,13 @@ class BaseHandler(ABC):
     #: verified. A template or theoretical capability alone is not enough.
     qualified_post_provision_modes = ()  # type: Tuple[str, ...]
 
+    #: Baseline deployment mode that must be applied and verified during the
+    #: standard provisioning run before the unit is deployable or eligible
+    #: for a post-provision mode conversion. ``None`` means the handler has no
+    #: such prerequisite. This is a handler trait so shared workflow code does
+    #: not maintain a vendor allowlist.
+    required_baseline_mode = None  # type: Optional[str]
+
     #: Whether the kiosk may expose this handler's manual recovery workflow.
     #: The recovery implementation remains vendor-local; the shared UI only
     #: consumes this capability flag.
