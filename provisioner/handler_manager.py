@@ -102,6 +102,39 @@ class HandlerManager:
         except ValueError:
             return None
 
+    @classmethod
+    def operator_capabilities_for(cls, device_type: Optional[str]) -> Dict[str, Any]:
+        """Return handler-owned capabilities used by operator workflows.
+
+        The kiosk and API must not maintain their own vendor allowlists for
+        AP/PTP or recovery actions. Unknown and non-provisionable side-door
+        device types intentionally return the base, empty capability set.
+        """
+        if not device_type:
+            return {
+                "post_provision_modes": [],
+                "manual_netinstall": False,
+                "manual_netinstall_label": "",
+            }
+        handler_class = cls.handler_class_for(device_type)
+        if handler_class is None:
+            return {
+                "post_provision_modes": [],
+                "manual_netinstall": False,
+                "manual_netinstall_label": "",
+            }
+        return {
+            "post_provision_modes": list(
+                getattr(handler_class, "supported_post_provision_modes", ())
+            ),
+            "manual_netinstall": bool(
+                getattr(handler_class, "supports_manual_netinstall", False)
+            ),
+            "manual_netinstall_label": str(
+                getattr(handler_class, "manual_netinstall_label", "")
+            ),
+        }
+
     async def provision_device(
         self,
         fingerprint: DeviceFingerprint,

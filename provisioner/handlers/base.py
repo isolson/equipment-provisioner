@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, Any, Callable, Awaitable
+from typing import Optional, Dict, Any, Callable, Awaitable, Tuple
 
 _logger = logging.getLogger(__name__)
 
@@ -103,6 +103,17 @@ class BaseHandler(ABC):
     #: (base-only resolution). Enable per vendor only after bench
     #: verification. See docs/design-config-resolution.md.
     supports_config_overlays = False
+
+    #: Post-provisioning deployment modes the operator can apply through the
+    #: shared mode workflow. This is behavior/capability data, so it belongs
+    #: on the handler rather than in the kiosk or VendorSpec registry.
+    supported_post_provision_modes = ()  # type: Tuple[str, ...]
+
+    #: Whether the kiosk may expose this handler's manual recovery workflow.
+    #: The recovery implementation remains vendor-local; the shared UI only
+    #: consumes this capability flag.
+    supports_manual_netinstall = False
+    manual_netinstall_label = "Recovery (Netinstall)"
 
     @staticmethod
     def is_full_config_export(config: Dict[str, Any]) -> bool:

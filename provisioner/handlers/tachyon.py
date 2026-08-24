@@ -38,6 +38,8 @@ class TachyonHandler(BaseHandler):
     Default IP: 169.254.1.1
     """
 
+    supported_post_provision_modes = ("ap", "ptp")
+
     # API endpoints
     API_LOGIN = "/cgi.lua/login"
     API_CONFIG = "/cgi.lua/config"

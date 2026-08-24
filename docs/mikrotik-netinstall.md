@@ -21,8 +21,10 @@ the device off ready for customer config.
    Netinstall and Configure-script pipeline. It reports completion on the
    touchscreen.
 
-The orange "Netinstall" button remains available for manual or diagnostic use.
-The automatic BOOTP flow is the normal operator procedure.
+The activity modal exposes **MikroTik recovery (Netinstall)** under its collapsed
+**Service actions** section for a detected MikroTik device. The API validates
+both the handler capability and the device MAC OUI before starting the
+operation. The automatic BOOTP flow remains the normal operator procedure.
 
 ## End-to-end pipeline
 

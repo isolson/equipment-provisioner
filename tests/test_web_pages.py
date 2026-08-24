@@ -151,16 +151,34 @@ def test_dashboard_vendor_metadata_renders_identically_to_the_old_map():
     }
 
 
-def test_dashboard_keeps_behavioral_vendor_branches_hardcoded():
-    """canApplyMode (cambium/tachyon) and the Tachyon SSID uppercasing are
-    behavior, not enumeration — they stay in the JS (Story 5 / #75)."""
+def test_dashboard_uses_server_owned_workflow_actions():
+    """The modal renders capabilities from port workflow state, not a new
+    frontend vendor allowlist. Tachyon's SSID preview remains a separate,
+    pre-existing mode-config behavior pending its handler-trait migration."""
     client = make_client()
     html = client.get("/").text
 
-    assert (
-        "port.device_type === 'cambium' || port.device_type === 'tachyon'"
-    ) in html
+    assert "port.device_type === 'cambium' || port.device_type === 'tachyon'" not in html
+    assert "workflow.available_actions" in html
+    assert "workflow.service_actions" in html
+    assert "renderWorkflowActionPanel(portNum, port)" in html
     assert "port.device_type === 'tachyon' ? dir.toUpperCase() : hostname" in html
+
+
+def test_dashboard_footer_is_contextual_and_touch_friendly():
+    client = make_client()
+    html = client.get("/").text
+
+    assert "function renderPortModalFooter(portNum, port, printableLabel)" in html
+    assert "Retry provisioning" in html
+    assert "Enter credentials and retry" in html
+    assert "Reprint label" in html
+    assert "if (active)" in html
+    assert "port.workflow.state !== 'failed'" in html
+    assert "MikroTik recovery (Netinstall)" not in html
+    assert re.search(r"\.modal-action\s*\{[^}]*min-height:\s*48px", html)
+    assert "flex flex-wrap justify-end gap-2" in html
+    assert "const canApplyMode" not in html
 
 
 def test_dashboard_progress_uses_run_specific_validation_plan():

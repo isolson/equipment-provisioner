@@ -182,6 +182,7 @@ class Provisioner:
             simple_subnet=(
                 None if self._use_vlan_mode else self.config.simple_mode.subnet
             ),
+            mode_config_enabled=self.config.features.mode_config,
         )
         await self.port_manager.setup()
         self.port_manager.on_device_detected(self._on_port_device_detected)
@@ -385,6 +386,13 @@ class Provisioner:
             # Don't overwrite state if cancelled — link-down handler already reset everything
             if not cancelled:
                 self.port_manager.mark_port_provisioning(port_num, False, success=success)
+                # The completion event is emitted inside _provision_port_device,
+                # before mark_port_provisioning() can derive the terminal
+                # workflow. Push the authoritative post-run state immediately
+                # instead of waiting for the next two-second status broadcast.
+                from .web.websocket import notify_port_change
+                port_status = self.port_manager._get_single_port_status(port_num)
+                await notify_port_change(port_num, port_status)
 
             # Push device info to equipment registry on success
             if success and not cancelled:
@@ -811,6 +819,12 @@ class Provisioner:
                     status=ProvisioningStatus.FAILED,
                     error_message=result.error_message,
                     completed_at=datetime.now(),
+                )
+
+                # Persist the retry reason in port state so page refreshes and
+                # WebSocket reconnects render the same contextual action.
+                self.port_manager.set_needs_credentials(
+                    port_num, result.needs_credentials
                 )
 
                 # If credentials failed, send special notification to prompt UI
