@@ -2054,6 +2054,7 @@ class CambiumHandler(BaseHandler):
 
         try:
             firmware_file = Path(firmware_path)
+            debug_value = "0" if upgrade_type == "sw" else "true"
             logger.info(
                 f"Uploading firmware {firmware_file.name} to {self.ip} via {self.interface} "
                 f"(alt-bank path)"
@@ -2141,7 +2142,7 @@ class CambiumHandler(BaseHandler):
                 "-w", "\n%{http_code}",
                 "-X", "POST",
                 "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", f"type={upgrade_type}&debug=true",
+                "-d", f"type={upgrade_type}&debug={debug_value}",
             ]
             if cookie_path:
                 curl_args.extend(["-b", cookie_path])
@@ -2167,7 +2168,11 @@ class CambiumHandler(BaseHandler):
             )
 
             # Step 3: poll get_upgrade_status (same form body) until done
-            ready = await self._poll_upgrade_status_curl(stok, cookie_file=cookie_path)
+            ready = await self._poll_upgrade_status_curl(
+                stok,
+                cookie_file=cookie_path,
+                debug_value=debug_value,
+            )
             if ready:
                 logger.info(f"Alt-bank firmware ready on {self.ip}")
                 return True
@@ -2180,7 +2185,13 @@ class CambiumHandler(BaseHandler):
             logger.error(f"Failed to upload firmware to alt bank via curl: {e}")
             return False
 
-    async def _poll_upgrade_status_curl(self, stok: str, timeout: int = 300, cookie_file: Optional[str] = None) -> bool:
+    async def _poll_upgrade_status_curl(
+        self,
+        stok: str,
+        timeout: int = 300,
+        cookie_file: Optional[str] = None,
+        debug_value: str = "true",
+    ) -> bool:
         """Poll /admin/get_upgrade_status (alt-bank path) until upgrade is ready.
 
         Mirrors _poll_upload_status_curl but uses the get_upgrade_status
@@ -2199,7 +2210,7 @@ class CambiumHandler(BaseHandler):
                     "-w", "\n%{http_code}",
                     "-X", "POST",
                     "-H", "Content-Type: application/x-www-form-urlencoded",
-                    "-d", "type=device&debug=true",
+                    "-d", f"type=device&debug={debug_value}",
                 ]
                 if cookie_file:
                     curl_args.extend(["-b", cookie_file])

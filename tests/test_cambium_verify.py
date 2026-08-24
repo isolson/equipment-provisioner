@@ -156,6 +156,33 @@ async def test_force_bank_one_keeps_legacy_first_pass(monkeypatch, tmp_path):
     assert calls == [str(firmware)]
 
 
+async def test_ax_explicit_upgrade_uses_release_debug_value(monkeypatch, tmp_path):
+    h = _handler()
+    h.interface = "eth0.1996"
+    firmware = tmp_path / "ePMP-AX-v5.11.1.img"
+    firmware.write_bytes(b"firmware")
+    process_args = []
+    poll_args = []
+
+    async def fake_exec(*args, **kwargs):
+        process_args.append(args)
+        return _CurlResult()
+
+    async def ready(*args, **kwargs):
+        poll_args.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(h, "_poll_upgrade_status_curl", ready)
+
+    assert await h._upload_firmware_curl_alt_bank(
+        str(firmware),
+        upgrade_type="sw",
+    ) is True
+    assert any("type=sw&debug=0" in args for args in process_args)
+    assert poll_args[0][1]["debug_value"] == "0"
+
+
 async def test_firmware_upload_fails_when_ready_status_is_not_confirmed(
     monkeypatch, tmp_path
 ):

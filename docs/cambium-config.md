@@ -313,9 +313,9 @@ This was confirmed via HAR capture of the web UI doing a successful
 manual dual-bank upgrade on a Force 300-25 running 5.11.1.
 
 ePMP AX uses the explicit second-pass sequence for both banks. Its
-`upgrade_sw_image_local` request uses `type=sw`. Its
-`get_upgrade_status` request uses `type=device`. The AX web UI does not
-expose `local_upload_image`; that endpoint returns HTTP 404.
+`upgrade_sw_image_local` request uses `type=sw&debug=0`. Its
+`get_upgrade_status` request uses `type=device&debug=0`. The AX web UI
+does not expose `local_upload_image`; that endpoint returns HTTP 404.
 
 ### First pass — first-bank flash
 
