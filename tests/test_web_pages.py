@@ -188,17 +188,59 @@ def test_dashboard_rechecks_identity_before_showing_preserved_complete():
         "function getIconState", 1
     )[0]
     assert card_state.index("if (port.waiting_for_boot)") < card_state.index(
-        "if (port.last_result === 'complete'"
+        "const readiness = deploymentReadiness(port)"
     )
 
     status_center = html.split("function getStatusCenterInfo(port, portNum) {", 1)[1].split(
         "function statusIconSVG", 1
     )[0]
     assert status_center.index("if (port.waiting_for_boot)") < status_center.index(
-        "const isDone = port.last_result"
+        "const readiness = deploymentReadiness(port)"
     )
     assert "Checking connected device..." in status_center
     assert "Waiting for link..." in status_center
+
+
+def test_dashboard_requires_verified_config_before_deploy_ready():
+    """Firmware-only success must not be presented as deployable.
+
+    Cambium and Tachyon can finish their standard pass without a resolved
+    config. Keep the mode controls available, but show an amber state until
+    AP/PTP config has been applied successfully.
+    """
+    client = make_client()
+    html = client.get("/").text
+
+    readiness = html.split("function deploymentReadiness(port) {", 1)[1].split(
+        "function getCardState", 1
+    )[0]
+    assert "if (!provisionSucceeded(port)) return null" in readiness
+    assert "supportsModeConfiguration(port) && !port.device_mode" in readiness
+    assert "checklist.config_upload !== true" in readiness
+    assert "return 'needs-config'" in readiness
+    assert "checklist.config_verify !== true" in readiness
+    assert "return 'config-unverified'" in readiness
+    assert readiness.index("return 'needs-config'") < readiness.index(
+        "return 'ready'"
+    )
+
+    status_center = html.split("function getStatusCenterInfo(port, portNum) {", 1)[1].split(
+        "function statusIconSVG", 1
+    )[0]
+    assert "text: 'NEEDS CONFIG'" in status_center
+    assert "sub: 'Select AP or PTP'" in status_center
+    assert "text: 'CONFIG UNVERIFIED'" in status_center
+    assert "if (readiness === 'ready')" in status_center
+    assert "sub = 'Ready to deploy'" in status_center
+    assert "const verifyOk = supportsModeConfiguration(port)" in status_center
+    assert "? checklist.config_verify === true || Boolean(port.device_mode)" in status_center
+
+    # A successful firmware pass is precisely when AP/PTP selection must stay
+    # enabled so the operator can turn NEEDS CONFIG into deploy-ready.
+    assert (
+        "const canApplyMode = provisionSucceeded(port) "
+        "&& supportsModeConfiguration(port);"
+    ) in html
 
 
 def test_labels_page_renders_guarded_templates():

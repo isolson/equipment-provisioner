@@ -695,6 +695,30 @@
             return speed.replace('bps', '').replace('Gbps', 'G').replace('Mbps', 'M');
         }
 
+        function provisionSucceeded(port) {
+            return port.last_result === 'complete' || port.last_result === 'success';
+        }
+
+        function supportsModeConfiguration(port) {
+            return port.device_type === 'cambium' || port.device_type === 'tachyon';
+        }
+
+        function deploymentReadiness(port) {
+            if (!provisionSucceeded(port)) return null;
+
+            // Cambium and Tachyon leave the standard firmware pass in SM/base
+            // state when no template was resolved. They are not deployable
+            // until either a standard config was applied and verified or the
+            // operator successfully applied an AP/PTP mode config.
+            if (supportsModeConfiguration(port) && !port.device_mode) {
+                const checklist = port.checklist || {};
+                if (checklist.config_upload !== true) return 'needs-config';
+                if (checklist.config_verify !== true) return 'config-unverified';
+            }
+
+            return 'ready';
+        }
+
         function getCardState(port) {
             const checklist = port.checklist || {};
 
@@ -704,8 +728,11 @@
             // may be a rapid equipment swap rather than the old unit rebooting.
             if (port.waiting_for_boot) return 'warning';
 
+            const readiness = deploymentReadiness(port);
+            if (readiness === 'needs-config' || readiness === 'config-unverified') return 'warning';
+
             // Provisioning result survives link-down (e.g. device changed networks after config)
-            if (port.last_result === 'complete' || port.last_result === 'success') return 'success';
+            if (readiness === 'ready') return 'success';
             if (port.last_result === 'failed') return 'error';
 
             if (!port.link_up) return 'idle';
@@ -846,9 +873,15 @@
                 const sub = port.link_up ? 'Checking connected device...' : 'Waiting for link...';
                 return { text: 'BOOTING', sub, cls: 'booting', icon: 'spinner' };
             }
+            const readiness = deploymentReadiness(port);
+            if (readiness === 'needs-config') {
+                return { text: 'NEEDS CONFIG', sub: 'Select AP or PTP', cls: 'warning', icon: 'alert' };
+            }
+            if (readiness === 'config-unverified') {
+                return { text: 'CONFIG UNVERIFIED', sub: 'Applied but not confirmed', cls: 'warning', icon: 'alert' };
+            }
             // Provisioning result survives link-down (device may have changed networks)
-            const isDone = port.last_result === 'complete' || port.last_result === 'success';
-            if (isDone) {
+            if (readiness === 'ready') {
                 let sub = 'Ready to deploy';
                 if (port.device_mode) {
                     const mc = port.mode_config || {};
@@ -911,8 +944,13 @@
             }
             // last_result already handled at top of function
             const loginOk = checklist.login === true;
-            const configOk = checklist.config_upload === true || checklist.config_upload === 'skipped';
-            const verifyOk = checklist.verify === true || checklist.config_verify === true || checklist.config_verify === 'skipped';
+            const configOk = checklist.config_upload === true
+                || (checklist.config_upload === 'skipped' && !supportsModeConfiguration(port))
+                || Boolean(port.device_mode);
+            const verifyOk = supportsModeConfiguration(port)
+                ? checklist.config_verify === true || Boolean(port.device_mode)
+                : checklist.verify === true || checklist.config_verify === true
+                    || checklist.config_verify === 'skipped';
             if (loginOk && configOk && verifyOk) {
                 return { text: 'COMPLETE', sub: 'Ready to deploy', cls: 'complete', icon: 'check' };
             }
@@ -1055,8 +1093,7 @@
                 ` : ''}
             `;
             const isActive = port.provisioning || port.waiting_for_boot;
-            const isDone = port.last_result === 'complete' || port.last_result === 'success';
-            const canApplyMode = isDone && (port.device_type === 'cambium' || port.device_type === 'tachyon');
+            const canApplyMode = provisionSucceeded(port) && supportsModeConfiguration(port);
             const isEvolutionDigital = port.device_type === 'evolution_digital';
             const printableLabel = lastLabelByPort[portNum] || port.last_label;
             document.getElementById('modal-footer').innerHTML = isActive ? `
