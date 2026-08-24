@@ -217,6 +217,115 @@ async def test_post_grace_sweep_leaves_connected_complete_port_alone():
     assert state.checklist.login is True
 
 
+def test_replacement_mac_clears_preserved_run_but_keeps_cooldown_identity():
+    """A rapid equipment swap must not inherit the previous COMPLETE card.
+
+    Keep the old success identity only so cooldown logic can prove that the
+    newly observed MAC is a different unit and bypass the old unit's cooldown.
+    """
+    import time
+
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    old_mac = "00:11:22:33:44:55"
+    completed_at = time.time()
+    state.last_result = "success"
+    state.last_error = "stale error"
+    state.provisioning_ended = completed_at
+    state.last_provisioned_at = completed_at
+    state.last_provisioned_mac = old_mac
+    state.provision_attempted = True
+    state.last_bootp_fired_at = completed_at
+    state.last_bootp_fired_mac = old_mac
+    state.device_model = "Old model"
+    state.device_serial = "OLD123"
+    state.checklist.login = True
+    manager.set_step_plan(1, [{"key": "login", "label": "Login"}])
+    manager.update_checklist(1, "login", True, "Old run")
+    state.device_mode = "ap"
+    state.mode_config = {"tower": 1}
+
+    changed = manager._reset_run_state_if_replaced(1, "AA:BB:CC:DD:EE:FF")
+
+    assert changed is True
+    assert state.last_result is None
+    assert state.last_error is None
+    assert state.provisioning_ended is None
+    assert state.provision_attempted is False
+    assert state.last_bootp_fired_at is None
+    assert state.last_bootp_fired_mac is None
+    assert state.device_model is None
+    assert state.device_serial is None
+    assert state.checklist.login is None
+    assert state.step_plan == []
+    assert state.step_status == {}
+    assert state.step_details == {}
+    assert state.device_mode is None
+    assert state.mode_config is None
+    assert state.last_provisioned_at == completed_at
+    assert state.last_provisioned_mac == old_mac
+
+
+def test_same_mac_keeps_completed_run_during_reboot_grace():
+    """A rebooting unit must retain COMPLETE even if MAC case differs."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.last_result = "success"
+    state.last_provisioned_mac = "AA:BB:CC:DD:EE:FF"
+    state.provision_attempted = True
+    state.checklist.login = True
+
+    changed = manager._reset_run_state_if_replaced(1, "aa:bb:cc:dd:ee:ff")
+
+    assert changed is False
+    assert state.last_result == "success"
+    assert state.provision_attempted is True
+    assert state.checklist.login is True
+
+
+@pytest.mark.asyncio
+async def test_rapid_ip_device_swap_clears_complete_and_provisions_new_mac(monkeypatch):
+    """IP detection must inspect MAC before the old attempted flag can block it."""
+    import time
+
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.link_up = True
+    state.last_result = "success"
+    state.provisioning_ended = time.time()
+    state.last_provisioned_at = time.time()
+    state.last_provisioned_mac = "00:11:22:33:44:55"
+    state.provision_attempted = True
+    state.checklist.login = True
+
+    target_ip = "169.254.1.1"
+    monkeypatch.setattr(DeviceLinkLocalIP, "ALL", [(target_ip, ["cambium"])])
+    manager._try_passive_detection = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    manager._ping_device = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._identify_device_type = AsyncMock(return_value="cambium")  # type: ignore[method-assign]
+    manager._lookup_neighbor_mac = AsyncMock(  # type: ignore[method-assign]
+        return_value="AA:BB:CC:DD:EE:FF"
+    )
+    detected = AsyncMock()
+    manager.on_device_detected(detected)
+
+    await manager._detect_device_on_port(1)
+
+    detected.assert_awaited_once_with(1, "cambium", target_ip)
+    assert state.device_mac == "AA:BB:CC:DD:EE:FF"
+    assert state.last_result is None
+    assert state.checklist.login is None
+    assert state.provision_attempted is True
+    # The old identity remains solely for cooldown comparison/audit.
+    assert state.last_provisioned_mac == "00:11:22:33:44:55"
+
+
 @pytest.mark.asyncio
 async def test_link_down_during_expected_reboot_does_not_cancel_provisioning():
     """While expecting_reboot is set, a link-down must be ignored.
@@ -581,6 +690,41 @@ async def test_passive_detection_marks_detected_when_link_up_and_match():
 
     assert state.device_detected is True
     assert state.device_type == "evolution_digital"
+    assert state.device_mac == "84:01:12:42:95:fe"
+
+
+@pytest.mark.asyncio
+async def test_passive_detection_provisions_replacement_during_complete_grace():
+    """A new passive-only device must not inherit the old unit's COMPLETE."""
+    import time
+
+    manager = PortManager(num_ports=6)
+    manager._generate_port_configs()
+
+    config = manager.ports[5]
+    state = manager.port_states[5]
+    state.link_up = True
+    state.last_result = "success"
+    state.provisioning_ended = time.time()
+    state.last_provisioned_at = time.time()
+    state.last_provisioned_mac = "84:01:12:00:00:01"
+    state.provision_attempted = True
+    state.checklist.link_qualification = "PASS"
+    detected = AsyncMock()
+    manager.on_device_detected(detected)
+
+    async def fake_sniff(self, interface, timeout_sec, pi_mac=None):
+        return "84:01:12:42:95:fe"
+
+    with patch(
+        "provisioner.fingerprint.DeviceFingerprinter.sniff_for_known_mac",
+        new=fake_sniff,
+    ):
+        await manager._try_passive_detection(5, config, state, timeout_sec=10)
+
+    detected.assert_awaited_once_with(5, "evolution_digital", None)
+    assert state.last_result is None
+    assert state.checklist.link_qualification is None
     assert state.device_mac == "84:01:12:42:95:fe"
 
 

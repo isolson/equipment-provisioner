@@ -701,6 +701,13 @@ class PortManager:
                 )
                 continue
 
+            # A successful run intentionally preserves COMPLETE/checklist state
+            # through a short reboot grace window. A different, trusted
+            # MikroTik MAC means the operator has already replaced the unit;
+            # clear the old run immediately instead of making the replacement
+            # inherit that grace-period state.
+            self._reset_run_state_if_replaced(port_num, mac)
+
             # If the same unit is still advertising BOOTP after a fired
             # Netinstall, do not automatically reflash it again. Require a
             # physical remove/reinsert (which clears port state) or a
@@ -1135,10 +1142,22 @@ class PortManager:
                 )
 
                 if device_type:
+                    # Resolve identity before consulting provision_attempted.
+                    # During the post-success reboot grace, that flag belongs
+                    # to the previous unit. A different MAC must clear the
+                    # preserved run so a rapid bench swap can proceed.
+                    current_mac = await self._lookup_neighbor_mac(
+                        config.interface_name,
+                        device_ip,
+                    )
+                    self._reset_run_state_if_replaced(port_num, current_mac)
+
                     state.link_up = True
                     state.device_detected = True
                     state.device_type = device_type
                     state.device_ip = device_ip
+                    if current_mac:
+                        state.device_mac = current_mac
                     state.last_seen = asyncio.get_event_loop().time()
 
                     logger.info(f"Detected {device_type} on port {port_num}")
@@ -1151,9 +1170,6 @@ class PortManager:
                         # change means a different physical device; bypass
                         # the cooldown in that case.
                         import time as _time
-                        current_mac = await self._lookup_neighbor_mac(config.interface_name, device_ip)
-                        if current_mac:
-                            state.device_mac = current_mac
                         in_cooldown = (
                             state.last_provisioned_at is not None
                             and _time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN
@@ -1161,7 +1177,7 @@ class PortManager:
                         same_device = (
                             state.last_provisioned_mac is None
                             or current_mac is None
-                            or current_mac == state.last_provisioned_mac
+                            or current_mac.lower() == state.last_provisioned_mac.lower()
                         )
                         if in_cooldown and same_device:
                             elapsed = int(_time.time() - state.last_provisioned_at)
@@ -1203,10 +1219,18 @@ class PortManager:
                 ["mikrotik"],
             )
             if device_type:
+                current_mac = await self._lookup_neighbor_mac(
+                    config.interface_name,
+                    device_ip,
+                )
+                self._reset_run_state_if_replaced(port_num, current_mac)
+
                 state.link_up = True
                 state.device_detected = True
                 state.device_type = device_type
                 state.device_ip = device_ip
+                if current_mac:
+                    state.device_mac = current_mac
                 state.last_seen = asyncio.get_event_loop().time()
 
                 logger.info(f"Detected {device_type} on port {port_num} via fallback IP {device_ip}")
@@ -1278,6 +1302,8 @@ class PortManager:
             device_type = await self._identify_device_type(interface, device_ip, [])
             if not device_type:
                 continue
+
+            self._reset_run_state_if_replaced(port_num, device_mac)
 
             state.link_up = True
             state.device_detected = True
@@ -1370,6 +1396,8 @@ class PortManager:
                 f"discarding match for {mac}"
             )
             return
+
+        self._reset_run_state_if_replaced(port_num, mac)
 
         device_type = DeviceType.EVOLUTION_DIGITAL.value
         state.device_detected = True
@@ -1693,6 +1721,58 @@ class PortManager:
             state.provisioning_ended = None
             self.reset_checklist(port_num)
             self.clear_device_mode(port_num)
+
+    def _reset_run_state_if_replaced(
+        self,
+        port_num: int,
+        observed_mac: Optional[str],
+    ) -> bool:
+        """Clear preserved run state when a different device is observed.
+
+        Successful provisioning keeps its result and checklist visible during
+        ``PROVISIONING_GRACE_PERIOD`` so planned reboots do not make COMPLETE
+        disappear. Bench operators can replace equipment faster than that
+        grace period. Once a trusted detection path observes a MAC different
+        from ``last_provisioned_mac``, the old visible and idempotency state
+        belongs to another physical unit and must not suppress the replacement.
+
+        Keep the successful-run timestamp and MAC as historical cooldown
+        identity. Existing cooldown checks can then bypass that cooldown only
+        for this demonstrably different device.
+        """
+        state = self.port_states.get(port_num)
+        if not state or not observed_mac or not state.last_provisioned_mac:
+            return False
+
+        previous_mac = state.last_provisioned_mac.strip().lower()
+        current_mac = observed_mac.strip().lower()
+        if not previous_mac or not current_mac or previous_mac == current_mac:
+            return False
+
+        # The replacement may still differ from the last *successful* MAC
+        # while its own run is active or has failed. Once device_mac already
+        # identifies the observed unit, this is a repeat observation, not a
+        # second replacement. Preserve its attempt/result gates so a BOOTP
+        # device cannot loop destructive retries.
+        active_mac = (state.device_mac or "").strip().lower()
+        if active_mac and active_mac == current_mac:
+            return False
+
+        logger.info(
+            f"Port {port_num} observed replacement MAC {observed_mac}; "
+            "clearing preserved result from the previous device"
+        )
+        state.last_result = None
+        state.last_error = None
+        state.provision_attempted = False
+        state.provisioning_ended = None
+        state.last_bootp_fired_at = None
+        state.last_bootp_fired_mac = None
+        state.device_model = None
+        state.device_serial = None
+        self.reset_checklist(port_num)
+        self.clear_device_mode(port_num)
+        return True
 
     def update_port_device_info(
         self,
