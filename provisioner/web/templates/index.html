@@ -698,6 +698,12 @@
         function getCardState(port) {
             const checklist = port.checklist || {};
 
+            // A preserved success belongs to the previous observed identity
+            // until the device that came back on the link is identified. Do
+            // not paint the card COMPLETE during that uncertainty window: it
+            // may be a rapid equipment swap rather than the old unit rebooting.
+            if (port.waiting_for_boot) return 'warning';
+
             // Provisioning result survives link-down (e.g. device changed networks after config)
             if (port.last_result === 'complete' || port.last_result === 'success') return 'success';
             if (port.last_result === 'failed') return 'error';
@@ -717,7 +723,6 @@
             if (checklist.login === true && (checklist.verify === true || checklist.config_verify === true || checklist.config_verify === 'skipped')) return 'success';
             // Failed
             if (checklist.login === false || checklist.firmware_update_1 === false) return 'error';
-            if (port.waiting_for_boot) return 'warning';
             if (port.device_detected) return 'success';
             return 'warning';
         }
@@ -826,6 +831,21 @@
                 }
                 if (port.link_up) return { text: 'DETECTED', sub: 'Starting qualification...', cls: 'booting', icon: 'spinner' };
             }
+            // During reboot grace, last_result can intentionally still be
+            // success. Identity is not yet known, so BOOTING must take visual
+            // precedence over the previous device's COMPLETE result. Once
+            // detection observes the same MAC, COMPLETE returns; a different
+            // MAC clears the preserved run and starts the replacement flow.
+            if (port.waiting_for_boot) {
+                const bootStart = bootStartTimes[portNum];
+                const bootingMinutes = bootStart ? Math.floor((Date.now() - bootStart) / 60000) : 0;
+                // Show reset suggestion after 5 minutes (except for Tarana)
+                if (bootingMinutes >= 5 && port.device_type !== 'tarana') {
+                    return { text: 'BOOTING', sub: 'May need factory reset', cls: 'booting', icon: 'spinner', showResetHint: true };
+                }
+                const sub = port.link_up ? 'Checking connected device...' : 'Waiting for link...';
+                return { text: 'BOOTING', sub, cls: 'booting', icon: 'spinner' };
+            }
             // Provisioning result survives link-down (device may have changed networks)
             const isDone = port.last_result === 'complete' || port.last_result === 'success';
             if (isDone) {
@@ -880,15 +900,6 @@
                 const prog = getStepProgress(port);
                 const stepNum = Math.min(prog.done + 1, prog.total);
                 return { text, sub: `Step ${stepNum} of ${prog.total}`, cls: 'active', icon: 'spinner' };
-            }
-            if (port.waiting_for_boot) {
-                const bootStart = bootStartTimes[portNum];
-                const bootingMinutes = bootStart ? Math.floor((Date.now() - bootStart) / 60000) : 0;
-                // Show reset suggestion after 5 minutes (except for Tarana)
-                if (bootingMinutes >= 5 && port.device_type !== 'tarana') {
-                    return { text: 'BOOTING', sub: 'May need factory reset', cls: 'booting', icon: 'spinner', showResetHint: true };
-                }
-                return { text: 'BOOTING', sub: 'Waiting for device...', cls: 'booting', icon: 'spinner' };
             }
             if (checklist.firmware_update_1 === 'loading' || checklist.firmware_update_2 === 'loading') {
                 const prog = getStepProgress(port);
