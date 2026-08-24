@@ -74,8 +74,10 @@ class _CurlResult:
 
     def __init__(self, stdout=b'{"success":1}\n200'):
         self.stdout = stdout
+        self.stdin = None
 
-    async def communicate(self):
+    async def communicate(self, stdin=None):
+        self.stdin = stdin
         return self.stdout, b""
 
 
@@ -131,8 +133,8 @@ async def test_ax_bank_one_uses_explicit_upgrade_sequence(monkeypatch, tmp_path)
     firmware.write_bytes(b"firmware")
     calls = []
 
-    async def explicit(path, upgrade_type="device"):
-        calls.append((path, upgrade_type))
+    async def explicit(path):
+        calls.append(path)
         return True
 
     async def legacy(path):
@@ -142,7 +144,7 @@ async def test_ax_bank_one_uses_explicit_upgrade_sequence(monkeypatch, tmp_path)
     monkeypatch.setattr(h, "_upload_firmware_curl", legacy)
 
     assert await h.upload_firmware(str(firmware), bank=1) is True
-    assert calls == [(str(firmware), "sw")]
+    assert calls == [str(firmware)]
 
 
 async def test_force_bank_one_keeps_legacy_first_pass(monkeypatch, tmp_path):
@@ -157,7 +159,7 @@ async def test_force_bank_one_keeps_legacy_first_pass(monkeypatch, tmp_path):
         calls.append(path)
         return True
 
-    async def explicit(path, upgrade_type="device"):
+    async def explicit(path):
         raise AssertionError("Force bank one must keep the confirmed legacy path")
 
     monkeypatch.setattr(h, "_upload_firmware_curl", legacy)
@@ -167,7 +169,7 @@ async def test_force_bank_one_keeps_legacy_first_pass(monkeypatch, tmp_path):
     assert calls == [str(firmware)]
 
 
-async def test_ax_explicit_upgrade_uses_release_debug_value(monkeypatch, tmp_path):
+async def test_ax_explicit_upgrade_matches_har_request(monkeypatch, tmp_path):
     h = _handler()
     h.interface = "eth0.1996"
     firmware = tmp_path / "ePMP-AX-v5.11.1.img"
@@ -186,12 +188,59 @@ async def test_ax_explicit_upgrade_uses_release_debug_value(monkeypatch, tmp_pat
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
     monkeypatch.setattr(h, "_poll_upgrade_status_curl", ready)
 
-    assert await h._upload_firmware_curl_alt_bank(
-        str(firmware),
-        upgrade_type="sw",
+    assert await h._upload_firmware_curl_alt_bank(str(firmware)) is True
+    assert any("type=device&debug=true" in args for args in process_args)
+    assert any("X-Requested-With: XMLHttpRequest" in args for args in process_args)
+    assert all(";stok=" not in arg for args in process_args for arg in args)
+    assert poll_args[0][1]["debug_value"] == "true"
+
+
+async def test_curl_stdin_config_keeps_url_and_form_data_out_of_argv(monkeypatch):
+    h = _handler()
+    process_args = []
+    results = []
+
+    async def fake_exec(*args, **kwargs):
+        process_args.append(args)
+        result = _CurlResult()
+        results.append(result)
+        return result
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    secret_url = "https://device/cgi-bin/luci/;stok=session-secret/admin/test"
+    secret_form = "password=password-secret"
+    await h._run_curl_with_stdin_config(
+        ["curl", "-s", "-X", "POST"],
+        secret_url,
+        form_data=secret_form,
+    )
+
+    argv = process_args[0]
+    assert all("session-secret" not in arg for arg in argv)
+    assert all("password-secret" not in arg for arg in argv)
+    assert secret_url.encode() in results[0].stdin
+    assert secret_form.encode() in results[0].stdin
+
+
+async def test_upgrade_poll_accepts_har_terminal_status(monkeypatch, fast_sleep):
+    h = _handler()
+    h.interface = "eth0.1996"
+    replies = iter([
+        _CurlResult(b'{"success":1,"status":0,"error":0}\n200'),
+        _CurlResult(b'{"success":1,"status":7,"error":0}\n200'),
+    ])
+
+    async def fake_exec(*args, **kwargs):
+        return next(replies)
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    assert await h._poll_upgrade_status_curl(
+        "session-secret",
+        timeout=10,
+        debug_value="true",
     ) is True
-    assert any("type=sw&debug=0" in args for args in process_args)
-    assert poll_args[0][1]["debug_value"] == "0"
 
 
 async def test_explicit_upgrade_stops_on_application_upload_failure(
@@ -210,10 +259,7 @@ async def test_explicit_upgrade_stops_on_application_upload_failure(
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
-    assert await h._upload_firmware_curl_alt_bank(
-        str(firmware),
-        upgrade_type="sw",
-    ) is False
+    assert await h._upload_firmware_curl_alt_bank(str(firmware)) is False
     assert len(process_args) == 1
 
 

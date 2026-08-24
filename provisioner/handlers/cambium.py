@@ -1861,11 +1861,7 @@ class CambiumHandler(BaseHandler):
                 model = self._device_info.model if self._device_info else None
                 is_ax = self._is_ax_model(model)
                 if bank == 2 or is_ax:
-                    upgrade_type = "sw" if is_ax else "device"
-                    return await self._upload_firmware_curl_alt_bank(
-                        firmware_path,
-                        upgrade_type=upgrade_type,
-                    )
+                    return await self._upload_firmware_curl_alt_bank(firmware_path)
                 return await self._upload_firmware_curl(firmware_path)
 
             # Use aiohttp when no interface binding needed
@@ -2047,21 +2043,17 @@ class CambiumHandler(BaseHandler):
             logger.error(f"Failed to upload firmware via curl: {e}")
             return False
 
-    async def _upload_firmware_curl_alt_bank(
-        self,
-        firmware_path: str,
-        upgrade_type: str = "device",
-    ) -> bool:
+    async def _upload_firmware_curl_alt_bank(self, firmware_path: str) -> bool:
         """Upload firmware with the explicit upload-and-upgrade sequence.
 
-        Force-series FW2 uses ``upgrade_type=device``. The ePMP AX web UI
-        uses this sequence for both passes and sends ``upgrade_type=sw``.
+        Force-series FW2 and ePMP AX both send ``type=device&debug=true``.
+        A 2026-08-24 AX HAR capture confirmed this sequence through status 7.
         """
         import tempfile
 
         try:
             firmware_file = Path(firmware_path)
-            debug_value = "0" if upgrade_type == "sw" else "true"
+            debug_value = "true"
             logger.info(
                 f"Uploading firmware {firmware_file.name} to {self.ip} via {self.interface} "
                 f"(alt-bank path)"
@@ -2070,7 +2062,7 @@ class CambiumHandler(BaseHandler):
             cookie_path = None
             stok = self._stok
             if stok:
-                logger.debug(f"Reusing existing stok for alt-bank upload: {stok[:16]}...")
+                logger.debug("Reusing the existing session for alt-bank upload")
                 cookie_path = self._cookie_file
             else:
                 logger.debug("No existing stok, logging in via curl for alt-bank upload...")
@@ -2082,19 +2074,22 @@ class CambiumHandler(BaseHandler):
                 password = self.credentials.get("password", "admin")
                 login_url = f"{self._base_url}/cgi-bin/luci"
 
-                proc = await asyncio.create_subprocess_exec(
-                    "curl", "-s", "-k", "-m", "10",
-                    "--interface", self.interface,
-                    "-c", cookie_path, "-b", cookie_path,
-                    "-X", "POST",
-                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
-                    login_url,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                login_form = (
+                    f"username={urllib.parse.quote(username, safe='')}"
+                    f"&password={urllib.parse.quote(password, safe='')}"
                 )
-                stdout, stderr = await proc.communicate()
+                proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                    [
+                        "curl", "-s", "-k", "-m", "10",
+                        "--interface", self.interface,
+                        "-c", cookie_path, "-b", cookie_path,
+                        "-X", "POST",
+                    ],
+                    login_url,
+                    form_data=login_form,
+                )
                 if proc.returncode != 0:
-                    logger.error(f"Login failed: {stderr.decode()}")
+                    logger.error("Cambium login curl failed with exit %s", proc.returncode)
                     return False
                 response = stdout.decode("utf-8", errors="ignore")
                 match = re.search(r'"stok":"([^"]+)"', response)
@@ -2112,20 +2107,17 @@ class CambiumHandler(BaseHandler):
                 "--interface", self.interface,
                 "-w", "\n%{http_code}",
                 "-X", "POST",
+                "-H", "cache-control: no-cache",
                 "-F", f"image=@{firmware_path}",
             ]
             if cookie_path:
                 curl_args.extend(["-b", cookie_path])
-            curl_args.append(upload_url)
-
-            proc = await asyncio.create_subprocess_exec(
-                *curl_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                curl_args,
+                upload_url,
             )
-            stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                logger.error(f"Alt-bank upload curl failed: {stderr.decode()}")
+                logger.error("Alt-bank upload curl failed with exit %s", proc.returncode)
                 return False
             upload_body, upload_status = self._split_curl_http_response(stdout)
             if upload_status is None or not 200 <= upload_status < 300:
@@ -2155,21 +2147,22 @@ class CambiumHandler(BaseHandler):
                 "--interface", self.interface,
                 "-w", "\n%{http_code}",
                 "-X", "POST",
-                "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", f"type={upgrade_type}&debug={debug_value}",
+                "-H", "cache-control: no-cache",
+                "-H", "X-Requested-With: XMLHttpRequest",
+                "-H", "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
+                "-d", f"type=device&debug={debug_value}",
             ]
             if cookie_path:
                 curl_args.extend(["-b", cookie_path])
-            curl_args.append(upgrade_url)
-
-            proc = await asyncio.create_subprocess_exec(
-                *curl_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                curl_args,
+                upgrade_url,
             )
-            stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                logger.error(f"upgrade_sw_image_local curl failed: {stderr.decode()}")
+                logger.error(
+                    "upgrade_sw_image_local curl failed with exit %s",
+                    proc.returncode,
+                )
                 return False
             upgrade_body, upgrade_status = self._split_curl_http_response(stdout)
             if upgrade_status is None or not 200 <= upgrade_status < 300:
@@ -2234,19 +2227,17 @@ class CambiumHandler(BaseHandler):
                     "--interface", self.interface,
                     "-w", "\n%{http_code}",
                     "-X", "POST",
-                    "-H", "Content-Type: application/x-www-form-urlencoded",
+                    "-H", "cache-control: no-cache",
+                    "-H", "X-Requested-With: XMLHttpRequest",
+                    "-H", "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
                     "-d", f"type=device&debug={debug_value}",
                 ]
                 if cookie_file:
                     curl_args.extend(["-b", cookie_file])
-                curl_args.append(url)
-
-                proc = await asyncio.create_subprocess_exec(
-                    *curl_args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                proc, stdout, _ = await self._run_curl_with_stdin_config(
+                    curl_args,
+                    url,
                 )
-                stdout, _ = await proc.communicate()
                 if proc.returncode != 0:
                     observation = ("curl_exit", proc.returncode)
                     if observation != last_observation:
@@ -2429,6 +2420,38 @@ class CambiumHandler(BaseHandler):
         if separator and re.fullmatch(rb"\d{3}", status_text.strip()):
             return body, int(status_text.strip())
         return stdout, None
+
+    @staticmethod
+    async def _run_curl_with_stdin_config(
+        curl_args: list,
+        url: str,
+        form_data: Optional[str] = None,
+    ):
+        """Run curl without putting a session URL or form secret in argv."""
+        def config_value(value: str) -> str:
+            return (
+                value.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+            )
+
+        config_lines = ['url = "{}"'.format(config_value(url))]
+        if form_data is not None:
+            config_lines.append(
+                'data-binary = "{}"'.format(config_value(form_data))
+            )
+        config_input = ("\n".join(config_lines) + "\n").encode("utf-8")
+
+        proc = await asyncio.create_subprocess_exec(
+            *curl_args,
+            "--config", "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate(config_input)
+        return proc, stdout, stderr
 
     @staticmethod
     def _curl_application_success(operation: str, body: bytes) -> Optional[bool]:

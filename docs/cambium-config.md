@@ -300,7 +300,7 @@ endpoint with multipart upload. This is separate from config.
 | 2026-01-27 | `set_param` (small key set) | Provisioner logs | 5.10.4 |
 | 2026-01-27 | Login (`/cgi-bin/luci`) | Provisioner logs | 5.10.4 |
 | 2026-05-28 | `upload_sw_image_local` + `upgrade_sw_image_local` + `get_upgrade_status` (FW2 alt-bank flash) | HAR capture from browser, Force 300-25 | 5.11.1 |
-| 2026-08-24 | `upload_sw_image_local` + `upgrade_sw_image_local` + `get_upgrade_status` (both passes) | Device web UI JavaScript, ePMP AX SKU 53560 | 5.11.0 |
+| 2026-08-24 | `upload_sw_image_local` + `upgrade_sw_image_local` + `get_upgrade_status` (both passes) | Successful HAR capture, ePMP AX SKU 53560 | 5.11.0 |
 
 ---
 
@@ -312,10 +312,10 @@ needs two separate flash passes, each using a different endpoint set.
 This was confirmed via HAR capture of the web UI doing a successful
 manual dual-bank upgrade on a Force 300-25 running 5.11.1.
 
-ePMP AX uses the explicit second-pass sequence for both banks. Its
-`upgrade_sw_image_local` request uses `type=sw&debug=0`. Its
-`get_upgrade_status` request uses `type=device&debug=0`. The AX web UI
-does not expose `local_upload_image`; that endpoint returns HTTP 404.
+ePMP AX uses the explicit second-pass sequence for both banks. The trigger
+and status requests use `type=device&debug=true`. A successful HAR confirmed
+status progression from 0 through 7. The AX web UI does not expose
+`local_upload_image`; that endpoint returns HTTP 404.
 
 ### First pass — first-bank flash
 
