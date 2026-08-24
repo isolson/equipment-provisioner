@@ -47,10 +47,22 @@ class DummyPortManager:
                 "device_detected": False,
                 "device_type": None,
                 "device_ip": None,
+                "device_mac": None,
+                "device_serial": "TEST-SERIAL",
+                "device_model": "Test model",
                 "provisioning": False,
+                "waiting_for_boot": False,
+                "boot_wait_remaining": None,
                 "link_speed": "1Gbps",
                 "last_result": "success",
                 "last_error": None,
+                "checklist": {"login": True},
+                "step_plan": [{"key": "login", "label": "Login"}],
+                "step_status": {"login": True},
+                "step_details": {},
+                "device_mode": None,
+                "mode_config": None,
+                "ptp_link_id": None,
             }
         }
 
@@ -129,6 +141,11 @@ def test_ports_api_includes_last_provisioning_result(tmp_path):
     assert port["port_number"] == 5
     assert port["last_result"] == "success"
     assert port["last_error"] is None
+    assert port["device_model"] == "Test model"
+    assert port["device_serial"] == "TEST-SERIAL"
+    assert port["checklist"] == {"login": True}
+    assert port["step_plan"] == [{"key": "login", "label": "Login"}]
+    assert port["step_status"] == {"login": True}
 
 
 # Register response with the ship-ready readback (wifi PR #255) in the state

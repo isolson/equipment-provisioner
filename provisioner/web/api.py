@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from ..handler_manager import provisionable_device_types
@@ -49,12 +49,23 @@ class PortStatus(BaseModel):
     device_detected: bool
     device_type: Optional[str] = None
     device_ip: Optional[str] = None
+    device_mac: Optional[str] = None
+    device_serial: Optional[str] = None
     device_model: Optional[str] = None
     provisioning: bool = False
+    waiting_for_boot: bool = False
+    boot_wait_remaining: Optional[int] = None
     last_activity: Optional[str] = None
     link_speed: Optional[str] = None
     last_result: Optional[str] = None
     last_error: Optional[str] = None
+    checklist: Dict[str, Any] = Field(default_factory=dict)
+    step_plan: List[Dict[str, str]] = Field(default_factory=list)
+    step_status: Dict[str, Any] = Field(default_factory=dict)
+    step_details: Dict[str, str] = Field(default_factory=dict)
+    device_mode: Optional[str] = None
+    mode_config: Optional[Dict[str, Any]] = None
+    ptp_link_id: Optional[str] = None
 
 
 class ProvisionRequest(BaseModel):
@@ -148,18 +159,7 @@ async def get_all_ports(request: Request):
     port_status = provisioner.port_manager.get_port_status()
     
     return [
-        PortStatus(
-            port_number=port_num,
-            vlan_id=status["vlan_id"],
-            link_up=status["link_up"],
-            device_detected=status["device_detected"],
-            device_type=status["device_type"],
-            device_ip=status["device_ip"],
-            provisioning=status["provisioning"],
-            link_speed=status.get("link_speed"),
-            last_result=status.get("last_result"),
-            last_error=status.get("last_error"),
-        )
+        PortStatus(port_number=port_num, **status)
         for port_num, status in port_status.items()
     ]
 
@@ -182,18 +182,7 @@ async def get_port(port_number: int, request: Request):
         raise HTTPException(status_code=404, detail="Port not found")
     
     status = port_status[port_number]
-    return PortStatus(
-        port_number=port_number,
-        vlan_id=status["vlan_id"],
-        link_up=status["link_up"],
-        device_detected=status["device_detected"],
-        device_type=status["device_type"],
-        device_ip=status["device_ip"],
-        provisioning=status["provisioning"],
-        link_speed=status.get("link_speed"),
-        last_result=status.get("last_result"),
-        last_error=status.get("last_error"),
-    )
+    return PortStatus(port_number=port_number, **status)
 
 
 # ============================================================================
