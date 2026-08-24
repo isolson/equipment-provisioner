@@ -2573,6 +2573,23 @@ async def apply_device_mode(
             detail=f"Mode configuration not supported for {device_type}",
         )
 
+    # AP/PTP are post-provision conversions. They must never become a way to
+    # bypass a missing or unverified standard SM configuration.
+    if status.get("last_result") not in ("success", "complete"):
+        raise HTTPException(
+            status_code=409,
+            detail="Standard SM provisioning must complete before AP/PTP conversion",
+        )
+    checklist = status.get("checklist") or {}
+    if (
+        checklist.get("config_upload") is not True
+        or checklist.get("config_verify") is not True
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Verified SM configuration is required before AP/PTP conversion",
+        )
+
     # Validate mode-specific parameters
     if req.mode == "ap":
         if req.tower is None or req.direction is None:

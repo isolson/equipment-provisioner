@@ -148,6 +148,67 @@ def test_ports_api_includes_last_provisioning_result(tmp_path):
     assert port["step_status"] == {"login": True}
 
 
+class DummyModePortManager:
+    """Port status fixture for AP/PTP conversion precondition tests."""
+
+    def __init__(self, checklist, last_result="success"):
+        self._checklist = checklist
+        self._last_result = last_result
+
+    def get_port_status(self):
+        return {
+            5: {
+                "device_detected": True,
+                "device_type": "tachyon",
+                "device_ip": "169.254.1.1",
+                "device_model": "TNA-303X",
+                "last_result": self._last_result,
+                "checklist": self._checklist,
+            }
+        }
+
+
+def test_apply_mode_rejects_firmware_only_success(tmp_path, monkeypatch):
+    """AP/PTP cannot replace the missing automatic SM baseline."""
+    client, config, _data_path = make_client(tmp_path)
+    config.features.mode_config = True
+    client.app.state.provisioner.port_manager = DummyModePortManager(
+        {"config_upload": "skipped", "config_verify": None}
+    )
+    monkeypatch.setattr("provisioner.config.get_config", lambda: config)
+
+    response = client.post(
+        "/api/ports/5/apply-mode",
+        json={"mode": "ap", "tower": 5, "direction": "north"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Verified SM configuration is required before AP/PTP conversion"
+    )
+
+
+def test_apply_mode_accepts_verified_sm_baseline(tmp_path, monkeypatch):
+    """A verified standard SM run unlocks optional mode conversion."""
+    client, config, _data_path = make_client(tmp_path)
+    config.features.mode_config = True
+    client.app.state.provisioner.port_manager = DummyModePortManager(
+        {"config_upload": True, "config_verify": True}
+    )
+    monkeypatch.setattr("provisioner.config.get_config", lambda: config)
+    run_apply_mode = AsyncMock()
+    monkeypatch.setattr("provisioner.web.api._run_apply_mode", run_apply_mode)
+
+    response = client.post(
+        "/api/ports/5/apply-mode",
+        json={"mode": "ap", "tower": 5, "direction": "north"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    run_apply_mode.assert_awaited_once()
+
+
 # Register response with the ship-ready readback (wifi PR #255) in the state
 # the contract requires before a unit ships.
 SHIP_READY_READBACK = {

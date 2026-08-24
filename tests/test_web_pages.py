@@ -204,9 +204,9 @@ def test_dashboard_rechecks_identity_before_showing_preserved_complete():
 def test_dashboard_requires_verified_config_before_deploy_ready():
     """Firmware-only success must not be presented as deployable.
 
-    Cambium and Tachyon can finish their standard pass without a resolved
-    config. Keep the mode controls available, but show an amber state until
-    AP/PTP config has been applied successfully.
+    Cambium and Tachyon can finish firmware work without a resolved config.
+    Treat that as a missing SM baseline and keep AP/PTP conversion locked
+    until standard SM configuration has been applied and verified.
     """
     client = make_client()
     html = client.get("/").text
@@ -217,29 +217,32 @@ def test_dashboard_requires_verified_config_before_deploy_ready():
     assert "if (!provisionSucceeded(port)) return null" in readiness
     assert "supportsModeConfiguration(port) && !port.device_mode" in readiness
     assert "checklist.config_upload !== true" in readiness
-    assert "return 'needs-config'" in readiness
+    assert "return 'sm-config-missing'" in readiness
     assert "checklist.config_verify !== true" in readiness
-    assert "return 'config-unverified'" in readiness
-    assert readiness.index("return 'needs-config'") < readiness.index(
+    assert "return 'sm-config-unverified'" in readiness
+    assert readiness.index("return 'sm-config-missing'") < readiness.index(
         "return 'ready'"
     )
 
     status_center = html.split("function getStatusCenterInfo(port, portNum) {", 1)[1].split(
         "function statusIconSVG", 1
     )[0]
-    assert "text: 'NEEDS CONFIG'" in status_center
-    assert "sub: 'Select AP or PTP'" in status_center
-    assert "text: 'CONFIG UNVERIFIED'" in status_center
+    assert "text: 'SM CONFIG MISSING'" in status_center
+    assert "sub: 'Cannot deploy'" in status_center
+    assert "text: 'SM CONFIG UNVERIFIED'" in status_center
     assert "if (readiness === 'ready')" in status_center
     assert "sub = 'Ready to deploy'" in status_center
+    assert "sub = 'SM \\u2014 Ready to deploy'" in status_center
     assert "const verifyOk = supportsModeConfiguration(port)" in status_center
     assert "? checklist.config_verify === true || Boolean(port.device_mode)" in status_center
 
-    # A successful firmware pass is precisely when AP/PTP selection must stay
-    # enabled so the operator can turn NEEDS CONFIG into deploy-ready.
+    # AP/PTP are post-provision conversions. A firmware-only success must not
+    # unlock them as a workaround for the missing SM baseline.
     assert (
-        "const canApplyMode = provisionSucceeded(port) "
-        "&& supportsModeConfiguration(port);"
+        "const canApplyMode = supportsModeConfiguration(port)"
+    ) in html
+    assert (
+        "&& deploymentReadiness(port) === 'ready';"
     ) in html
 
 
