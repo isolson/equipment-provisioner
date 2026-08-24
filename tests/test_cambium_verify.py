@@ -71,8 +71,44 @@ async def test_verify_config_true_on_match(monkeypatch, fast_sleep):
 class _CurlResult:
     returncode = 0
 
+    def __init__(self, stdout=b'{"success":1}\n200'):
+        self.stdout = stdout
+
     async def communicate(self):
-        return b'{"success":1}', b""
+        return self.stdout, b""
+
+
+def test_curl_http_response_split_keeps_body_separate_from_status():
+    h = _handler()
+
+    body, status = h._split_curl_http_response(b'{"status":7}\n200')
+
+    assert body == b'{"status":7}'
+    assert status == 200
+
+
+async def test_upload_status_fails_immediately_on_http_error(monkeypatch):
+    h = _handler()
+    h.interface = "eth0.1996"
+
+    async def fake_exec(*args, **kwargs):
+        return _CurlResult(b"Not found\n404")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    assert await h._poll_upload_status_curl("test-session", timeout=300) is False
+
+
+async def test_upload_status_fails_immediately_on_non_json_body(monkeypatch):
+    h = _handler()
+    h.interface = "eth0.1996"
+
+    async def fake_exec(*args, **kwargs):
+        return _CurlResult(b"<html>login</html>\n200")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    assert await h._poll_upload_status_curl("test-session", timeout=300) is False
 
 
 async def test_firmware_upload_fails_when_ready_status_is_not_confirmed(
