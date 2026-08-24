@@ -2143,7 +2143,7 @@ class CambiumHandler(BaseHandler):
         import time as _time
         start_time = _time.time()
         url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/get_upgrade_status"
-        last_summary = None
+        last_observation = None
 
         while _time.time() - start_time < timeout:
             try:
@@ -2164,9 +2164,18 @@ class CambiumHandler(BaseHandler):
                     stderr=asyncio.subprocess.PIPE,
                 )
                 stdout, _ = await proc.communicate()
-                if proc.returncode == 0 and stdout:
+                if proc.returncode != 0:
+                    observation = ("curl_exit", proc.returncode)
+                    if observation != last_observation:
+                        logger.info("Cambium alt-bank status poll: curl exit=%s", proc.returncode)
+                        last_observation = observation
+                elif not stdout:
+                    observation = ("empty",)
+                    if observation != last_observation:
+                        logger.info("Cambium alt-bank status poll: empty response")
+                        last_observation = observation
+                else:
                     response = stdout.decode("utf-8", errors="ignore")
-                    logger.debug(f"Upgrade status: {response}")
                     try:
                         data = json.loads(response)
                         summary = (
@@ -2176,13 +2185,14 @@ class CambiumHandler(BaseHandler):
                             data.get("progress"),
                             data.get("error"),
                         )
-                        if summary != last_summary:
+                        observation = ("json",) + summary
+                        if observation != last_observation:
                             logger.info(
                                 "Cambium alt-bank status: status=%r success=%r "
                                 "percent=%r progress=%r error=%r",
                                 *summary,
                             )
-                            last_summary = summary
+                            last_observation = observation
                         if data.get("status") == 7:
                             logger.info("Alt-bank upgrade complete (status=7)")
                             return True
@@ -2195,7 +2205,13 @@ class CambiumHandler(BaseHandler):
                             return False
                         logger.debug(f"Alt-bank upgrade in progress (status={data.get('status', '?')})")
                     except json.JSONDecodeError:
-                        pass
+                        observation = ("non_json", len(stdout))
+                        if observation != last_observation:
+                            logger.info(
+                                "Cambium alt-bank status poll: non-JSON response (%s bytes)",
+                                len(stdout),
+                            )
+                            last_observation = observation
                 await asyncio.sleep(2)
             except Exception as e:
                 logger.debug(f"Upgrade status poll error: {e}")
@@ -2218,7 +2234,7 @@ class CambiumHandler(BaseHandler):
         import time
         start_time = time.time()
         url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/get_upload_status"
-        last_summary = None
+        last_observation = None
 
         while time.time() - start_time < timeout:
             try:
@@ -2240,9 +2256,18 @@ class CambiumHandler(BaseHandler):
                 )
                 stdout, _ = await proc.communicate()
 
-                if proc.returncode == 0 and stdout:
+                if proc.returncode != 0:
+                    observation = ("curl_exit", proc.returncode)
+                    if observation != last_observation:
+                        logger.info("Cambium upload status poll: curl exit=%s", proc.returncode)
+                        last_observation = observation
+                elif not stdout:
+                    observation = ("empty",)
+                    if observation != last_observation:
+                        logger.info("Cambium upload status poll: empty response")
+                        last_observation = observation
+                else:
                     response = stdout.decode("utf-8", errors="ignore")
-                    logger.debug(f"Upload status: {response}")
 
                     try:
                         data = json.loads(response)
@@ -2253,13 +2278,14 @@ class CambiumHandler(BaseHandler):
                             data.get("progress"),
                             data.get("error"),
                         )
-                        if summary != last_summary:
+                        observation = ("json",) + summary
+                        if observation != last_observation:
                             logger.info(
                                 "Cambium upload status: status=%r success=%r "
                                 "percent=%r progress=%r error=%r",
                                 *summary,
                             )
-                            last_summary = summary
+                            last_observation = observation
                         # Status 7 = firmware unpacked and ready for reboot (confirmed from Cambium web UI)
                         if data.get("status") == 7:
                             logger.info(f"Firmware unpacked and ready (status=7)")
@@ -2277,7 +2303,13 @@ class CambiumHandler(BaseHandler):
                         current_status = data.get("status", "unknown")
                         logger.debug(f"Firmware unpack in progress (status={current_status})")
                     except json.JSONDecodeError:
-                        pass
+                        observation = ("non_json", len(stdout))
+                        if observation != last_observation:
+                            logger.info(
+                                "Cambium upload status poll: non-JSON response (%s bytes)",
+                                len(stdout),
+                            )
+                            last_observation = observation
 
                 await asyncio.sleep(2)
 
