@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import Any, ClassVar, Optional, Dict
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, create_model, field_validator
 from dotenv import load_dotenv
+
+from .vendor_ips import device_ips_vendors, primary_ip
+from .vendor_registry import credential_defaults, firmware_source_config_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +47,23 @@ class NetworkConfig(BaseModel):
     management: ManagementNetworkConfig = Field(default_factory=ManagementNetworkConfig)
 
 
-class DeviceIPsConfig(BaseModel):
-    """Known link-local IPs for device types."""
-    cambium: str = "169.254.1.1"
-    tachyon: str = "169.254.1.1"
-    tarana: str = "169.254.100.1"
-    ubiquiti: str = "192.168.1.20"
-    mikrotik: str = "192.168.88.1"
+# Known link-local IPs for device types (`ports.device_ips` in config.yaml).
+# One typed `str` field per vendor, so a partial override in config.yaml
+# keeps every other vendor's default (pydantic backfills omitted fields).
+# Fields and defaults derive from the single vendor-IP registry
+# (vendor_ips.py, Story 4 / #74) — a new registry vendor appears here
+# automatically. Only the vendor's *primary* IP is overridable here;
+# alternate addresses (e.g. Tachyon's 192.168.1.1) live in the registry
+# only, matching the pre-registry schema. device_ips_vendors() keeps the
+# historical field/serialization order.
+DeviceIPsConfig = create_model(
+    "DeviceIPsConfig",
+    **{vendor: (str, primary_ip(vendor)) for vendor in device_ips_vendors()}
+)
+DeviceIPsConfig.__doc__ = (
+    "Known link-local IPs for device types (derived from "
+    "vendor_ips.VENDOR_LINK_LOCAL_IPS)."
+)
 
 
 class PortsConfig(BaseModel):
@@ -75,6 +88,25 @@ class SimpleModeConfig(BaseModel):
 class DataConfig(BaseModel):
     """Local data directory configuration for firmware and configs."""
     local_path: str = "/var/lib/provisioner/repo"
+
+
+class SnapshotsConfig(BaseModel):
+    """Device-config snapshot store (epic #112 R3, issue #116).
+
+    ``path`` unset means "a ``snapshots`` sibling of ``data.local_path``"
+    (default install: ``/var/lib/provisioner/snapshots``) — outside the
+    data repo so snapshots (which carry secrets at rest) are never synced
+    or committed. The directory is created 0700 (files 0600) on first
+    write by the service user; no install step is required.
+
+    Retention (design doc D5, conservative defaults): keep the newest
+    ``max_per_unit`` snapshots per (vendor, serial|MAC) unit and the newest
+    ``max_total`` overall; older ones are evicted on capture with a logged
+    eviction. Manual delete via the API always works regardless.
+    """
+    path: Optional[str] = None
+    max_per_unit: int = Field(default=5, ge=1)
+    max_total: int = Field(default=200, ge=1)
 
 
 class DeviceCredentials(BaseModel):
@@ -103,30 +135,23 @@ class DeviceCredentials(BaseModel):
         return v
 
 
-class CambiumCredentials(DeviceCredentials):
-    """Cambium default credentials (admin/admin)."""
-    password: str = "admin"
+def _default_credentials() -> Dict[str, "DeviceCredentials"]:
+    """Per-vendor factory-default credentials (Story 3 / #73).
 
-
-class TachyonCredentials(DeviceCredentials):
-    """Tachyon default credentials (root/admin)."""
-    username: str = "root"
-    password: str = "admin"
-
-
-class UbiquitiCredentials(DeviceCredentials):
-    """Ubiquiti default credentials (ubnt/ubnt)."""
-    username: str = "ubnt"
-    password: str = "ubnt"
-
-
-class CredentialsConfig(BaseModel):
-    """All device credentials."""
-    cambium: DeviceCredentials = Field(default_factory=CambiumCredentials)
-    mikrotik: DeviceCredentials = Field(default_factory=DeviceCredentials)
-    tarana: DeviceCredentials = Field(default_factory=DeviceCredentials)
-    tachyon: DeviceCredentials = Field(default_factory=TachyonCredentials)
-    ubiquiti: DeviceCredentials = Field(default_factory=UbiquitiCredentials)
+    The config-level source for vendor credential defaults, keyed by
+    device-type string (mirrors ``_default_firmware_sources``) —
+    ``main.py``, the credentials UI, and the setup readiness checks all
+    derive from it. Since Story 6 (#76) the credential *data* lives in
+    each vendor's VendorSpec (``vendor_registry.py``
+    ``default_credentials``); this factory wraps it in typed
+    ``DeviceCredentials`` models (the registry cannot construct them
+    without importing this module). ``credential_defaults()`` sorts by
+    vendor, preserving the historical alphabetical declaration order.
+    """
+    return {
+        vendor: DeviceCredentials(**kwargs)
+        for vendor, kwargs in credential_defaults().items()
+    }
 
 
 class NotificationsConfig(BaseModel):
@@ -192,14 +217,26 @@ class FirmwareSourceConfig(BaseModel):
         return self.channel if self.channel in valid_channels else "release"
 
 
+# Historical _default_firmware_sources declaration order, preserved so
+# config serialization and the firmware checker's source-init/check order
+# stay byte-identical (#76). Cosmetic order metadata with the same
+# partial-order semantics as vendor_ips.py's tuples: registry vendors
+# missing from this tuple are appended in registration order, so adding a
+# vendor still needs only its register(VendorSpec(...)) entry; a
+# consistency test rejects stale (removed) vendors here.
+_FIRMWARE_SOURCE_DEFAULTS_ORDER = ("tachyon", "mikrotik", "ubiquiti", "cambium")
+
+
 def _default_firmware_sources():
-    """Default firmware sources — Tachyon enabled, others stubbed."""
-    return {
-        "tachyon": FirmwareSourceConfig(enabled=True, auto_download=True),
-        "mikrotik": FirmwareSourceConfig(enabled=True, auto_download=True, channel="long-term"),
-        "ubiquiti": FirmwareSourceConfig(enabled=False),
-        "cambium": FirmwareSourceConfig(enabled=False),
-    }
+    """Default firmware-checker source configs, one per vendor with an
+    auto-fetch source class. Since Story 6 (#76) the per-vendor defaults
+    live in each vendor's VendorSpec (``vendor_registry.py``
+    ``firmware_source_defaults``); this factory wraps them in typed
+    ``FirmwareSourceConfig`` models."""
+    defaults = firmware_source_config_defaults()
+    ordered = [v for v in _FIRMWARE_SOURCE_DEFAULTS_ORDER if v in defaults]
+    ordered += [v for v in defaults if v not in _FIRMWARE_SOURCE_DEFAULTS_ORDER]
+    return {vendor: FirmwareSourceConfig(**defaults[vendor]) for vendor in ordered}
 
 
 class FirmwareCheckerConfig(BaseModel):
@@ -228,6 +265,18 @@ class FeaturesConfig(BaseModel):
     device_overrides: bool = False      # MAC-based device override provisioning
     apply_config_ubiquiti: bool = False # Ubiquiti config application
     apply_config_tarana: bool = False   # Tarana config application (stub)
+
+
+class ProvisioningConfig(BaseModel):
+    """Cross-vendor provisioning job defaults.
+
+    ``default_role`` selects the site-role config overlay
+    (``configs/templates/{vendor}/roles/{role}/``) applied to jobs that do
+    not choose a role explicitly. Roles are opaque strings derived from the
+    template tree — there is no role enum. None (the default) resolves
+    configs exactly as before role overlays existed.
+    """
+    default_role: Optional[str] = None
 
 
 class TaranaDeviceConfig(BaseModel):
@@ -307,17 +356,53 @@ class Config(BaseModel):
     ports: PortsConfig = Field(default_factory=PortsConfig)
     simple_mode: SimpleModeConfig = Field(default_factory=SimpleModeConfig)
     data: DataConfig = Field(default_factory=DataConfig)
-    credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
+    credentials: Dict[str, DeviceCredentials] = Field(default_factory=_default_credentials)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     gpio: GPIOConfig = Field(default_factory=GPIOConfig)
     display: DisplayConfig = Field(default_factory=DisplayConfig)
     label_printer: LabelPrinterConfig = Field(default_factory=LabelPrinterConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    snapshots: SnapshotsConfig = Field(default_factory=SnapshotsConfig)
     firmware: FirmwareConfig = Field(default_factory=FirmwareConfig)
     features: FeaturesConfig = Field(default_factory=FeaturesConfig)
+    provisioning: ProvisioningConfig = Field(default_factory=ProvisioningConfig)
     device_settings: DeviceSettingsConfig = Field(default_factory=DeviceSettingsConfig)
     equipment_registry: EquipmentRegistryConfig = Field(default_factory=EquipmentRegistryConfig)
     analytics: AnalyticsConfig = Field(default_factory=AnalyticsConfig)
+
+    @field_validator("credentials", mode="before")
+    @classmethod
+    def _backfill_credential_defaults(cls, v: Any) -> Any:
+        """Deep-merge a YAML ``credentials:`` mapping over the factory defaults.
+
+        With a plain ``Dict`` field, a partial ``credentials:`` block in a
+        host ``config.yaml`` would *replace* the whole dict — a file setting
+        only ``mikrotik`` would silently drop the cambium/tachyon/ubiquiti
+        factory logins, and ``tachyon: {password: x}`` would lose the
+        ``root`` username. So: defaults first, YAML wins per field. Unknown
+        vendor keys pass through unchanged (harmless), and a bare
+        ``vendor:`` key (parsed as None) keeps that vendor's defaults.
+        A malformed non-mapping value (e.g. a YAML list) passes through
+        untouched so pydantic raises ValidationError, exactly as the
+        pre-Story-3 typed model did.
+        """
+        if v is not None and not isinstance(v, dict):
+            return v
+        merged: Dict[str, Any] = {
+            vendor: creds.model_dump()
+            for vendor, creds in _default_credentials().items()
+        }
+        if isinstance(v, dict):
+            for vendor, block in v.items():
+                if isinstance(block, dict):
+                    vendor_creds = dict(merged.get(vendor, {}))
+                    vendor_creds.update(block)
+                    merged[vendor] = vendor_creds
+                elif block is not None:
+                    # Already-built DeviceCredentials (programmatic use) or
+                    # invalid input — hand it to pydantic validation as-is.
+                    merged[vendor] = block
+        return merged
 
 
 def expand_env_vars(obj):

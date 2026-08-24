@@ -19,6 +19,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from ..handler_manager import provisionable_device_types
+from ..vendor_registry import (
+    builtin_ui_credentials,
+    nonprovisionable_device_types,
+    ui_styles,
+)
 from ..setup_tools import (
     build_readiness_report,
     import_setup_bundle,
@@ -60,6 +66,10 @@ class ProvisionRequest(BaseModel):
     skip_config: bool = False
     config_override: Optional[Dict[str, Any]] = None
     operator_id: Optional[int] = None
+    # Site-role config overlay for this job (opaque string, e.g. "tower").
+    # None falls back to config.yaml provisioning.default_role. Absent in
+    # old clients, so requests are wire-compatible. UI exposure is R2.
+    role: Optional[str] = None
 
 
 class ProvisionResponse(BaseModel):
@@ -540,7 +550,7 @@ async def _run_netinstall(provisioner, port_number: int):
     # password, so the post-flash SSH login must use that value. Fetch it from
     # the contract credentials endpoint (same API key); fall back to the local
     # MIKROTIK_BOOTSTRAP_PASS when the endpoint is unavailable.
-    local_bootstrap_pass = config.credentials.mikrotik.bootstrap_password
+    local_bootstrap_pass = config.credentials["mikrotik"].bootstrap_password
     canonical_bootstrap_pass = None
     try:
         creds = await MikrotikHandler.fetch_provisioning_credentials(
@@ -1232,13 +1242,14 @@ def _get_repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-VALID_DEVICE_TYPES = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
+# Valid device types derive from HANDLER_MAP — see
+# provisioner.handler_manager.provisionable_device_types() (Story 2 / #72).
 
 
 def _validate_device_type(device_type: str) -> str:
     """Validate device_type is a known type. Raises HTTPException if not."""
     sanitized = os.path.basename(device_type).lower().strip()
-    if sanitized not in VALID_DEVICE_TYPES:
+    if sanitized not in provisionable_device_types():
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
     return sanitized
 
@@ -1281,19 +1292,24 @@ def _extract_version_from_filename(filename: str) -> str:
     return "unknown"
 
 
+# Filename keywords that identify a vendor beyond its own device-type
+# string. Hand-keyed per-vendor extras (like _template_requirements in
+# setup_tools.py) — a vendor absent here simply matches on its
+# device-type string alone, so use .get(), never direct indexing.
+_DEVICE_TYPE_FILENAME_HINTS = {
+    "cambium": ("epmp",),
+    "mikrotik": ("routeros",),
+    "ubiquiti": ("airos", "ubnt"),
+}
+
+
 def _get_device_type_from_filename(filename: str) -> Optional[str]:
     """Try to detect device type from filename."""
     filename_lower = filename.lower()
-    if 'epmp' in filename_lower or 'cambium' in filename_lower:
-        return 'cambium'
-    elif 'routeros' in filename_lower or 'mikrotik' in filename_lower:
-        return 'mikrotik'
-    elif 'tachyon' in filename_lower:
-        return 'tachyon'
-    elif 'tarana' in filename_lower:
-        return 'tarana'
-    elif 'ubiquiti' in filename_lower or 'airos' in filename_lower or 'ubnt' in filename_lower:
-        return 'ubiquiti'
+    for device_type in provisionable_device_types():
+        hints = (device_type,) + _DEVICE_TYPE_FILENAME_HINTS.get(device_type, ())
+        if any(hint in filename_lower for hint in hints):
+            return device_type
     return None
 
 
@@ -2162,24 +2178,13 @@ async def test_api():
 # Default Credentials Management
 # ============================================================================
 
-# Known defaults for each device type (hardcoded fallbacks)
-BUILTIN_CREDENTIALS = {
-    "cambium": [
-        {"username": "admin", "password": "admin"},
-    ],
-    "mikrotik": [
-        {"username": "admin", "password": ""},
-    ],
-    "tachyon": [
-        {"username": "root", "password": "admin"},
-    ],
-    "tarana": [
-        {"username": "admin", "password": "admin123"},
-    ],
-    "ubiquiti": [
-        {"username": "ubnt", "password": "ubnt"},
-    ],
-}
+# Known factory-shipped logins for each device type, shown as read-only
+# entries in the credentials UI, derived from the
+# VendorSpec registry (Story 6 / #76): each vendor's default_credentials,
+# unless its spec sets builtin_ui_credentials (Tarana ships
+# admin/admin123, but the config default keeps an empty password because
+# each fleet sets its own).
+BUILTIN_CREDENTIALS = builtin_ui_credentials()
 
 
 def _get_credentials_path(request: Request) -> Path:
@@ -2235,8 +2240,8 @@ async def get_all_default_credentials(request: Request):
         custom_creds = _load_credentials(request)
 
         result = []
-        # Use sorted list for consistent ordering
-        for device_type in sorted(VALID_DEVICE_TYPES):
+        # provisionable_device_types() is sorted, for consistent ordering
+        for device_type in provisionable_device_types():
             builtin = BUILTIN_CREDENTIALS.get(device_type, [])
             custom = custom_creds.get(device_type, [])
 
@@ -2270,7 +2275,7 @@ async def get_all_default_credentials(request: Request):
 @router.get("/default-credentials/{device_type}")
 async def get_device_credentials(request: Request, device_type: str):
     """Get credentials for a specific device type."""
-    if device_type not in VALID_DEVICE_TYPES:
+    if device_type not in provisionable_device_types():
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
 
     custom_creds = _load_credentials(request)
@@ -2312,7 +2317,7 @@ async def add_credential(
     """Add a custom credential for a device type."""
     logger.info(f"POST /default-credentials/{device_type} - Adding credential for user: {credential.username}")
 
-    if device_type not in VALID_DEVICE_TYPES:
+    if device_type not in provisionable_device_types():
         logger.warning(f"Invalid device type: {device_type}")
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
 
@@ -2347,7 +2352,7 @@ async def delete_credential(
     index: int,
 ):
     """Delete a custom credential by index."""
-    if device_type not in VALID_DEVICE_TYPES:
+    if device_type not in provisionable_device_types():
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
 
     credentials = _load_credentials(request)
@@ -2677,3 +2682,98 @@ async def _run_apply_mode(
 
     except Exception as e:
         logger.exception(f"Error applying mode on port {port_number}: {e}")
+
+
+# ============================================================================
+# Vendor UI Metadata (Story 5 / #75)
+# ============================================================================
+#
+# The kiosk dashboard's `deviceVendors` map is no longer hardcoded in
+# index.html: the dashboard route (web/app.py) injects vendor_ui_metadata()
+# into the template server-side, so adding a vendor to HANDLER_MAP needs
+# zero JS edits and the long-lived kiosk Chromium can never serve a stale
+# vendor list (see docs/KIOSK_ARCHITECTURE.md on kiosk uptimes).
+#
+# The vendor *list* derives from provisionable_device_types() (HANDLER_MAP,
+# Story 2 / #72) plus two documented exceptions (same as
+# tests/test_vendor_registry.py):
+#   - evolution_digital: a real DeviceType dispatched via the main.py
+#     side-door, intentionally absent from HANDLER_MAP.
+#   - unknown: a UI-only fallback card, not a vendor.
+#
+# _VENDOR_UI_STYLE is presentation data (display name, accent color),
+# derived from each VendorSpec's ui_style (Story 6 / #76): entries are
+# looked up with .get() and any vendor missing from it still renders with
+# derived defaults. `unknown` is the UI-only fallback card, not a vendor,
+# so its style stays here rather than in the registry.
+
+_VENDOR_UI_STYLE: Dict[str, Dict[str, str]] = dict(ui_styles())
+_VENDOR_UI_STYLE["unknown"] = {"name": "Unknown", "color": "#6b7280"}
+
+# Fallback accent for a vendor without a style entry (same gray as `unknown`).
+_DEFAULT_VENDOR_COLOR = "#6b7280"
+
+_VENDOR_ICONS_DIR = Path(__file__).parent / "static" / "vendor-icons"
+
+
+def _vendor_default_user(device_type: str) -> str:
+    """Default-username hint for the kiosk's custom-credentials form.
+
+    Read-only indirection over the credentials source so the UI hint can
+    never drift from it (it is the first builtin entry's username; "" when
+    the vendor has no builtin credentials, e.g. evolution_digital).
+    BUILTIN_CREDENTIALS itself derives from the VendorSpec registry
+    (Story 6 / #76).
+    """
+    builtin = BUILTIN_CREDENTIALS.get(device_type, [])
+    if not builtin:
+        return ""
+    return builtin[0].get("username", "")
+
+
+def _vendor_icon(device_type: str) -> str:
+    """Static icon URL for a vendor, or "" when no icon file is bundled.
+
+    Icons live at web/static/vendor-icons/<device_type>.png by convention;
+    the empty string preserves the kiosk's no-icon rendering path (used by
+    `unknown` today and by any newly added vendor until an icon ships).
+    """
+    if (_VENDOR_ICONS_DIR / f"{device_type}.png").is_file():
+        return f"/static/vendor-icons/{device_type}.png"
+    return ""
+
+
+def _vendor_ui_entry(device_type: str) -> Dict[str, str]:
+    """Build one kiosk metadata entry (name, color, defaultUser, icon)."""
+    style = _VENDOR_UI_STYLE.get(device_type, {})
+    return {
+        "name": style.get("name", device_type.replace("_", " ").title()),
+        "color": style.get("color", _DEFAULT_VENDOR_COLOR),
+        "defaultUser": _vendor_default_user(device_type),
+        "icon": _vendor_icon(device_type),
+    }
+
+
+def vendor_ui_metadata() -> Dict[str, Dict[str, str]]:
+    """Vendor metadata map injected into the dashboard template.
+
+    Keys: every provisionable device type (from HANDLER_MAP) plus the
+    documented `evolution_digital` and `unknown` exceptions. Values are the
+    exact shape the kiosk JS consumes: name, color, defaultUser, icon.
+    """
+    metadata = {
+        device_type: _vendor_ui_entry(device_type)
+        for device_type in provisionable_device_types()
+    }
+    # Non-provisionable vendors (evolution_digital) still get a card —
+    # they are real device types, just dispatched via the main.py
+    # side-door instead of HANDLER_MAP.
+    for device_type in nonprovisionable_device_types():
+        metadata[device_type] = _vendor_ui_entry(device_type)
+    unknown = _vendor_ui_entry("unknown")
+    # The unknown-device card offers "admin" as the generic username hint
+    # (matches the JS `vendor.defaultUser || 'admin'` fallback); it is a UI
+    # affordance, not a credential-source entry.
+    unknown["defaultUser"] = "admin"
+    metadata["unknown"] = unknown
+    return metadata

@@ -10,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .api import router as api_router
+from .snapshots import router as snapshots_router
+from .api import vendor_ui_metadata
 from .websocket import router as ws_router
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,7 @@ def create_app(
     
     # Include routers
     app.include_router(api_router, prefix="/api")
+    app.include_router(snapshots_router, prefix="/api")
     app.include_router(ws_router, prefix="/ws")
     
     # Root route serves the dashboard
@@ -91,6 +94,12 @@ def create_app(
             "title": title,
             "num_ports": num_ports,
             "label_printer": label_printer,
+            # Server-injected vendor metadata (Story 5 / #75): the JS
+            # `deviceVendors` map derives from the handler registry instead
+            # of a hardcoded frontend copy. Injection (vs. a runtime fetch)
+            # means the map exists at script-parse time — no async race at
+            # first render, no stale-JS hazard on the long-lived kiosk.
+            "vendor_metadata": vendor_ui_metadata(),
         })
 
     @app.get("/labels", response_class=HTMLResponse)

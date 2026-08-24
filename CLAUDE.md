@@ -8,8 +8,9 @@ A network equipment auto-provisioner running on a Linux host (currently a Lenovo
 
 - **Handler properties control flow, not if/else in base.py.** The `provision()` method in `base.py` reads handler properties such as `supports_dual_bank`, `config_after_all_firmware`, and `fw2_skips_reboot`. To change behavior for a device, override a property in the handler. Do not add vendor-specific branching to `base.py`. The same rule applies before instantiation: `config_store.py` and `main.py` read class-level traits through `HandlerManager.handler_class_for()` instead of `if device_type == "..."`. See `docs/HANDLER_DEVELOPMENT.md`.
 - **Properties can be conditional on model.** `self._device_info` is populated before properties are checked in `provision()`. A single handler can serve APs and switches with different behavior by checking the model in the property getter.
-- **Vendor *behavior* stays in vendor handlers.** No provisioning logic in `base.py`, `port_manager.py`, or `fingerprint.py`; `base.py` must contain **zero** vendor brand strings (it currently has one stray `mikrotik` check at `base.py:395-403` — don't add more, and prefer a handler property when you touch it). Vendor *enumeration*, by contrast, is **not** confined to the enum + `HANDLER_MAP` as older notes claimed — it is currently spread across ~10 registries (handler map, credentials ×4, link-local IPs, fingerprint signatures, firmware patterns, firmware-source `SOURCE_MAP`, CLI/API/UI lists, and setup-tools `SUPPORTED_DEVICE_TYPES`). **Standard: never add a *new* source of truth that lists vendors — derive from an existing one.** See `AGENTS.md` for the full standard and `docs/ARCHITECTURE_ISOLATION_REVIEW.md` for the touchpoint map; we are consolidating toward a single `VendorSpec` registry (`docs/epic-vendor-isolation-refactor.md`).
-- **Config templates use deep merge, with an explicit mode-template exception.** Standard provisioning templates are merged into the device's current config as-is. They do not support `{{variable}}` substitution. AP and PTP mode-change templates are rendered by `provisioner/mode_config.py`; limit placeholders to those templates. Full-export templates (for example, Tachyon `.tar` or exported JSON files) are applied authoritatively (replace, not merge); the vendor handler decides (`TachyonHandler._is_full_config_export`).
+- **Vendor *behavior* stays in vendor handlers.** No provisioning logic in `base.py`, `port_manager.py`, or `fingerprint.py`; `base.py` must contain **zero** vendor brand strings (true since Story 1 / #122 replaced the last stray `mikrotik` branch with the `firmware_lookup_key()` handler override — keep it at zero). Vendor *enumeration* is consolidated into the `VendorSpec` registry (`provisioner/vendor_registry.py`, Story 6 / #76): one `register(VendorSpec(...))` per vendor, from which the handler map, firmware `SOURCE_MAP`, firmware patterns, credentials, IPs, UI metadata, and the CLI/API/setup lists all derive. Fingerprint signatures/probes are the remaining hand-kept vendor knowledge (Story 7 / #77). **Standard: never add a *new* source of truth that lists vendors — derive from the registry.** See `AGENTS.md` for the full standard and `docs/ARCHITECTURE_ISOLATION_REVIEW.md` for the touchpoint map (`docs/epic-vendor-isolation-refactor.md` is the epic).
+- **Config templates use deep merge, with an explicit mode-template exception.** Standard provisioning templates are merged into the device's current config as-is (shared merge semantics live in `provisioner/config_merge.py`). They do not support `{{variable}}` substitution. AP and PTP mode-change templates are rendered by `provisioner/mode_config.py`; limit placeholders to those templates. Full-export templates (for example, Tachyon `.tar` or exported JSON files) are applied authoritatively (replace, not merge); the vendor handler decides via the class-level `is_full_config_export()` hook (Tachyon overrides it).
+- **Template lookup goes through the config resolver.** `main.py` resolves templates via `provisioner/config_resolver.py` (R1 / #114), not by calling `store.get_config_template()` directly. With no role selected the resolver is a byte-identical passthrough of the plain lookup; with a role it composes site-role overlays from `configs/templates/{vendor}/roles/{role}/`, gated by the `supports_config_overlays` handler trait (off fleet-wide until bench-verified). See `docs/HANDLER_DEVELOPMENT.md` → "Site-Role Config Overlays".
 - **Two config/firmware paths exist.** Code deploys to `/opt/provisioner/` via `scripts/deploy.sh`. The active data repo is at `/var/lib/provisioner/repo/`. Config templates need to exist in the repo dir on the Pi to take effect. Deploy script syncs code but not the repo data dir.
 
 ## Provisioning Flow
@@ -35,25 +36,15 @@ The default order is preferred for most devices. Only use `config_after_all_firm
 
 ## Adding New Vendors or Hardware
 
-Follow the checklist in `docs/HANDLER_DEVELOPMENT.md` under "Adding a New Vendor" or "Adding a New Model to an Existing Vendor". The key touchpoints are:
+Follow the checklist in `docs/HANDLER_DEVELOPMENT.md` under "Adding a New Vendor" or "Adding a New Model to an Existing Vendor". Since the VendorSpec registry landed (Story 6 / #76), the touchpoints are:
 
 1. `provisioner/handlers/{vendor}.py` — handler class
-2. `provisioner/fingerprint.py` — device detection
-3. `provisioner/port_manager.py` — boot-ping IPs (`DeviceLinkLocalIP`)
-4. `provisioner/handler_manager.py` — `HANDLER_MAP`
-5. `provisioner/firmware.py` — `MODEL_FIRMWARE_PATTERNS` + version regex
-6. `provisioner/config_store.py` — `CONFIG_MODEL_ALIASES` (if needed)
-7. `configs/templates/{vendor}/{model}.json` — config template
-8. `provisioner/handlers/__init__.py` — import + `__all__` *(miss this → ImportError at boot)*
-9. `provisioner/config.py` — `CredentialsConfig` field, `DeviceIPsConfig`, firmware-source default, any `apply_config_<vendor>` flag
-10. `provisioner/main.py` — credentials dict *(must move in lockstep with #9 or AttributeError at boot)*
-11. `provisioner/cli.py` — handler dict + `choices`
-12. `provisioner/web/api.py` — `VALID_DEVICE_TYPES` + `BUILTIN_CREDENTIALS`; `provisioner/web/templates/index.html` — vendor metadata map
-13. `provisioner/firmware_sources/__init__.py` — import + `__all__` *(miss this → ImportError at boot)*
-14. `provisioner/firmware_checker.py` — `SOURCE_MAP` + the source imports *(miss either → ImportError at boot)*
-15. `provisioner/setup_tools.py` — `SUPPORTED_DEVICE_TYPES` + the per-vendor readiness / credential-hint / config-mode dicts (first-run setup UI)
+2. `provisioner/firmware_sources/{vendor}.py` — firmware source class (only if the vendor has an auto-fetch source; Tarana doesn't)
+3. `provisioner/fingerprint.py` — `DeviceType` enum member + detection signatures/probes (detection is the one area not yet in the registry — Story 7 / #77)
+4. `provisioner/vendor_registry.py` — **one `register(VendorSpec(...))` call**, in `DeviceType` declaration order: handler class, firmware source class + checker defaults, factory credentials, link-local IPs, model→firmware patterns, UI name/color. Everything else derives: `HANDLER_MAP`, `SOURCE_MAP`, `MODEL_FIRMWARE_PATTERNS`, the IP/boot-ping/`DeviceIPsConfig` views, `_default_credentials()`/`_default_firmware_sources()`, `BUILTIN_CREDENTIALS`, kiosk vendor cards, and the CLI/API/setup device-type lists.
+5. `configs/templates/{vendor}/{model}.json` — config template (+ `CONFIG_MODEL_ALIASES` in `config_store.py` if the API-reported model name differs)
 
-⚠️ This list is long *because* vendor enumeration isn't yet consolidated. Miss an **S1** site (#4, #8, #9, #10, #13, #14) and the service crashes at boot; miss an **S2** site and the device is silently undetectable or shows dead/missing setup-UI entries. Run `grep -rin <vendor> provisioner/ configs/` before declaring done. The exhaustive table is in `docs/ARCHITECTURE_ISOLATION_REVIEW.md`.
+Do **not** re-list the vendor anywhere else: `handlers/__init__.py` and `firmware_sources/__init__.py` deliberately no longer import vendor modules (the old ImportError-at-boot class), `main.py`/`cli.py`/`web/api.py`/`setup_tools.py` derive their lists, and per-vendor hint dicts (`setup_tools.py`, `mode_config.py`, `config_store.py`) are `.get()`-tolerant of a missing vendor. `tests/test_vendor_registry.py` fails CI on spec↔enum↔view drift; `tests/test_vendor_golden.py` locks the current values — update both in the same commit as an intentional vendor change. Run `grep -rin <vendor> provisioner/ configs/` before declaring done. Single-vendor builds: set `PROVISIONER_VENDORS=<vendor>` in the service environment.
 
 ## Deployment
 
@@ -83,9 +74,9 @@ Minimize the chance of leaking credentials, keys, or other private data — espe
 
 - Echoing/printing a secret value, or passing one as a CLI arg (`sshpass -p`, secrets in argv) instead of via env/stdin — see **Secrets & Private Data** above
 - Adding vendor branching to `base.py` instead of using handler properties
-- Adding a *new* place that enumerates vendors (another hardcoded list/dict or `if device_type == "..."`) instead of deriving from an existing registry — the vendor list already has ~10 copies; don't make it 11
+- Adding a *new* place that enumerates vendors (another hardcoded list/dict or `if device_type == "..."`) instead of deriving from an existing registry — the vendor list peaked at ~10 copies and Phase 1 of the isolation epic just collapsed several; don't add one back
 - Using Python 3.10+ syntax (Pi runs 3.9)
-- Forgetting to add new device IPs to the boot-ping list (causes 120s detection delay)
+- Forgetting to add new device IPs to the vendor-IP registry (`provisioner/vendor_ips.py` — the boot-ping list derives from it; a missing IP causes 120s detection delay)
 - Putting `{{placeholders}}` in config templates (no substitution engine exists)
 - Only deploying code without copying templates to the repo dir on the Pi
 - Making `config_after_all_firmware` globally true instead of conditional on model

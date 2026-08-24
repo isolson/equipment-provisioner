@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Callable, Awaitable, Tuple, Union
 
 from .fingerprint import is_mikrotik_oui
+from .vendor_ips import boot_ping_ips, probe_ip_candidates, registered_vendor_ips
 
 logger = logging.getLogger(__name__)
 
@@ -113,29 +114,54 @@ class ProvisioningChecklist:
 
 
 class DeviceLinkLocalIP:
-    """Known link-local/default IPs for device types."""
-    CAMBIUM = "169.254.1.1"
-    TACHYON = "169.254.1.1"
-    TACHYON_ALT = "192.168.1.1"  # Some Tachyon devices use this
-    TARANA = "169.254.100.1"
-    MIKROTIK = "192.168.88.1"  # Mikrotik default, but often uses DHCP
-    UBIQUITI = "192.168.1.20"  # Ubiquiti AirMax and Wave default
+    """Known link-local/default IPs for device types.
 
-    # All IPs to probe when detecting device type
-    ALL = [
-        ("169.254.1.1", ["cambium", "tachyon"]),
-        ("192.168.1.1", ["tachyon"]),  # Tachyon alternate IP
-        ("192.168.1.20", ["ubiquiti"]),  # Ubiquiti AirMax/Wave default
-        ("169.254.100.1", ["tarana"]),
-        ("192.168.88.1", ["mikrotik"]),
-    ]
+    Derived from the vendor-IP views in ``provisioner.vendor_ips``
+    (Stories 4/#74 and 6/#76). Add or change vendor IPs in the vendor's
+    ``VendorSpec`` (``vendor_registry.py``), not here.
+
+    Per-vendor address attributes (``CAMBIUM``, ``TACHYON``,
+    ``TACHYON_ALT``, ``TARANA``, ``MIKROTIK``, ``UBIQUITI``, ...) are
+    generated below from ``registered_vendor_ips()`` — the *unfiltered*
+    registry — so they stay defined under a ``PROVISIONER_VENDORS``
+    allowlist (they are facts about vendor gear, not detection
+    candidates) and disappear automatically when a vendor's spec is
+    removed. ``ALL`` / ``BOOT_PING`` derive from the *filtered* views:
+    an allowlisted build only probes for enabled vendors.
+    """
+
+    # All (ip, [candidate vendors]) pairs to probe when detecting device
+    # type — derived; registry order is the probe order.
+    ALL = probe_ip_candidates()
+
+    # IPs pinged during the boot wait for a quick liveness check — derived;
+    # preserves the historical boot-ping order (MikroTik before Tarana).
+    BOOT_PING = boot_ping_ips()
 
     # Some MikroTik units may be reset with different default LAN subnets.
-    # We only probe these if standard defaults do not match.
+    # We only probe these if standard defaults do not match. Deliberately
+    # not part of the vendor-IP registry: fallbacks are conditional
+    # behavior (probed only after every standard probe misses), not part
+    # of the standard probe/boot-ping enumeration.
     MIKROTIK_FALLBACKS = [
         "192.168.0.1",
         "10.0.0.1",
     ]
+
+
+def _generate_vendor_address_constants():
+    """Attach <VENDOR> / <VENDOR>_ALT[n] address attributes to
+    DeviceLinkLocalIP: <VENDOR> is the primary IP (e.g. CAMBIUM =
+    "169.254.1.1"), <VENDOR>_ALT the second (e.g. TACHYON_ALT =
+    "192.168.1.1"), <VENDOR>_ALT2... any further alternates."""
+    for vendor, ips in registered_vendor_ips().items():
+        setattr(DeviceLinkLocalIP, vendor.upper(), ips[0])
+        for alt_index, alt_ip in enumerate(ips[1:], start=1):
+            suffix = "_ALT" if alt_index == 1 else "_ALT{}".format(alt_index)
+            setattr(DeviceLinkLocalIP, vendor.upper() + suffix, alt_ip)
+
+
+_generate_vendor_address_constants()
 
 
 @dataclass
@@ -998,14 +1024,10 @@ class PortManager:
 
             async def boot_ping_check(port_num: int, config: PortConfig, state: PortState) -> None:
                 """Ping device during boot wait to detect when it's up."""
-                # Try known device IPs for boot detection
-                ips_to_try = [
-                    DeviceLinkLocalIP.CAMBIUM,      # 169.254.1.1
-                    DeviceLinkLocalIP.TACHYON_ALT,  # 192.168.1.1
-                    DeviceLinkLocalIP.UBIQUITI,     # 192.168.1.20
-                    DeviceLinkLocalIP.MIKROTIK,     # 192.168.88.1
-                    DeviceLinkLocalIP.TARANA,       # 169.254.100.1
-                ]
+                # Try known device IPs for boot detection — derived from
+                # the vendor-IP registry (Story 4 / #74), historical order
+                # preserved.
+                ips_to_try = DeviceLinkLocalIP.BOOT_PING
                 for ip in ips_to_try:
                     # Skip ARP fallback during boot ping — we just need a
                     # quick liveness check, not thorough MikroTik detection.

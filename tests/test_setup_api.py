@@ -202,7 +202,7 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
             pass
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -291,7 +291,7 @@ async def test_netinstall_clears_expecting_reboot_when_step_after_flash_fails(tm
             return False  # device never comes back after the flash
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -377,7 +377,7 @@ async def test_netinstall_ships_wifi_driver_packages_in_flash_payload(tmp_path, 
             pass
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -469,7 +469,7 @@ async def test_netinstall_fails_before_register_when_wifi_radios_not_bound(tmp_p
             pass
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     config.label_printer.enabled = True
@@ -560,7 +560,7 @@ def _ship_ready_fake_handler(phone_home_url="https://wifi.example.test/ztp/mikro
 
 def _netinstall_env(monkeypatch, tmp_path, handler_cls, register):
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -723,7 +723,7 @@ async def test_netinstall_requires_ztp_api_key_before_flash(tmp_path, monkeypatc
             return True
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     provisioner = SimpleNamespace(
         config=config,
@@ -749,11 +749,11 @@ async def test_netinstall_requires_ztp_api_key_before_flash(tmp_path, monkeypatc
 def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch):
     client, config, data_path = make_client(tmp_path)
 
-    config.credentials.cambium.password = "fleet-pass"
-    config.credentials.mikrotik.password = "switch-pass"
-    config.credentials.tachyon.password = "fleet-pass"
-    config.credentials.tarana.password = "fleet-pass"
-    config.credentials.ubiquiti.password = "fleet-pass"
+    config.credentials["cambium"].password = "fleet-pass"
+    config.credentials["mikrotik"].password = "switch-pass"
+    config.credentials["tachyon"].password = "fleet-pass"
+    config.credentials["tarana"].password = "fleet-pass"
+    config.credentials["ubiquiti"].password = "fleet-pass"
     config.device_settings.tarana.operator_id = 12345
 
     (data_path / "configs" / "templates" / "cambium").mkdir(parents=True)
@@ -1019,3 +1019,56 @@ def test_setup_restart_service_schedules_systemctl_restart(tmp_path, monkeypatch
     assert payload["success"] is True
     assert captured["cmd"][0] == "/bin/sh"
     assert "systemctl restart provisioner-web" in captured["cmd"][2]
+
+
+def test_read_primary_credentials_reads_the_dict_table():
+    """Story 3 (#73): config.credentials is a plain dict. The old
+    getattr(config.credentials, device_type) pattern silently returns None
+    on a dict — every vendor would report factory defaults. Prove the setup
+    readiness rows read the real table, and that the recommended hints
+    survived the derivation from _default_credentials() verbatim."""
+    from provisioner.setup_tools import _read_primary_credentials
+
+    config = Config()
+    config.credentials["mikrotik"].password = "switch-pass"
+
+    rows = {row["device_type"]: row for row in _read_primary_credentials(config)}
+
+    # Usernames come from the table — tachyon would degrade to "admin" if a
+    # getattr-on-dict consumer pattern came back.
+    assert rows["tachyon"]["username"] == "root"
+    assert rows["ubiquiti"]["username"] == "ubnt"
+    assert rows["mikrotik"]["has_password"] is True
+    assert rows["mikrotik"]["status"] == "ready"
+
+    # Factory-default passwords still warn; empty ones still read as missing.
+    assert rows["cambium"]["status"] == "warning"
+    assert rows["cambium"]["summary"] == "Still using factory default"
+    assert rows["tarana"]["status"] == "warning"
+    assert rows["tarana"]["summary"] == "Missing or placeholder"
+
+    # Recommended hints are preserved exactly (derived values + prose).
+    assert rows["cambium"]["recommended"] == "admin/admin"
+    assert rows["tachyon"]["recommended"] == "root/admin"
+    assert rows["ubiquiti"]["recommended"] == "ubnt/ubnt"
+    assert rows["mikrotik"]["recommended"] == "admin/(empty until switch password is set)"
+    assert rows["tarana"]["recommended"] == "admin/(set your fleet password)"
+
+
+def test_builtin_credentials_derive_from_the_defaults_table():
+    """The credentials-UI hints derive from _default_credentials() (Story 3
+    / #73); tarana keeps its documented shipped-login override (admin123
+    differs from the empty config-level default)."""
+    from provisioner.config import _default_credentials
+    from provisioner.web.api import BUILTIN_CREDENTIALS
+
+    factory = _default_credentials()
+    assert BUILTIN_CREDENTIALS["tarana"] == [
+        {"username": "admin", "password": "admin123"}
+    ]
+    for device_type, creds in factory.items():
+        if device_type == "tarana":
+            continue
+        assert BUILTIN_CREDENTIALS[device_type] == [
+            {"username": creds.username, "password": creds.password}
+        ]

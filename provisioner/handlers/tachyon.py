@@ -22,6 +22,7 @@ from typing import Dict, Any, Optional
 
 import aiohttp
 
+from provisioner.config_merge import deep_merge
 from provisioner.config_templates import ConfigTemplateError, load_config_template
 
 from .base import BaseHandler, DeviceInfo, UNVERIFIED
@@ -1022,8 +1023,13 @@ class TachyonHandler(BaseHandler):
                         index,
                     )
 
-    def _is_full_config_export(self, config: Dict[str, Any]) -> bool:
-        """Return True when a JSON template looks like a full Tachyon export."""
+    @staticmethod
+    def is_full_config_export(config: Dict[str, Any]) -> bool:
+        """Return True when a JSON template looks like a full Tachyon export.
+
+        Overrides the BaseHandler class-level hook so the config resolver
+        can detect replace-not-merge templates before instantiation.
+        """
         if not isinstance(config, dict):
             return False
         keys = set(config.keys())
@@ -1269,14 +1275,12 @@ class TachyonHandler(BaseHandler):
             return False
 
     def _deep_merge(self, base: dict, overlay: dict) -> dict:
-        """Recursively merge overlay into base. Overlay values win on conflict."""
-        merged = base.copy()
-        for key, value in overlay.items():
-            if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
-                merged[key] = self._deep_merge(merged[key], value)
-            else:
-                merged[key] = value
-        return merged
+        """Recursively merge overlay into base. Overlay values win on conflict.
+
+        Delegates to the shared vendor-neutral utility (config_merge.py),
+        which was promoted from this handler's original implementation.
+        """
+        return deep_merge(base, overlay)
 
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from JSON file or tarball.
@@ -1296,7 +1300,7 @@ class TachyonHandler(BaseHandler):
                 loaded_template.top_level_keys,
             )
 
-            if loaded_template.source_type == "tar" or self._is_full_config_export(config):
+            if loaded_template.source_type == "tar" or self.is_full_config_export(config):
                 logger.info("Applying Tachyon config export as authoritative full config")
             else:
                 # Partial JSON templates remain patch-like and merge into the

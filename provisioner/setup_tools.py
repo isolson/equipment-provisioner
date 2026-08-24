@@ -12,6 +12,9 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from .config import _default_credentials
+from .handler_manager import provisionable_device_types
+
 
 STATUS_PRIORITY = {
     "ready": 0,
@@ -20,7 +23,12 @@ STATUS_PRIORITY = {
     "error": 3,
 }
 
-SUPPORTED_DEVICE_TYPES = ("cambium", "mikrotik", "tachyon", "tarana", "ubiquiti")
+# The supported device-type list derives from HANDLER_MAP — see
+# provisioner.handler_manager.provisionable_device_types() (Story 2 / #72).
+# Credential defaults derive from config._default_credentials (Story 3 /
+# #73). The remaining per-vendor readiness/hint/mode dicts stay hand-keyed
+# until Story 6 consolidates them; iteration over the derived list must
+# tolerate a vendor missing from those dicts (.get(), never indexing).
 ROOT_BUNDLE_NAMES = {
     "configs",
     "firmware",
@@ -74,28 +82,51 @@ def _interface_exists(interface_name: str) -> bool:
     return Path("/sys/class/net") .joinpath(interface_name).exists()
 
 
+# Prose shown in the "recommended" hint for vendors whose config-level
+# default ships with an empty password (the credential values themselves
+# derive from config._default_credentials — Story 3 / #73).
+_EMPTY_PASSWORD_HINTS = {
+    "mikrotik": "(empty until switch password is set)",
+    "tarana": "(set your fleet password)",
+}
+
+
 def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
-    defaults = {
-        "cambium": "admin/admin",
-        "mikrotik": "admin/(empty until switch password is set)",
-        "tachyon": "root/admin",
-        "tarana": "admin/(set your fleet password)",
-        "ubiquiti": "ubnt/ubnt",
-    }
+    factory = _default_credentials()
+    # Union of the non-empty factory-default passwords (admin, ubnt) —
+    # configuring any of them on a vendor that ships with a factory login
+    # gets the "still factory default" warning.
+    factory_passwords = {creds.password for creds in factory.values() if creds.password}
+
+    # config.credentials is a plain dict (Story 3 / #73) — getattr on it
+    # would silently return None, so read it with .get().
+    configured = getattr(config, "credentials", None)
+    if not isinstance(configured, dict):
+        configured = {}
 
     result = []
-    for device_type in SUPPORTED_DEVICE_TYPES:
-        creds = getattr(getattr(config, "credentials", None), device_type, None)
+    for device_type in provisionable_device_types():
+        creds = configured.get(device_type)
         password = getattr(creds, "password", "")
+        factory_default = factory.get(device_type)
         status = "ready"
         summary = "Configured"
 
         if _is_placeholder_secret(password):
             status = "warning"
             summary = "Missing or placeholder"
-        elif device_type in {"cambium", "tachyon", "ubiquiti"} and password in {"admin", "ubnt"}:
+        elif getattr(factory_default, "password", "") and password in factory_passwords:
             status = "warning"
             summary = "Still using factory default"
+
+        if factory_default is None:
+            recommended = None
+        else:
+            recommended = "{}/{}".format(
+                factory_default.username,
+                factory_default.password
+                or _EMPTY_PASSWORD_HINTS.get(device_type, "(no default password)"),
+            )
 
         result.append(
             {
@@ -104,7 +135,7 @@ def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
                 "has_password": bool(password),
                 "status": status,
                 "summary": summary,
-                "recommended": defaults[device_type],
+                "recommended": recommended,
             }
         )
 
@@ -239,7 +270,7 @@ def _build_firmware_check(data_path: Path) -> Dict[str, Any]:
     per_vendor = []
     missing_required = []
 
-    for device_type in SUPPORTED_DEVICE_TYPES:
+    for device_type in provisionable_device_types():
         device_dir = firmware_root / device_type
         files = sorted(p.name for p in device_dir.iterdir() if p.is_file()) if device_dir.exists() else []
         status = "ready" if files else "warning"
@@ -293,7 +324,7 @@ def _build_credentials_check(config: Any, data_path: Path) -> Dict[str, Any]:
 
     custom_counts = {
         device_type: len(custom_credentials.get(device_type, []))
-        for device_type in SUPPORTED_DEVICE_TYPES
+        for device_type in provisionable_device_types()
     }
 
     status = "ready"
@@ -324,7 +355,11 @@ def probe_mikrotik_switch(config: Any) -> Dict[str, Any]:
     """Inspect the provisioning switch, preferring RouterOS API when available."""
     management = getattr(getattr(config, "network", None), "management", None)
     switch_ip = getattr(management, "switch_ip", None) or "192.168.88.1"
-    configured_password = getattr(getattr(config.credentials, "mikrotik", None), "password", "")
+    # config.credentials is a plain dict (Story 3 / #73) — .get(), not getattr.
+    credentials_table = getattr(config, "credentials", None)
+    if not isinstance(credentials_table, dict):
+        credentials_table = {}
+    configured_password = getattr(credentials_table.get("mikrotik"), "password", "")
     password_candidates = []
     for password in (configured_password, ""):
         if password not in password_candidates:

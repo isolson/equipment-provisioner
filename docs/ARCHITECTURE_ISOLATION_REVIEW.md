@@ -1,6 +1,8 @@
 # Architecture & Vendor-Isolation Review
 
 > Audit of how modular the provisioner is: can one vendor be removed cleanly, and could the system be reduced to a single-vendor build? Tachyon is used as the worked example. Companion to `docs/epic-vendor-isolation-refactor.md` (the remediation plan).
+>
+> **Remediation status (2026-08):** Phase 1 of the epic is merged — Story 1 (PR #122, `base.py` leak), Story 2 (PR #125, derived CLI/API/setup device-type lists), Story 3 (PR #127, credentials table), Story 4 (PR #124, `vendor_ips.py` IP registry). Story 5 (kiosk vendor metadata) is in review via PR #128, not yet landed. This document is a point-in-time audit: resolved findings carry dated annotations in place; unannotated rows still describe the current tree.
 
 ## Headline verdict
 
@@ -45,15 +47,15 @@ To **add or remove one vendor**, you must edit *every* one of these. There is no
 | 1 | `DeviceType` enum | `fingerprint.py:36` | ✅ yes |
 | 2 | `HANDLER_MAP` (+ import) | `handler_manager.py:10,24` | ✅ yes |
 | 3 | `handlers/__init__.py` import + `__all__` | `handlers/__init__.py` | ❌ undocumented |
-| 4 | CLI handler dict + `choices=[...]` | `cli.py:383,522,568` | ❌ **duplicate of #2** |
-| 5 | `VALID_DEVICE_TYPES` set | `web/api.py:1156` (used 2159/2193/2235/2270) | ❌ **duplicate** |
+| 4 | ~~CLI handler dict + `choices=[...]`~~ | `cli.py` `get_handler()` / `build_parser()` | ✅ **derives from #2** since Story 2 / #72 (`provisionable_device_types()`) |
+| 5 | ~~`VALID_DEVICE_TYPES` set~~ | `web/api.py` `_validate_device_type()` + credential endpoints | ✅ **derives from #2** since Story 2 / #72 |
 | 6 | UI vendor metadata map | `index.html:347` | ❌ **duplicate (frontend)** |
-| 7 | Per-vendor pydantic classes + fields | `config.py:47-53` (`DeviceIPsConfig`), `97-120` (`*Credentials`/`CredentialsConfig`), firmware sources, feature flags | ❌ undocumented |
-| 8 | `DeviceLinkLocalIP` consts + `.ALL` + inline copy | `port_manager.py:112` **and** `:982` | ⚠️ partly blessed, **self-duplicated** |
+| 7 | Per-vendor pydantic classes + fields | `config.py` (feature flags; credentials + firmware sources are `Dict` tables with defaults factories — `_default_credentials()` since Story 3 / #73; `DeviceIPsConfig` fields derive from the IP registry since Story 4 / #74) | ❌ undocumented |
+| 8 | ~~`DeviceLinkLocalIP` consts + `.ALL` + inline copy~~ | `vendor_ips.py` `VENDOR_LINK_LOCAL_IPS` (single registry; `port_manager.py` probe/boot-ping lists and `DeviceIPsConfig` derive from it) | ✅ **consolidated** since Story 4 / #74 (2026-08, PR #124) |
 | 9 | Firmware-source class registry: `SOURCE_MAP` + imports, and `firmware_sources/__init__.py` | `firmware_checker.py:20-39`, `firmware_sources/__init__.py` | ❌ undocumented (**import-crash on removal**) |
-| 10 | `SUPPORTED_DEVICE_TYPES` + readiness / credential-hint / config-mode dicts | `setup_tools.py:23,79-126` | ❌ undocumented (first-run setup UI) |
+| 10 | Per-vendor readiness / credential-hint / config-mode dicts (the device-type list itself derives from #2 since Story 2 / #72) | `setup_tools.py` | ❌ undocumented (first-run setup UI) |
 
-Credentials specifically have **four** copies: `CredentialsConfig` (`config.py:114`), the `main.py:109` dict, handler `DEFAULT_CREDENTIALS`, and `BUILTIN_CREDENTIALS` (`api.py:2086`).
+Credentials consolidated to **one config-level table** in Story 3 / #73: `_default_credentials()` (`config.py`), with the `main.py` handler dict, `BUILTIN_CREDENTIALS` (`web/api.py`), and the setup credential hints deriving from it (a before-validator backfills partial `config.yaml` blocks with the defaults). Handler-internal `DEFAULT_CREDENTIALS` fallback lists stay vendor-local by design (MikroTik's is a multi-candidate retry list).
 
 **Implication:** the registry is not DRY. Forgetting any one site is the dominant failure mode of both extraction directions — and the failure mode varies (see §4).
 
@@ -65,20 +67,20 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 
 | Sev | Leak | Location | Notes |
 |---|---|---|---|
-| **S1** | `if self.device_type == "mikrotik"` in the engine | `base.py:395-403` (`firmware_lookup_key`) | **The one true rule violation.** Should be a handler property override. Contained to 1 spot. |
-| **S1** | Credentials dict ↔ config schema coupling | `main.py:109-129` ⟷ `config.py:97-120` | `self.config.credentials.tachyon` hardcoded. Remove from one but not the other → **AttributeError at startup**. Must move together. |
+| ~~S1~~ | ~~`if self.device_type == "mikrotik"` in the engine~~ | `base.py` (`firmware_lookup_key`) | **Resolved (2026-08, Story 1 / PR #122):** now a `BaseHandler.firmware_lookup_key()` override (`MikrotikHandler` returns the architecture). `base.py` carries zero vendor brand strings. |
+| ~~S1~~ | ~~Credentials dict ↔ config schema coupling~~ | `main.py` ⟷ `config.py` | **Resolved (2026-08, Story 3 / PR #127):** `main.py` iterates the `config.credentials` table; a before-validator backfills partial `config.yaml` blocks from `_default_credentials()`. No AttributeError coupling remains. |
 | **S1** | Handler imports | `handler_manager.py:10`, `handlers/__init__.py` | Delete a handler file but leave the import → **ImportError at startup** (hard crash). |
 | **S1** | Firmware-source imports + `SOURCE_MAP` | `firmware_sources/__init__.py`, `firmware_checker.py:20-39` | Delete `firmware_sources/{vendor}.py` but leave the import/map → **ImportError at startup**. |
 | **S2** | `HTTP_SIGNATURES` per-vendor regex blocks | `fingerprint.py:139-186` | Stale entries = harmless dead code; *missing* = device undetected. |
 | **S2** | Dedicated probe methods + call sites | `fingerprint.py:426` (MikroTik :8728), `:434/589` (`_probe_tachyon_api`), `:441/694` (`_probe_wave_api`), `:991` (SSH banner), `:1030` (SNMP), `:1075` (`_get_mikrotik_info`) | The detection cascade is hand-wired per vendor — the biggest concentration of vendor knowledge outside handlers. |
 | **S2** | `_extract_device_details` per-vendor `elif` chain | `fingerprint.py:~854-912` | Model/version regex branch per `DeviceType`. |
 | **S2** | `MODEL_FIRMWARE_PATTERNS` | `firmware.py:165-218` | Vendor model→filename-pattern table. Dead rows harmless. |
-| **S2** | Typed per-vendor config classes + IP defaults + feature flags | `config.py:47-53,97-120`, `apply_config_ubiquiti`/`apply_config_tarana`, `device_settings.tarana/.mikrotik` | Schema-level coupling. `apply_config_<vendor>` flags should be generic/table-driven. |
-| **S2** | CLI handler dict + choices | `cli.py:383,522,568` | **Second copy** of the handler registry. |
-| **S2** | `VALID_DEVICE_TYPES` + filename→type inference + UI lists + `BUILTIN_CREDENTIALS` | `web/api.py:1156,1208-1217,2068,2086` | **Third + fourth copies** of the vendor list. Plus MikroTik netinstall/ZTP and Tarana-settings blocks. |
-| **S2** | `SUPPORTED_DEVICE_TYPES` + per-vendor readiness / credential-hint / config-mode dicts | `setup_tools.py:23,79-126` | First-run setup readiness UI; also couples to `apply_config_ubiquiti`. Stale entries = dead UI rows; missing = vendor absent from setup checks. |
+| **S2** | Per-vendor feature flags + device settings | `config.py` `apply_config_ubiquiti`/`apply_config_tarana`, `device_settings.tarana/.mikrotik` | Schema-level coupling. `apply_config_<vendor>` flags should be generic/table-driven. (The typed credentials classes and `DeviceIPsConfig` IP defaults formerly in this row were resolved 2026-08 — Story 3 / PR #127 and Story 4 / PR #124.) |
+| ~~S2~~ | ~~CLI handler dict + choices~~ | `cli.py` | **Resolved (Story 2 / #72):** handler lookup goes through `HandlerManager.handler_class_for`; choices/help derive from `provisionable_device_types()`. |
+| **S2** | UI lists + `BUILTIN_CREDENTIALS` (device-type validation + filename→type inference now derive from `HANDLER_MAP` — Story 2 / #72) | `web/api.py` | **Fourth copy** of the vendor list (`BUILTIN_CREDENTIALS`). Plus MikroTik netinstall/ZTP and Tarana-settings blocks, and the hand-keyed `_DEVICE_TYPE_FILENAME_HINTS` alias extras. |
+| **S2** | Per-vendor readiness / credential-hint / config-mode dicts (device-type list derives from `HANDLER_MAP` — Story 2 / #72) | `setup_tools.py` | First-run setup readiness UI; also couples to `apply_config_ubiquiti`. Stale entries = dead UI rows; missing = vendor absent from setup checks. |
 | **S2** | UI vendor map + behavioral branches | `index.html:347` (map), `:966` (`canApplyMode`), `:1307` (Tachyon SSID uppercase) | **Frontend copy** + 2 vendor-specific UI behaviors. |
-| **S2** | `DeviceLinkLocalIP` self-duplication | `port_manager.py:112` vs inline `:982-986` | Same IP→vendor data twice in one file. |
+| ~~S2~~ | ~~`DeviceLinkLocalIP` self-duplication~~ | `port_manager.py` | **Resolved (2026-08, Story 4 / PR #124):** both copies now derive from `vendor_ips.py` `VENDOR_LINK_LOCAL_IPS`. |
 | **S2** | Tarana settings injection in main loop | `main.py:568-578` | Vendor `if device_type == "tarana"` in orchestrator. |
 | **S3** | `CONFIG_MODEL_ALIASES` | `config_store.py:35-43` | Optional; dead entries harmless. |
 | **S3** | Evolution Digital side-door dispatch | `main.py:438,757` | **By design & documented** (`handler_manager.py:21-23`): ED runs a passive cross-port flow, intentionally not in `HANDLER_MAP`. |
@@ -88,6 +90,8 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 
 **Resolved via class-level handler traits (2026-06):** the Tachyon branches introduced by PR #85 in `config_store.py` (`is_tachyon` template-lookup gating, alias prefix matching) and `main.py` (model preflight) were replaced by `BaseHandler` class attributes — `allows_prefixed_config_exports`, `allows_arbitrary_template_fallback`, `config_alias_prefix_matching`, `requires_model_preflight` — consulted via `HandlerManager.handler_class_for(device_type)` (see `docs/HANDLER_DEVELOPMENT.md` → "Class-Level Traits"). This is the sanctioned mechanism for pre-instantiation vendor behavior in shared modules; the Tarana settings injection (S2 above) is the remaining orchestrator branch that should migrate to it. The future `VendorSpec` registry should absorb these traits.
 
+**Resolved via Phase-1 registry consolidation (2026-08):** Story 1 (PR #122) removed the `base.py` `firmware_lookup_key` branch — the engine's one rule violation — via a handler override. Story 2 (PR #125) deleted `VALID_DEVICE_TYPES` and `SUPPORTED_DEVICE_TYPES`; the CLI, API device-type validation, and setup device-type lists now derive from `HANDLER_MAP` (`provisionable_device_types()`). Story 3 (PR #127) collapsed the credentials S1 coupling into the backfilled `_default_credentials()` table. Story 4 (PR #124) collapsed the three IP copies into `vendor_ips.py` `VENDOR_LINK_LOCAL_IPS`. The struck-through rows above carry per-row annotations; Story 5 (the `index.html` vendor map) is in review via PR #128 and its rows remain live until it lands.
+
 ---
 
 ## 4. Direction A — Pull Tachyon out (the worked example)
@@ -96,9 +100,9 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 
 **Delete outright (self-contained):** `handlers/tachyon.py`, `firmware_sources/tachyon.py`, `configs/templates/tachyon/`, `web/static/vendor-icons/tachyon.png`, Tachyon test cases.
 
-**Must edit or it crashes (S1):** `handler_manager.py` (import + map), `handlers/__init__.py` (import + `__all__`), `firmware_sources/__init__.py` (import + `__all__`), `firmware_checker.py` (`SOURCE_MAP` + imports), `config.py` (`TachyonCredentials`, `CredentialsConfig.tachyon`, `DeviceIPsConfig.tachyon`, firmware-source entry), `main.py` (credentials-dict key `:118`), `cli.py` (handler dict + choices).
+**Must edit or it crashes (S1):** `handler_manager.py` (import + map), `handlers/__init__.py` (import + `__all__`), `firmware_sources/__init__.py` (import + `__all__`), `firmware_checker.py` (`SOURCE_MAP` + imports). (`config.py` is no longer an S1 site: the `_default_credentials()` tachyon entry and firmware-source default are S2 cleanups — stale entries are harmless — and `DeviceIPsConfig` derives from the IP registry since Story 4 / #74. `cli.py` and `main.py` no longer need edits — the CLI derives from `HANDLER_MAP` since Story 2 / #72, and the `main.py` credentials dict iterates the `config.credentials` table since Story 3 / #73.)
 
-**Must edit or you get dead code / an undetectable device (S2):** `fingerprint.py` (enum `:40`, `HTTP_SIGNATURES` `:156`, `_probe_tachyon_api` + its call at `:434`, `_extract_device_details` branch), `firmware.py` (3 rows `:186-193`), `config_store.py` (alias block), `port_manager.py` (`DeviceLinkLocalIP` Tachyon consts + `.ALL` + inline list), `web/api.py` (`VALID_DEVICE_TYPES` + `BUILTIN_CREDENTIALS` + filename inference + UI lists), `setup_tools.py` (`SUPPORTED_DEVICE_TYPES` + readiness/hint/mode dicts), `index.html` (vendor map + `canApplyMode` + SSID-uppercase branch).
+**Must edit or you get dead code / an undetectable device (S2):** `fingerprint.py` (enum `:40`, `HTTP_SIGNATURES` `:156`, `_probe_tachyon_api` + its call at `:434`, `_extract_device_details` branch), `firmware.py` (3 rows `:186-193`), `config_store.py` (alias block), `vendor_ips.py` (`VENDOR_LINK_LOCAL_IPS` tachyon entry — `port_manager.py` probe/boot-ping lists and `DeviceIPsConfig` derive from it, Story 4 / #74), `config.py` (`_default_credentials()` + firmware-source default cleanups), `web/api.py` (`_DEVICE_TYPE_FILENAME_HINTS` extras + UI lists; `BUILTIN_CREDENTIALS` derives from `_default_credentials()` — only a `_BUILTIN_OVERRIDES` entry would need removing; device-type validation derives from `HANDLER_MAP`), `setup_tools.py` (readiness/hint/mode dicts; the device-type list derives from `HANDLER_MAP`, the credential hints from `_default_credentials()`), `index.html` (vendor map + `canApplyMode` + SSID-uppercase branch).
 
 **Risk profile:** the danger is *omission*, not breakage. Forgetting an S1 site stops the service at boot; forgetting an S2 site leaves dead code or a silently-undetectable device. `grep -ri tachyon provisioner/ configs/` is the safety net.
 
@@ -111,7 +115,7 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 **Multi-vendor SCAFFOLDING — deletable/collapsible:**
 - **`fingerprint.py` is ~80% dead weight with one vendor.** Any device on the port *is* that vendor — delete the probe cascade (MikroTik :8728 special-case, `_probe_tachyon_api`, `_probe_wave_api`, SSH-banner, SNMP) and all other `HTTP_SIGNATURES`. `DeviceType` collapses to `{THE_VENDOR, UNKNOWN}`. **Biggest single simplification.**
 - `handler_manager`/`HANDLER_MAP` → "always return TheHandler."
-- `DeviceLinkLocalIP.ALL`, `cli` choices, `VALID_DEVICE_TYPES`, `index.html` vendor map → one entry each.
+- `vendor_ips.py` `VENDOR_LINK_LOCAL_IPS` and the `index.html` vendor map → one entry each (the `cli` choices and API device-type validation already derive from `HANDLER_MAP` — Story 2 / #72 — so they collapse for free).
 - Evolution Digital passive path, and (unless the chosen vendor *is* MikroTik) netinstall/ZTP/BOOTP/OUI machinery → deletable.
 
 **Caveat:** because there's no plugin registry, "reduce to one" is the same manual carving across the same ~10 enumeration sites. The core engine is genuinely vendor-neutral; the cost is concentrated in `fingerprint.py` and the duplicated enumerations.
@@ -128,7 +132,7 @@ Severity key — **S1/High**: explicit rule violation, or crash/silent-wrong if 
 | **Can Tachyon come out cleanly?** | **Yes** | ~15 files, mechanical; no behavioral coupling; grep is the safety net. |
 | **Can it reduce to one vendor?** | **Yes, and cleaner** | Core is vendor-neutral; the `fingerprint.py` cascade collapses. |
 
-**Remediation:** see `docs/epic-vendor-isolation-refactor.md`. Phase 1 (consolidate the enumeration registries, fix the `base.py` leak) eliminates both S1 crash-couplings and ~90% of the modularity gap with no behavioral risk.
+**Remediation:** see `docs/epic-vendor-isolation-refactor.md`. Phase 1 (consolidate the enumeration registries, fix the `base.py` leak) eliminates both S1 crash-couplings and ~90% of the modularity gap with no behavioral risk. *(Update 2026-08: Phase 1 is merged — PRs #122/#125/#127/#124 — and both S1 crash-couplings are gone; see the dated annotations above.)*
 
 ---
 
@@ -140,7 +144,7 @@ grep -rniE 'tachyon|cambium|mikrotik|tarana|ubiquiti|evolution' provisioner \
   --include='*.py' | grep -v 'provisioner/handlers/' | grep -v 'firmware_sources/'
 
 # Confirm the duplicated vendor registries:
-grep -rn 'HANDLER_MAP\|VALID_DEVICE_TYPES\|BUILTIN_CREDENTIALS\|SOURCE_MAP\|SUPPORTED_DEVICE_TYPES\|DeviceType\.' provisioner | head -40
+grep -rn 'HANDLER_MAP\|provisionable_device_types\|BUILTIN_CREDENTIALS\|_default_credentials\|SOURCE_MAP\|VENDOR_LINK_LOCAL_IPS\|DeviceType\.' provisioner | head -40
 
 # Confirm no handler imports another handler (behavioral isolation):
 grep -rn 'from .handlers' provisioner/handlers/*.py    # expect only base/__init__

@@ -44,6 +44,8 @@ Never branch on vendor names in shared modules; add/override a trait instead.
 | `allows_arbitrary_template_fallback` | `True` | `False`: when no model/alias/default template matches, do NOT fall back to an arbitrary file in the vendor's template dir. Disable for vendors with product-family templates where cross-applying configs is dangerous. Tachyon: `False` |
 | `config_alias_prefix_matching` | `False` | `True`: `CONFIG_MODEL_ALIASES` keys also match as model-name prefixes (`tna-305` covers `tna-305-xyz`). Tachyon: `True` |
 | `requires_model_preflight` | `False` | `True`: when fingerprinting identifies the vendor but not the model, run a read-only login/get-info preflight (`HandlerManager.login_and_get_info`) before firmware/config asset lookup. Enable for vendors with model-specific assets. Tachyon: `True` |
+| `supports_config_overlays` | `False` | `True`: the config resolver (`config_resolver.py`) may compose site-role overlays over this vendor's base template. `False` refuses overlays with an operator-visible note (base-only resolution). Enable per vendor **only after bench verification** — no vendor sets it yet. See "Site-Role Config Overlays" below |
+| `is_full_config_export(config)` | `False` (staticmethod) | Returns `True` when a loaded JSON config is a full device export (applied replace-not-merge), so the resolver refuses to compose partial overlays over it. Method-shaped because the answer depends on the config's content, not the vendor alone — still callable before instantiation. Tachyon: key-set heuristic |
 
 ### Property Combinations by Vendor
 
@@ -385,6 +387,61 @@ configs/
 2. `templates/{device_type}/default.json` - Default for type
 3. `templates/{device_type}/*.json` - First file found
 
+## Site-Role Config Overlays
+
+Provisioning jobs can carry a **site role** (e.g. a tower deployment vs a
+business/home install). The config resolver (`provisioner/config_resolver.py`,
+the seam `main.py` calls instead of `store.get_config_template()` directly —
+design: `docs/design-config-resolution.md`) composes an optional role overlay
+over the base template:
+
+```
+configs/templates/{vendor}/roles/{role}/{model|alias|default}.json
+```
+
+Rules:
+
+- **Roles are opaque strings derived from the template tree** — adding a role
+  is a data change (create the directory), never a code change. No module may
+  grow a role enum or role list.
+- **Lookup reuses the base chain**: model → `CONFIG_MODEL_ALIASES` alias →
+  `default.json`, honoring the same class traits
+  (`allows_prefixed_config_exports`, `config_alias_prefix_matching`). There is
+  **no** arbitrary-file fallback for overlays, and overlays are `.json` only —
+  they are dict deltas, deep-merged over the base (dicts merge recursively,
+  overlay wins per key; **lists and scalars replace wholesale**).
+- **Overlays that touch a list must carry the complete list value** — and
+  therefore **role overlays must never contain secrets or identity fields**
+  (PSKs, passwords, SNMP communities, static IPs, SSIDs). Those belong to
+  snapshots/replacement flows, never to git-committed files under
+  `configs/templates/**`. `tests/test_role_overlay_lint.py` enforces the
+  secret-shaped-key check on every shipped overlay.
+- **Refusals soft-proceed**: if the vendor's handler has
+  `supports_config_overlays = False` (the default), the base is a `.tar`
+  full export, or `is_full_config_export()` fires on the JSON base, the
+  resolver resolves base-only and records an operator-visible note. A missing
+  overlay for a selected role also soft-proceeds with a note (roles roll out
+  vendor-by-vendor).
+- **No role selected ⇒ byte-identical passthrough** of the plain template
+  lookup — the template file is not even opened. When an overlay does apply,
+  the merged result is materialized as a job-scoped `0600` artifact under
+  `/var/lib/provisioner/run/resolved/` and handed to the handler as a normal
+  config file; the artifact is deleted after the job.
+
+Role selection: per-job via the API (`ProvisionRequest.role`; kiosk UI
+exposure is a follow-up story) with a fallback default in `config.yaml`:
+
+```yaml
+provisioning:
+  default_role: tower    # optional; omit for role-less resolution
+```
+
+**Host note:** like all template content, role overlay files must exist in the
+data repo on the host (`/var/lib/provisioner/repo/configs/templates/...`) —
+`deploy.sh` syncs code only. The `provisioning:` config section is likewise a
+`/etc/provisioner/config.yaml` edit on the host (deploy does not touch it);
+existing configs without the section keep working — the default is no role.
+
 ## Firmware File Locations
 
 ```
@@ -501,30 +558,42 @@ print(f"Success: {result.success}, Error: {result.error_message}")
 - Add API probe if the device has a distinctive REST endpoint
 - Detection must work on factory-default devices at their default IP
 
-### 3. Boot-Ping Discovery (`provisioner/port_manager.py`)
+### 3. Firmware Source (`provisioner/firmware_sources/{vendor}.py`, optional)
 
-- Add the vendor's default IP(s) to `DeviceLinkLocalIP` class
-- Add to `DeviceLinkLocalIP.ALL` with vendor tag
-- Add to the boot-ping `ips_to_try` list in `_boot_ping_detect()`
+- Subclass `BaseFirmwareSource` and implement `check_for_updates()` — only if the vendor has an unauthenticated download endpoint (Tarana doesn't; its firmware is uploaded manually)
+- Do **not** add it to `firmware_sources/__init__.py` — that package deliberately no longer imports vendor modules; the class is referenced only from the vendor's spec (step 4)
+- Add firmware version extraction regex in `firmware.py` if the vendor uses non-standard naming, and create the `firmware/{vendor}/` directory in the data repo
 
-### 4. Handler Registration (`provisioner/handler_manager.py`)
+### 4. VendorSpec Registration (`provisioner/vendor_registry.py`)
 
-- Add `DeviceType.{VENDOR}: {Vendor}Handler` to `HANDLER_MAP`
+One `register(VendorSpec(...))` call per vendor — together with the `DeviceType` enum member (step 2), this is the whole shared-registration budget (Story 6 / #76). Every other vendor enumeration derives from the spec:
 
-### 5. Firmware Matching (`provisioner/firmware.py`)
+| Spec field | Derived views |
+|---|---|
+| `handler_cls` | `HandlerManager.HANDLER_MAP`, and via `provisionable_device_types()` the CLI choices, API device-type validation, and setup rows |
+| `firmware_source_cls` + `firmware_source_defaults` | `FirmwareChecker.SOURCE_MAP`, `config._default_firmware_sources()` |
+| `default_credentials` (+ `builtin_ui_credentials` if the shipped login differs) | `config._default_credentials()`, `BUILTIN_CREDENTIALS`, setup credential hints |
+| `link_local_ips` | `vendor_ips.VENDOR_LINK_LOCAL_IPS`, the `.ALL` probe list, the boot-ping list, `DeviceIPsConfig` defaults. The first IP is the vendor's primary/default address. New vendors append to the probe order; existing vendors' probe positions are pinned by the historical order tuples in `vendor_ips.py`/`config.py` — don't touch those when adding |
+| `model_firmware_patterns` | `FirmwareManager.MODEL_FIRMWARE_PATTERNS` (firmware-file lookup; distinct from any handler-local validation dict, which is a class trait) |
+| `config_template_dir` | consistency-tested against `configs/templates/` |
+| `ui_style` (`name`, `color`) | kiosk vendor cards via `vendor_ui_metadata()`; drop an icon at `web/static/vendor-icons/{vendor}.png` |
 
-- Add model-to-filename patterns in `MODEL_FIRMWARE_PATTERNS`
-- Add firmware version extraction regex if the vendor uses non-standard naming
-- Create `firmware/{vendor}/` directory
+Rules:
 
-### 6. Config Templates (`configs/templates/{vendor}/`)
+- Register in `DeviceType` declaration order (a test asserts it) — registration is explicit and deterministic, never filesystem discovery
+- Specs hold enumeration **data** only; behavior and class-level traits stay on the handler class (the spec points at the class)
+- Documented exceptions: Evolution Digital registers with `provisionable=False` (dispatched via the `main.py` side-door, no `HANDLER_MAP` entry); `MockHandler` stays outside the registry
+- `tests/test_vendor_registry.py` enforces spec↔enum↔view consistency; `tests/test_vendor_golden.py` locks the derived values — update both in the same commit as an intentional vendor change
+- Single-vendor builds: set `PROVISIONER_VENDORS=<vendor>[,<vendor>...]` in the service environment to filter every derived view (excluded vendors vanish from detection, CLI, API, setup, and UI with no ImportError)
+
+### 5. Config Templates (`configs/templates/{vendor}/`)
 
 - Create vendor subdirectory
 - Add model-specific templates as `{model}.json` (or `.rsc`, `.yaml`, `.tar`)
 - Add model aliases to `CONFIG_MODEL_ALIASES` in `config_store.py` if needed
 - Template format is vendor-specific — match what the handler's `apply_config_file()` expects
 
-### 7. Testing
+### 6. Testing
 
 - [ ] Device detection works (factory-default state)
 - [ ] Boot-ping finds the device after power-on
@@ -542,7 +611,7 @@ print(f"Success: {result.success}, Error: {result.error_message}")
 
 If the new model has different provisioning behavior than existing models (e.g., a switch vs AP from the same vendor):
 
-1. Add firmware patterns to `MODEL_FIRMWARE_PATTERNS`
+1. Add firmware patterns to the vendor's `model_firmware_patterns` in its `VendorSpec` (`provisioner/vendor_registry.py`)
 2. Add config template as `configs/templates/{vendor}/{model}.json`
 3. If the model needs different flow (e.g., `config_after_all_firmware`), make the handler property conditional on model name
 4. Add model alias to `CONFIG_MODEL_ALIASES` if the API-reported model name differs from the template filename

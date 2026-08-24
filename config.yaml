@@ -109,6 +109,16 @@ features:
   apply_config_ubiquiti: false  # Ubiquiti config application (untested)
   apply_config_tarana: true     # Tarana config application via gNMI Set
 
+# Cross-vendor provisioning job defaults. Omitted entirely by default:
+# no role selected means config resolution is identical to pre-role
+# behavior. `default_role` names the site-role config overlay
+# (configs/templates/{vendor}/roles/{role}/ — see
+# docs/HANDLER_DEVELOPMENT.md "Site-Role Config Overlays") applied to
+# jobs that do not pick a role explicitly. Roles are opaque strings
+# derived from the template tree.
+# provisioning:
+#   default_role: tower
+
 device_settings:
   tarana:
     operator_id:                    # Tarana operator ID (set via gNMI on /radios/global/config/operator-id)
