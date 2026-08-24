@@ -129,3 +129,26 @@ def test_mode_endpoint_uses_handler_capability(monkeypatch):
 
     assert response.status_code == 200
     assert calls == [(4, "tachyon", "ap")]
+
+
+def test_ap_qualification_does_not_authorize_ptp(monkeypatch):
+    monkeypatch.setattr(
+        TachyonHandler,
+        "qualified_post_provision_modes",
+        ("ap",),
+    )
+    client = _client(
+        monkeypatch,
+        _status("tachyon", "78:5E:E8:D0:4C:38"),
+        mode_config=True,
+    )
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "ptp", "my_tower": 5, "remote_tower": 12},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Mode configuration not supported for tachyon"
+    )

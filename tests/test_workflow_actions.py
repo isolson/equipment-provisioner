@@ -26,11 +26,11 @@ def _action_ids(workflow, key="available_actions"):
     return [action["id"] for action in workflow[key]]
 
 
-def _qualify_tachyon_modes(monkeypatch):
+def _qualify_tachyon_modes(monkeypatch, modes=("ap", "ptp")):
     monkeypatch.setattr(
         TachyonHandler,
         "qualified_post_provision_modes",
-        ("ap", "ptp"),
+        modes,
     )
 
 
@@ -68,6 +68,17 @@ def test_success_actions_respect_feature_flag_and_qualification(monkeypatch):
     assert _action_ids(disabled) == []
     assert _action_ids(enabled) == ["configure_ap", "configure_ptp"]
     assert _action_ids(unsupported) == []
+
+
+def test_mode_qualification_is_independent_per_mode(monkeypatch):
+    _qualify_tachyon_modes(monkeypatch, modes=("ap",))
+
+    workflow = workflow_for_port(
+        _state(last_result="success"),
+        mode_config_enabled=True,
+    )
+
+    assert _action_ids(workflow) == ["configure_ap"]
 
 
 def test_required_mode_is_not_reported_ready(monkeypatch):
