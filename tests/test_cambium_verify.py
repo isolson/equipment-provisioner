@@ -6,6 +6,7 @@ returns ``True`` when there is nothing to compare, so a verify with no expected
 values reports success without confirming anything.
 """
 
+from provisioner.handlers.base import DeviceInfo
 from provisioner.handlers.cambium import CambiumHandler
 
 
@@ -109,6 +110,50 @@ async def test_upload_status_fails_immediately_on_non_json_body(monkeypatch):
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
 
     assert await h._poll_upload_status_curl("test-session", timeout=300) is False
+
+
+async def test_ax_bank_one_uses_explicit_upgrade_sequence(monkeypatch, tmp_path):
+    h = _handler()
+    h.interface = "eth0.1996"
+    h._device_info = DeviceInfo(device_type="cambium", model="ePMP AX (SKU 53560)")
+    firmware = tmp_path / "ePMP-AX-v5.11.1.img"
+    firmware.write_bytes(b"firmware")
+    calls = []
+
+    async def explicit(path, upgrade_type="device"):
+        calls.append((path, upgrade_type))
+        return True
+
+    async def legacy(path):
+        raise AssertionError("AX must not use local_upload_image")
+
+    monkeypatch.setattr(h, "_upload_firmware_curl_alt_bank", explicit)
+    monkeypatch.setattr(h, "_upload_firmware_curl", legacy)
+
+    assert await h.upload_firmware(str(firmware), bank=1) is True
+    assert calls == [(str(firmware), "sw")]
+
+
+async def test_force_bank_one_keeps_legacy_first_pass(monkeypatch, tmp_path):
+    h = _handler()
+    h.interface = "eth0.1996"
+    h._device_info = DeviceInfo(device_type="cambium", model="Force 300-25")
+    firmware = tmp_path / "ePMP-v5.11.1.img"
+    firmware.write_bytes(b"firmware")
+    calls = []
+
+    async def legacy(path):
+        calls.append(path)
+        return True
+
+    async def explicit(path, upgrade_type="device"):
+        raise AssertionError("Force bank one must keep the confirmed legacy path")
+
+    monkeypatch.setattr(h, "_upload_firmware_curl", legacy)
+    monkeypatch.setattr(h, "_upload_firmware_curl_alt_bank", explicit)
+
+    assert await h.upload_firmware(str(firmware), bank=1) is True
+    assert calls == [str(firmware)]
 
 
 async def test_firmware_upload_fails_when_ready_status_is_not_confirmed(

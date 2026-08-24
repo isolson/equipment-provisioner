@@ -300,6 +300,7 @@ endpoint with multipart upload. This is separate from config.
 | 2026-01-27 | `set_param` (small key set) | Provisioner logs | 5.10.4 |
 | 2026-01-27 | Login (`/cgi-bin/luci`) | Provisioner logs | 5.10.4 |
 | 2026-05-28 | `upload_sw_image_local` + `upgrade_sw_image_local` + `get_upgrade_status` (FW2 alt-bank flash) | HAR capture from browser, Force 300-25 | 5.11.1 |
+| 2026-08-24 | `upload_sw_image_local` + `upgrade_sw_image_local` + `get_upgrade_status` (both passes) | Device web UI JavaScript, ePMP AX SKU 53560 | 5.11.0 |
 
 ---
 
@@ -310,6 +311,11 @@ full provisioning that ends with **both banks at the target version**
 needs two separate flash passes, each using a different endpoint set.
 This was confirmed via HAR capture of the web UI doing a successful
 manual dual-bank upgrade on a Force 300-25 running 5.11.1.
+
+ePMP AX uses the explicit second-pass sequence for both banks. Its
+`upgrade_sw_image_local` request uses `type=sw`. Its
+`get_upgrade_status` request uses `type=device`. The AX web UI does not
+expose `local_upload_image`; that endpoint returns HTTP 404.
 
 ### First pass — first-bank flash
 
@@ -345,12 +351,13 @@ the step the provisioner was missing before #58.
 `get_upload_status` (verified empirically). The form body is mandatory;
 without it the endpoint returns a 400.
 
-Handler implementation: `CambiumHandler.upload_firmware()` branches on
-the `bank` parameter — `bank=1` → first-pass flow,
-`bank=2` → alt-bank flow.
+Handler implementation: `CambiumHandler.upload_firmware()` derives the
+flow from the model and bank. Force-series devices use the original
+first-pass and second-pass split. ePMP AX uses the explicit sequence for
+both passes.
 
 ---
 
-*Last updated: 2026-05-28*
+*Last updated: 2026-08-24*
 *This document is the source of truth for Cambium API behavior. Update it
 when new endpoints or behaviors are confirmed on actual hardware.*

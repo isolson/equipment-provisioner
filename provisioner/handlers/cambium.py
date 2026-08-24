@@ -1829,8 +1829,8 @@ class CambiumHandler(BaseHandler):
     async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
         """Upload firmware to the device.
 
-        Cambium ePMP uses different endpoint sequences for the first vs.
-        second bank-update pass:
+        Cambium ePMP uses different endpoint sequences by device family and
+        bank-update pass:
 
         - First pass (bank in {None, 1}): POST local_upload_image, then poll
           get_upload_status until status=7. Suitable for the initial flash
@@ -1843,8 +1843,10 @@ class CambiumHandler(BaseHandler):
           a prior bank-swap reboot — the first-pass endpoint silently no-ops
           in that state.
 
-        Endpoint set confirmed via HAR capture on Cambium Force 300-25
-        firmware 5.11.1; see docs/cambium-config.md.
+        - ePMP AX: use the explicit upload/upgrade/status sequence for both
+          passes. Its web UI does not expose the legacy first-pass endpoints.
+
+        Endpoint sets are hardware-confirmed; see docs/cambium-config.md.
         """
         try:
             firmware_file = Path(firmware_path)
@@ -1856,8 +1858,14 @@ class CambiumHandler(BaseHandler):
 
             # Use curl when interface binding is needed (VLAN mode)
             if self.interface:
-                if bank == 2:
-                    return await self._upload_firmware_curl_alt_bank(firmware_path)
+                model = self._device_info.model if self._device_info else None
+                is_ax = self._is_ax_model(model)
+                if bank == 2 or is_ax:
+                    upgrade_type = "sw" if is_ax else "device"
+                    return await self._upload_firmware_curl_alt_bank(
+                        firmware_path,
+                        upgrade_type=upgrade_type,
+                    )
                 return await self._upload_firmware_curl(firmware_path)
 
             # Use aiohttp when no interface binding needed
@@ -2032,13 +2040,15 @@ class CambiumHandler(BaseHandler):
             logger.error(f"Failed to upload firmware via curl: {e}")
             return False
 
-    async def _upload_firmware_curl_alt_bank(self, firmware_path: str) -> bool:
-        """Upload firmware to the second (alternate) bank via curl.
+    async def _upload_firmware_curl_alt_bank(
+        self,
+        firmware_path: str,
+        upgrade_type: str = "device",
+    ) -> bool:
+        """Upload firmware with the explicit upload-and-upgrade sequence.
 
-        Used for FW2 — see upload_firmware() docstring for why this differs
-        from _upload_firmware_curl. Hits the upload_sw_image_local +
-        upgrade_sw_image_local + get_upgrade_status endpoint set captured
-        from the Cambium web UI HAR on Force 300-25 firmware 5.11.1.
+        Force-series FW2 uses ``upgrade_type=device``. The ePMP AX web UI
+        uses this sequence for both passes and sends ``upgrade_type=sw``.
         """
         import tempfile
 
@@ -2131,7 +2141,7 @@ class CambiumHandler(BaseHandler):
                 "-w", "\n%{http_code}",
                 "-X", "POST",
                 "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", "type=device&debug=true",
+                "-d", f"type={upgrade_type}&debug=true",
             ]
             if cookie_path:
                 curl_args.extend(["-b", cookie_path])
