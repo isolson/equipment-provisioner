@@ -198,7 +198,15 @@ class PortState:
     boot_ping_responded: bool = False  # True once device responds to ping during boot
     last_result: Optional[str] = None  # "success" or "failed"
     last_error: Optional[str] = None  # Error message if failed
+    needs_credentials: bool = False  # Last failure needs an operator login
     checklist: ProvisioningChecklist = field(default_factory=ProvisioningChecklist)  # Step-by-step progress
+    # Ordered, run-specific validation plan plus generic status/detail maps.
+    # The legacy checklist remains the compatibility surface for existing API
+    # clients, while these fields let capability-driven flows (and MikroTik
+    # Netinstall) expose only the checks they actually run.
+    step_plan: List[Dict[str, str]] = field(default_factory=list)
+    step_status: Dict[str, Union[bool, str]] = field(default_factory=dict)
+    step_details: Dict[str, str] = field(default_factory=dict)
     provision_attempted: bool = False  # True once provisioning has been attempted (prevents re-trigger)
     last_provisioned_at: Optional[float] = None  # Timestamp of last successful provisioning (survives disconnect)
     last_provisioned_mac: Optional[str] = None  # MAC of the last successfully provisioned device — cooldown is bypassed when a different MAC appears
@@ -212,6 +220,9 @@ class PortState:
     device_mode: Optional[str] = None
     mode_config: Optional[Dict[str, Any]] = None  # Naming params used to configure mode
     ptp_link_id: Optional[str] = None  # Canonical PTP link ID, e.g. "tw05-tw12"
+    # The job-intent flow can require AP/PTP selection after base provisioning.
+    # Until that flow sets this, mode actions remain optional.
+    mode_selection_required: bool = False
 
     # Rolling buffer of (timestamp, link_up: bool, speed: Optional[str]) events
     # recorded on every switch-port webhook. Used by the passive Evolution
@@ -261,6 +272,7 @@ class PortManager:
         local_ip_base: str = "169.254.1.2",
         management: Optional[ManagementConfig] = None,
         setup_vlans: bool = True,
+        mode_config_enabled: bool = False,
     ):
         """Initialize port manager.
 
@@ -283,6 +295,7 @@ class PortManager:
         self.num_ports = num_ports if setup_vlans else 1
         self.local_ip_base = local_ip_base
         self.management = management or ManagementConfig()
+        self.mode_config_enabled = mode_config_enabled
         # Single-port mode only: optional DHCP/static subnet to ARP-sweep for
         # devices that arrive at addresses outside the vendor link-local list
         # (e.g. routers that already DHCP'd to 192.168.1.x).  Set by
@@ -886,9 +899,10 @@ class PortManager:
             if not is_running:
                 state.last_result = None
                 state.last_error = None
+                state.needs_credentials = False
                 state.provision_attempted = False
                 state.provisioning_ended = None
-                state.checklist.reset()
+                self.reset_checklist(port_num)
                 self.clear_device_mode(port_num)
 
     # Grace period after provisioning before marking device as disconnected (seconds)
@@ -975,11 +989,12 @@ class PortManager:
                 logger.info(f"Port {port_num} clearing stale post-grace last_result")
                 state.last_result = None
                 state.last_error = None
+                state.needs_credentials = False
                 state.provision_attempted = False
                 state.provisioning_ended = None
                 state.last_bootp_fired_at = None
                 state.last_bootp_fired_mac = None
-                state.checklist.reset()
+                self.reset_checklist(port_num)
                 self.clear_device_mode(port_num)
                 try:
                     from provisioner.web.websocket import notify_port_change
@@ -1618,6 +1633,8 @@ class PortManager:
         if port_num in self.port_states:
             state = self.port_states[port_num]
             state.provisioning = provisioning
+            if provisioning:
+                state.needs_credentials = False
             if not provisioning:
                 # Only start grace period for successful provisioning (firmware updates need reboot time)
                 if success:
@@ -1626,11 +1643,18 @@ class PortManager:
                     state.last_provisioned_mac = state.device_mac
                     state.last_result = "success"
                     state.last_error = None
+                    state.needs_credentials = False
                 else:
                     state.provisioning_ended = None  # No grace period for failures
                     state.last_result = "failed"
                     state.last_error = error
                 state.ping_failures = 0  # Reset ping failures
+
+    def set_needs_credentials(self, port_num: int, required: bool) -> None:
+        """Persist the retry reason across REST and WebSocket reconnects."""
+        state = self.port_states.get(port_num)
+        if state:
+            state.needs_credentials = required
 
     def set_expecting_reboot(self, port_num: int, expecting: bool) -> None:
         """Set whether a port is expecting a planned reboot (firmware update).
@@ -1680,11 +1704,12 @@ class PortManager:
         if not in_grace:
             state.last_result = None
             state.last_error = None
+            state.needs_credentials = False
             state.provision_attempted = False
             state.last_bootp_fired_at = None
             state.last_bootp_fired_mac = None
             state.provisioning_ended = None
-            state.checklist.reset()
+            self.reset_checklist(port_num)
             self.clear_device_mode(port_num)
 
     def update_port_device_info(
@@ -1718,6 +1743,7 @@ class PortManager:
         port_num: int,
         step: str,
         status: Optional[Union[bool, str]],
+        detail: Optional[str] = None,
     ) -> None:
         """Update a specific checklist step for a port.
 
@@ -1728,12 +1754,39 @@ class PortManager:
         """
         if port_num in self.port_states:
             state = self.port_states[port_num]
+            if status is not None:
+                state.step_status[step] = status
+            if detail:
+                state.step_details[step] = detail
             if hasattr(state.checklist, step):
                 if step == "firmware_banks" and isinstance(status, str):
                     if not state.checklist.firmware_banks_initial:
                         state.checklist.firmware_banks_initial = status
                 setattr(state.checklist, step, status)
                 logger.debug(f"Port {port_num} checklist: {step} = {status}")
+
+    def set_step_plan(self, port_num: int, steps: List[Dict[str, str]]) -> None:
+        """Set the ordered validation plan for the current port run.
+
+        Each entry has a stable ``key`` and a user-facing ``label``. Unknown
+        keys are intentional: vendor-specific flows can publish their checks
+        without adding another fixed field to :class:`ProvisioningChecklist`.
+        """
+        if port_num not in self.port_states:
+            return
+
+        normalized = []
+        seen = set()
+        for item in steps:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()
+            if not key or key in seen:
+                continue
+            label = str(item.get("label", key.replace("_", " ").title())).strip()
+            normalized.append({"key": key, "label": label or key})
+            seen.add(key)
+        self.port_states[port_num].step_plan = normalized
 
     def reset_checklist(self, port_num: int) -> None:
         """Reset the checklist for a port (for new device or re-provisioning).
@@ -1744,6 +1797,9 @@ class PortManager:
         if port_num in self.port_states:
             state = self.port_states[port_num]
             state.checklist.reset()
+            state.step_plan.clear()
+            state.step_status.clear()
+            state.step_details.clear()
             logger.debug(f"Port {port_num} checklist reset")
 
     def get_link_events_since(
@@ -1769,36 +1825,18 @@ class PortManager:
         import time
         current_time = time.time()
         return {
-            port_num: {
-                "vlan_id": state.vlan_id,
-                "link_up": state.link_up,
-                "device_detected": state.device_detected,
-                "device_type": state.device_type,
-                "device_ip": state.device_ip,
-                "device_mac": state.device_mac,
-                "device_serial": state.device_serial,
-                "device_model": state.device_model,
-                "provisioning": state.provisioning,
-                "link_speed": state.link_speed,
-                "waiting_for_boot": state.waiting_for_boot,
-                "boot_wait_remaining": max(0, int(state.boot_wait_until - current_time)) if state.boot_wait_until else None,
-                "last_result": state.last_result,
-                "last_error": state.last_error,
-                "checklist": state.checklist.to_dict(),
-                "device_mode": state.device_mode,
-                "mode_config": state.mode_config,
-                "ptp_link_id": state.ptp_link_id,
-            }
+            port_num: self._serialize_port_state(state, current_time)
             for port_num, state in self.port_states.items()
         }
 
-    def _get_single_port_status(self, port_num: int) -> Dict:
-        """Get status of a single port for WebSocket notifications."""
-        import time
-        current_time = time.time()
-        state = self.port_states.get(port_num)
-        if not state:
-            return {}
+    def _serialize_port_state(
+        self,
+        state: PortState,
+        current_time: float,
+    ) -> Dict[str, Any]:
+        """Serialize one port, including its server-owned workflow contract."""
+        from .workflow_actions import workflow_for_port
+
         return {
             "vlan_id": state.vlan_id,
             "link_up": state.link_up,
@@ -1811,14 +1849,31 @@ class PortManager:
             "provisioning": state.provisioning,
             "link_speed": state.link_speed,
             "waiting_for_boot": state.waiting_for_boot,
-            "boot_wait_remaining": max(0, int(state.boot_wait_until - current_time)) if state.boot_wait_until else None,
+            "boot_wait_remaining": (
+                max(0, int(state.boot_wait_until - current_time))
+                if state.boot_wait_until else None
+            ),
             "last_result": state.last_result,
             "last_error": state.last_error,
+            "needs_credentials": state.needs_credentials,
             "checklist": state.checklist.to_dict(),
+            "step_plan": state.step_plan,
+            "step_status": state.step_status,
+            "step_details": state.step_details,
             "device_mode": state.device_mode,
             "mode_config": state.mode_config,
             "ptp_link_id": state.ptp_link_id,
+            "workflow": workflow_for_port(state, self.mode_config_enabled),
         }
+
+    def _get_single_port_status(self, port_num: int) -> Dict:
+        """Get status of a single port for WebSocket notifications."""
+        import time
+        current_time = time.time()
+        state = self.port_states.get(port_num)
+        if not state:
+            return {}
+        return self._serialize_port_state(state, current_time)
 
     def _map_switch_port_to_port_num(self, switch_port: str) -> Optional[int]:
         """Map MikroTik switch port name to our port number.
@@ -1904,9 +1959,10 @@ class PortManager:
                     )
                     state.last_result = None
                     state.last_error = None
+                    state.needs_credentials = False
                     state.provision_attempted = False
                     state.provisioning_ended = None
-                    state.checklist.reset()
+                    self.reset_checklist(port_num)
                     self.clear_device_mode(port_num)
 
                 # Start boot wait timer - will ping until device responds, then wait for web init
@@ -2016,6 +2072,7 @@ class PortManager:
         state.device_mode = mode
         state.mode_config = mode_config
         state.ptp_link_id = ptp_link_id
+        state.mode_selection_required = False
 
         # Update PTP link registry with timestamp
         if ptp_link_id and mode in ("ptp-a", "ptp-b"):
@@ -2062,6 +2119,7 @@ class PortManager:
         state.device_mode = None
         state.mode_config = None
         state.ptp_link_id = None
+        state.mode_selection_required = False
 
     def get_ptp_link(self, link_id: str) -> Optional[Dict[str, Any]]:
         """Get PTP link info by link ID."""
@@ -2136,6 +2194,7 @@ def init_port_manager(
     management: Optional[ManagementConfig] = None,
     setup_vlans: bool = True,
     simple_subnet: Optional[str] = None,
+    mode_config_enabled: bool = False,
 ) -> PortManager:
     """Initialize the global port manager.
 
@@ -2148,6 +2207,7 @@ def init_port_manager(
         setup_vlans: False for single-port (no-switch) deployments
         simple_subnet: When setup_vlans is False, a CIDR to ARP-sweep for
             DHCP-addressed devices outside the vendor link-local list.
+        mode_config_enabled: Expose handler-supported AP/PTP actions.
     """
     global _port_manager
     pm = PortManager(
@@ -2157,6 +2217,7 @@ def init_port_manager(
         local_ip_base=local_ip_base,
         management=management,
         setup_vlans=setup_vlans,
+        mode_config_enabled=mode_config_enabled,
     )
     if not setup_vlans and simple_subnet:
         pm._simple_subnet = simple_subnet

@@ -45,6 +45,9 @@ Never branch on vendor names in shared modules; add/override a trait instead.
 | `config_alias_prefix_matching` | `False` | `True`: `CONFIG_MODEL_ALIASES` keys also match as model-name prefixes (`tna-305` covers `tna-305-xyz`). Tachyon: `True` |
 | `requires_model_preflight` | `False` | `True`: when fingerprinting identifies the vendor but not the model, run a read-only login/get-info preflight (`HandlerManager.login_and_get_info`) before firmware/config asset lookup. Enable for vendors with model-specific assets. Tachyon: `True` |
 | `supports_config_overlays` | `False` | `True`: the config resolver (`config_resolver.py`) may compose site-role overlays over this vendor's base template. `False` refuses overlays with an operator-visible note (base-only resolution). Enable per vendor **only after bench verification** — no vendor sets it yet. See "Site-Role Config Overlays" below |
+| `qualified_post_provision_modes` | `()` | Declares deployment modes that may be offered after infrastructure provisioning. Add a mode only after its vendor-specific template, injected identity/radio-role fields, handler apply path, and hardware outcome are verified. Template presence alone is insufficient. The API and kiosk derive AP/PTP actions from this tuple; shared code must not maintain a vendor allowlist. No vendor is qualified yet. |
+| `supports_manual_netinstall` | `False` | Exposes the guarded manual recovery action for this handler. MikroTik: `True`. The Netinstall API still requires a detected MikroTik OUI before it starts the destructive operation. |
+| `manual_netinstall_label` | `"Recovery (Netinstall)"` | Operator-facing label for the manual recovery action. Override it when the recovery mechanism needs vendor-specific context. |
 | `is_full_config_export(config)` | `False` (staticmethod) | Returns `True` when a loaded JSON config is a full device export (applied replace-not-merge), so the resolver refuses to compose partial overlays over it. Method-shaped because the answer depends on the config's content, not the vendor alone — still callable before instantiation. Tachyon: key-set heuristic |
 
 ### Property Combinations by Vendor
@@ -330,7 +333,7 @@ Each port card shows two zones:
    - `NO LINK` (gray) — no cable / no device
    - `DETECTING` (amber spinner) — waiting for device
    - `READY` (green check) — device detected, tap to provision
-   - `LOGGING IN`, `CHECKING FIRMWARE`, or `APPLYING CONFIG` (blue spinner) — active provisioning step with a "Step N of 7" subtitle
+   - `LOGGING IN`, `CHECKING FIRMWARE`, or `APPLYING CONFIG` (blue spinner) — active step with a `Step N of M` subtitle
    - `COMPLETE` (green check) — all steps passed
    - `FAILED` (red X) — error with truncated message
    - `NEEDS CREDENTIALS` (red alert) — tap to enter password
@@ -343,7 +346,13 @@ Opens an activity log view with:
 - MAC Address, Serial, IP, Link Speed
 - FW Bank 1 and FW Bank 2 with version and active indicator
 
-**Activity log** — timestamped step-by-step entries in provisioning order:
+**Activity log** — timestamped entries from the validation plan for the run.
+
+The backend derives the standard plan from handler capabilities and the selected work. It omits validations that do not apply.
+
+Vendor-specific flows can publish additional validations. For example, MikroTik Netinstall publishes ZTP, WiFi, phone-home, registration, and ship-ready validations.
+
+Standard provisioning uses these validation keys:
 
 | Step | Checklist Key | Detail Shown |
 |------|---------------|--------------|

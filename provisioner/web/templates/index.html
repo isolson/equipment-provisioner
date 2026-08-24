@@ -187,6 +187,72 @@
             backdrop-filter: blur(4px);
         }
 
+        #modal-title,
+        #modal-footer,
+        .workflow-actions {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        .modal-action {
+            min-height: 48px;
+            padding: 0 18px;
+            border: 1px solid transparent;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 700;
+            line-height: 1.2;
+            white-space: nowrap;
+        }
+        .modal-action-primary { background: #2563eb; color: #ffffff; }
+        .modal-action-primary:hover { background: #1d4ed8; }
+        .modal-action-secondary {
+            background: #ffffff;
+            border-color: #cbd5e1;
+            color: #334155;
+        }
+        .modal-action-secondary:hover { background: #f8fafc; }
+        .workflow-actions {
+            margin-top: 16px;
+            padding: 14px;
+            border: 1px solid #dbeafe;
+            border-radius: 12px;
+            background: #eff6ff;
+        }
+        .workflow-actions-title { color: #1e3a8a; font-size: 14px; font-weight: 750; }
+        .workflow-actions-help { color: #475569; font-size: 12px; margin-top: 2px; }
+        .workflow-actions-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 12px;
+        }
+        .workflow-actions-grid .modal-action { width: 100%; }
+        .service-actions {
+            margin-top: 14px;
+            border-top: 1px solid #e5e7eb;
+            padding-top: 10px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        .service-actions summary {
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+            color: #64748b;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 650;
+        }
+        .service-action-button {
+            width: 100%;
+            min-height: 48px;
+            border: 1px solid #f59e0b;
+            border-radius: 10px;
+            background: #fffbeb;
+            color: #92400e;
+            font-size: 14px;
+            font-weight: 700;
+        }
+
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: #f3f4f6; }
         ::-webkit-scrollbar-thumb { background: #9ca3af; border-radius: 4px; }
@@ -268,14 +334,14 @@
         <div class="absolute inset-4 md:inset-auto md:top-1/2 md:left-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-full md:max-w-md bg-white rounded-xl shadow-xl overflow-hidden flex flex-col max-h-[80vh] border border-gray-300">
             <div class="px-5 py-3 border-b border-gray-300 flex items-center justify-between">
                 <h3 class="text-lg font-bold" id="modal-title">Port Actions</h3>
-                <button onclick="closeModal()" class="p-2 rounded-lg hover:bg-gray-100">
+                <button onclick="closeModal()" class="w-11 h-11 flex items-center justify-center rounded-lg hover:bg-gray-100" aria-label="Close port details">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                     </svg>
                 </button>
             </div>
             <div class="flex-1 overflow-y-auto p-5" id="modal-content"></div>
-            <div class="px-5 py-3 border-t border-gray-300 flex gap-2" id="modal-footer"></div>
+            <div class="px-5 py-3 border-t border-gray-300 flex flex-wrap justify-end gap-2" id="modal-footer"></div>
         </div>
     </div>
 
@@ -564,6 +630,8 @@
                     if (message.data?.checklist && ports[message.port_number]) {
                         const oldCl = ports[message.port_number].checklist || {};
                         const newCl = message.data.checklist;
+                        const oldSteps = ports[message.port_number].step_status || {};
+                        const newSteps = message.data.step_status || {};
                         const deviceType = message.data?.device_type || ports[message.port_number]?.device_type;
                         const pn = message.port_number;
                         if (!portActivityLogs[pn]) portActivityLogs[pn] = [];
@@ -573,17 +641,24 @@
                             firmware_update_2: firmwareStepLabel(deviceType, 'firmware_update_2'),
                             config_upload: 'Config', config_verify: 'Verify',
                             reboot: 'Reboot', verify: 'Verify FW' };
+                        for (const item of (message.data.step_plan || [])) {
+                            if (item?.key) stepNames[item.key] = item.label || item.key;
+                        }
                         // Parse FW versions for detail on fw update steps
                         let fwVersions = {};
                         const fwSrc = newCl.firmware_banks || oldCl.firmware_banks;
                         if (fwSrc) fwVersions = parseFirmwareBanks(fwSrc);
                         for (const key of Object.keys(stepNames)) {
-                            if (newCl[key] !== undefined && newCl[key] !== oldCl[key]) {
-                                const state = getIconState(newCl, key);
-                                let detail = '';
-                                if (key === 'model_confirmed' && typeof newCl[key] === 'string') detail = newCl[key];
-                                if (key === 'firmware_banks' && typeof newCl[key] === 'string') {
-                                    detail = firmwareBanksDetail(parseFirmwareBanks(newCl[key]), deviceType);
+                            const hasNewDynamic = Object.prototype.hasOwnProperty.call(newSteps, key);
+                            const hasOldDynamic = Object.prototype.hasOwnProperty.call(oldSteps, key);
+                            const newValue = hasNewDynamic ? newSteps[key] : newCl[key];
+                            const oldValue = hasOldDynamic ? oldSteps[key] : oldCl[key];
+                            if (newValue !== undefined && newValue !== null && newValue !== oldValue) {
+                                const state = getIconState({ [key]: newValue }, key);
+                                let detail = message.data.step_details?.[key] || '';
+                                if (key === 'model_confirmed' && typeof newValue === 'string') detail = newValue;
+                                if (key === 'firmware_banks' && typeof newValue === 'string') {
+                                    detail = firmwareBanksDetail(parseFirmwareBanks(newValue), deviceType);
                                 }
                                 if (key === 'firmware_update_1') {
                                     detail = deviceType === 'mikrotik'
@@ -690,6 +765,7 @@
             const checklist = port.checklist || {};
 
             // Provisioning result survives link-down (e.g. device changed networks after config)
+            if (port.workflow?.state === 'action_required') return 'warning';
             if (port.last_result === 'complete' || port.last_result === 'success') return 'success';
             if (port.last_result === 'failed') return 'error';
 
@@ -771,11 +847,29 @@
 
         function getStepProgress(port) {
             const cl = port.checklist || {};
-            // Only count steps that are present in the checklist (not all possible steps)
+            const dynamic = port.step_status || {};
+            const plan = Array.isArray(port.step_plan) ? port.step_plan : [];
+            if (plan.length > 0) {
+                let done = 0;
+                for (const item of plan) {
+                    const key = typeof item === 'string' ? item : item.key;
+                    const v = Object.prototype.hasOwnProperty.call(dynamic, key)
+                        ? dynamic[key]
+                        : cl[key];
+                    if (v === true || v === false || v === 'skipped' || v === 'unverified'
+                        || (typeof v === 'string' && v.length > 0 && v !== 'loading' && v !== 'running')) {
+                        done++;
+                    }
+                }
+                return { done, total: plan.length };
+            }
+
+            // Backward-compatible fallback for hosts without a run-specific
+            // plan. Null means not applicable; it must not inflate the total.
             const allKeys = ['login', 'model_confirmed', 'firmware_banks', 'firmware_update_1', 'config_upload', 'config_verify', 'firmware_update_2', 'reboot', 'verify'];
             let done = 0, total = 0;
             for (const k of allKeys) {
-                if (cl[k] === undefined) continue;
+                if (cl[k] === undefined || cl[k] === null) continue;
                 total++;
                 const v = cl[k];
                 if (v === true || v === 'skipped' || (typeof v === 'string' && v.length > 0 && v !== 'loading')) done++;
@@ -802,6 +896,9 @@
             // Provisioning result survives link-down (device may have changed networks)
             const isDone = port.last_result === 'complete' || port.last_result === 'success';
             if (isDone) {
+                if (port.workflow?.state === 'action_required') {
+                    return { text: 'ACTION REQUIRED', sub: 'Choose AP or PTP', cls: 'warning', icon: 'alert' };
+                }
                 let sub = 'Ready to deploy';
                 if (port.device_mode) {
                     const mc = port.mode_config || {};
@@ -830,9 +927,23 @@
                 let text = stepLabels[port.current_step];
                 if (!text) {
                     const cl = port.checklist || {};
+                    const dynamic = port.step_status || {};
+                    const plan = Array.isArray(port.step_plan) ? port.step_plan : [];
+                    for (const item of plan) {
+                        const key = typeof item === 'string' ? item : item.key;
+                        const value = Object.prototype.hasOwnProperty.call(dynamic, key)
+                            ? dynamic[key]
+                            : cl[key];
+                        if (value === 'loading' || value === 'running') {
+                            text = (typeof item === 'string' ? item : (item.label || key))
+                                .replace(/_/g, ' ')
+                                .toUpperCase();
+                            break;
+                        }
+                    }
                     const stepOrder = ['login', 'model_confirmed', 'firmware_banks', 'firmware_update_1', 'config_upload', 'config_verify', 'firmware_update_2', 'reboot', 'verify'];
                     for (const k of stepOrder) {
-                        if (cl[k] === 'loading') { text = stepLabels[k]; break; }
+                        if (!text && cl[k] === 'loading') { text = stepLabels[k]; break; }
                     }
                     if (!text) text = 'STARTING';
                 }
@@ -941,6 +1052,130 @@
             return div;
         }
 
+        // Modal workflow actions
+        function setPortModalFooter(html) {
+            const footer = document.getElementById('modal-footer');
+            footer.innerHTML = html;
+            footer.style.display = html.trim() ? 'flex' : 'none';
+        }
+
+        function workflowForPort(port) {
+            const active = !!(port?.provisioning || port?.waiting_for_boot);
+            const failed = port?.last_result === 'failed';
+
+            // Provisioning lifecycle events arrive just ahead of the next
+            // fully serialized port update. Suppress stale actions during
+            // that brief handoff while keeping capabilities server-owned.
+            if (active) {
+                return {
+                    state: 'running',
+                    required_action: null,
+                    available_actions: [],
+                    service_actions: [],
+                };
+            }
+            if (port?.workflow && Array.isArray(port.workflow.available_actions)) {
+                if (failed && port.workflow.state !== 'failed') {
+                    return {
+                        state: 'failed',
+                        required_action: null,
+                        available_actions: [{
+                            id: port?.needs_credentials ? 'retry_credentials' : 'retry_provisioning',
+                            label: port?.needs_credentials ? 'Enter credentials and retry' : 'Retry provisioning',
+                            kind: 'primary',
+                        }],
+                        service_actions: [],
+                    };
+                }
+                return port.workflow;
+            }
+            // Compatibility fallback during rolling deploys. It deliberately
+            // has no vendor capabilities; an old server cannot safely claim
+            // that a device supports a behavior.
+            return {
+                state: failed ? 'failed' : 'ready',
+                required_action: null,
+                available_actions: failed ? [{
+                    id: port?.needs_credentials ? 'retry_credentials' : 'retry_provisioning',
+                    label: port?.needs_credentials ? 'Enter credentials and retry' : 'Retry provisioning',
+                    kind: 'primary',
+                }] : [],
+                service_actions: [],
+            };
+        }
+
+        function runPortWorkflowAction(actionId, portNum) {
+            if (actionId === 'configure_ap') return openAPModal(portNum);
+            if (actionId === 'configure_ptp') return openPTPModal(portNum);
+            if (actionId === 'retry_credentials') return openCredentialModal(portNum);
+            if (actionId === 'retry_provisioning') return openProvisionModal(portNum);
+            if (actionId === 'manual_netinstall') return startNetinstall(portNum);
+            showToast('This action is not available yet', 'warning');
+        }
+
+        function renderWorkflowActionButton(action, portNum) {
+            return `<button onclick="runPortWorkflowAction('${escapeHtml(action.id)}', ${portNum})"
+                class="modal-action modal-action-primary">${escapeHtml(action.label)}</button>`;
+        }
+
+        function renderWorkflowActionPanel(portNum, port) {
+            const workflow = workflowForPort(port);
+            const modeActions = workflow.available_actions.filter(action =>
+                action.id === 'configure_ap' || action.id === 'configure_ptp'
+            );
+            const serviceActions = Array.isArray(workflow.service_actions)
+                ? workflow.service_actions : [];
+            let html = '';
+
+            if (modeActions.length) {
+                const required = workflow.required_action === 'choose_device_mode';
+                html += `<div class="workflow-actions">
+                    <div class="workflow-actions-title">${required ? 'Next step' : 'Deployment options'}</div>
+                    <div class="workflow-actions-help">${required
+                        ? 'Choose how this infrastructure radio will be deployed.'
+                        : 'Use these only when this radio is being deployed at a tower.'}</div>
+                    <div class="workflow-actions-grid">
+                        ${modeActions.map(action => renderWorkflowActionButton(action, portNum)).join('')}
+                    </div>
+                </div>`;
+            }
+
+            if (serviceActions.length) {
+                html += `<details class="service-actions">
+                    <summary>Service actions</summary>
+                    ${serviceActions.map(action => `
+                        <button onclick="runPortWorkflowAction('${escapeHtml(action.id)}', ${portNum})"
+                            class="service-action-button">${escapeHtml(action.label)}</button>
+                    `).join('')}
+                </details>`;
+            }
+            return html;
+        }
+
+        function renderPortModalFooter(portNum, port, printableLabel) {
+            const workflow = workflowForPort(port);
+            if (workflow.state === 'running') return '';
+
+            if (port.device_type === 'evolution_digital') {
+                return `
+                    <button onclick="openProvisionModal(${portNum})" class="modal-action modal-action-primary">Re-qualify</button>
+                    <button onclick="closeModal()" class="modal-action modal-action-secondary">Dismiss</button>
+                `;
+            }
+
+            const retryAction = workflow.available_actions.find(action =>
+                action.id === 'retry_credentials' || action.id === 'retry_provisioning'
+            );
+            const retryButton = retryAction
+                ? renderWorkflowActionButton(retryAction, portNum) : '';
+            const reprintButton = printableLabel ? `
+                <button onclick="reprintLastLabel(${portNum})" class="modal-action modal-action-secondary">Reprint label</button>
+            ` : '';
+            const dismissLabel = workflow.state === 'failed' ? 'Dismiss' : 'Done';
+            return `${retryButton}${reprintButton}
+                <button onclick="closeModal()" class="modal-action modal-action-secondary">${dismissLabel}</button>`;
+        }
+
         // Modal functions
         function openPortModal(portNum) {
             selectedPort = portNum;
@@ -1001,47 +1236,11 @@
                         ${port.last_error}
                     </div>
                 ` : ''}
+
+                ${renderWorkflowActionPanel(portNum, port)}
             `;
-            const isActive = port.provisioning || port.waiting_for_boot;
-            const isDone = port.last_result === 'complete' || port.last_result === 'success';
-            const canApplyMode = isDone && (port.device_type === 'cambium' || port.device_type === 'tachyon');
-            const isEvolutionDigital = port.device_type === 'evolution_digital';
             const printableLabel = lastLabelByPort[portNum] || port.last_label;
-            document.getElementById('modal-footer').innerHTML = isActive ? `
-                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
-                    Close
-                </button>
-            ` : isEvolutionDigital ? `
-                <button onclick="openProvisionModal(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
-                    Re-qualify
-                </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
-                    Close
-                </button>
-            ` : `
-                ${canApplyMode ? `
-                <button onclick="openAPModal(${portNum})" class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm text-white">
-                    Configure as AP
-                </button>
-                <button onclick="openPTPModal(${portNum})" class="flex-1 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg font-medium text-sm text-white">
-                    Configure as PTP
-                </button>
-                ` : ''}
-                ${printableLabel ? `
-                <button onclick="reprintLastLabel(${portNum})" class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg font-medium text-sm text-white">
-                    Reprint Label
-                </button>
-                ` : ''}
-                <button onclick="startNetinstall(${portNum})" class="flex-1 py-2 bg-orange-600 hover:bg-orange-500 rounded-lg font-medium text-sm text-white">
-                    Netinstall
-                </button>
-                <button onclick="openProvisionModal(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
-                    Retry
-                </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
-                    Close
-                </button>
-            `;
+            setPortModalFooter(renderPortModalFooter(portNum, port, printableLabel));
             document.getElementById('port-modal').classList.remove('hidden');
         }
 
@@ -1057,10 +1256,10 @@
                 const color = stateColors[entry.state] || '#6b7280';
                 const loadingAnim = entry.state === 'loading' ? 'animation:icon-pulse 1.5s infinite;' : '';
                 return `<div class="log-entry" ${entry.state === 'loading' ? 'style="background:#eff6ff;border-radius:4px;margin:0 -4px;padding:5px 4px;"' : ''}>
-                    <span class="log-time">${entry.time || ''}</span>
+                    <span class="log-time">${escapeHtml(entry.time || '')}</span>
                     <span class="log-icon" style="color:${color};${loadingAnim}">${icon}</span>
-                    <span class="log-step" style="color:${color};${entry.state === 'loading' ? 'font-weight:600;' : ''}">${entry.step}</span>
-                    ${entry.detail ? `<span class="log-detail">${entry.detail}</span>` : ''}
+                    <span class="log-step" style="color:${color};${entry.state === 'loading' ? 'font-weight:600;' : ''}">${escapeHtml(entry.step)}</span>
+                    ${entry.detail ? `<span class="log-detail">${escapeHtml(entry.detail)}</span>` : ''}
                 </div>`;
             }
 
@@ -1099,14 +1298,33 @@
 
             // Build unified list in canonical provisioning order
             // Steps that never appear in checklist or log are omitted (e.g. reboot when no FW update)
-            const allSteps = [
+            const defaultSteps = [
                 ['login', 'Login'], ['model_confirmed', 'Model'], ['firmware_banks', 'FW Check'],
                 ['firmware_update_1', isMikrotik ? 'Software' : 'FW Bank 1'], ['config_upload', 'Config'], ['config_verify', 'Verify'],
                 ['firmware_update_2', isMikrotik ? 'RouterBOARD' : 'FW Bank 2'], ['reboot', 'Reboot'], ['verify', 'Verify FW']
             ];
             const checklist = port?.checklist || {};
+            const dynamic = port?.step_status || {};
+            const details = port?.step_details || {};
+            const planned = Array.isArray(port?.step_plan) ? port.step_plan : [];
+            const allSteps = planned.length > 0
+                ? planned.map(item => [
+                    typeof item === 'string' ? item : item.key,
+                    typeof item === 'string' ? item.replace(/_/g, ' ') : (item.label || item.key),
+                ])
+                : defaultSteps;
             const isActive = port && (port.provisioning || port.waiting_for_boot);
             const curStep = port?.current_step;
+
+            function stepValue(key) {
+                return Object.prototype.hasOwnProperty.call(dynamic, key)
+                    ? dynamic[key]
+                    : checklist[key];
+            }
+
+            function stepState(key) {
+                return getIconState({ [key]: stepValue(key) }, key);
+            }
 
             // Index logged entries by step label (use last entry for each label)
             const logByLabel = {};
@@ -1121,7 +1339,7 @@
             if (logByLabel['Started']) {
                 const startEntry = { ...logByLabel['Started'] };
                 const hasAnyStep = Object.keys(logByLabel).some(k => k !== 'Started' && k !== 'Complete' && k !== 'Failed')
-                    || allSteps.some(([k]) => { const s = getIconState(checklist, k); return s === 'success' || s === 'error' || s === 'skipped'; });
+                    || allSteps.some(([k]) => { const s = stepState(k); return s === 'success' || s === 'error' || s === 'skipped'; });
                 if (hasAnyStep) startEntry.state = 'success';
                 html += renderEntry(startEntry);
             }
@@ -1131,17 +1349,18 @@
             let lastLoadingKey = null;
             if (isActive) {
                 for (const [key] of allSteps) {
-                    if (getIconState(checklist, key) === 'loading') lastLoadingKey = key;
+                    if (stepState(key) === 'loading') lastLoadingKey = key;
                 }
             }
 
             for (const [key, label] of allSteps) {
                 // Skip steps that never appeared in checklist or log — they weren't part of this run
                 const logged = logByLabel[label];
-                if (checklist[key] === undefined && !logged) continue;
+                const value = stepValue(key);
+                if ((value === undefined || value === null) && !logged && planned.length === 0) continue;
 
                 // Determine state from checklist
-                let state = getIconState(checklist, key);
+                let state = stepState(key);
 
                 // Only the LAST loading step should actually show as loading.
                 // Earlier 'loading' steps have implicitly succeeded (we moved past them).
@@ -1152,8 +1371,8 @@
                 if (isActive && state === 'pending' && curStep === key) state = 'loading';
 
                 // Build detail text
-                let detail = '';
-                if (key === 'model_confirmed' && typeof checklist[key] === 'string') detail = checklist[key];
+                let detail = details[key] || '';
+                if (key === 'model_confirmed' && typeof value === 'string') detail = value;
                 if (key === 'firmware_update_1') {
                     detail = formatFromTo(
                         firmwareValueForStep(fwStart, port?.device_type, key),
@@ -1260,14 +1479,14 @@
                     </div>
                 </div>
             `;
-            document.getElementById('modal-footer').innerHTML = `
-                <button onclick="startProvisioning(${portNum})" class="flex-1 py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-sm text-white">
+            setPortModalFooter(`
+                <button onclick="startProvisioning(${portNum})" class="modal-action modal-action-primary">
                     Start Provisioning
                 </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                <button onclick="closeModal()" class="modal-action modal-action-secondary">
                     Cancel
                 </button>
-            `;
+            `);
             document.getElementById('port-modal').classList.remove('hidden');
         }
 
@@ -1313,15 +1532,15 @@
                     </div>
                 </div>
             `;
-            document.getElementById('modal-footer').innerHTML = `
+            setPortModalFooter(`
                 <button id="ap-apply-btn" onclick="applyAPMode(${portNum})" disabled
-                    class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-300 disabled:cursor-not-allowed rounded-lg font-medium text-sm text-white">
+                    class="modal-action modal-action-primary disabled:bg-gray-300 disabled:cursor-not-allowed">
                     Apply AP Config
                 </button>
-                <button onclick="openPortModal(${portNum})" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                <button onclick="openPortModal(${portNum})" class="modal-action modal-action-secondary">
                     Back
                 </button>
-            `;
+            `);
             document.getElementById('port-modal').classList.remove('hidden');
             // Reset state
             window._apDirection = null;
@@ -1421,15 +1640,15 @@
                     </div>
                 </div>
             `;
-            document.getElementById('modal-footer').innerHTML = `
+            setPortModalFooter(`
                 <button id="ptp-apply-btn" onclick="applyPTPMode(${portNum})" disabled
-                    class="flex-1 py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-300 disabled:cursor-not-allowed rounded-lg font-medium text-sm text-white">
+                    class="modal-action modal-action-primary disabled:bg-gray-300 disabled:cursor-not-allowed">
                     Apply PTP Config
                 </button>
-                <button onclick="openPortModal(${portNum})" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                <button onclick="openPortModal(${portNum})" class="modal-action modal-action-secondary">
                     Back
                 </button>
-            `;
+            `);
             document.getElementById('port-modal').classList.remove('hidden');
         }
 
@@ -1531,14 +1750,14 @@
                     </div>
                 </div>
             `;
-            document.getElementById('modal-footer').innerHTML = `
-                <button onclick="retryWithCredentials(${portNum})" class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium text-sm text-white">
+            setPortModalFooter(`
+                <button onclick="retryWithCredentials(${portNum})" class="modal-action modal-action-primary">
                     Retry with Credentials
                 </button>
-                <button onclick="closeModal()" class="flex-1 py-2 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-sm text-gray-800">
+                <button onclick="closeModal()" class="modal-action modal-action-secondary">
                     Cancel
                 </button>
-            `;
+            `);
             document.getElementById('port-modal').classList.remove('hidden');
             // Focus password field after modal opens
             setTimeout(() => document.getElementById('custom-password')?.focus(), 100);

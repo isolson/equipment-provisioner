@@ -112,15 +112,18 @@ Implementation notes:
 ### Port Card Design
 Each port card (250px height) has two zones:
 - **Identity line** — compact top bar with vendor color tag, model name, port number, link speed. Hidden when no device is detected.
-- **Status center** — large area filling the card with a state icon (36px circle), bold status text, and optional subtitle (e.g. "Step 4 of 7"). Background color matches state (blue=active, green=complete, red=error, gray=idle, amber=booting).
+- **Status center** — large area with a state icon, status text, and an optional `Step N of M` subtitle. The run-specific validation plan supplies `M`.
 
 Cards are clickable when a device is detected, opening the activity log modal.
 
 ### Activity Log Modal
 Tapping a port card opens a modal with:
 - **Device summary grid** — labeled rows for MAC, Serial, IP, Link Speed, FW Bank 1, FW Bank 2 (with active indicator).
-- **Activity log** — timestamped entries in canonical provisioning order: Login → Model → FW Check → FW Bank 1 → Config → FW Bank 2 → Reboot → Verify. Each entry shows state (✓/✗/●/○), step name, and detail text such as firmware version or model name. Active steps have a blue highlight. Steps not yet in the log but visible in the checklist appear without timestamps.
-- **Footer** — "Close" during provisioning; "Retry" + "Close" after completion or failure.
+- **Activity log** — timestamped entries from the validation plan for the run. Each entry shows its state, name, and available detail.
+- Standard plans derive from handler capabilities and the selected work. Vendor-specific flows can add their own validation keys.
+- **Action area** — render the server-provided workflow actions for the current run. During provisioning there is no competing footer action. Failures show one contextual retry action (including credential entry when required). Successful runs show only relevant next steps. AP/PTP options require a production-qualified vendor/mode path, not merely a template or a vendor that conceptually supports the mode. Optional qualified changes are labeled as deployment options, while required mode selection is an explicit `ACTION REQUIRED` state.
+- **Service actions** — disruptive diagnostics such as MikroTik Netinstall live behind a collapsed service section, not beside normal completion actions. Their API endpoints independently validate handler capability and device identity.
+- **Completion footer** — use one clear terminal action (`Done`) plus an optional label reprint. All touch targets are at least 48px high at kiosk resolution.
 
 The modal live-updates during active provisioning via WebSocket re-renders.
 
