@@ -23,7 +23,6 @@ import pytest
 
 from provisioner.handlers.tachyon import TachyonHandler
 
-
 # ---------------------------------------------------------------------------------------
 # Mock plumbing: a fake asyncio.create_subprocess_exec driven by a per-test "responder".
 # ---------------------------------------------------------------------------------------
@@ -47,8 +46,10 @@ class DummyProc:
         self.returncode = returncode
         self._stdout = stdout.encode("utf-8")
         self._stderr = stderr.encode("utf-8")
+        self.stdin = None
 
-    async def communicate(self):
+    async def communicate(self, stdin=None):
+        self.stdin = stdin
         return (self._stdout, self._stderr)
 
 
@@ -233,6 +234,34 @@ async def test_api_request_curl_returns_parsed_json_on_200(monkeypatch):
     handler = make_handler()
     result = await handler._api_request_curl("GET", handler.API_CONFIG)
     assert result["system"]["hostname"] == "x"
+
+
+@pytest.mark.asyncio
+async def test_api_request_curl_keeps_token_and_body_out_of_argv(monkeypatch):
+    captured = []
+    processes = []
+
+    async def fake_exec(*cmd, **kwargs):
+        captured.append(list(cmd))
+        process = DummyProc(0, mk_stdout("{}", 200), "")
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    handler = make_handler()
+    await handler._api_request_curl(
+        "POST",
+        handler.API_CONFIG,
+        data={"password": "unit-password"},
+    )
+
+    argv = captured[0]
+    assert "--config" in argv
+    assert all("tok-123" not in arg for arg in argv)
+    assert all("unit-password" not in arg for arg in argv)
+    config_input = processes[0].stdin.decode("utf-8")
+    assert "Cookie: token=tok-123" in config_input
+    assert "unit-password" in config_input
 
 
 # ---------------------------------------------------------------------------------------

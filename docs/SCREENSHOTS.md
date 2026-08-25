@@ -15,7 +15,7 @@ This document specifies what screenshots are needed for the README and what they
   - One "Provisioning" (blue, progress checklist)
   - One "Idle" (gray, no device)
 - Browser window should be sized to ~1200×800
-- Include the dashboard header with the Labels and Manage links.
+- Include the dashboard header with the Manage link and other active navigation controls. Label controls are intentionally omitted while label printing is paused.
 
 **How to capture:**
 1. Provision 2–3 devices so you have a mix of states

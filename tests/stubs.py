@@ -118,12 +118,24 @@ class StubSession:
 class _FakeProc:
     """Stand-in for the process returned by ``create_subprocess_exec``."""
 
-    def __init__(self, returncode: int, stdout: bytes, stderr: bytes):
+    def __init__(self, returncode=None, stdout=None, stderr=None, resolver=None):
         self.returncode = returncode
         self._stdout = stdout
         self._stderr = stderr
+        self._resolver = resolver
+        self.stdin = None
 
-    async def communicate(self):
+    async def communicate(self, stdin=None):
+        self.stdin = stdin
+        if self._resolver is not None:
+            result = self._resolver(stdin)
+            if len(result) == 3:
+                self.returncode, stdout, stderr = result
+            else:
+                self.returncode, stdout = result
+                stderr = b""
+            self._stdout = _to_bytes(stdout)
+            self._stderr = _to_bytes(stderr)
         return self._stdout, self._stderr
 
 
@@ -147,6 +159,7 @@ def curl_method(argv: List[str]) -> str:
 
 # Handler signature: (argv) -> (returncode, stdout, stderr) | (returncode, stdout)
 CurlHandler = Callable[[List[str]], Any]
+InputCurlHandler = Callable[[List[str], Optional[bytes]], Any]
 
 
 class FakeCurl:
@@ -161,9 +174,17 @@ class FakeCurl:
     def __init__(self):
         self.calls: List[List[str]] = []
         self._handler: Optional[CurlHandler] = None
+        self._input_handler: Optional[InputCurlHandler] = None
 
     def set_handler(self, fn: CurlHandler) -> "FakeCurl":
         self._handler = fn
+        self._input_handler = None
+        return self
+
+    def set_input_handler(self, fn: InputCurlHandler) -> "FakeCurl":
+        """Register a handler that receives curl's stdin config bytes."""
+        self._handler = None
+        self._input_handler = fn
         return self
 
     def route_by_method(self, mapping: Dict[str, Any]) -> "FakeCurl":
@@ -181,9 +202,13 @@ class FakeCurl:
     async def __call__(self, *argv: Any, **kwargs: Any) -> _FakeProc:
         args = list(argv)
         self.calls.append(args)
-        if self._handler is None:
+        if self._handler is None and self._input_handler is None:
             raise AssertionError(
                 "fake_curl received an unexpected subprocess call: %r" % (args,)
+            )
+        if self._input_handler is not None:
+            return _FakeProc(
+                resolver=lambda stdin: self._input_handler(args, stdin)
             )
         result = self._handler(args)
         if len(result) == 3:

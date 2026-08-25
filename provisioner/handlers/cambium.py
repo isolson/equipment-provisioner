@@ -6,13 +6,13 @@ import logging
 import os
 import re
 import tempfile
-from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
 import urllib.parse
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
 
-from .base import BaseHandler, DeviceInfo, UNVERIFIED
+from .base import UNVERIFIED, BaseHandler, DeviceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -447,18 +447,17 @@ class CambiumHandler(BaseHandler):
 
             form_data = f"changed_elements={urllib.parse.quote(changed_elements)}&debug=true"
 
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-k", "-m", "15",
-                "--interface", self.interface,
-                "-b", self._cookie_file,
-                "-X", "POST",
-                "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", form_data,
+            proc, stdout, _ = await self._run_curl_with_stdin_config(
+                [
+                    "curl", "-s", "-k", "-m", "15",
+                    "--interface", self.interface,
+                    "-b", self._cookie_file,
+                    "-X", "POST",
+                    "-H", "Content-Type: application/x-www-form-urlencoded",
+                ],
                 set_param_url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                form_data=form_data,
             )
-            stdout, _ = await proc.communicate()
 
             if proc.returncode == 0:
                 response = stdout.decode("utf-8", errors="ignore")
@@ -478,17 +477,16 @@ class CambiumHandler(BaseHandler):
                 "oldPassword": old_password,
                 "newPassword": new_password,
             }
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-k", "-m", "10",
-                "--interface", self.interface,
-                "-X", "POST",
-                "-H", "Content-Type: application/json",
-                "-d", json.dumps(payload),
+            proc, stdout, _ = await self._run_curl_with_stdin_config(
+                [
+                    "curl", "-s", "-k", "-m", "10",
+                    "--interface", self.interface,
+                    "-X", "POST",
+                    "-H", "Content-Type: application/json",
+                ],
                 change_url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                form_data=json.dumps(payload),
             )
-            stdout, _ = await proc.communicate()
             if proc.returncode == 0:
                 response = stdout.decode("utf-8", errors="ignore")
                 if "success" in response.lower() or "200" in response:
@@ -683,19 +681,23 @@ class CambiumHandler(BaseHandler):
                 self._cookie_file = cookie_fd.name
                 cookie_fd.close()
 
-            # Use curl with interface binding and save cookies
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-k", "-m", "10",
-                "--interface", self.interface,
-                "-c", self._cookie_file, "-b", self._cookie_file,
-                "-X", "POST",
-                "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
-                login_url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            # Keep the login form and URL out of the curl process argv. The
+            # process list is visible to other local users on the provisioner.
+            login_form = (
+                f"username={urllib.parse.quote(username, safe='')}"
+                f"&password={urllib.parse.quote(password, safe='')}"
             )
-            stdout, stderr = await proc.communicate()
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                [
+                    "curl", "-s", "-k", "-m", "10",
+                    "--interface", self.interface,
+                    "-c", self._cookie_file, "-b", self._cookie_file,
+                    "-X", "POST",
+                    "-H", "Content-Type: application/x-www-form-urlencoded",
+                ],
+                login_url,
+                form_data=login_form,
+            )
 
             logger.info(f"CGI login curl returncode: {proc.returncode}, stdout len: {len(stdout) if stdout else 0}")
             if stderr:
@@ -2680,17 +2682,20 @@ class CambiumHandler(BaseHandler):
                 password = self.credentials.get("password", "admin")
                 login_url = f"{self._base_url}/cgi-bin/luci"
 
-                proc = await asyncio.create_subprocess_exec(
-                    "curl", "-s", "-k", "-m", "10",
-                    "--interface", self.interface,
-                    "-c", cookie_path, "-b", cookie_path,
-                    "-X", "POST",
-                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
-                    login_url,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                login_form = (
+                    f"username={urllib.parse.quote(username, safe='')}"
+                    f"&password={urllib.parse.quote(password, safe='')}"
                 )
-                stdout, stderr = await proc.communicate()
+                proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                    [
+                        "curl", "-s", "-k", "-m", "10",
+                        "--interface", self.interface,
+                        "-c", cookie_path, "-b", cookie_path,
+                        "-X", "POST",
+                    ],
+                    login_url,
+                    form_data=login_form,
+                )
 
                 if proc.returncode != 0:
                     logger.error(f"Login failed for reboot: {stderr.decode()}")
@@ -2941,18 +2946,21 @@ class CambiumHandler(BaseHandler):
                 self._cookie_file = cookie_fd.name
                 cookie_fd.close()
 
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-k", "-m", "10",
-                "--interface", self.interface,
-                "-c", self._cookie_file, "-b", self._cookie_file,
-                "-X", "POST",
-                "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
-                login_url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            login_form = (
+                f"username={urllib.parse.quote(username, safe='')}"
+                f"&password={urllib.parse.quote(password, safe='')}"
             )
-            stdout, stderr = await proc.communicate()
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                [
+                    "curl", "-s", "-k", "-m", "10",
+                    "--interface", self.interface,
+                    "-c", self._cookie_file, "-b", self._cookie_file,
+                    "-X", "POST",
+                    "-H", "Content-Type: application/x-www-form-urlencoded",
+                ],
+                login_url,
+                form_data=login_form,
+            )
 
             if proc.returncode != 0 or not stdout:
                 return False, "no_response"
