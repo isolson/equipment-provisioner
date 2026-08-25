@@ -223,6 +223,29 @@ async def test_curl_stdin_config_keeps_url_and_form_data_out_of_argv(monkeypatch
     assert secret_form.encode() in results[0].stdin
 
 
+async def test_cambium_login_keeps_credentials_out_of_curl_argv(monkeypatch):
+    h = _handler()
+    h.interface = "eth0.1996"
+    h.credentials = {"username": "unit-user", "password": "unit-password"}
+    process_args = []
+    results = []
+
+    async def fake_exec(*args, **kwargs):
+        process_args.append(args)
+        result = _CurlResult(b'{"stok":"session-token"}')
+        results.append(result)
+        return result
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    assert await h._try_cgi_login_curl("unit-user", "unit-password") == (True, False)
+
+    argv = process_args[0]
+    assert all("unit-password" not in arg for arg in argv)
+    assert b"username=unit-user" in results[0].stdin
+    assert b"password=unit-password" in results[0].stdin
+
+
 async def test_upgrade_poll_accepts_har_terminal_status(monkeypatch, fast_sleep):
     h = _handler()
     h.interface = "eth0.1996"

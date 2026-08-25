@@ -25,7 +25,7 @@ def make_client():
     return TestClient(app)
 
 
-def test_dashboard_renders_setup_banner_hook():
+def test_dashboard_renders_setup_banner_without_label_controls():
     client = make_client()
 
     response = client.get("/")
@@ -34,7 +34,11 @@ def test_dashboard_renders_setup_banner_hook():
 
     assert 'id="setup-readiness-banner"' in html
     assert 'href="/files"' in html
-    assert 'href="/labels"' in html
+    assert 'href="/labels"' not in html
+    assert 'id="label-printer-button"' not in html
+    assert 'onclick="connectLabelPrinter()"' not in html
+    assert "Reprint label" not in html
+    assert "initLabelPrinterUi();" not in html
     assert "loadSetupReadiness()" in html
     assert 'aria-label="Dismiss setup readiness notice"' in html
     assert "dismissSetupReadinessBanner()" in html
@@ -196,10 +200,10 @@ def test_dashboard_footer_is_contextual_and_touch_friendly():
     client = make_client()
     html = client.get("/").text
 
-    assert "function renderPortModalFooter(portNum, port, printableLabel)" in html
+    assert "function renderPortModalFooter(portNum, port)" in html
     assert "Retry provisioning" in html
     assert "Enter credentials and retry" in html
-    assert "Reprint label" in html
+    assert "Reprint label" not in html
     assert "if (active)" in html
     assert "port.workflow.state !== 'failed'" in html
     assert "MikroTik recovery (Netinstall)" not in html

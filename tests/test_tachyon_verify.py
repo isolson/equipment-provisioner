@@ -92,6 +92,15 @@ def _write_config_tar(tmp_path, config):
     return tar_path
 
 
+def curl_config_data(stdin: bytes):
+    """Decode the JSON request body from a stdin-backed curl config."""
+    for line in stdin.decode("utf-8").splitlines():
+        if line.startswith("data-binary = "):
+            encoded_value = line.split(" = ", 1)[1]
+            return json.loads(json.loads(encoded_value))
+    raise AssertionError("curl config did not include a data-binary value")
+
+
 # ---------------------------------------------------------------------------
 # apply_config read-back
 # ---------------------------------------------------------------------------
@@ -170,14 +179,14 @@ async def test_apply_config_adds_missing_radio_isolation_default(fake_curl):
     }
     posted = {}
 
-    def route(argv):
+    def route(argv, stdin):
         method = argv[argv.index("-X") + 1]
         if method != "POST":
             raise AssertionError("unexpected method: %s" % method)
-        posted.update(json.loads(argv[argv.index("-d") + 1]))
+        posted.update(curl_config_data(stdin))
         return (0, json.dumps({}))
 
-    fake_curl.set_handler(route)
+    fake_curl.set_input_handler(route)
 
     assert await h.apply_config(config) is True
 
@@ -207,16 +216,16 @@ async def test_apply_config_adds_missing_full_export_schema_defaults(fake_curl):
     config["network"]["zones"]["wan"]["dhcp"] = {"broadcast": False, "custom_dns": False}
     posted = {}
 
-    def route(argv):
+    def route(argv, stdin):
         method = argv[argv.index("-X") + 1]
         if method == "POST":
-            posted.update(json.loads(argv[argv.index("-d") + 1]))
+            posted.update(curl_config_data(stdin))
             return (0, json.dumps({}))
         if method == "GET":
             return (0, json.dumps(posted))
         raise AssertionError("unexpected method: %s" % method)
 
-    fake_curl.set_handler(route)
+    fake_curl.set_input_handler(route)
 
     assert await h.apply_config(config) is True
 
@@ -251,16 +260,16 @@ async def test_apply_config_file_tar_posts_authoritative_export_without_deep_mer
     tar_path = _write_config_tar(tmp_path, export_config)
     posted = {}
 
-    def route(argv):
+    def route(argv, stdin):
         method = argv[argv.index("-X") + 1]
         if method == "POST":
-            posted.update(json.loads(argv[argv.index("-d") + 1]))
+            posted.update(curl_config_data(stdin))
             return (0, json.dumps({}))
         if method == "GET":
             return (0, json.dumps(posted))
         raise AssertionError("unexpected method: %s" % method)
 
-    fake_curl.set_handler(route)
+    fake_curl.set_input_handler(route)
 
     assert await h.apply_config_file(str(tar_path)) is True
     assert fake_curl.methods == ["POST", "GET"]
@@ -279,18 +288,18 @@ async def test_apply_config_file_partial_json_still_merges_live_config(
     live_config["ethernet"]["ports"]["eth2"] = {"enabled": True}
     posted = {}
 
-    def route(argv):
+    def route(argv, stdin):
         method = argv[argv.index("-X") + 1]
         if method == "GET" and not posted:
             return (0, json.dumps(live_config))
         if method == "POST":
-            posted.update(json.loads(argv[argv.index("-d") + 1]))
+            posted.update(curl_config_data(stdin))
             return (0, json.dumps({}))
         if method == "GET":
             return (0, json.dumps(posted))
         raise AssertionError("unexpected method: %s" % method)
 
-    fake_curl.set_handler(route)
+    fake_curl.set_input_handler(route)
 
     assert await h.apply_config_file(str(partial_path)) is True
     assert fake_curl.methods == ["GET", "POST", "GET"]

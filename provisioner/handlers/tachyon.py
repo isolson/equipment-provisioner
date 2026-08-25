@@ -18,14 +18,14 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 import aiohttp
 
 from provisioner.config_merge import deep_merge
 from provisioner.config_templates import ConfigTemplateError, load_config_template
 
-from .base import BaseHandler, DeviceInfo, UNVERIFIED
+from .base import UNVERIFIED, BaseHandler, DeviceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +376,7 @@ class TachyonHandler(BaseHandler):
                 "username": self.credentials.get("username", "root"),
                 "password": self.credentials.get("password", "admin"),
             })
+            payload_bytes = payload.encode("utf-8")
 
             # Create temp file for cookie jar (cleaner than parsing stdout mix)
             cookie_fd = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
@@ -390,12 +391,13 @@ class TachyonHandler(BaseHandler):
                     "-X", "POST",
                     "-H", "Content-Type: application/json",
                     "-c", cookie_file,  # Save cookies to file
-                    "-d", payload,
+                    "--data-binary", "@-",
                     login_url,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await proc.communicate()
+                stdout, stderr = await proc.communicate(payload_bytes)
 
                 if proc.returncode == 0:
                     response = stdout.decode("utf-8", errors="ignore")
@@ -577,20 +579,30 @@ class TachyonHandler(BaseHandler):
         # Add headers
         cmd.extend(["-H", "Content-Type: application/json"])
 
-        # Tachyon uses 'token' cookie for auth
+        # Keep the URL, auth token, and request body in curl's stdin config.
+        # These values must not appear in the process argument list.
+        config_lines = ['url = "{}"'.format(self._curl_config_value(url))]
         if self._api_token:
-            cmd.extend(["-H", f"Cookie: token={self._api_token}"])
-            logger.debug(f"Using token: {self._api_token[:30]}...")
+            config_lines.append(
+                'header = "{}"'.format(
+                    self._curl_config_value(f"Cookie: token={self._api_token}")
+                )
+            )
+            logger.debug("Using authenticated Tachyon session token")
         else:
             logger.warning(f"No token for API request to {endpoint}")
 
-        # Add data for POST/PUT
         if data and method in ("POST", "PUT", "PATCH"):
-            cmd.extend(["-d", json.dumps(data)])
+            config_lines.append(
+                'data-binary = "{}"'.format(
+                    self._curl_config_value(json.dumps(data))
+                )
+            )
 
-        cmd.append(url)
-
-        returncode, body, http_code, stderr = await self._run_curl(cmd)
+        returncode, body, http_code, stderr = await self._run_curl(
+            cmd,
+            config_input=("\n".join(config_lines) + "\n").encode("utf-8"),
+        )
 
         if returncode != 0:
             logger.error(f"API request failed: {method} {endpoint}: {stderr}")
@@ -618,7 +630,17 @@ class TachyonHandler(BaseHandler):
     # ``curl -s`` (no -f) otherwise hides. Must match the parsing in _run_curl().
     _CURL_STATUS_MARKER = "HTTPSTATUS:"
 
-    async def _run_curl(self, cmd: list):
+    @staticmethod
+    def _curl_config_value(value: str) -> str:
+        """Escape a value for a curl config file read from stdin."""
+        return (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+        )
+
+    async def _run_curl(self, cmd: list, config_input: Optional[bytes] = None):
         """Run a curl command and recover (returncode, body, http_code, stderr).
 
         Appends ``-w '\\nHTTPSTATUS:%{http_code}'`` so the HTTP status code is captured.
@@ -626,16 +648,23 @@ class TachyonHandler(BaseHandler):
         error/login pages be reported as successful config/firmware uploads.
 
         http_code is None if curl produced no status line (e.g. a transport failure).
+        When config_input is provided, curl reads URL, headers, and body from stdin.
         """
         write_out = "\n" + self._CURL_STATUS_MARKER + "%{http_code}"
         full_cmd = [cmd[0], "-w", write_out] + list(cmd[1:])
+        process_kwargs = {
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+        }
+        if config_input is not None:
+            full_cmd.extend(["--config", "-"])
+            process_kwargs["stdin"] = asyncio.subprocess.PIPE
 
         proc = await asyncio.create_subprocess_exec(
             *full_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            **process_kwargs,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await proc.communicate(config_input)
         out = stdout.decode("utf-8", errors="ignore")
         err = stderr.decode("utf-8", errors="ignore")
 
@@ -1221,13 +1250,22 @@ class TachyonHandler(BaseHandler):
                 "-H", "Content-Type: application/json",
             ]
 
-            # Add auth - Tachyon uses 'token' cookie
+            config_lines = [
+                'url = "{}"'.format(self._curl_config_value(url)),
+                'data-binary = "{}"'.format(
+                    self._curl_config_value(payload)
+                ),
+            ]
             if self._api_token:
-                cmd.extend(["-H", f"Cookie: token={self._api_token}"])
-
-            cmd.extend(["-d", payload, url])
-
-            returncode, body, http_code, stderr = await self._run_curl(cmd)
+                config_lines.append(
+                    'header = "{}"'.format(
+                        self._curl_config_value(f"Cookie: token={self._api_token}")
+                    )
+                )
+            returncode, body, http_code, stderr = await self._run_curl(
+                cmd,
+                config_input=("\n".join(config_lines) + "\n").encode("utf-8"),
+            )
 
             if returncode != 0:
                 logger.error(f"Config apply curl failed (rc={returncode}): {stderr}")
@@ -1394,15 +1432,20 @@ class TachyonHandler(BaseHandler):
                 "-F", "force=false",
             ])
 
-            # Add auth - Tachyon uses 'token' cookie
+            config_lines = ['url = "{}"'.format(self._curl_config_value(url))]
             if self._api_token:
-                cmd.extend(["-H", f"Cookie: token={self._api_token}"])
-
-            cmd.append(url)
+                config_lines.append(
+                    'header = "{}"'.format(
+                        self._curl_config_value(f"Cookie: token={self._api_token}")
+                    )
+                )
 
             logger.info(f"Uploading firmware {firmware_file.name} to {self.ip}")
 
-            returncode, body, http_code, stderr = await self._run_curl(cmd)
+            returncode, body, http_code, stderr = await self._run_curl(
+                cmd,
+                config_input=("\n".join(config_lines) + "\n").encode("utf-8"),
+            )
 
             if returncode != 0:
                 logger.error(f"Firmware upload curl failed (rc={returncode}): {stderr}")

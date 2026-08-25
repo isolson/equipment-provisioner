@@ -284,18 +284,6 @@
         </div>
         <div class="flex flex-wrap items-center gap-2 sm:justify-end">
             <span class="text-sm text-gray-600" id="status-text">Connecting...</span>
-            <button onclick="connectLabelPrinter()" class="header-btn p-2 hidden" id="label-printer-button" title="Label printer">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 9V4h12v5M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M7 14h10v6H7zM18 12h.01"></path>
-                </svg>
-                <span id="label-printer-queue-badge" class="hidden ml-1 min-w-[18px] rounded-full bg-red-600 px-1 text-[10px] font-bold text-white"></span>
-            </button>
-            <a href="/labels" class="header-btn px-3 gap-2 text-sm font-bold" title="Labels">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M4 3h7l9 9a2 2 0 010 2.83L14.83 20a2 2 0 01-2.83 0L3 11V4a1 1 0 011-1z"></path>
-                </svg>
-                <span class="hidden sm:inline">Labels</span>
-            </a>
             <a href="/files" class="header-btn p-2" title="Manage">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
@@ -448,7 +436,6 @@
             document.getElementById('management-url').textContent = window.location.host;
             // Fetch display config (for sleep timeout)
             fetchDisplayConfig();
-            initLabelPrinterUi();
             // Fetch device settings defaults (operator ID, etc.)
             fetch('/api/device-settings').then(r => r.json()).then(s => {
                 if (s.tarana?.operator_id) window.defaultOperatorId = s.tarana.operator_id;
@@ -1221,7 +1208,7 @@
             return html;
         }
 
-        function renderPortModalFooter(portNum, port, printableLabel) {
+        function renderPortModalFooter(portNum, port) {
             const workflow = workflowForPort(port);
             if (workflow.state === 'running') return '';
 
@@ -1237,11 +1224,8 @@
             );
             const retryButton = retryAction
                 ? renderWorkflowActionButton(retryAction, portNum) : '';
-            const reprintButton = printableLabel ? `
-                <button onclick="reprintLastLabel(${portNum})" class="modal-action modal-action-secondary">Reprint label</button>
-            ` : '';
             const dismissLabel = workflow.state === 'failed' ? 'Dismiss' : 'Done';
-            return `${retryButton}${reprintButton}
+            return `${retryButton}
                 <button onclick="closeModal()" class="modal-action modal-action-secondary">${dismissLabel}</button>`;
         }
 
@@ -1308,8 +1292,7 @@
 
                 ${renderWorkflowActionPanel(portNum, port)}
             `;
-            const printableLabel = lastLabelByPort[portNum] || port.last_label;
-            setPortModalFooter(renderPortModalFooter(portNum, port, printableLabel));
+            setPortModalFooter(renderPortModalFooter(portNum, port));
             document.getElementById('port-modal').classList.remove('hidden');
         }
 
