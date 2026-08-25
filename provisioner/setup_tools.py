@@ -15,7 +15,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from .config import _default_credentials
 from .handler_manager import provisionable_device_types
 
-
 STATUS_PRIORITY = {
     "ready": 0,
     "warning": 1,
@@ -173,16 +172,36 @@ def _tarana_operator_id(config: Any) -> Optional[int]:
         return None
 
 
-def _existing_template_modes(device_dir: Path) -> Dict[str, List[str]]:
+def _existing_template_modes(
+    device_dir: Path,
+    data_path: Optional[Path] = None,
+    device_type: Optional[str] = None,
+) -> Dict[str, List[str]]:
     matches: Dict[str, List[str]] = {}
-    if not device_dir.exists():
-        return matches
+    if device_dir.exists():
+        for file_path in sorted(p for p in device_dir.iterdir() if p.is_file()):
+            stem = file_path.name
+            for prefix in ("default", "ap", "ptp-a", "ptp-b"):
+                if stem.startswith(prefix):
+                    matches.setdefault(prefix, []).append(file_path.name)
 
-    for file_path in sorted(p for p in device_dir.iterdir() if p.is_file()):
-        stem = file_path.name
-        for prefix in ("default", "ap", "ptp-a", "ptp-b"):
-            if stem.startswith(prefix):
-                matches.setdefault(prefix, []).append(file_path.name)
+    # The promoted library is recursive: family/firmware/role directories
+    # replace the old flat ``default.json``/``ptp-a.json`` convention.  Keep
+    # the readiness contract stable by projecting catalog metadata back onto
+    # the legacy mode keys without reading protected PTP contents.
+    if data_path is not None and device_type is not None:
+        from .config_assets import ConfigAssetCatalog
+
+        for asset in ConfigAssetCatalog(data_path).list_assets(
+            device_type=device_type,
+            config_type="template",
+        ):
+            if asset.mode == "sm":
+                mode = "default"
+            else:
+                mode = asset.mode
+            if mode:
+                matches.setdefault(mode, []).append(asset.path)
     return matches
 
 
@@ -219,7 +238,11 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
             )
             continue
 
-        existing = _existing_template_modes(templates_root / device_type)
+        existing = _existing_template_modes(
+            templates_root / device_type,
+            data_path=data_path,
+            device_type=device_type,
+        )
         missing_modes = [mode for mode in info["modes"] if mode not in existing]
         required_default_missing = info["required"] and "default" not in existing
 
