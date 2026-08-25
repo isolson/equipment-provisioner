@@ -88,7 +88,7 @@ class CambiumHandler(BaseHandler):
         self.login_error: Optional[str] = None  # Human-readable login error for UI
         self._credentials_confirmed: bool = False  # True after successful login (for reconnect)
         self._password_change_required: bool = False  # Device requires password change on first login
-        self._last_applied_config: Optional[Dict[str, str]] = None  # Flat keys applied via set_param
+        self._last_applied_config: Optional[Dict[str, Any]] = None  # Flat keys applied via set_param/import
 
     @property
     def device_type(self) -> str:
@@ -3219,18 +3219,17 @@ class CambiumHandler(BaseHandler):
 
         # Build expected_values from last applied config if not provided
         if not expected_values and self._last_applied_config:
-            expected_values = {}
-            # Map device_props keys to the field names _check_config_values expects
-            key_map = {
-                "wirelessInterfaceSSID": "ssid",
-                "snmpSystemName": "hostname",
-                "systemConfigDeviceName": "devicename",
-            }
-            for prop_key, verify_key in key_map.items():
-                if prop_key in self._last_applied_config:
-                    expected_values[verify_key] = self._last_applied_config[prop_key]
+            # Native Cambium imports contain operational device_props rather
+            # than the three identity fields used by apply_ap_naming().
+            # Compare the safe scalar properties that were actually applied;
+            # do not silently downgrade a readable config to UNVERIFIED just
+            # because it has no SSID/hostname/device-name fields.
+            expected_values = self._verification_values(self._last_applied_config)
             if expected_values:
-                logger.info(f"[CONFIG VERIFY] Built expected values from last applied config: {expected_values}")
+                logger.info(
+                    f"[CONFIG VERIFY] Built {len(expected_values)} safe expected values "
+                    "from last applied config"
+                )
 
         # Try reading config with the existing session first (no reboot expected)
         if self._stok and self._cookie_file:
@@ -3278,6 +3277,51 @@ class CambiumHandler(BaseHandler):
         logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed for {self.ip}")
         return False
 
+    _VERIFY_FIELD_ALIASES = {
+        "ssid": "wirelessInterfaceSSID",
+        "hostname": "snmpSystemName",
+        "devicename": "systemConfigDeviceName",
+    }
+    _SECRET_CONFIG_KEY_RE = re.compile(
+        r"(?:password|passphrase|psk|secret|token|private[_-]?key|encryption[_-]?key)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _verification_values(cls, props: Dict[str, Any]) -> Dict[str, Any]:
+        """Return safe scalar properties suitable for read-back verification.
+
+        Cambium's native JSON exports use a flat ``device_props`` mapping.
+        Identity fields are optional, so verification must use the applied
+        operational properties when present. Secret-shaped fields are excluded
+        even though the current approved templates do not contain them.
+        """
+        return {
+            key: value
+            for key, value in props.items()
+            if not key.startswith("_")
+            and not cls._SECRET_CONFIG_KEY_RE.search(key)
+            and isinstance(value, (str, int, float, bool))
+        }
+
+    @staticmethod
+    def _verification_value(value: Any) -> str:
+        """Normalize Cambium scalar representations without logging values."""
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        normalized = str(value).strip().lower()
+        if normalized in ("true", "yes", "on", "enabled"):
+            return "1"
+        if normalized in ("false", "no", "off", "disabled"):
+            return "0"
+        return normalized
+
+    @classmethod
+    def _config_values_match(cls, expected: Any, actual: Any) -> bool:
+        return cls._verification_value(expected) == cls._verification_value(actual)
+
     def _check_config_values(self, config: Dict[str, Any], expected_values: Optional[Dict[str, Any]] = None):
         """Check a read-back config dict against expected values.
 
@@ -3286,26 +3330,31 @@ class CambiumHandler(BaseHandler):
         config was readable but we confirmed no specific value, so we must not
         claim a green success.
         """
-        actual_ssid = config.get("wirelessInterfaceSSID")
-        actual_snmp_name = config.get("snmpSystemName")
-        actual_device_name = config.get("systemConfigDeviceName")
-
-        logger.info(f"[CONFIG VERIFY] Read back: ssid={actual_ssid}, snmpName={actual_snmp_name}, deviceName={actual_device_name}")
-
         if not expected_values:
             logger.info(f"[CONFIG VERIFY] Config readable but no expected values to confirm — UNVERIFIED")
             return UNVERIFIED
 
+        missing = False
+        checked = 0
         for field, expected in expected_values.items():
-            if field == "ssid" and actual_ssid != expected:
-                logger.error(f"[CONFIG VERIFY] SSID mismatch: expected {expected}, got {actual_ssid}")
+            property_name = self._VERIFY_FIELD_ALIASES.get(field, field)
+            if property_name not in config:
+                missing = True
+                logger.warning(
+                    f"[CONFIG VERIFY] Read-back omitted expected property {property_name}"
+                )
+                continue
+            checked += 1
+            if not self._config_values_match(expected, config[property_name]):
+                logger.error(f"[CONFIG VERIFY] Property mismatch: {property_name}")
                 return False
-            elif field == "hostname" and actual_snmp_name != expected:
-                logger.error(f"[CONFIG VERIFY] snmpSystemName mismatch: expected {expected}, got {actual_snmp_name}")
-                return False
-            elif field == "devicename" and actual_device_name != expected:
-                logger.error(f"[CONFIG VERIFY] deviceName mismatch: expected {expected}, got {actual_device_name}")
-                return False
+
+        if not checked or missing:
+            logger.info(
+                f"[CONFIG VERIFY] Read-back was incomplete ({checked}/{len(expected_values)} "
+                "properties confirmed) — UNVERIFIED"
+            )
+            return UNVERIFIED
 
         logger.info(f"[CONFIG VERIFY] All expected values verified successfully")
         return True
