@@ -429,6 +429,7 @@ register(VendorSpec(
         "epmp 4525": ["epmp-ax", "epmp_ax"],
         "epmp 4600": ["epmp-ax", "epmp_ax"],
         "epmp 4600c": ["epmp-ax", "epmp_ax"],
+        "epmp 4616": ["epmp-ax", "epmp_ax"],
         "epmp 4625": ["epmp-ax", "epmp_ax"],
         # Force 300 series - uses AC firmware
         "force 300-25": ["epmp-ac", "epmp_ac", "force300", "force-300"],
@@ -455,7 +456,10 @@ register(VendorSpec(
         ConfigFamilySpec(
             name="ePMP 4K",
             directory="ePMP-4K",
-            model_patterns=("epmp 4518", "epmp 4525", "epmp 4600", "epmp 4600c", "epmp 4625"),
+            model_patterns=(
+                "epmp 4518", "epmp 4525", "epmp 4600", "epmp 4600c",
+                "epmp 4616", "epmp 4625",
+            ),
             roles=("AP", "SM", "PTP"),
         ),
     ),

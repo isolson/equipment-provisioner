@@ -79,9 +79,10 @@ def test_model_firmware_patterns_golden():
         # Cambium
         "epmp 4518": ["epmp-ax", "epmp_ax"],
         "epmp 4525": ["epmp-ax", "epmp_ax"],
-        "epmp 4600": ["epmp-ax", "epmp_ax"],
-        "epmp 4600c": ["epmp-ax", "epmp_ax"],
-        "epmp 4625": ["epmp-ax", "epmp_ax"],
+            "epmp 4600": ["epmp-ax", "epmp_ax"],
+            "epmp 4600c": ["epmp-ax", "epmp_ax"],
+            "epmp 4616": ["epmp-ax", "epmp_ax"],
+            "epmp 4625": ["epmp-ax", "epmp_ax"],
         "force 300-25": ["epmp-ac", "epmp_ac", "force300", "force-300"],
         "force 300-19": ["epmp-ac", "epmp_ac", "force300", "force-300"],
         "force 300-16": ["epmp-ac", "epmp_ac", "force300", "force-300"],

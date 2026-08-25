@@ -32,6 +32,7 @@ def make_client(tmp_path):
 def test_registry_maps_approved_models_to_families():
     assert config_family_for_model("cambium", "ePMP 3000").directory == "ePMP-3K"
     assert config_family_for_model("cambium", "ePMP 4518").directory == "ePMP-4K"
+    assert config_family_for_model("cambium", "ePMP 4616").directory == "ePMP-4K"
     assert config_family_for_model("tachyon", "TNA-301").directory == "TNA-301-302"
     assert config_family_for_model("tachyon", "TNA-303X").directory == "TNA-303X"
     assert config_family_for_model("tachyon", "TNA-303L-65").directory == "TNA-303L-65"
