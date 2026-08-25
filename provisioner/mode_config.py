@@ -249,7 +249,7 @@ class ModeConfigManager:
                 import tarfile
                 with tarfile.open(template_path, "r:*") as tar:
                     for member in tar.getmembers():
-                        if member.name.endswith("config.json") or member.name == "config.json":
+                        if Path(member.name).name == "config.json":
                             f = tar.extractfile(member)
                             if f:
                                 return json.load(f)

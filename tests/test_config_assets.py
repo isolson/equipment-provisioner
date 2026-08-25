@@ -99,6 +99,27 @@ def test_mode_profile_and_ptp_side_resolution(tmp_path):
     assert manager.get_template_path("tachyon", "ptp-b", "TNA-303X").parts[-2] == "SM"
 
 
+def test_mode_loader_ignores_macos_tar_metadata(tmp_path):
+    root = tmp_path / "configs/templates/tachyon/TNA-303X/PTP/twXX-twXX/Main"
+    root.mkdir(parents=True)
+    tar_path = root / "default.tar"
+    config = b'{"system": {"hostname": "ptp-main"}}'
+    metadata = b"not a UTF-8 JSON document"
+
+    with tarfile.open(tar_path, "w") as archive:
+        metadata_info = tarfile.TarInfo("._config.json")
+        metadata_info.size = len(metadata)
+        archive.addfile(metadata_info, io.BytesIO(metadata))
+        config_info = tarfile.TarInfo("config.json")
+        config_info.size = len(config)
+        archive.addfile(config_info, io.BytesIO(config))
+
+    manager = ModeConfigManager(str(tmp_path / "configs/templates"))
+    assert manager.load_template(
+        "tachyon", "ptp-a", "TNA-303X", link_profile="twXX-twXX"
+    ) == {"system": {"hostname": "ptp-main"}}
+
+
 def test_mode_family_missing_asset_does_not_fall_back_to_flat_template(tmp_path):
     family_root = tmp_path / "configs/templates/cambium/ePMP-3K"
     family_root.mkdir(parents=True)
