@@ -36,6 +36,33 @@ def test_dashboard_renders_setup_banner_hook():
     assert 'href="/files"' in html
     assert 'href="/labels"' in html
     assert "loadSetupReadiness()" in html
+    assert 'aria-label="Dismiss setup readiness notice"' in html
+    assert "dismissSetupReadinessBanner()" in html
+
+
+def test_dashboard_does_not_auto_queue_labels_on_completion():
+    """Completion events keep the label payload contract but do not enqueue it.
+
+    The printer queue remains available for manual use and future AP/PTP
+    workflow hooks, but provisioning completion is not production-enabled for
+    automatic label printing yet.
+    """
+    client = make_client()
+    html = client.get("/").text
+
+    assert "handleCompletedLabel(message.port_number, message.data.label)" not in html
+    assert "function handleCompletedLabel(portNumber, rawLabel)" in html
+
+
+def test_dashboard_persists_and_resets_setup_banner_dismissal():
+    client = make_client()
+    html = client.get("/").text
+
+    assert "const SETUP_READINESS_DISMISSED_KEY = 'provisionerSetupReadinessDismissed'" in html
+    assert "localStorage.setItem(SETUP_READINESS_DISMISSED_KEY, 'true')" in html
+    assert "localStorage.removeItem(SETUP_READINESS_DISMISSED_KEY)" in html
+    assert "if (isSetupReadinessDismissed())" in html
+    assert "if (data?.status === 'ready') clearSetupReadinessDismissal();" in html
 
 
 def _rendered_device_vendors(html):
