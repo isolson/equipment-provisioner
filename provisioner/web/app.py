@@ -9,9 +9,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from ..vendor_registry import config_family_metadata
 from .api import router as api_router
-from .snapshots import router as snapshots_router
 from .api import vendor_ui_metadata
+from .snapshots import router as snapshots_router
 from .websocket import router as ws_router
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,8 @@ def create_app(
         return templates.TemplateResponse(request, "files.html", {
             "request": request,
             "title": title,
+            "vendor_metadata": vendor_ui_metadata(),
+            "family_metadata": config_family_metadata(),
         })
 
     # Firmware management page

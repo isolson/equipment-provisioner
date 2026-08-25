@@ -22,6 +22,8 @@ import json
 import os
 import re
 import sys
+import tarfile
+from pathlib import Path
 from typing import List, Tuple
 
 DEFAULT_DIR = os.path.join("configs", "templates")
@@ -30,6 +32,10 @@ PLACEHOLDER_RE = re.compile(r"\{\{\s*[^}]+\s*\}\}")
 # Templates consumed by mode_config.py's render engine, where {{...}} is valid.
 # Keyed by basename so it survives per-vendor directory layout.
 PLACEHOLDER_ALLOWED_BASENAMES = {"ap.json", "ptp-a.json", "ptp-b.json"}
+SECRET_KEY_RE = re.compile(
+    r"(?:^|_)(?:password|passphrase|psk|secret|token|private_key)(?:$|_)",
+    re.IGNORECASE,
+)
 
 
 def _iter_template_files(root: str) -> List[str]:
@@ -42,11 +48,60 @@ def _iter_template_files(root: str) -> List[str]:
     return sorted(files)
 
 
+def _contains_secret_key(value) -> bool:
+    """Detect actual secret-shaped scalar fields, not boolean feature flags."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if SECRET_KEY_RE.search(str(key)) and isinstance(child, (str, bytes)) and child:
+                return True
+            if _contains_secret_key(child):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_secret_key(child) for child in value)
+    return False
+
+
+def _is_ptp_asset(path: str) -> bool:
+    return "ptp" in {part.lower() for part in Path(path).parts}
+
+
+def _check_tar(path: str, structured: bool) -> List[str]:
+    problems: List[str] = []
+    try:
+        with tarfile.open(path, "r:*") as archive:
+            members = archive.getmembers()
+            config_members = [member for member in members if Path(member.name).name == "config.json"]
+            if not config_members:
+                return ["TAR has no config.json"]
+            for member in members:
+                member_path = Path(member.name)
+                if member_path.is_absolute() or ".." in member_path.parts:
+                    problems.append("TAR contains an unsafe path: %s" % member.name)
+            config_file = archive.extractfile(config_members[0])
+            if config_file is None:
+                return problems + ["TAR config.json cannot be read"]
+            try:
+                parsed = json.load(config_file)
+            except (ValueError, UnicodeDecodeError) as exc:
+                problems.append("invalid config.json: %s" % exc)
+            else:
+                if structured and not _is_ptp_asset(path) and _contains_secret_key(parsed):
+                    problems.append("secret-shaped field is not allowed in a non-PTP asset")
+    except (tarfile.TarError, OSError) as exc:
+        problems.append("invalid TAR: %s" % exc)
+    return problems
+
+
 def check_templates(root: str) -> List[Tuple[str, str]]:
     problems: List[Tuple[str, str]] = []
     for path in _iter_template_files(root):
         base = os.path.basename(path)
         ext = os.path.splitext(base)[1].lower()
+
+        if base.lower().endswith((".tar", ".tar.gz", ".tgz")):
+            for problem in _check_tar(path, structured=True):
+                problems.append((path, problem))
+            continue
 
         try:
             with open(path, "r") as handle:
@@ -55,13 +110,16 @@ def check_templates(root: str) -> List[Tuple[str, str]]:
             problems.append((path, "could not read: %s" % exc))
             continue
 
-        # 1. JSON validity
+        # 1. JSON/TAR validity
         if ext == ".json":
             try:
-                json.loads(text)
+                parsed = json.loads(text)
             except ValueError as exc:
                 problems.append((path, "invalid JSON: %s" % exc))
                 # still fall through to placeholder check on the raw text
+            else:
+                if not _is_ptp_asset(path) and _contains_secret_key(parsed):
+                    problems.append((path, "secret-shaped field is not allowed in a non-PTP asset"))
 
         # 2. placeholder syntax, unless this is an allowlisted mode template
         if base not in PLACEHOLDER_ALLOWED_BASENAMES:

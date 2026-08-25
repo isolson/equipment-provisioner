@@ -1,12 +1,13 @@
 """REST API endpoints for Network Provisioner web interface."""
 
 import asyncio
+import io
 import json
 import logging
 import os
 import re
-import shutil
 import subprocess
+import tarfile
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -14,28 +15,38 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import aiohttp
-from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
+from ..config_assets import (
+    ConfigAsset,
+    ConfigAssetCatalog,
+)
 from ..fingerprint import is_mikrotik_oui
 from ..handler_manager import HandlerManager, provisionable_device_types
-from ..vendor_registry import (
-    builtin_ui_credentials,
-    nonprovisionable_device_types,
-    ui_styles,
-)
 from ..setup_tools import (
     build_readiness_report,
     import_setup_bundle,
     seed_bundled_templates,
     write_setup_bundle,
 )
+from ..vendor_registry import (
+    builtin_ui_credentials,
+    config_family_metadata,
+    nonprovisionable_device_types,
+    spec_for,
+    ui_styles,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["api"])
+_SECRET_KEY_RE = re.compile(
+    r"(?:^|_)(?:password|passphrase|psk|secret|token|private_key)(?:$|_)",
+    re.IGNORECASE,
+)
 
 
 # ============================================================================
@@ -1234,6 +1245,31 @@ class ConfigInfo(BaseModel):
     path: str
 
 
+class ConfigAssetInfo(BaseModel):
+    """Structured metadata for a family/mode-aware config asset."""
+    path: str
+    device_type: str
+    config_type: str
+    filename: str
+    size: int
+    modified: str
+    family: Optional[str] = None
+    firmware: Optional[str] = None
+    role: Optional[str] = None
+    mode: Optional[str] = None
+    profile: Optional[str] = None
+    link_profile: Optional[str] = None
+    content_type: str
+    protected: bool
+    editable: bool
+
+
+class ConfigAssetUpdate(BaseModel):
+    """Content update for one non-protected text asset."""
+    path: str
+    content: str
+
+
 class FirmwareUrlRequest(BaseModel):
     """Request to download firmware from URL."""
     url: str
@@ -1909,6 +1945,283 @@ async def firmware_checker_toggle(request: Request, enabled: bool = True):
 # ============================================================================
 # Config Management Endpoints
 # ============================================================================
+
+
+def _config_asset_catalog(request: Request) -> ConfigAssetCatalog:
+    return ConfigAssetCatalog(_get_data_path(request))
+
+
+def _config_asset_response(asset: ConfigAsset) -> ConfigAssetInfo:
+    return ConfigAssetInfo(**asset.as_dict())
+
+
+def _validate_family_directory(device_type: str, family: Optional[str]) -> None:
+    """Reject a family name that is not declared by the vendor registry."""
+    if not family:
+        return
+    spec = spec_for(device_type)
+    if spec is None or family not in {entry.directory for entry in spec.config_families}:
+        raise HTTPException(status_code=400, detail="Unknown config family")
+
+
+def _validate_family_role(
+    device_type: str,
+    family: Optional[str],
+    role: Optional[str],
+    mode: Optional[str],
+    profile: Optional[str],
+) -> None:
+    """Validate structured hierarchy fields against the registry contract."""
+    if not family:
+        if any(value for value in (role, mode, profile)):
+            raise HTTPException(status_code=400, detail="Family is required for structured fields")
+        return
+
+    spec = spec_for(device_type)
+    family_spec = next(
+        (entry for entry in (spec.config_families if spec else ()) if entry.directory == family),
+        None,
+    )
+    if family_spec is None:
+        raise HTTPException(status_code=400, detail="Unknown config family")
+    if role and role.upper() not in family_spec.roles:
+        raise HTTPException(status_code=400, detail="Role is not supported by this config family")
+    if mode and mode not in ("ap", "sm"):
+        raise HTTPException(status_code=400, detail="Structured uploads support AP or SM mode only")
+    if mode == "ap" and role and role.upper() != "AP":
+        raise HTTPException(status_code=400, detail="AP mode requires AP role")
+    if mode == "sm" and role and role.upper() != "SM":
+        raise HTTPException(status_code=400, detail="SM mode requires SM role")
+    if profile and role and role.upper() != "AP":
+        raise HTTPException(status_code=400, detail="Profiles are supported only for AP assets")
+    if profile and profile.lower() not in {"default", "north", "east", "south", "west"}:
+        raise HTTPException(status_code=400, detail="Unknown AP profile")
+
+
+def _contains_secret_key(value: Any) -> bool:
+    """Detect credential-like keys without inspecting or logging their values."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_lower = str(key).lower()
+            if _SECRET_KEY_RE.search(key_lower) and isinstance(child, (str, bytes)) and child:
+                return True
+            if _contains_secret_key(child):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_secret_key(child) for child in value)
+    return False
+
+
+def _validate_uploaded_asset(filename: str, content: bytes, structured: bool) -> None:
+    """Validate JSON/TAR shape and reject secrets in tracked family assets."""
+    lower_name = filename.lower()
+    if lower_name.endswith(".json"):
+        try:
+            parsed = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON: %s" % exc)
+        if structured and _contains_secret_key(parsed):
+            raise HTTPException(
+                status_code=400,
+                detail="Family assets cannot contain credential or secret fields",
+            )
+        return
+    if lower_name.endswith((".tar", ".tar.gz", ".tgz")):
+        try:
+            with tarfile.open(fileobj=io.BytesIO(content), mode="r:*") as archive:
+                members = archive.getmembers()
+                if not any(Path(member.name).name == "config.json" for member in members):
+                    raise HTTPException(status_code=400, detail="TAR asset has no config.json")
+                for member in members:
+                    member_path = Path(member.name)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise HTTPException(status_code=400, detail="TAR contains an unsafe path")
+                if structured:
+                    config_member = next(
+                        member for member in members if Path(member.name).name == "config.json"
+                    )
+                    config_file = archive.extractfile(config_member)
+                    if config_file is not None:
+                        parsed = json.load(config_file)
+                        if _contains_secret_key(parsed):
+                            raise HTTPException(
+                                status_code=400,
+                                detail="Family assets cannot contain credential or secret fields",
+                            )
+        except HTTPException:
+            raise
+        except (tarfile.TarError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid TAR asset: %s" % exc)
+
+
+@router.get("/config-assets", response_model=List[ConfigAssetInfo])
+async def list_config_assets(
+    request: Request,
+    device_type: Optional[str] = None,
+    family: Optional[str] = None,
+    firmware: Optional[str] = None,
+    role: Optional[str] = None,
+    mode: Optional[str] = None,
+    config_type: Optional[str] = None,
+):
+    """List the recursive family/mode configuration catalog."""
+    if device_type:
+        device_type = _validate_device_type(device_type)
+    try:
+        assets = _config_asset_catalog(request).list_assets(
+            device_type=device_type,
+            family=family,
+            firmware=firmware,
+            role=role,
+            mode=mode,
+            config_type=config_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return [_config_asset_response(asset) for asset in assets]
+
+
+@router.get("/config-assets/metadata")
+async def config_asset_metadata():
+    """Return registry-derived family metadata and stable mode labels."""
+    return {
+        "families": config_family_metadata(),
+        "modes": {
+            "ap": "AP",
+            "sm": "SM",
+            "ptp-a": "PTP Main",
+            "ptp-b": "PTP SM",
+        },
+    }
+
+
+@router.get("/config-assets/content")
+async def get_config_asset_content(request: Request, path: str):
+    """Return editable text content; protected assets never leave the host."""
+    try:
+        asset_path, asset = _config_asset_catalog(request).resolve(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Config asset not found")
+    if asset.protected:
+        raise HTTPException(status_code=403, detail="Protected PTP asset content is host-only")
+    if not asset.editable:
+        raise HTTPException(status_code=415, detail="This asset is not editable text")
+    try:
+        content = asset_path.read_text()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not read config asset") from exc
+    response = {"path": asset.path, "filename": asset.filename, "content": content}
+    if asset.content_type == "json":
+        try:
+            response["parsed"] = json.loads(content)
+        except json.JSONDecodeError:
+            pass
+    return response
+
+
+@router.post("/config-assets/upload")
+async def upload_config_asset(
+    request: Request,
+    file: UploadFile = File(...),
+    config_type: str = Form("template"),
+    device_type: str = Form(...),
+    family: Optional[str] = Form(None),
+    firmware: Optional[str] = Form(None),
+    role: Optional[str] = Form(None),
+    mode: Optional[str] = Form(None),
+    profile: Optional[str] = Form(None),
+    link_profile: Optional[str] = Form(None),
+):
+    """Upload a safe structured asset; PTP is installed host-side only."""
+    device_type = _validate_device_type(device_type)
+    if config_type not in ("template", "override"):
+        raise HTTPException(status_code=400, detail="Invalid config type")
+    _validate_family_directory(device_type, family)
+    _validate_family_role(device_type, family, role, mode, profile)
+    if mode == "ptp-a" or mode == "ptp-b" or (role and role.lower() == "ptp"):
+        raise HTTPException(status_code=403, detail="PTP assets use the host-only installation workflow")
+    if mode == "ap" and role and role.lower() != "ap":
+        raise HTTPException(status_code=400, detail="AP mode requires AP role")
+    if mode == "sm" and role and role.lower() != "sm":
+        raise HTTPException(status_code=400, detail="SM mode requires SM role")
+
+    safe_filename = _sanitize_filename(file.filename or "")
+    if not safe_filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    try:
+        destination = _config_asset_catalog(request).destination(
+            config_type,
+            device_type,
+            family,
+            firmware,
+            role,
+            mode,
+            profile,
+            link_profile,
+            safe_filename,
+        )
+        content = await file.read()
+        _validate_uploaded_asset(safe_filename, content, structured=bool(family))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + ".part")
+        temporary.write_bytes(content)
+        os.replace(str(temporary), str(destination))
+        asset = _config_asset_catalog(request).resolve(
+            str(destination.relative_to(_get_data_path(request)))
+        )[1]
+        return {"success": True, "asset": _config_asset_response(asset)}
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.error("Failed to upload config asset: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to store config asset") from exc
+
+
+@router.put("/config-assets/content")
+async def update_config_asset(request: Request, body: ConfigAssetUpdate):
+    """Update one editable non-protected asset."""
+    try:
+        asset_path, asset = _config_asset_catalog(request).resolve(body.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Config asset not found")
+    if asset.protected:
+        raise HTTPException(status_code=403, detail="Protected PTP asset content is host-only")
+    if not asset.editable:
+        raise HTTPException(status_code=415, detail="This asset is not editable text")
+    _validate_uploaded_asset(asset.filename, body.content.encode("utf-8"), structured=bool(asset.family))
+    try:
+        temporary = asset_path.with_name(asset_path.name + ".part")
+        temporary.write_text(body.content)
+        os.replace(str(temporary), str(asset_path))
+    except OSError as exc:
+        logger.error("Failed to update config asset: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to update config asset") from exc
+    return {"success": True, "path": asset.path}
+
+
+@router.delete("/config-assets/content")
+async def delete_config_asset(request: Request, path: str):
+    """Delete one editable non-protected asset."""
+    try:
+        asset_path, asset = _config_asset_catalog(request).resolve(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Config asset not found")
+    if asset.protected:
+        raise HTTPException(status_code=403, detail="Protected PTP asset content is host-only")
+    try:
+        asset_path.unlink()
+    except OSError as exc:
+        logger.error("Failed to delete config asset: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to delete config asset") from exc
+    return {"success": True, "path": asset.path}
 
 @router.get("/configs", response_model=List[ConfigInfo])
 async def list_configs(request: Request):
@@ -2673,12 +2986,13 @@ async def _run_apply_mode(
     req: ApplyModeRequest,
 ):
     """Apply device mode in a background task."""
+    from ..fingerprint import DeviceType, identify_device
     from ..mode_config import get_mode_config_manager, make_ptp_link_id
-    from ..fingerprint import identify_device, DeviceType
     from .websocket import notify_port_change
 
     port_manager = provisioner.port_manager
     mcm = get_mode_config_manager()
+    device_model = (port_manager.get_port_status().get(port_number) or {}).get("device_model")
 
     try:
         # Determine mode and naming
@@ -2700,8 +3014,17 @@ async def _run_apply_mode(
             f"hostname={naming['hostname']}, ssid={naming['ssid']}"
         )
 
-        # Load mode template
-        template = mcm.load_template(device_type, mode)
+        # Load the model family profile.  AP directions map directly to the
+        # standard library's North/East/South/West directories.  PTP side A
+        # resolves Main and side B resolves SM inside ModeConfigManager.
+        profile = req.direction.title() if req.mode == "ap" and req.direction else None
+        template = mcm.load_template(
+            device_type,
+            mode,
+            model=device_model,
+            profile=profile,
+            link_profile=ptp_link_id,
+        )
 
         # Create handler and connect
         interface = port_manager.get_interface_for_port(port_number)

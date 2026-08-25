@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -120,16 +120,82 @@ class ConfigStore:
 
         return None
 
+    def _get_family_template(
+        self, device_type: str, model: Optional[str], role: str = "SM"
+    ) -> Optional[Path]:
+        """Find the approved family/firmware/role default for a model.
+
+        Family selection comes only from ``VendorSpec``.  The filesystem may
+        contain multiple firmware directories; the newest directory by name
+        wins, matching the operator-facing library convention.  There is no
+        arbitrary family fallback, because a valid config for another radio
+        family can still be destructive.
+        """
+        if not model:
+            return None
+
+        from .vendor_registry import config_family_for_model
+
+        family = config_family_for_model(device_type, model)
+        if family is None:
+            return None
+
+        family_dir = self.templates_path / device_type / family.directory
+        if not family_dir.is_dir():
+            return None
+
+        extensions = [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]
+        version_dirs = sorted(
+            (entry for entry in family_dir.iterdir() if entry.is_dir()),
+            key=lambda entry: entry.name.lower(),
+            reverse=True,
+        )
+        # Some approved libraries are firmware-versioned (Cambium) and some
+        # are intentionally family-versioned only (Tachyon).
+        containers = [family_dir] + version_dirs
+        for version_dir in containers:
+            role_dir = next(
+                (
+                    entry for entry in version_dir.iterdir()
+                    if entry.is_dir() and entry.name.lower() == role.lower()
+                ),
+                None,
+            )
+            if role_dir is None:
+                continue
+            template = self._find_named_template(role_dir, "default", extensions)
+            if template:
+                return template
+        return None
+
+    def _has_family_tree(self, device_type: str) -> bool:
+        """Return whether this vendor has any installed family assets.
+
+        Older installations may have only the historical flat templates.  In
+        that case the legacy lookup remains available.  Once any structured
+        family tree is installed, a recognized model must stay within its
+        declared family so a missing role cannot silently cross-apply a flat
+        template.
+        """
+        from .vendor_registry import spec_for
+
+        spec = spec_for(device_type)
+        if spec is None:
+            return False
+        device_dir = self.templates_path / device_type
+        return any(
+            (device_dir / family.directory).is_dir()
+            for family in spec.config_families
+        )
+
     def get_config_template(self, device_type: str, model: Optional[str] = None) -> Optional[Path]:
         """Get the path to the config template for a device type.
 
-        Searches in order:
-        1. {templates_path}/{device_type}/{model}.* (model-specific in subdir)
-        2. {templates_path}/{device_type}/{alias}.* (aliased model in subdir)
-        3. {templates_path}/{device_type}/default.* (default in subdir)
-        4. {templates_path}/{device_type}_{model}.* (legacy model-specific)
-        5. {templates_path}/{device_type}.* (legacy device type)
+        Searches the approved model family/firmware/SM tree first, then the
+        historical flat vendor tree and legacy root layout.
         """
+        from .vendor_registry import config_family_for_model
+
         device_dir = self.templates_path / device_type
 
         model_names = []
@@ -143,6 +209,23 @@ class ConfigStore:
         if model_alias:
             logger.debug(f"Config model alias: {model} -> {model_alias}")
         traits = self._handler_traits(device_type)
+
+        family_template = self._get_family_template(device_type, model)
+        if family_template:
+            logger.info(
+                "Using family config template: %s for %s/%s",
+                family_template,
+                device_type,
+                model,
+            )
+            return family_template
+        if config_family_for_model(device_type, model) is not None and self._has_family_tree(device_type):
+            logger.warning(
+                "No family config template for recognized model %s/%s; refusing legacy fallback",
+                device_type,
+                model,
+            )
+            return None
 
         if device_dir.exists() and device_dir.is_dir():
             if model_names:

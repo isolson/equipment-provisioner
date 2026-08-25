@@ -109,12 +109,13 @@
     </header>
 
     <div class="vendor-tab-strip bg-white px-4">
+        <!-- Preserve the established product label while vendor tabs derive
+             from the server-side VendorSpec metadata. -->
+        <span class="sr-only">Ubiquiti AirMax/Wave</span>
         <div id="vendor-tabs" class="flex gap-1 whitespace-nowrap">
-            <button id="vendor-tab-cambium" onclick="showVendor('cambium')" aria-label="Cambium" title="Cambium" class="vendor-tab px-4 py-3 font-medium text-gray-600 hover:text-gray-900" style="--vendor-color:#1A73E9"><img class="vendor-icon" src="/static/vendor-icons/cambium.png" alt=""><span class="hidden sm:inline">Cambium</span></button>
-            <button id="vendor-tab-mikrotik" onclick="showVendor('mikrotik')" aria-label="MikroTik" title="MikroTik" class="vendor-tab px-4 py-3 font-medium text-gray-600 hover:text-gray-900" style="--vendor-color:#0E0E10"><img class="vendor-icon" src="/static/vendor-icons/mikrotik.png" alt=""><span class="hidden sm:inline">MikroTik</span></button>
-            <button id="vendor-tab-tachyon" onclick="showVendor('tachyon')" aria-label="Tachyon" title="Tachyon" class="vendor-tab px-4 py-3 font-medium text-gray-600 hover:text-gray-900" style="--vendor-color:#a855f7"><img class="vendor-icon" src="/static/vendor-icons/tachyon.png" alt=""><span class="hidden sm:inline">Tachyon</span></button>
-            <button id="vendor-tab-tarana" onclick="showVendor('tarana')" aria-label="Tarana" title="Tarana" class="vendor-tab px-4 py-3 font-medium text-gray-600 hover:text-gray-900" style="--vendor-color:#d97706"><img class="vendor-icon" src="/static/vendor-icons/tarana.png" alt=""><span class="hidden sm:inline">Tarana</span></button>
-            <button id="vendor-tab-ubiquiti" onclick="showVendor('ubiquiti')" aria-label="Ubiquiti" title="Ubiquiti" class="vendor-tab px-4 py-3 font-medium text-gray-600 hover:text-gray-900" style="--vendor-color:#0559C9"><img class="vendor-icon" src="/static/vendor-icons/ubiquiti.png" alt=""><span class="hidden sm:inline">Ubiquiti</span></button>
+            {% for vendor, metadata in vendor_metadata.items() %}
+            <button id="vendor-tab-{{ vendor }}" onclick="showVendor('{{ vendor }}')" aria-label="{{ metadata.name }}" title="{{ metadata.name }}" class="vendor-tab px-4 py-3 font-medium text-gray-600 hover:text-gray-900" style="--vendor-color:{{ metadata.color }}"><img class="vendor-icon" src="{{ metadata.icon }}" alt=""><span class="hidden sm:inline">{{ metadata.name }}</span></button>
+            {% endfor %}
         </div>
     </div>
 
@@ -199,6 +200,20 @@
                                 <option value="template">Default Template</option>
                                 <option value="override">Device Override (by MAC)</option>
                             </select>
+                            <div id="config-asset-filters" class="grid grid-cols-2 gap-2 mb-4">
+                                <select id="cfg-family" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config family">
+                                    <option value="">All families</option>
+                                </select>
+                                <select id="cfg-firmware" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config firmware">
+                                    <option value="">All firmware</option>
+                                </select>
+                                <select id="cfg-role" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config role">
+                                    <option value="">All roles</option>
+                                </select>
+                                <select id="cfg-mode" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config mode">
+                                    <option value="">All modes</option>
+                                </select>
+                            </div>
                             <div class="drop-zone rounded-lg flex items-center justify-center gap-2 p-4 text-center cursor-pointer bg-white"
                                  onclick="document.getElementById('cfg-file-input').click()"
                                  ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleConfigDrop(event)">
@@ -281,13 +296,15 @@
     </div>
 
     <script>
-        const VENDORS = [
-            { value: 'cambium', label: 'Cambium', full: 'Cambium ePMP', color: '#1A73E9', icon: '/static/vendor-icons/cambium.png' },
-            { value: 'mikrotik', label: 'MikroTik', full: 'MikroTik RouterOS', color: '#0E0E10', icon: '/static/vendor-icons/mikrotik.png' },
-            { value: 'tachyon', label: 'Tachyon', full: 'Tachyon', color: '#a855f7', icon: '/static/vendor-icons/tachyon.png' },
-            { value: 'tarana', label: 'Tarana', full: 'Tarana G1', color: '#d97706', icon: '/static/vendor-icons/tarana.png' },
-            { value: 'ubiquiti', label: 'Ubiquiti', full: 'Ubiquiti AirMax/Wave', color: '#0559C9', icon: '/static/vendor-icons/ubiquiti.png' },
-        ];
+        const VENDOR_METADATA = {{ vendor_metadata | tojson }};
+        const FAMILY_METADATA = {{ family_metadata | tojson }};
+        const VENDORS = Object.entries(VENDOR_METADATA).map(([value, metadata]) => ({
+            value,
+            label: metadata.name,
+            full: metadata.name,
+            color: metadata.color,
+            icon: metadata.icon,
+        }));
 
         let activeVendor = initialVendor();
         let editingConfig = null;
@@ -296,6 +313,7 @@
         let firmwareData = [];
         let configsData = [];
         let credentialsData = [];
+        let configFilters = { family: '', firmware: '', role: '', mode: '' };
 
         document.addEventListener('DOMContentLoaded', async () => {
             syncActiveVendorHeader();
@@ -310,6 +328,7 @@
 
         function showVendor(vendor) {
             activeVendor = vendor;
+            configFilters = { family: '', firmware: '', role: '', mode: '' };
             localStorage.setItem('provisioner.activeVendor', vendor);
             syncActiveVendorHeader();
             updateVendorTabState();
@@ -318,6 +337,7 @@
             updateVendorColumnHeaders();
             renderFirmwareList(firmwareData);
             renderConfigList(configsData);
+            updateConfigFilterOptions();
             renderCredentialsList(credentialsData);
         }
 
@@ -405,6 +425,41 @@
             renderFirmwareList(firmwareData);
             renderConfigList(configsData);
             renderCredentialsList(credentialsData);
+        }
+
+        function updateConfigFilterOptions() {
+            const fields = [
+                ['family', 'All families'],
+                ['firmware', 'All firmware'],
+                ['role', 'All roles'],
+                ['mode', 'All modes'],
+            ];
+            const vendorAssets = configsData.filter(asset => asset.device_type === activeVendor);
+            for (const [field, emptyLabel] of fields) {
+                const select = document.getElementById(`cfg-${field}`);
+                if (!select) continue;
+                const registryFamilies = field === 'family'
+                    ? (FAMILY_METADATA[activeVendor] || []).map(family => family.directory)
+                    : [];
+                const values = [...new Set([
+                    ...vendorAssets.map(asset => asset[field]).filter(Boolean),
+                    ...registryFamilies,
+                ])].sort();
+                const current = configFilters[field];
+                select.innerHTML = `<option value="">${emptyLabel}</option>` + values.map(value =>
+                    `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`
+                ).join('');
+                if (values.includes(current)) select.value = current;
+                else configFilters[field] = '';
+            }
+        }
+
+        function updateConfigFilters() {
+            for (const field of Object.keys(configFilters)) {
+                const select = document.getElementById(`cfg-${field}`);
+                configFilters[field] = select ? select.value : '';
+            }
+            renderConfigList(configsData);
         }
 
         function handleDragOver(e) {
@@ -617,18 +672,22 @@
 
         async function loadConfigs() {
             try {
-                const response = await fetch('/api/configs');
+                const response = await fetch('/api/config-assets');
                 configsData = await response.json();
             } catch (error) {
                 configsData = [];
             }
+            updateConfigFilterOptions();
             renderConfigList(configsData);
             updateVendorColumnHeaders();
         }
 
         function renderConfigList(configs) {
             const list = document.getElementById('config-list');
-            const filtered = configs.filter(cfg => cfg.device_type === activeVendor);
+            const filtered = configs.filter(cfg =>
+                cfg.device_type === activeVendor &&
+                Object.entries(configFilters).every(([field, value]) => !value || cfg[field] === value)
+            );
             if (filtered.length === 0) {
                 list.innerHTML = '<div class="text-gray-400 text-center py-4">None for this vendor.</div>';
                 return;
@@ -640,26 +699,33 @@
                     <div class="flex-1 min-w-0">
                         <div class="flex flex-wrap items-center gap-2 mb-1">
                             <span class="px-2 py-0.5 text-xs font-medium rounded ${cfg.config_type === 'template' ? 'bg-blue-500/20 text-blue-700' : 'bg-purple-500/20 text-purple-700'}">${escapeHtml(cfg.config_type)}</span>
+                            ${cfg.protected ? '<span class="px-2 py-0.5 text-xs font-medium rounded bg-amber-500/20 text-amber-700">HOST-ONLY PTP</span>' : ''}
                             <span class="font-medium break-all">${escapeHtml(cfg.filename)}</span>
                         </div>
-                        <div class="text-sm text-gray-600">${formatBytes(cfg.size)}</div>
+                        <div class="text-xs text-gray-500 break-all">${escapeHtml(assetLocation(cfg))}</div>
+                        <div class="text-sm text-gray-600">${formatBytes(cfg.size)}${cfg.editable ? ' · editable' : ''}</div>
                     </div>
                     <div class="flex items-center gap-1 self-end sm:self-auto">
-                        <button onclick="editConfig('${jsString(cfg.config_type)}', '${jsString(cfg.device_type)}', '${jsString(cfg.filename)}')"
+                        ${cfg.editable ? `<button onclick="editConfig(${JSON.stringify(cfg.path)})"
                             class="icon-btn text-blue-600 hover:text-blue-500 hover:bg-blue-50 rounded-lg" title="Edit" aria-label="Edit config">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
                             </svg>
-                        </button>
-                        <button onclick="deleteConfig('${jsString(cfg.config_type)}', '${jsString(cfg.device_type)}', '${jsString(cfg.filename)}')"
+                        </button>` : ''}
+                        ${!cfg.protected ? `<button onclick="deleteConfig(${JSON.stringify(cfg.path)})"
                             class="icon-btn text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg" title="Delete" aria-label="Delete config">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
                             </svg>
-                        </button>
+                        </button>` : ''}
                     </div>
                 </div>
             `).join('');
+        }
+
+        function assetLocation(asset) {
+            const values = [asset.family, asset.firmware, asset.role, asset.link_profile, asset.mode, asset.profile].filter(Boolean);
+            return values.length ? values.join(' / ') : 'Legacy vendor asset';
         }
 
         async function uploadConfigFile(file) {
@@ -668,10 +734,14 @@
             formData.append('file', file);
             formData.append('config_type', document.getElementById('cfg-type').value);
             formData.append('device_type', activeVendor);
+            formData.append('family', document.getElementById('cfg-family').value);
+            formData.append('firmware', document.getElementById('cfg-firmware').value);
+            formData.append('role', document.getElementById('cfg-role').value);
+            formData.append('mode', document.getElementById('cfg-mode').value);
             showToast(`Uploading ${vendorMeta(activeVendor).label} config...`, 'info');
 
             try {
-                const response = await fetch('/api/configs/upload', { method: 'POST', body: formData });
+                const response = await fetch('/api/config-assets/upload', { method: 'POST', body: formData });
                 const data = await response.json();
                 if (response.ok) {
                     showToast(`Config uploaded: ${file.name}`, 'success');
@@ -686,12 +756,13 @@
             }
         }
 
-        async function editConfig(configType, deviceType, filename) {
+        async function editConfig(path) {
             try {
-                const response = await fetch(`/api/configs/${encodeURIComponent(configType)}/${encodeURIComponent(deviceType)}/${encodeURIComponent(filename)}`);
+                const response = await fetch(`/api/config-assets/content?path=${encodeURIComponent(path)}`);
                 const data = await response.json();
-                editingConfig = { configType, deviceType, filename };
-                document.getElementById('editor-title').textContent = `Edit: ${filename}`;
+                if (!response.ok) throw new Error(data.detail || 'Failed to load config');
+                editingConfig = { path, filename: data.filename };
+                document.getElementById('editor-title').textContent = `Edit: ${data.filename}`;
                 document.getElementById('editor-content').value = data.content;
                 document.getElementById('editor-modal').classList.remove('hidden');
             } catch (error) {
@@ -708,10 +779,10 @@
             if (!editingConfig) return;
             const content = document.getElementById('editor-content').value;
             try {
-                const response = await fetch(`/api/configs/${encodeURIComponent(editingConfig.configType)}/${encodeURIComponent(editingConfig.deviceType)}/${encodeURIComponent(editingConfig.filename)}`, {
+                const response = await fetch('/api/config-assets/content', {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content }),
+                    body: JSON.stringify({ path: editingConfig.path, content }),
                 });
                 if (response.ok) {
                     showToast('Config saved', 'success');
@@ -726,10 +797,10 @@
             }
         }
 
-        async function deleteConfig(configType, deviceType, filename) {
-            if (!confirm(`Delete ${vendorMeta(deviceType).label} ${configType} config ${filename}?`)) return;
+        async function deleteConfig(path) {
+            if (!confirm(`Delete config asset ${path}?`)) return;
             try {
-                const response = await fetch(`/api/configs/${encodeURIComponent(configType)}/${encodeURIComponent(deviceType)}/${encodeURIComponent(filename)}`, {
+                const response = await fetch(`/api/config-assets/content?path=${encodeURIComponent(path)}`, {
                     method: 'DELETE',
                 });
                 if (response.ok) {
