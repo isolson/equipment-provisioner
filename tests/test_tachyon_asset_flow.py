@@ -2,7 +2,6 @@ import logging
 import sqlite3
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
@@ -18,6 +17,8 @@ except ImportError:
     rich_module = types.ModuleType("rich")
     rich_console_module = types.ModuleType("rich.console")
     rich_logging_module = types.ModuleType("rich.logging")
+    rich_progress_module = types.ModuleType("rich.progress")
+    rich_table_module = types.ModuleType("rich.table")
 
     class _Console:
         def print(self, *args, **kwargs):
@@ -26,11 +27,56 @@ except ImportError:
     class _RichHandler(logging.Handler):
         pass
 
+    class _Table:
+        def __init__(self, *args, **kwargs):
+            self.rows = []
+
+        def add_column(self, *args, **kwargs):
+            return None
+
+        def add_row(self, *args, **kwargs):
+            self.rows.append(args)
+
+    class _Progress:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def add_task(self, *args, **kwargs):
+            return 0
+
+        def update(self, *args, **kwargs):
+            return None
+
+        def advance(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return self
+
+        def stop(self):
+            return None
+
+    class _ProgressColumn:
+        def __init__(self, *args, **kwargs):
+            pass
+
     rich_console_module.Console = _Console
     rich_logging_module.RichHandler = _RichHandler
+    rich_progress_module.Progress = _Progress
+    rich_progress_module.SpinnerColumn = _ProgressColumn
+    rich_progress_module.TextColumn = _ProgressColumn
+    rich_table_module.Table = _Table
     sys.modules["rich"] = rich_module
     sys.modules["rich.console"] = rich_console_module
     sys.modules["rich.logging"] = rich_logging_module
+    sys.modules["rich.progress"] = rich_progress_module
+    sys.modules["rich.table"] = rich_table_module
 
 # Stub aiosqlite only when it is genuinely not installed. Keying on
 # `sys.modules` shadowed the real package on CI (installed but not yet

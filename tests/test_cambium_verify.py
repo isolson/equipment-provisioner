@@ -1,12 +1,6 @@
-"""Regression tests for Cambium config verification honesty.
+"""Regression tests for Cambium config verification honesty."""
 
-Cambium already has the correct fail-closed *shape* (verify_config returns
-False after exhausting retries) — these lock that in — but ``_check_config_values``
-returns ``True`` when there is nothing to compare, so a verify with no expected
-values reports success without confirming anything.
-"""
-
-from provisioner.handlers.base import DeviceInfo
+from provisioner.handlers.base import UNVERIFIED, DeviceInfo
 from provisioner.handlers.cambium import CambiumHandler
 
 
@@ -21,11 +15,7 @@ def _handler() -> CambiumHandler:
 
 
 async def test_verify_config_not_success_with_nothing_to_compare(monkeypatch, fast_sleep):
-    """RED today: read-back succeeds but there are no expected values to check.
-
-    ``verify_config`` must not report a plain success — it has confirmed
-    nothing. Expected post-fix: an 'unverified' signal, not True.
-    """
+    """A readable config with no expected values remains explicitly unverified."""
     h = _handler()
     h._last_applied_config = {}  # nothing to derive expectations from
 
@@ -34,7 +24,7 @@ async def test_verify_config_not_success_with_nothing_to_compare(monkeypatch, fa
 
     monkeypatch.setattr(h, "_get_config_curl", readback)
     result = await h.verify_config()
-    assert result is not True
+    assert result == UNVERIFIED
 
 
 async def test_verify_config_false_when_readback_empty(monkeypatch, fast_sleep):
@@ -67,6 +57,43 @@ async def test_verify_config_true_on_match(monkeypatch, fast_sleep):
 
     monkeypatch.setattr(h, "_get_config_curl", readback)
     assert await h.verify_config() is True
+
+
+async def test_verify_config_confirms_native_import_properties(monkeypatch, fast_sleep):
+    """Native SM imports must verify their operational properties, too."""
+    h = _handler()
+    h._last_applied_config = {
+        "networkMode": "2",
+        "mgmtVLANVID": "12",
+        "cambiumSSHServerEnable": "1",
+        # Never use secret-shaped fields as verification expectations.
+        "wirelessInterfaceEncryptionKey": "not-an-expectation",
+    }
+
+    async def readback():
+        return {
+            "networkMode": 2,
+            "mgmtVLANVID": 12,
+            "cambiumSSHServerEnable": True,
+            "wirelessInterfaceEncryptionKey": "different-value",
+        }
+
+    monkeypatch.setattr(h, "_get_config_curl", readback)
+    assert await h.verify_config() is True
+
+
+async def test_verify_config_is_unverified_when_native_readback_is_incomplete(monkeypatch, fast_sleep):
+    h = _handler()
+    h._last_applied_config = {
+        "networkMode": "2",
+        "mgmtVLANVID": "12",
+    }
+
+    async def readback():
+        return {"networkMode": "2"}
+
+    monkeypatch.setattr(h, "_get_config_curl", readback)
+    assert await h.verify_config() == UNVERIFIED
 
 
 class _CurlResult:
