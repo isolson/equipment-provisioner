@@ -67,6 +67,7 @@ def test_cambium_properties(model):
         # ePMP-AX (WiFi 6) models get the extended first-boot ceiling...
         ("ePMP 4525", 360),
         ("ePMP 4600C", 360),
+        ("ePMP 4616", 360),
         ("Cambium ePMP 4625", 360),
         ("ePMP AX (SKU 53999)", 360),
         # ...including marketing variants that carry an AX model number.
