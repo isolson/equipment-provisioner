@@ -137,6 +137,7 @@ class TestModelFirmwarePatterns:
         assert "epmp-ax" in patterns.get("epmp 4518", [])
         assert "epmp-ax" in patterns.get("epmp 4525", [])
         assert "epmp-ax" in patterns.get("epmp 4600", [])
+        assert "epmp-ax" in patterns.get("epmp 4616", [])
         assert "epmp-ax" in patterns.get("epmp 4625", [])
 
     def test_cambium_force_300_patterns(self):
