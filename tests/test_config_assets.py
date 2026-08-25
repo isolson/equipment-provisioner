@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from provisioner.config import Config
 from provisioner.config_assets import ConfigAssetCatalog
 from provisioner.config_store import ConfigStore
-from provisioner.mode_config import ModeConfigManager
+from provisioner.mode_config import ModeConfigManager, make_ptp_link_id
 from provisioner.vendor_registry import config_family_for_model
 from provisioner.web.app import create_app
 
@@ -98,6 +98,29 @@ def test_mode_profile_and_ptp_side_resolution(tmp_path):
     ).parts[-3:] == ("twXX-twXX", "Main", "default.tar")
     assert manager.get_template_path("tachyon", "ptp-a", "TNA-303X").parts[-2] == "Main"
     assert manager.get_template_path("tachyon", "ptp-b", "TNA-303X").parts[-2] == "SM"
+
+
+def test_ptp_33_35_naming_keeps_shared_link_identity():
+    manager = ModeConfigManager("unused")
+
+    assert make_ptp_link_id(33, 35) == "tw33-tw35"
+    assert manager.generate_ptp_naming(33, 35, "a", "cambium") == {
+        "hostname": "tw33a-tw35",
+        "systemname": "tw33a-tw35",
+        "ssid": "tw33-tw35",
+        "my_tower": "33",
+        "my_tower_padded": "33",
+        "remote_tower": "35",
+        "remote_tower_padded": "35",
+        "side": "a",
+        "ptp_ssid": "tw33-tw35",
+    }
+    assert manager.generate_ptp_naming(33, 35, "b", "cambium")["hostname"] == (
+        "tw33-tw35b"
+    )
+    assert manager.generate_ptp_naming(33, 35, "b", "cambium")["ssid"] == (
+        "tw33-tw35"
+    )
 
 
 def test_mode_loader_ignores_macos_tar_metadata(tmp_path):

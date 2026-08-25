@@ -103,7 +103,9 @@ class HandlerManager:
             return None
 
     @classmethod
-    def operator_capabilities_for(cls, device_type: Optional[str]) -> Dict[str, Any]:
+    def operator_capabilities_for(
+        cls, device_type: Optional[str], model: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Return handler-owned capabilities used by operator workflows.
 
         The kiosk and API must not maintain their own vendor allowlists for
@@ -125,10 +127,9 @@ class HandlerManager:
                 "manual_netinstall": False,
                 "manual_netinstall_label": "",
             }
+        qualified_modes = handler_class.qualified_post_provision_modes_for_model(model)
         return {
-            "post_provision_modes": list(
-                getattr(handler_class, "qualified_post_provision_modes", ())
-            ),
+            "post_provision_modes": list(qualified_modes),
             "required_baseline_mode": str(
                 getattr(handler_class, "required_baseline_mode", "") or ""
             ),

@@ -133,6 +133,46 @@ def test_mode_endpoint_uses_handler_capability(monkeypatch):
     assert calls == [(4, "tachyon", "ap")]
 
 
+def test_mode_endpoint_uses_model_qualified_cambium_ptp(monkeypatch):
+    calls = []
+
+    async def fake_run(provisioner, port_number, device_type, device_ip, req):
+        calls.append((port_number, device_type, req.mode, req.my_tower, req.remote_tower))
+
+    monkeypatch.setattr("provisioner.web.api._run_apply_mode", fake_run)
+    client = _client(
+        monkeypatch,
+        dict(_status("cambium", "00:00:00:00:00:01"), device_model="ePMP 4616"),
+        mode_config=True,
+    )
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "ptp", "my_tower": 33, "remote_tower": 35},
+    )
+
+    assert response.status_code == 200
+    assert calls == [(4, "cambium", "ptp", 33, 35)]
+
+
+def test_mode_endpoint_keeps_other_cambium_models_locked(monkeypatch):
+    client = _client(
+        monkeypatch,
+        dict(_status("cambium", "00:00:00:00:00:01"), device_model="ePMP 4518"),
+        mode_config=True,
+    )
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "ptp", "my_tower": 33, "remote_tower": 35},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Mode configuration not supported for cambium"
+    )
+
+
 def test_mode_endpoint_requires_verified_handler_baseline(monkeypatch):
     monkeypatch.setattr(
         TachyonHandler,

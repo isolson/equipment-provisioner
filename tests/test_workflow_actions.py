@@ -10,6 +10,7 @@ from provisioner.workflow_actions import workflow_for_port
 def _state(**overrides):
     values = {
         "device_type": "tachyon",
+        "device_model": None,
         "device_detected": True,
         "provisioning": False,
         "waiting_for_boot": False,
@@ -103,6 +104,28 @@ def test_success_actions_respect_feature_flag_and_qualification(monkeypatch):
     assert _action_ids(disabled) == []
     assert _action_ids(enabled) == ["configure_ap", "configure_ptp"]
     assert _action_ids(unsupported) == []
+
+
+def test_cambium_ptp_qualification_is_limited_to_epmp_4616():
+    qualified = workflow_for_port(
+        _state(
+            device_type="cambium",
+            device_model="ePMP 4616",
+            last_result="success",
+        ),
+        mode_config_enabled=True,
+    )
+    unqualified = workflow_for_port(
+        _state(
+            device_type="cambium",
+            device_model="ePMP 4518",
+            last_result="success",
+        ),
+        mode_config_enabled=True,
+    )
+
+    assert _action_ids(qualified) == ["configure_ptp"]
+    assert _action_ids(unqualified) == []
 
 
 def test_mode_qualification_is_independent_per_mode(monkeypatch):

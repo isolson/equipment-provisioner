@@ -110,6 +110,18 @@ class BaseHandler(ABC):
     #: verified. A template or theoretical capability alone is not enough.
     qualified_post_provision_modes = ()  # type: Tuple[str, ...]
 
+    @classmethod
+    def qualified_post_provision_modes_for_model(
+        cls, model: Optional[str] = None
+    ) -> Tuple[str, ...]:
+        """Return qualified post-provision modes for a detected model.
+
+        Vendors may narrow a class-level qualification to hardware that has
+        completed its bench verification.  The default preserves the legacy
+        class-level capability contract.
+        """
+        return cls.qualified_post_provision_modes
+
     #: Baseline deployment mode that must be applied and verified during the
     #: standard provisioning run before the unit is deployable or eligible
     #: for a post-provision mode conversion. ``None`` means the handler has no

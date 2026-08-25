@@ -27,6 +27,21 @@ class CambiumHandler(BaseHandler):
 
     required_baseline_mode = "sm"
 
+    @classmethod
+    def qualified_post_provision_modes_for_model(
+        cls, model: Optional[str] = None
+    ) -> Tuple[str, ...]:
+        """Expose PTP only for the ePMP 4616 bench-qualified model.
+
+        The ePMP-4K PTP archives are shared by this family, but hardware
+        qualification is intentionally narrower until each model is tested.
+        """
+        modes = tuple(cls.qualified_post_provision_modes)
+        model_key = (model or "").lower().replace("cambium ", "").strip()
+        if model_key == "epmp 4616":
+            return modes + ("ptp",)
+        return modes
+
     # Model to firmware filename pattern mapping
     MODEL_FIRMWARE_PATTERNS = {
         # ePMP AX series (WiFi 6) - uses ePMP-AX firmware

@@ -2904,7 +2904,9 @@ async def apply_device_mode(
     if req.mode not in ("ap", "ptp"):
         raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
 
-    capabilities = HandlerManager.operator_capabilities_for(device_type)
+    capabilities = HandlerManager.operator_capabilities_for(
+        device_type, status.get("device_model")
+    )
     if req.mode not in capabilities["post_provision_modes"]:
         raise HTTPException(
             status_code=400,
