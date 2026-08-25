@@ -850,6 +850,44 @@ def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch
     assert checks["config_templates"]["status"] == "warning"
 
 
+def test_setup_readiness_counts_recursive_family_assets(tmp_path, monkeypatch):
+    client, _config, data_path = make_client(tmp_path)
+
+    for vendor, family, extension in (
+        ("cambium", "ePMP-4K/5.11.1", ".json"),
+        ("tachyon", "TNA-303X", ".tar"),
+    ):
+        base = data_path / "configs" / "templates" / vendor / family
+        (base / "SM").mkdir(parents=True)
+        (base / "SM" / ("default" + extension)).write_bytes(b"asset")
+        (base / "AP" / "North").mkdir(parents=True)
+        (base / "AP" / "North" / ("default" + extension)).write_bytes(b"asset")
+        for side in ("Main", "SM"):
+            (base / "PTP" / "twXX-twXX" / side).mkdir(parents=True)
+            (base / "PTP" / "twXX-twXX" / side / ("default" + extension)).write_bytes(b"asset")
+
+    monkeypatch.setattr("provisioner.setup_tools._interface_exists", lambda _: True)
+    monkeypatch.setattr(
+        "provisioner.setup_tools.probe_mikrotik_switch",
+        lambda _cfg: {
+            "reachable": True,
+            "mode": "configured",
+            "status": "ready",
+            "summary": "configured",
+            "actions": [],
+            "checks": [],
+        },
+    )
+
+    checks = {item["id"]: item for item in client.get("/api/setup/readiness").json()["checks"]}
+    template_check = checks["config_templates"]
+    details = {item["device_type"]: item for item in template_check["details"]}
+    assert details["cambium"]["status"] == "ready"
+    assert details["tachyon"]["status"] == "ready"
+    assert details["cambium"]["missing_modes"] == []
+    assert details["tachyon"]["missing_modes"] == []
+
+
 def test_setup_bundle_import_copies_repo_and_optional_system_files(tmp_path, monkeypatch):
     client, _config, data_path = make_client(tmp_path)
 
