@@ -431,6 +431,7 @@
             wake_on_connect: true,
         };
         let readinessRefreshTimer = null;
+        const SETUP_READINESS_DISMISSED_KEY = 'provisionerSetupReadinessDismissed';
 
         // Device vendors — server-injected from the vendor registry
         // (vendor_ui_metadata() in web/api.py, Story 5 / #75). Derived from
@@ -478,6 +479,34 @@
             return (status || 'unknown').toUpperCase();
         }
 
+        function isSetupReadinessDismissed() {
+            try {
+                return localStorage.getItem(SETUP_READINESS_DISMISSED_KEY) === 'true';
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function clearSetupReadinessDismissal() {
+            try {
+                localStorage.removeItem(SETUP_READINESS_DISMISSED_KEY);
+            } catch (error) {
+                // Storage can be unavailable in restricted browser contexts.
+            }
+        }
+
+        function dismissSetupReadinessBanner() {
+            try {
+                localStorage.setItem(SETUP_READINESS_DISMISSED_KEY, 'true');
+            } catch (error) {
+                // The current page can still be dismissed if storage is unavailable.
+            }
+            const banner = document.getElementById('setup-readiness-banner');
+            if (!banner) return;
+            banner.className = 'hidden flex-shrink-0 px-4 py-3 border-b border-gray-300';
+            banner.innerHTML = '';
+        }
+
         async function loadSetupReadiness() {
             try {
                 const response = await fetch('/api/setup/readiness');
@@ -494,6 +523,13 @@
             if (!banner) return;
 
             if (!data || data.status === 'ready') {
+                if (data?.status === 'ready') clearSetupReadinessDismissal();
+                banner.className = 'hidden flex-shrink-0 px-4 py-3 border-b border-gray-300';
+                banner.innerHTML = '';
+                return;
+            }
+
+            if (isSetupReadinessDismissed()) {
                 banner.className = 'hidden flex-shrink-0 px-4 py-3 border-b border-gray-300';
                 banner.innerHTML = '';
                 return;
@@ -516,9 +552,14 @@
                         <div class="text-sm font-semibold">Setup is not complete yet.</div>
                         <div class="text-sm opacity-80">${escapeHtml(switchSummary)}</div>
                     </div>
-                    <a href="/files" class="px-4 py-2 rounded-lg bg-white/80 hover:bg-white text-sm font-semibold text-gray-900 border border-gray-300 self-start sm:self-auto">
-                        Open Setup
-                    </a>
+                    <div class="flex items-center gap-2 self-start sm:self-auto">
+                        <a href="/files" class="px-4 py-2 rounded-lg bg-white/80 hover:bg-white text-sm font-semibold text-gray-900 border border-gray-300">
+                            Open Setup
+                        </a>
+                        <button type="button" onclick="dismissSetupReadinessBanner()" class="w-12 h-12 flex items-center justify-center rounded-lg bg-white/50 hover:bg-white text-gray-700 border border-gray-300 text-xl" aria-label="Dismiss setup readiness notice" title="Dismiss setup readiness notice">
+                            &times;
+                        </button>
+                    </div>
                 </div>
             `;
         }
@@ -710,9 +751,6 @@
                                 message.success ? `Port ${message.port_number}: Complete` : `Port ${message.port_number}: Failed`,
                                 message.success ? 'success' : 'error'
                             );
-                            if (message.success && message.data?.label) {
-                                handleCompletedLabel(message.port_number, message.data.label);
-                            }
                         } else if (message.type === 'credentials_required') {
                             ports[message.port_number].needs_credentials = true;
                             ports[message.port_number].last_error = message.error || 'Invalid credentials';

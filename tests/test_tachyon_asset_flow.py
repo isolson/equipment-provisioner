@@ -1,8 +1,8 @@
-from pathlib import Path
 import logging
 import sqlite3
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -11,8 +11,10 @@ from provisioner.config_store import init_store
 from provisioner.fingerprint import DeviceFingerprint, DeviceType
 from provisioner.handlers.base import DeviceInfo, ProvisioningResult
 
-
-if "rich.console" not in sys.modules:
+try:
+    import rich.console  # noqa: F401
+    import rich.logging  # noqa: F401
+except ImportError:
     rich_module = types.ModuleType("rich")
     rich_console_module = types.ModuleType("rich.console")
     rich_logging_module = types.ModuleType("rich.logging")
