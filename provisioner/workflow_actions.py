@@ -50,7 +50,8 @@ def _checklist_value(state: Any, key: str) -> Any:
 def workflow_for_port(state: Any, mode_config_enabled: bool) -> Dict[str, Any]:
     """Build the workflow contract for one ``PortState``-like object."""
     capabilities = HandlerManager.operator_capabilities_for(
-        getattr(state, "device_type", None)
+        getattr(state, "device_type", None),
+        getattr(state, "device_model", None),
     )
     actions = []  # type: List[Dict[str, str]]
     service_actions = []  # type: List[Dict[str, str]]
