@@ -17,6 +17,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .config_assets import MODE_TO_PTP_SIDE
+from .vendor_registry import config_family_for_model
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,13 +84,22 @@ class ModeConfigManager:
         device_type: str,
         mode: str,
         model: Optional[str] = None,
+        profile: Optional[str] = None,
+        link_profile: Optional[str] = None,
     ) -> Optional[Path]:
         """Get path to a mode config template.
 
-        Search order:
-        1. ``{templates}/{device_type}/{model}-{mode}.json``
-        2. ``{templates}/{device_type}/{mode}.json``
-        3. ``{templates}/{device_type}_{mode}.json`` (legacy)
+        Family assets are resolved as:
+
+        ``{vendor}/{family}/{firmware}/{role}/{profile}/default``
+
+        AP ``profile`` is a direction.  PTP ``link_profile`` is an exact link
+        directory when present, otherwise the approved ``twXX-twXX`` generic
+        directory is used.  ``ptp-a`` is always the Main archive and
+        ``ptp-b`` is always the SM archive.
+
+        Legacy flat templates remain available for models without an approved
+        family tree.
         """
         base_name = self._MODE_TEMPLATE_NAMES.get(mode)
         if base_name is None:
@@ -95,6 +107,100 @@ class ModeConfigManager:
             return None
 
         device_dir = self.templates_path / device_type
+
+        family = config_family_for_model(device_type, model)
+        if family is not None:
+            family_dir = device_dir / family.directory
+            if family_dir.is_dir():
+                role = "AP" if mode == "ap" else "PTP"
+                version_dirs = sorted(
+                    (entry for entry in family_dir.iterdir() if entry.is_dir()),
+                    key=lambda entry: entry.name.lower(),
+                    reverse=True,
+                )
+                # Cambium includes a firmware directory; Tachyon's approved
+                # exports are version-independent and place AP/SM directly
+                # below the family directory.
+                containers = [family_dir] + version_dirs
+                family_profile = profile or "default"
+                if mode in MODE_TO_PTP_SIDE:
+                    side = MODE_TO_PTP_SIDE[mode]
+                    link_names = []
+                    if link_profile:
+                        link_names.append(link_profile)
+                    link_names.append("twXX-twXX")
+                elif mode == "ap":
+                    if family_profile.lower() == "default":
+                        # The family default is AP/default.json, while
+                        # directional profiles are AP/North/default.json.
+                        for version_dir in containers:
+                            role_dir = next(
+                                (
+                                    entry for entry in version_dir.iterdir()
+                                    if entry.is_dir() and entry.name.lower() == role.lower()
+                                ),
+                                None,
+                            )
+                            if role_dir is None:
+                                continue
+                            for extension in (".json", ".tar", ".tar.gz"):
+                                candidate = role_dir / ("default" + extension)
+                                if candidate.is_file():
+                                    return candidate
+                        return None
+                    link_names = [family_profile]
+                else:
+                    link_names = [family_profile]
+
+                for version_dir in containers:
+                    role_dir = next(
+                        (
+                            entry for entry in version_dir.iterdir()
+                            if entry.is_dir() and entry.name.lower() == role.lower()
+                        ),
+                        None,
+                    )
+                    if role_dir is None:
+                        continue
+                    for link_name in link_names:
+                        profile_dir = next(
+                            (
+                                entry for entry in role_dir.iterdir()
+                                if entry.is_dir() and entry.name.lower() == link_name.lower()
+                            ),
+                            None,
+                        )
+                        if profile_dir is None:
+                            continue
+                        if mode in MODE_TO_PTP_SIDE:
+                            profile_dir = next(
+                                (
+                                    entry for entry in profile_dir.iterdir()
+                                    if entry.is_dir() and entry.name.lower() == side.lower()
+                                ),
+                                None,
+                            )
+                            if profile_dir is None:
+                                continue
+                        for extension in (".json", ".tar", ".tar.gz"):
+                            candidate = profile_dir / ("default" + extension)
+                            if candidate.is_file():
+                                return candidate
+                # An installed family tree is authoritative.  Do not fall
+                # back to a vendor-wide AP/PTP file for a family that lacks
+                # the requested role/profile.
+                return None
+            # Preserve legacy flat templates only for installations that have
+            # no structured family tree yet.  Once the library is present,
+            # missing family assets fail closed instead of crossing families.
+            from .vendor_registry import spec_for
+
+            spec = spec_for(device_type)
+            if spec is not None and any(
+                (device_dir / candidate.directory).is_dir()
+                for candidate in spec.config_families
+            ):
+                return None
 
         if device_dir.is_dir():
             # Model-specific template
@@ -124,9 +230,17 @@ class ModeConfigManager:
         device_type: str,
         mode: str,
         model: Optional[str] = None,
+        profile: Optional[str] = None,
+        link_profile: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Load a mode config template as a dictionary."""
-        template_path = self.get_template_path(device_type, mode, model)
+        template_path = self.get_template_path(
+            device_type,
+            mode,
+            model,
+            profile=profile,
+            link_profile=link_profile,
+        )
         if not template_path:
             return None
 
@@ -339,11 +453,20 @@ class ModeConfigManager:
         device_type: str,
     ) -> Dict[str, Any]:
         fields = self.INJECT_FIELDS.get(device_type, [])
+        # Cambium exports wrap the flat device properties in ``device_props``;
+        # mode injection must update that payload so CambiumHandler.apply_config
+        # does not discard the generated hostname/SSID.
+        target = config
+        if (
+            device_type == "cambium"
+            and isinstance(config.get("device_props"), dict)
+        ):
+            target = config["device_props"]
         for field_path, var_name in fields:
             if var_name not in variables:
                 continue
             try:
-                self._set_nested_value(config, field_path, variables[var_name])
+                self._set_nested_value(target, field_path, variables[var_name])
                 logger.debug(f"Injected {field_path} = {variables[var_name]}")
             except (KeyError, IndexError, TypeError) as e:
                 logger.warning(f"Failed to inject {field_path}: {e}")

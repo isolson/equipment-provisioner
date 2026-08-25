@@ -79,22 +79,21 @@ when the knob is active, the effective filter is logged at INFO.
 import logging
 import os
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Type
 
 from .fingerprint import DeviceType
-from .handlers.base import BaseHandler
 from .firmware_sources.base import BaseFirmwareSource
-
-from .handlers.mikrotik import MikrotikHandler
+from .firmware_sources.cambium import CambiumFirmwareSource
+from .firmware_sources.mikrotik import MikrotikFirmwareSource
+from .firmware_sources.tachyon import TachyonFirmwareSource
+from .firmware_sources.ubiquiti import UbiquitiFirmwareSource
+from .handlers.base import BaseHandler
 from .handlers.cambium import CambiumHandler
+from .handlers.mikrotik import MikrotikHandler
 from .handlers.tachyon import TachyonHandler
 from .handlers.tarana import TaranaHandler
 from .handlers.ubiquiti import UbiquitiHandler
-
-from .firmware_sources.mikrotik import MikrotikFirmwareSource
-from .firmware_sources.cambium import CambiumFirmwareSource
-from .firmware_sources.tachyon import TachyonFirmwareSource
-from .firmware_sources.ubiquiti import UbiquitiFirmwareSource
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +115,30 @@ def _parse_vendors_env() -> Optional[FrozenSet[str]]:
 # Optional vendor allowlist, fixed at import (i.e. process start) because
 # the derived views are bound at their consumers' import time.
 VENDORS = _parse_vendors_env()  # type: Optional[FrozenSet[str]]
+
+
+@dataclass(frozen=True)
+class ConfigFamilySpec:
+    """A model family represented in the standard config library."""
+
+    name: str
+    directory: str
+    model_patterns: Tuple[str, ...]
+    roles: Tuple[str, ...] = ("AP", "SM", "PTP")
+
+    def matches(self, model: Optional[str]) -> bool:
+        if not model:
+            return False
+        normalized = " ".join(str(model).lower().strip().split())
+        return any(fnmatchcase(normalized, pattern.lower()) for pattern in self.model_patterns)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "directory": self.directory,
+            "model_patterns": list(self.model_patterns),
+            "roles": list(self.roles),
+        }
 
 
 @dataclass(frozen=True)
@@ -172,6 +195,10 @@ class VendorSpec:
     # (MikroTik: netinstall/ZTP .rsc; Tarana: operator_id only).
     config_template_dir: Optional[str] = None
 
+    # Standard device-config families.  This is metadata only; config
+    # behavior remains in the vendor handler and the resolver.
+    config_families: Tuple[ConfigFamilySpec, ...] = ()
+
     # Kiosk presentation data ({"name", "color"}); the rest of the UI
     # entry (defaultUser, icon) is derived in web/api.py.
     ui_style: Optional[Dict[str, str]] = None
@@ -223,6 +250,28 @@ def spec_for(device_type: str) -> Optional[VendorSpec]:
     if VENDORS is not None and spec.device_type.value not in VENDORS:
         return None
     return spec
+
+
+def config_family_for_model(
+    device_type: str, model: Optional[str]
+) -> Optional[ConfigFamilySpec]:
+    """Return the registry-declared config family for a detected model."""
+    spec = spec_for(device_type)
+    if spec is None:
+        return None
+    for family in spec.config_families:
+        if family.matches(model):
+            return family
+    return None
+
+
+def config_family_metadata() -> Dict[str, List[Dict[str, Any]]]:
+    """Return family metadata for API/UI consumers."""
+    return {
+        spec.device_type.value: [family.as_dict() for family in spec.config_families]
+        for spec in specs()
+        if spec.config_families
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +445,20 @@ register(VendorSpec(
         "epmp 1000": ["epmp1000", "epmp-nongps"],
     },
     config_template_dir="cambium",
+    config_families=(
+        ConfigFamilySpec(
+            name="ePMP 3K",
+            directory="ePMP-3K",
+            model_patterns=("epmp 3000", "epmp 3000l", "epmp 3000 mp"),
+            roles=("AP", "SM"),
+        ),
+        ConfigFamilySpec(
+            name="ePMP 4K",
+            directory="ePMP-4K",
+            model_patterns=("epmp 4518", "epmp 4525", "epmp 4600", "epmp 4600c", "epmp 4625"),
+            roles=("AP", "SM", "PTP"),
+        ),
+    ),
     ui_style={"name": "Cambium", "color": "#1A73E9"},
 ))
 
@@ -423,6 +486,26 @@ register(VendorSpec(
         "tns-100": ["tns-100", "tns100"],
     },
     config_template_dir="tachyon",
+    config_families=(
+        ConfigFamilySpec(
+            name="TNA-301-302",
+            directory="TNA-301-302",
+            model_patterns=("tna-301*", "tna-302*"),
+            roles=("AP", "SM"),
+        ),
+        ConfigFamilySpec(
+            name="TNA-303X",
+            directory="TNA-303X",
+            model_patterns=("tna-303x*",),
+            roles=("AP", "SM", "PTP"),
+        ),
+        ConfigFamilySpec(
+            name="TNA-303L-65",
+            directory="TNA-303L-65",
+            model_patterns=("tna-303l-65*",),
+            roles=("SM",),
+        ),
+    ),
     ui_style={"name": "Tachyon", "color": "#a855f7"},
 ))
 

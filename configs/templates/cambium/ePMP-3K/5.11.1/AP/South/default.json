@@ -1,0 +1,32 @@
+{
+  "device_props": {
+    "networkMode": "2",
+    "mgmtVLANEnable": "1",
+    "mgmtVLANVID": "12",
+    "wirelessDeviceCountryCode": "US",
+    "wirelessInterfaceMode": "1",
+    "wirelessInterfacePTPMode": "0",
+    "wirelessInterfaceTDDFrameSize": "5000",
+    "wirelessInterfaceTDDRatio": "4",
+    "wirelessInterfaceTXPower": "21",
+    "wirelessInterfaceRateMaxMCS": "39",
+    "wirelessInterfaceSSID": "ePMP-3K-SOUTH",
+    "systemNtpServerIPMode": "1",
+    "systemNtpServerPrimaryIP": "time.google.com",
+    "systemNtpServerSecondaryIP": "time.cloudflare.com",
+    "syslogServerIPFirst": "100.126.15.28",
+    "syslogServerPortFirst": "514",
+    "syslogServerLogCLISH": "1",
+    "syslogServerLogDA": "1",
+    "syslogServerLogMask": "31",
+    "syslogServerLogToWeb": "0",
+    "cambiumDeviceAgentCNSURL": "cnmaestro.infra.treehouse.mn",
+    "cambiumDeviceAgentEnable": "1",
+    "cambiumDeviceAgentMGMTRoutingEnable": "0",
+    "cambiumDeviceAgentZeroTouchEnable": "1",
+    "snmpProtocolVersion": "1",
+    "snmpRemoteAccess": "1",
+    "cambiumSSHServerEnable": "1",
+    "cambiumTelnetServerEnable": "0"
+  }
+}
