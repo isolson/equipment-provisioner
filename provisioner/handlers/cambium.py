@@ -1307,7 +1307,10 @@ class CambiumHandler(BaseHandler):
         permission-restricted temporary JSON file, imported, and then read
         back through the existing fail-closed verifier.
         """
-        if not self.interface or not isinstance(config.get("device_props"), dict):
+        native_import = bool(
+            self.interface and isinstance(config.get("device_props"), dict)
+        )
+        if not native_import:
             success = await self.apply_config(config)
         else:
             temp_path = None
@@ -1331,6 +1334,16 @@ class CambiumHandler(BaseHandler):
 
         if not success:
             return False
+
+        if native_import:
+            # A Cambium native import can restart the management service when
+            # the radio role changes.  Do not read through the old session or
+            # fail while the device is between web-server states.
+            if not await self.wait_for_reboot(timeout=120):
+                logger.error(
+                    f"Cambium device did not become login-ready after mode import on {self.ip}"
+                )
+                return False
 
         verification = await self.verify_config()
         if verification is not True:
