@@ -3004,7 +3004,11 @@ async def _run_apply_mode(
             ptp_link_id = None
         else:
             # PTP: auto-assign side
-            side = port_manager.get_available_ptp_side(req.my_tower, req.remote_tower)
+            side = port_manager.get_available_ptp_side(
+                req.my_tower,
+                req.remote_tower,
+                port_num=port_number,
+            )
             mode = f"ptp-{side}"
             naming = mcm.generate_ptp_naming(
                 req.my_tower, req.remote_tower, side, device_type,

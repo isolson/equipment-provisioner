@@ -165,6 +165,20 @@ def test_cambium_mode_injection_updates_wrapped_device_props():
     assert "wirelessInterfaceSSID" not in rendered
 
 
+def test_legacy_cambium_ptp_templates_select_eptp_driver():
+    """Cambium's writable ePTP selector is protocol mode, not effective status."""
+    templates = Path(__file__).parents[1] / "configs/templates"
+    manager = ModeConfigManager(str(templates))
+
+    assert manager.load_template("cambium", "ptp-a")[
+        "wirelessInterfaceProtocolMode"
+    ] == "3"
+    assert manager.load_template("cambium", "ptp-b")[
+        "wirelessInterfaceProtocolMode"
+    ] == "3"
+    assert "cambiumSubModeType" not in manager.load_template("cambium", "ptp-a")
+
+
 def test_config_asset_api_lists_and_uploads_structured_assets(tmp_path):
     client, data_path = make_client(tmp_path)
     existing = data_path / "configs/templates/cambium/ePMP-3K/5.11.1/SM/default.json"

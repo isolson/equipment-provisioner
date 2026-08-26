@@ -2211,17 +2211,48 @@ class PortManager:
         return {k: v[0] for k, v in self._ptp_links.items()}
 
     def get_available_ptp_side(
-        self, my_tower: int, remote_tower: int
+        self,
+        my_tower: int,
+        remote_tower: int,
+        port_num: Optional[int] = None,
     ) -> str:
         """Determine which PTP side to assign (auto A or B).
+
+        When a port already owns one side of this link, preserve that side so
+        an operator can safely reapply a corrected profile.  Without the
+        port hint, the historical auto-assignment behavior is unchanged.
 
         Returns "a" if no existing link, or "a" side is unoccupied.
         Returns "b" if side A is already taken for this link.
         """
         from .mode_config import make_ptp_link_id
         link_id = make_ptp_link_id(my_tower, remote_tower)
+
+        # The link registry is in-memory and may be rebuilt later than the
+        # per-port state.  Prefer the port's recorded side when available so
+        # a restart followed by a corrective reapply cannot silently swap
+        # Main and SM.
+        if port_num is not None:
+            state = self.port_states.get(port_num)
+            if (
+                state
+                and state.ptp_link_id == link_id
+                and state.device_mode in ("ptp-a", "ptp-b")
+            ):
+                return state.device_mode[-1]
+
         entry = self._ptp_links.get(link_id)
-        if entry is None or entry[0].get("side_a_port") is None:
+        if entry is None:
+            return "a"
+
+        link_data = entry[0]
+        if port_num is not None:
+            if link_data.get("side_a_port") == port_num:
+                return "a"
+            if link_data.get("side_b_port") == port_num:
+                return "b"
+
+        if link_data.get("side_a_port") is None:
             return "a"
         return "b"
 
