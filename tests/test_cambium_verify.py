@@ -32,8 +32,13 @@ async def test_mode_config_uses_native_import_and_verifies(monkeypatch):
     async def fake_verify_config():
         return True
 
+    async def fake_wait_for_reboot(timeout):
+        seen["wait_timeout"] = timeout
+        return True
+
     monkeypatch.setattr(h, "apply_config_file", fake_apply_config_file)
     monkeypatch.setattr(h, "verify_config", fake_verify_config)
+    monkeypatch.setattr(h, "wait_for_reboot", fake_wait_for_reboot)
 
     assert await h.apply_mode_config(
         {"device_props": {"wirelessInterfacePTPMode": "1"}}
@@ -42,6 +47,7 @@ async def test_mode_config_uses_native_import_and_verifies(monkeypatch):
     assert seen["payload"] == {
         "device_props": {"wirelessInterfacePTPMode": "1"}
     }
+    assert seen["wait_timeout"] == 120
     assert not seen["path"].exists()
 
 
