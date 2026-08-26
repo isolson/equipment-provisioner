@@ -3051,7 +3051,7 @@ async def _run_apply_mode(
             # Apply config: template + naming injection, or just naming if no template
             if template:
                 rendered = mcm.render_template(template, naming, device_type)
-                success = await handler.apply_config(rendered)
+                success = await handler.apply_mode_config(rendered)
             else:
                 # No template — just apply hostname/SSID via apply_ap_naming
                 success = await handler.apply_ap_naming(

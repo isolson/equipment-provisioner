@@ -216,6 +216,15 @@ class BaseHandler(ABC):
         """
         pass
 
+    async def apply_mode_config(self, config: Dict[str, Any]) -> bool:
+        """Apply a rendered AP/PTP mode configuration.
+
+        Most handlers can use their normal configuration API for mode changes.
+        A handler with a vendor-native import path can override this hook while
+        keeping that behavior out of the shared mode orchestration.
+        """
+        return await self.apply_config(config)
+
     @abstractmethod
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from a file.

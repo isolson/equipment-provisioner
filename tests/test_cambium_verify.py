@@ -1,5 +1,8 @@
 """Regression tests for Cambium config verification honesty."""
 
+import json
+from pathlib import Path
+
 from provisioner.handlers.base import UNVERIFIED, DeviceInfo
 from provisioner.handlers.cambium import CambiumHandler
 
@@ -12,6 +15,34 @@ def _handler() -> CambiumHandler:
     h._stok = "stok"
     h._cookie_file = "/tmp/does-not-matter"
     return h
+
+
+async def test_mode_config_uses_native_import_and_verifies(monkeypatch):
+    h = _handler()
+    h.interface = "eth0.1996"
+    seen = {}
+
+    async def fake_apply_config_file(path):
+        path_obj = Path(path)
+        seen["path"] = path_obj
+        seen["exists_during_import"] = path_obj.is_file()
+        seen["payload"] = json.loads(path_obj.read_text())
+        return True
+
+    async def fake_verify_config():
+        return True
+
+    monkeypatch.setattr(h, "apply_config_file", fake_apply_config_file)
+    monkeypatch.setattr(h, "verify_config", fake_verify_config)
+
+    assert await h.apply_mode_config(
+        {"device_props": {"wirelessInterfacePTPMode": "1"}}
+    ) is True
+    assert seen["exists_during_import"] is True
+    assert seen["payload"] == {
+        "device_props": {"wirelessInterfacePTPMode": "1"}
+    }
+    assert not seen["path"].exists()
 
 
 async def test_verify_config_not_success_with_nothing_to_compare(monkeypatch, fast_sleep):

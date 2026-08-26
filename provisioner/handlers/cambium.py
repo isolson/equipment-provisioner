@@ -1298,6 +1298,48 @@ class CambiumHandler(BaseHandler):
             logger.error(f"Failed to apply config: {e}")
             return False
 
+    async def apply_mode_config(self, config: Dict[str, Any]) -> bool:
+        """Apply a rendered mode config through Cambium's native importer.
+
+        Cambium's exported ``device_props`` payloads are accepted by
+        ``config_import`` but are rejected by the smaller ``set_param`` API on
+        ePMP-AX hardware.  Mode templates are rendered in memory, written to a
+        permission-restricted temporary JSON file, imported, and then read
+        back through the existing fail-closed verifier.
+        """
+        if not self.interface or not isinstance(config.get("device_props"), dict):
+            success = await self.apply_config(config)
+        else:
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", prefix="cambium_mode_", delete=False
+                ) as config_file:
+                    json.dump(config, config_file)
+                    config_file.flush()
+                    temp_path = config_file.name
+                success = await self.apply_config_file(temp_path)
+            except Exception as e:
+                logger.error(f"Failed to stage Cambium mode config: {e}")
+                return False
+            finally:
+                if temp_path:
+                    try:
+                        os.unlink(temp_path)
+                    except OSError:
+                        pass
+
+        if not success:
+            return False
+
+        verification = await self.verify_config()
+        if verification is not True:
+            logger.error(
+                f"Cambium mode config verification did not pass on {self.ip}"
+            )
+            return False
+        return True
+
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from JSON file.
 
@@ -1396,7 +1438,7 @@ class CambiumHandler(BaseHandler):
                 return False
 
             response = stdout.decode("utf-8", errors="ignore")
-            logger.info(f"config_import response: {response[:500]}")
+            logger.info("config_import returned a response from the device")
 
             # Check upload success
             try:
@@ -1689,10 +1731,9 @@ class CambiumHandler(BaseHandler):
                 return True
             else:
                 err = resp_data.get("err", "")
-                # Log full response for debugging
                 logger.error(
-                    f"set_param failed on {self.ip}: success={success_val}, err={err!r}, "
-                    f"full_response={response[:2000]}"
+                    f"set_param failed on {self.ip}: success={success_val}, "
+                    f"error_present={bool(err)}"
                 )
                 return False
         except json.JSONDecodeError:
@@ -1704,7 +1745,7 @@ class CambiumHandler(BaseHandler):
             if "success" in response.lower():
                 self._last_applied_config = dict(props)
                 return True
-            logger.error(f"set_param returned non-JSON: {response[:500]}")
+            logger.error("set_param returned a non-JSON response")
             return False
 
     async def _apply_tar_config_curl(self, config_path: str) -> bool:
