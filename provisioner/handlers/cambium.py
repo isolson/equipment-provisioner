@@ -1345,13 +1345,32 @@ class CambiumHandler(BaseHandler):
                 )
                 return False
 
-        verification = await self.verify_config()
+        applied_props = self._last_applied_config or {}
+        verification = await self.verify_config(
+            expected_values=self._mode_verification_values(applied_props)
+        )
         if verification is not True:
             logger.error(
                 f"Cambium mode config verification did not pass on {self.ip}"
             )
             return False
         return True
+
+    @classmethod
+    def _mode_verification_values(cls, props: Dict[str, Any]) -> Dict[str, Any]:
+        """Select mode fields that must survive a native import.
+
+        Cambium devices can clamp transmit power to the country and hardware
+        limit during an import.  The read-back value is therefore not a stable
+        mode-application assertion.  Keep all other safe scalar properties,
+        including the PTP role and injected identity fields, fail-closed.
+        """
+        normalized_by_device = frozenset(("wirelessInterfaceTXPower",))
+        return {
+            key: value
+            for key, value in cls._verification_values(props).items()
+            if key not in normalized_by_device
+        }
 
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from JSON file.

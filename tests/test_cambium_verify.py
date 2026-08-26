@@ -27,9 +27,11 @@ async def test_mode_config_uses_native_import_and_verifies(monkeypatch):
         seen["path"] = path_obj
         seen["exists_during_import"] = path_obj.is_file()
         seen["payload"] = json.loads(path_obj.read_text())
+        h._last_applied_config = seen["payload"]["device_props"]
         return True
 
-    async def fake_verify_config():
+    async def fake_verify_config(expected_values=None):
+        seen["expected_values"] = expected_values
         return True
 
     async def fake_wait_for_reboot(timeout):
@@ -41,11 +43,22 @@ async def test_mode_config_uses_native_import_and_verifies(monkeypatch):
     monkeypatch.setattr(h, "wait_for_reboot", fake_wait_for_reboot)
 
     assert await h.apply_mode_config(
-        {"device_props": {"wirelessInterfacePTPMode": "1"}}
+        {
+            "device_props": {
+                "wirelessInterfacePTPMode": "1",
+                "wirelessInterfaceTXPower": "20",
+            }
+        }
     ) is True
     assert seen["exists_during_import"] is True
     assert seen["payload"] == {
-        "device_props": {"wirelessInterfacePTPMode": "1"}
+        "device_props": {
+            "wirelessInterfacePTPMode": "1",
+            "wirelessInterfaceTXPower": "20",
+        }
+    }
+    assert seen["expected_values"] == {
+        "wirelessInterfacePTPMode": "1",
     }
     assert seen["wait_timeout"] == 120
     assert not seen["path"].exists()
