@@ -467,7 +467,16 @@ async def test_apply_config_file_reduced_tar_merges_live_config(
 
     reduced_config = json.loads(json.dumps(_full_export_config()))
     live_config["wireless"]["radios"]["wlan0"]["vaps"][0]["mode"] = "ap"
-    reduced_config["wireless"]["radios"]["wlan0"]["vaps"][0]["mode"] = "ap"
+    live_config["wireless"]["radios"]["wlan0"]["vaps"][0]["security"] = {
+        "mode": "none"
+    }
+    reduced_config["wireless"]["radios"]["wlan0"]["vaps"] = [
+        {
+            "enabled": True,
+            "mode": "ap",
+            "network": {"zone": "wan"},
+        }
+    ]
     ethernet = reduced_config.pop("ethernet")
     ethernet["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] = True
     reduced_config["network"]["ethernet"] = ethernet
@@ -501,6 +510,10 @@ async def test_apply_config_file_reduced_tar_merges_live_config(
     assert posted["network"]["zones"]["wan"]["management"]["use_zone_ip"] is True
     assert posted["ethernet"]["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] is True
     assert "ethernet" not in posted["network"]
+    assert posted["wireless"]["radios"]["wlan0"]["ssid"] == "WEST"
+    assert posted["wireless"]["radios"]["wlan0"]["vaps"][0]["ssid"] == "WEST"
+    assert "security" in posted["wireless"]["radios"]["wlan0"]["vaps"][0]
+    assert "sta_profiles" in posted["wireless"]["radios"]["wlan0"]["vaps"][0]
 
 
 # ---------------------------------------------------------------------------

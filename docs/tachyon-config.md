@@ -36,7 +36,10 @@ The provisioner accepts the older reduced runtime layout where Ethernet is
 under `network.ethernet`. Before it sends the request, the Tachyon handler
 moves that section to the top level and removes the malformed nested copy.
 The handler merges this reduced layout with the live configuration. This keeps
-the live DHCP scopes, interface list, and local fallback account.
+the live DHCP scopes, interface list, local fallback account, and wireless VAP
+fields. The handler also preserves live VAP fields when a reduced export
+contains only a partial `vaps[]` entry. This supplies the radio SSID required by
+the Tachyon API without copying a captured static IP or device identity.
 
 ## Apply behavior
 

@@ -1132,6 +1132,14 @@ class TachyonHandler(BaseHandler):
             vaps = radio.get("vaps", [])
             if not isinstance(vaps, list):
                 continue
+            if radio_name == "wlan0" and "ssid" not in radio:
+                for vap in vaps:
+                    if isinstance(vap, dict) and isinstance(vap.get("ssid"), str) and vap["ssid"]:
+                        radio["ssid"] = vap["ssid"]
+                        logger.info(
+                            "Added default wireless.radios.wlan0.ssid from the first VAP for Tachyon config apply"
+                        )
+                        break
             for index, vap in enumerate(vaps):
                 if not isinstance(vap, dict):
                     continue
@@ -1424,6 +1432,50 @@ class TachyonHandler(BaseHandler):
         """
         return deep_merge(base, overlay)
 
+    def _merge_reduced_config(self, base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge a reduced export without dropping live wireless VAP fields.
+
+        The shared merge rule replaces lists. Older Tachyon profiles contain a
+        partial ``vaps`` list, so replacing it would remove the live SSID,
+        security, and station-profile fields required by the device API.
+        Native full exports do not use this path.
+        """
+        merged = self._deep_merge(base, overlay)
+        base_radios = base.get("wireless", {}).get("radios", {})
+        overlay_radios = overlay.get("wireless", {}).get("radios", {})
+        merged_radios = merged.get("wireless", {}).get("radios", {})
+        if not isinstance(base_radios, dict) or not isinstance(overlay_radios, dict):
+            return merged
+        if not isinstance(merged_radios, dict):
+            return merged
+
+        for radio_name, overlay_radio in overlay_radios.items():
+            base_radio = base_radios.get(radio_name)
+            merged_radio = merged_radios.get(radio_name)
+            if not isinstance(base_radio, dict) or not isinstance(overlay_radio, dict):
+                continue
+            if not isinstance(merged_radio, dict):
+                continue
+            base_vaps = base_radio.get("vaps")
+            overlay_vaps = overlay_radio.get("vaps")
+            if not isinstance(base_vaps, list) or not isinstance(overlay_vaps, list):
+                continue
+
+            merged_vaps = []
+            for index, overlay_vap in enumerate(overlay_vaps):
+                if (
+                    index < len(base_vaps)
+                    and isinstance(base_vaps[index], dict)
+                    and isinstance(overlay_vap, dict)
+                ):
+                    merged_vaps.append(self._deep_merge(base_vaps[index], overlay_vap))
+                else:
+                    merged_vaps.append(overlay_vap)
+            if len(base_vaps) > len(overlay_vaps):
+                merged_vaps.extend(base_vaps[len(overlay_vaps):])
+            merged_radio["vaps"] = merged_vaps
+        return merged
+
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from JSON file or tarball.
 
@@ -1458,7 +1510,7 @@ class TachyonHandler(BaseHandler):
                 try:
                     current_config = await self._api_request("GET", self.API_CONFIG)
                     if isinstance(current_config, dict):
-                        config = self._deep_merge(current_config, config)
+                        config = self._merge_reduced_config(current_config, config)
                         logger.info(f"Merged partial template config into current device config")
                 except Exception as e:
                     logger.warning(f"Could not GET current config for merge, applying template as-is: {e}")
