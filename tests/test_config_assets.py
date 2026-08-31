@@ -374,6 +374,37 @@ def test_ptp_settings_generation_requires_vendor_radio_settings():
         )
 
 
+def test_cambium_ptp_sm_settings_use_generated_preferred_ap_ssid():
+    manager = ModeConfigManager("unused")
+    naming = manager.generate_ptp_naming(32, 18, "b", "cambium")
+    config = {
+        "device_props": {
+            "wirelessInterfaceSSID": "captured-ssid",
+            "wirelessInterfaceMode": "2",
+            "wirelessInterfacePTPMode": "1",
+            "wirelessInterfaceProtocolMode": "3",
+            "wirelessInterfaceTDDFrameSize": "5000",
+            "wirelessInterfaceTDDRatio": "2",
+            "centerFrequency": "6565",
+            "prefferedAPTable": [
+                {
+                    "prefferedListTableEntrySSID": "captured-ssid",
+                    "prefferedListTableEntryKEY": "kept-private",
+                }
+            ],
+        }
+    }
+
+    generated = manager.generate_ptp_settings(
+        config, naming, "cambium", "b", "ePMP 4616"
+    )
+
+    props = generated["device_props"]
+    assert props["wirelessInterfaceSSID"] == naming["ssid"]
+    assert props["prefferedAPTable"][0]["prefferedListTableEntrySSID"] == naming["ssid"]
+    assert props["prefferedAPTable"][0]["prefferedListTableEntryKEY"] == "kept-private"
+
+
 def test_config_asset_api_lists_and_uploads_structured_assets(tmp_path):
     client, data_path = make_client(tmp_path)
     existing = data_path / "configs/templates/cambium/ePMP-3K/5.11.1/SM/default.json"

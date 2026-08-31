@@ -344,6 +344,28 @@ class CambiumHandler(BaseHandler):
             raise ValueError(
                 "Cambium PTP settings profile is missing: " + ", ".join(missing)
             )
+
+        # On the SM side, Cambium registers against the SSID in the preferred
+        # AP table. The top-level wirelessInterfaceSSID field is an AP field
+        # and does not update that table. Keep the profile's security key and
+        # other radio settings, but point its first preferred AP entry at the
+        # generated link identity.
+        if side == "b":
+            preferred = props.get("prefferedAPTable")
+            if isinstance(preferred, list):
+                entries = preferred
+            elif isinstance(preferred, dict):
+                entries = list(preferred.values())
+            else:
+                entries = []
+            ssid = props.get("wirelessInterfaceSSID")
+            if ssid:
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    if "prefferedListTableEntrySSID" in entry:
+                        entry["prefferedListTableEntrySSID"] = ssid
+                        break
         return config
 
     # Model to firmware filename pattern mapping
