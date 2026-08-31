@@ -1,12 +1,12 @@
 # New Hardware Provisioning SOP
 
-Use this procedure before you add a vendor, model, firmware version, or field
-configuration to the provisioner.
+Use this procedure before you add hardware support or a field configuration to
+the provisioner.
 
 The procedure has four goals:
 
 1. Record the intended device behavior.
-2. Separate portable configuration from device identity.
+2. Capture the vendor process and configuration format.
 3. Prove the full provisioning path on hardware.
 4. Leave enough evidence for another operator to repeat the result.
 
@@ -22,26 +22,37 @@ Record these items:
 - Device roles, such as SM, AP, Main, or PTP SM.
 - Management VLAN, management protocol, address method, and DNS source.
 - Required services, such as SNMP, syslog, NTP, SSH, and controller access.
-- Wireless interfaces, station-profile count, profile names, priorities, and security mode.
+- Wireless association policy, such as any compatible AP or a preferred AP list.
+- Wireless security requirements and optional profile behavior.
 - Fields that must stay unique per device, such as hostname, serial number, MAC address, BSSID, and static IP address.
 - Fields that contain secrets, such as passwords, PSKs, SNMP communities, and private keys.
 - The expected result after a reboot and after a firmware update.
 - Whether the normal path must run without operator input.
 
-Treat profile names as site data. The provisioner must support zero, one, or many
-station profiles. It must not require names such as `NORTH`, `EAST`, `SOUTH`,
-or `WEST`.
+Treat device names and wireless profiles as deployment data. The provisioner
+must support the device behavior that the selected deployment requires.
+It must not require one site's names or number of profiles.
 
 ## 2. Gather source evidence
 
-Collect the source material before you build a template.
+Collect the source material before you build a configuration asset.
 
 - Get the vendor API or export documentation.
 - Capture one factory-default device before you change it.
 - Capture one working device for each required firmware version.
 - Capture one example for each role that uses different configuration.
+- Capture a `.har` file during login, download, upload, apply, polling, reboot, and readback.
 - Record the export format, firmware version, model, and capture date.
 - Keep the original exports in protected runtime storage.
+- Keep the original `.har` file in protected runtime storage.
+
+Use the `.har` file to record the vendor process. Record the request method,
+URL path, content type, request shape, response shape, status, and timing.
+Remove cookies, credentials, tokens, and secret values from any working copy.
+
+Record the exact steps for configuration download and upload. Include the file
+name, upload field, wrapper object, content type, apply request, and polling
+request. Record whether the vendor uses a full import or a per-field operation.
 
 Use a working export as evidence, not as a ready-made portable template. A
 working export can contain device identity, static addresses, and secrets.
@@ -50,7 +61,8 @@ CAUTION: Do not commit customer exports or real secrets. They can expose device
 access, wireless access, or private network data.
 
 Inspect source files with secret values masked. Record field names and value
-types. Record secret presence, not secret values.
+types. Record secret presence, not secret values. Do not treat a downloaded
+file as a valid upload until the bench accepts it.
 
 ## 3. Classify every field
 
@@ -91,7 +103,26 @@ Keep vendor behavior in the vendor handler. Keep the shared provisioning engine
 vendor-neutral. Follow [AGENTS.md](../AGENTS.md) and
 [HANDLER_DEVELOPMENT.md](HANDLER_DEVELOPMENT.md).
 
-## 5. Add the implementation
+## 5. Map the device modes
+
+Define the relationship between the initial configuration and each operating
+mode before you add mode code.
+
+- Name the initial provisioning mode.
+- List the available operating modes and their required input.
+- Record which mode changes happen after initial provisioning.
+- Record which values each mode changes, preserves, or replaces.
+- Record how two devices pair for a point-to-point mode.
+- Record how the operator returns a device to the initial mode.
+- If modes use different configuration documents, use separate assets.
+
+Do not assume that a mode changes only a name or an SSID. Use exports and HAR
+files to identify every request and field that the vendor changes.
+
+The selected mode is authoritative. Do not infer it from a device name, SSID,
+model text, or an existing field.
+
+## 6. Add the implementation
 
 Follow the existing vendor checklist before you add a new handler or model.
 
@@ -117,7 +148,7 @@ runtime procedure.
 Load device credentials from protected host configuration. Do not place secret
 values in command arguments, shell history, logs, or the pull request.
 
-## 6. Prepare the bench
+## 7. Prepare the bench
 
 Before you connect a device, complete these actions:
 
@@ -137,7 +168,7 @@ vendor provides a handler logout operation, use it.
 CAUTION: Do not reset a device until you save the current export and the test
 has approval for the reset. A reset can remove the only working recovery path.
 
-## 7. Run the hardware validation
+## 8. Run the hardware validation
 
 If the vendor supports factory-state provisioning, run the full flow from
 factory state.
@@ -185,21 +216,21 @@ Record a pass or failure for each item that the intent record requires:
 - Controller or management endpoint access.
 - SSH access and Telnet state.
 - Wireless association and radio mode.
-- Station-profile count, names, priorities, and WPA2 security.
+- Optional wireless profiles, association behavior, priorities, and security.
 
 The validation must use the correct role asset. An AP test does not prove an SM
 profile. An SM test does not prove a PTP side.
 
-## 8. Test configuration edge cases
+## 9. Test configuration edge cases
 
 If a case applies to the vendor, run the case:
 
 - A full export with secrets.
-- A reduced profile with no station profiles.
-- A reduced profile with one station profile.
-- A reduced profile with multiple station profiles.
-- A profile with equal priorities.
-- A profile with different priorities.
+- A reduced profile with no optional profile block.
+- A reduced profile with one optional profile.
+- A reduced profile with multiple optional profiles.
+- A profile with equal priority values.
+- A profile with different priority values.
 - A firmware version with changed interface or DHCP fields.
 - An unsupported field that the vendor must skip.
 - A model that requires a hardware-specific field and a model that does not.
@@ -210,7 +241,7 @@ If a case applies to the vendor, run the case:
 For a full export, validate that the apply request uses the native import
 operation. Do not send a full export through a per-field operation.
 
-## 9. Record the result
+## 10. Record the result
 
 Add this information to the pull request:
 
@@ -228,7 +259,7 @@ Add this information to the pull request:
 Never include passwords, PSKs, private keys, SNMP communities, session tokens,
 or customer identity values in the pull request.
 
-## 10. Run the software gates
+## 11. Run the software gates
 
 Run these commands from the repository root:
 
@@ -245,7 +276,7 @@ Run focused tests for the changed handler before the full test suite. Run
 The pull request is ready after the software gates pass, the hardware result is
 repeatable, and the rollback path is documented.
 
-## 11. Restore the bench
+## 12. Restore the bench
 
 After validation, complete these actions:
 
@@ -260,22 +291,20 @@ Use the documented deployment rollback procedure in
 [BRANCHING.md](BRANCHING.md). Do not leave the production bench on an unapproved
 feature branch.
 
-## Recent lessons
+## Reusable lessons
 
-These lessons came from Cambium and Tachyon field audits:
+These lessons apply to every vendor audit:
 
 - A full export and a reduced profile need different apply semantics.
 - A successful HTTP response does not prove that the device accepted a field.
 - A list merge can replace every existing item and silently remove required fields.
-- A working firmware export is evidence for that firmware, not proof for every firmware version.
-- DHCP interface changes require export comparison and a clean-device test.
-- Station-profile names, counts, WPA2 keys, and priorities belong to the selected organization and role.
-- A generic handler must preserve arbitrary station-profile lists without requiring a site naming scheme.
-- Management services must be read back after the device reboots.
-- Cambium full exports use native `config_import` with `skipIllegal=1`.
-- Cambium full exports never use `set_param`.
-- Tachyon audits compare `ethernet.ports`, management DHCP, and `sta_profiles` across firmware versions.
-- Model-specific fields need tests for models that require them and models that do not.
+- A working export is evidence for one firmware version, not every firmware version.
+- A changed interface or address path requires export comparison and a clean-device test.
+- Optional profiles belong to the selected organization and role.
+- A generic handler must preserve optional profile data without requiring one naming scheme.
+- Management services need a readback after the device reboots.
+- A vendor full-import operation must not use a per-field operation.
+- A mode change needs its own asset and hardware result when it changes more than identity.
 
 For vendor-specific rules, read [cambium-config.md](cambium-config.md),
 [HANDLER_DEVELOPMENT.md](HANDLER_DEVELOPMENT.md), and the vendor API
