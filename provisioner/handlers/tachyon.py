@@ -1001,6 +1001,19 @@ class TachyonHandler(BaseHandler):
                     "Added default network.zones.wan.dhcp.enabled_options for Tachyon config apply"
                 )
 
+        # The promoted 30x baseline was created from a reduced export that
+        # placed Ethernet below ``network``.  Firmware 1.12 and 1.15 live
+        # exports both require ``ethernet`` at the document root.  Promote
+        # the legacy layout before inspecting or posting the config.  If a
+        # correct root section already exists, it is authoritative and the
+        # malformed duplicate is removed.
+        legacy_ethernet = network.get("ethernet") if isinstance(network, dict) else None
+        if isinstance(legacy_ethernet, dict):
+            if not isinstance(config.get("ethernet"), dict):
+                config["ethernet"] = legacy_ethernet
+                logger.info("Promoted legacy network.ethernet to top-level ethernet")
+            network.pop("ethernet", None)
+
         ethernet_ports = (
             config.get("ethernet", {}).get("ports", {})
             if isinstance(config.get("ethernet"), dict)

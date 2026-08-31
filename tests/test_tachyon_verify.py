@@ -251,6 +251,76 @@ async def test_apply_config_adds_missing_full_export_schema_defaults(fake_curl):
     assert posted["ethernet"]["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] is True
 
 
+async def test_apply_config_promotes_legacy_network_ethernet_and_preserves_dhcp(
+    fake_curl,
+):
+    """The reduced promoted archive used the old nested Ethernet layout."""
+    h = _curl_handler()
+    config = _full_export_config()
+    ethernet = config.pop("ethernet")
+    config["network"]["ethernet"] = ethernet
+    config["network"]["zones"].update(
+        {
+            "lan": {
+                "dhcp": {
+                    "enabled": True,
+                    "first": "192.0.2.10",
+                    "last": "192.0.2.20",
+                }
+            },
+            "local": {
+                "dhcp": {
+                    "enabled": True,
+                    "first": "198.51.100.10",
+                    "last": "198.51.100.20",
+                }
+            },
+        }
+    )
+    config["network"]["zones"]["wan"].update(
+        {
+            "dhcp": {"broadcast": False, "custom_dns": False},
+            "management": {
+                "enabled": True,
+                "vlan": 12,
+                "proto": "802.1q",
+                "use_zone_ip": True,
+                "ip": {"enabled": False},
+            },
+            "custom_mac": {"enabled": False},
+        }
+    )
+    posted = {}
+
+    def route(argv, stdin):
+        method = argv[argv.index("-X") + 1]
+        if method == "POST":
+            posted.update(curl_config_data(stdin))
+            return (0, json.dumps({}))
+        if method == "GET":
+            return (0, json.dumps(posted))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_input_handler(route)
+
+    assert await h.apply_config(config) is True
+    assert "ethernet" not in posted["network"]
+    assert posted["ethernet"] == ethernet
+    assert posted["network"]["zones"]["wan"]["dhcp"] == {
+        "broadcast": False,
+        "custom_dns": False,
+        "enabled_options": {
+            "log_server": True,
+            "ntp_server": True,
+            "timezone_offset": True,
+        },
+    }
+    assert posted["network"]["zones"]["wan"]["management"]["vlan"] == 12
+    assert posted["network"]["zones"]["wan"]["management"]["use_zone_ip"] is True
+    assert posted["network"]["zones"]["lan"]["dhcp"]["enabled"] is True
+    assert posted["network"]["zones"]["local"]["dhcp"]["enabled"] is True
+
+
 async def test_apply_config_file_tar_posts_authoritative_export_without_deep_merge(
     tmp_path, fake_curl, fast_sleep
 ):
