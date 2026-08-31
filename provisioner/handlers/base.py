@@ -225,6 +225,16 @@ class BaseHandler(ABC):
         """
         return await self.apply_config(config)
 
+    async def apply_antenna_gain(
+        self, gain_db: Optional[int] = None, model: Optional[str] = None
+    ) -> bool:
+        """Apply an optional post-provision antenna setting.
+
+        Vendors that do not need this setting keep the no-op default.  The
+        Cambium handler owns its connectorized-radio detection and write path.
+        """
+        return True
+
     @abstractmethod
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from a file.

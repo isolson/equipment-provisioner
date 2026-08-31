@@ -6,8 +6,9 @@
 > (vendor-touchpoint map), `docs/epic-vendor-isolation-refactor.md` (epic #69),
 > `docs/HANDLER_DEVELOPMENT.md` (handler properties and class traits).
 >
-> **This is a design document. It changes no production code.** Downstream stories
-> R1–R6 implement it. Anything the repo cannot answer is flagged in §6.7
+> This document describes the resolver contract. Shared Cambium field-export
+> handling is implemented in the runtime catalog and Cambium handler. Anything
+> the repo cannot answer is flagged in §6.7
 > ("Hardware follow-ups") and §7 ("Open decisions") — per the epic's rule, none of
 > those cells are guessed.
 
@@ -18,8 +19,8 @@ device for this job?"* — upstream of the provisioning engine. It replaces exac
 one call site (`main.py:599`). It does not change:
 
 - `BaseHandler.provision()` or any handler `apply_config` / `apply_config_file`
-- `ConfigStore.get_config_template()` lookup order, `CONFIG_MODEL_ALIASES`, or the
-  class-level handler traits that gate them
+- `ConfigStore.get_config_template()` family and legacy lookup behavior,
+  `CONFIG_MODEL_ALIASES`, or the class-level handler traits that gate them
 - the `apply_config_{vendor}` feature-flag gate in `main.py`
 - mode templates (`mode_config.py`) and their `{{placeholder}}` rendering — still
   the **only** sanctioned placeholder path
@@ -741,6 +742,41 @@ Out of scope by construction; the resolver is never invoked for it.
 | H10 | Tachyon | TNS switches use `config_after_all_firmware` (device leaves the provisioning network after config) — confirm capture-before-config ordering suffices for switch snapshots | R4 | bench |
 
 ---
+
+## 6.8 Cambium shared field-export profiles
+
+The canonical shared SM profile is resolved before a model-family fallback:
+
+`configs/templates/cambium/shared/5.11.1/SM/default.json`
+
+This path is also the active runtime path under:
+
+`/var/lib/provisioner/repo/configs/templates/cambium/shared/5.11.1/SM/default.json`
+
+The resolver uses it for Force 300, ePMP 3K, ePMP 4K, 4600C, and unknown
+Cambium models when the file is present. Existing ePMP-3K and ePMP-4K files
+remain fallbacks.
+
+The `/files` upload API requires an explicit **Field deployment export** type
+and role. It recognizes the wrapped `device_props` plus `template_props`
+format. The selected role is authoritative. It does not infer role from SSID,
+model, or other text.
+
+The exact export is stored in private runtime storage. The active copy is
+replaced with an atomic rename. Protected content endpoints return metadata
+only. The active shared SM copy removes captured identity, static management
+address, center-frequency, and SSID values. It keeps operational fields and
+secrets needed for deployment.
+
+The shared policy is management VLAN 12, DHCP management, DHCP-provided DNS,
+syslog `100.126.15.28:514` with mask `31`, internal cnMaestro, SSH on, Telnet
+off, scan mask `51`, and initial antenna gain `17` dBi. Full exports use native
+`config_import` with `skipIllegal=1`. Known 5 GHz devices receive mask `19`
+before import. AX and 6 GHz devices keep mask `51`.
+
+AP, PTP-A, and PTP-B exports remain separate family profiles. Their RF values,
+SSID, security, and other organization settings are not copied into the shared
+SM baseline.
 
 ## 7. Open decisions
 

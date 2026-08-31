@@ -1,6 +1,7 @@
 """Cambium ePMP device handler."""
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -26,6 +27,268 @@ class CambiumHandler(BaseHandler):
     """
 
     required_baseline_mode = "sm"
+
+    _SECRET_CONFIG_KEY_RE = re.compile(
+        r"(?:password|passphrase|psk|secret|token|community|private[_-]?key|encryption[_-]?key)",
+        re.IGNORECASE,
+    )
+    _DYNAMIC_FIELD_RE = re.compile(
+        r"(?:ip|addr|gateway|hostname|name|ssid|frequency|serial|mac|identity|location)",
+        re.IGNORECASE,
+    )
+    _PORTABLE_DROP_KEYS = frozenset({
+        # Device identity.  These values belong to the unit or the later
+        # naming workflow, not to a shared deployment export.
+        "systemConfigDeviceName",
+        "snmpSystemName",
+        "cambiumDeviceNameLoginDisplay",
+        "systemConfigSerialNumber",
+        "systemConfigMacAddress",
+        "cambiumDeviceSerialNumber",
+        "cambiumDeviceMacAddress",
+        "cambiumCNSDeviceAgentID",
+        # Captured management addresses and gateways must never be copied to
+        # another unit.  DHCP remains enabled by the explicit mode fields.
+        "networkBridgeIPAddr",
+        "networkBridgeGatewayIP",
+        "networkBridgeDNSIPAddrPrimary",
+        "networkBridgeDNSIPAddrSecondary",
+        "networkBridgeIPv6Addr",
+        "networkBridgeIPv6Gateway",
+        "networkBridgeIPv6AddressMode",
+        "networkBridgeNetmask",
+        "mgmtIFGateway",
+        "mgmtIFNetmask",
+        "mgmtIFIPv6AddressMode",
+        "mgmtIFVLAN",
+        "networkLanDefaultIP",
+        "networkLanIPAddr",
+        "networkLanIPAddressMode",
+        "networkLanIPv6Addr",
+        "networkLanIPv6AddressMode",
+        "networkWanGatewayIP",
+        "networkWanIPAddr",
+        "networkWanIPAddressMode",
+        "networkWanIPv6Addr",
+        "networkWanIPv6AddressMode",
+        "networkWanIPv6LocalInterfaceId",
+        "networkWanNetmask",
+        "networkLanNetmask",
+        "watchdogTargetIPAddress",
+    })
+    _SM_ONLY_DROP_KEYS = frozenset({
+        # A captured SM SSID is site-specific.  AP and PTP exports retain
+        # their selected SSID because those profiles are organization/site
+        # assets, not the universal SM baseline.
+        "wirelessInterfaceSSID",
+    })
+    _SM_RF_DROP_KEYS = frozenset({
+        # Keep the channel lists from the working field export.  The mask
+        # selects supported widths; removing these lists loses 80 MHz scan
+        # channels on some ePMP firmware.
+        "centerFrequency",
+        "centerFrequency2",
+    })
+    _FIELD_EXPORT_VERIFY_KEYS = frozenset({
+        "mgmtVLANEnable",
+        "mgmtVLANVID",
+        "networkBridgeIPAddressMode",
+        "mgmtIFIPAddressMode",
+        "wirelessInterfaceScanFrequencyBandwidth",
+        "syslogServerIPFirst",
+        "syslogServerPortFirst",
+        "syslogServerTypeFirst",
+        "syslogServerLogMask",
+        "cambiumDeviceAgentCNSURL",
+        "cambiumDeviceAgentEnable",
+        "cambiumDeviceAgentZeroTouchEnable",
+        "snmpProtocolVersion",
+        "wirelessInterfaceTDDAntennaGain",
+        "wirelessInterfaceSSID",
+        "snmpSystemName",
+        "systemConfigDeviceName",
+    })
+
+    @classmethod
+    def is_full_config_export(cls, config: Any) -> bool:
+        """Return whether *config* is a native Cambium field export."""
+        return bool(
+            isinstance(config, dict)
+            and isinstance(config.get("device_props"), dict)
+            and isinstance(config.get("template_props"), dict)
+        )
+
+    @classmethod
+    def _contains_secret_value(cls, value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if cls._SECRET_CONFIG_KEY_RE.search(str(key)) and child not in (
+                    None, "", [], {}
+                ):
+                    return True
+                if cls._contains_secret_value(child):
+                    return True
+        elif isinstance(value, list):
+            return any(cls._contains_secret_value(child) for child in value)
+        return False
+
+    @classmethod
+    def field_export_metadata(cls, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Return safe metadata for an uploaded native export.
+
+        This method returns field names and counts only.  It never returns a
+        credential, PSK, token, address, or other field value.
+        """
+        props = config.get("device_props", {})
+        template_props = config.get("template_props", {})
+        property_count = len(props) if isinstance(props, dict) else 0
+        if isinstance(template_props, dict):
+            property_count += len(template_props)
+        firmware_version = None
+        for source in (props, template_props):
+            if not isinstance(source, dict):
+                continue
+            for key in (
+                "firmwareVersion",
+                "softwareVersion",
+                "version",
+                "cambiumCurrentuImageVersion",
+                "cambiumCurrentuImageIVersion",
+            ):
+                value = source.get(key)
+                if isinstance(value, (str, int, float)) and str(value).strip():
+                    firmware_version = str(value)
+                    break
+            if firmware_version:
+                break
+        dynamic_fields = tuple(
+            sorted(key for key in props if cls._DYNAMIC_FIELD_RE.search(str(key)))
+        ) if isinstance(props, dict) else ()
+        return {
+            "export_type": "cambium_native_field_export",
+            "firmware_version": firmware_version,
+            "property_count": property_count,
+            "secret_present": cls._contains_secret_value(config),
+            "dynamic_fields": list(dynamic_fields),
+        }
+
+    @classmethod
+    def normalize_field_export(cls, config: Dict[str, Any], role: str) -> Dict[str, Any]:
+        """Make a native export safe to use as a portable runtime profile.
+
+        The complete upload is retained separately.  This copy removes
+        captured identity, management-address, and RF-location values while
+        retaining operational settings and secrets required by the field
+        deployment.  The selected upload role is the only role input used.
+        """
+        if not cls.is_full_config_export(config):
+            raise ValueError("Cambium field export must contain device_props and template_props")
+        normalized = copy.deepcopy(config)
+        props = normalized["device_props"]
+        for key in cls._PORTABLE_DROP_KEYS:
+            props.pop(key, None)
+        if role.lower() == "sm":
+            for key in cls._SM_ONLY_DROP_KEYS | cls._SM_RF_DROP_KEYS:
+                props.pop(key, None)
+
+        # Universal first-boot management policy.  These fields are present
+        # in the confirmed 5.10/5.11 exports and are ignored by older units
+        # through skipIllegal=1 during the native import.
+        props.update({
+            "networkMode": "2",
+            "mgmtVLANEnable": "1",
+            "mgmtVLANVID": "12",
+            "mgmtIFEnable": "0",
+            "networkBridgeIPAddressMode": "2",
+            "mgmtIFIPAddressMode": "2",
+            "systemNtpServerIPMode": "1",
+            "systemNtpServerPrimaryIP": "time.google.com",
+            "systemNtpServerSecondaryIP": "time.cloudflare.com",
+            "syslogServerIPFirst": "100.126.15.28",
+            "syslogServerPortFirst": "514",
+            "syslogServerTypeFirst": "1",
+            "syslogServerLogCLISH": "1",
+            "syslogServerLogDA": "1",
+            "syslogServerLogMask": "31",
+            "syslogServerLogToWeb": "0",
+            "cambiumDeviceAgentCNSURL": "cnmaestro.infra.treehouse.mn",
+            "cambiumDeviceAgentEnable": "1",
+            "cambiumDeviceAgentMGMTRoutingEnable": "0",
+            "cambiumDeviceAgentZeroTouchEnable": "1",
+            "snmpProtocolVersion": props.get("snmpProtocolVersion", "1"),
+            "snmpRemoteAccess": props.get("snmpRemoteAccess", "1"),
+            "cambiumSSHServerEnable": "1",
+            "cambiumTelnetServerEnable": "0",
+        })
+        if role.lower() == "sm":
+            # 51 is the Cambium mask for 20/40/80/160 MHz.  The apply step
+            # projects this to 19 for known 5 GHz models, because 160 MHz is
+            # not a legal field on those devices.
+            props["wirelessInterfaceScanFrequencyBandwidth"] = "51"
+            props["wirelessInterfaceTDDAntennaGain"] = "17"
+        return normalized
+
+    @classmethod
+    def _scan_mask_for_model(cls, model: Optional[str], current: Any) -> Any:
+        """Project the shared scan mask only when the model is known."""
+        model_key = (
+            (model or "").lower()
+            .replace("cambium ", "")
+            .replace("-", " ")
+            .strip()
+        )
+        if any(marker in model_key for marker in ("force 300", "epmp 3000", "epmp 3k")):
+            return "19"
+        if cls._is_ax_model(model):
+            return "51"
+        return current
+
+    @classmethod
+    def is_connectorized_model(cls, model: Optional[str]) -> bool:
+        """Return whether a model accepts the connectorized gain setting."""
+        model_key = (model or "").lower().replace("cambium ", "").strip()
+        return "4600c" in model_key or "connectorized" in model_key
+
+    async def apply_antenna_gain(
+        self, gain_db: Optional[int] = None, model: Optional[str] = None
+    ) -> bool:
+        """Apply connectorized gain during explicit AP/PTP/custom setup.
+
+        Initial SM provisioning uses the portable 17 dBi baseline.  This hook
+        runs only after an operator selects a post-provisioning mode.  It does
+        not write integrated radios, even when a value is supplied.
+        """
+        selected_model = model or (self._device_info.model if self._device_info else None)
+        if not self.is_connectorized_model(selected_model):
+            return True
+        effective_gain = 23 if gain_db is None else gain_db
+        try:
+            effective_gain = int(effective_gain)
+        except (TypeError, ValueError):
+            logger.error("Invalid Cambium antenna gain")
+            return False
+        if effective_gain <= 0 or effective_gain > 100:
+            logger.error("Invalid Cambium antenna gain range")
+            return False
+        return await self._apply_config_settings_curl({
+            "wirelessInterfaceTDDAntennaGain": str(effective_gain),
+        })
+
+    @classmethod
+    def prepare_field_export_for_model(
+        cls, config: Dict[str, Any], model: Optional[str]
+    ) -> Dict[str, Any]:
+        """Prepare a full export for one known radio before native import."""
+        if not cls.is_full_config_export(config):
+            return config
+        prepared = copy.deepcopy(config)
+        props = prepared["device_props"]
+        if "wirelessInterfaceScanFrequencyBandwidth" in props:
+            props["wirelessInterfaceScanFrequencyBandwidth"] = cls._scan_mask_for_model(
+                model,
+                props["wirelessInterfaceScanFrequencyBandwidth"],
+            )
+        return prepared
 
     @classmethod
     def qualified_post_provision_modes_for_model(
@@ -128,7 +391,8 @@ class CambiumHandler(BaseHandler):
         model = self._device_info.model if self._device_info else None
         return 360 if self._is_ax_model(model) else super().firmware_reboot_timeout
 
-    def _is_ax_model(self, model: Optional[str]) -> bool:
+    @classmethod
+    def _is_ax_model(cls, model: Optional[str]) -> bool:
         """Whether ``model`` is an ePMP-AX (WiFi 6) device.
 
         Derives the AX model set from ``MODEL_FIRMWARE_PATTERNS`` (the existing
@@ -141,14 +405,14 @@ class CambiumHandler(BaseHandler):
         if not model:
             return False
         model_key = model.lower().replace("cambium ", "").strip()
-        patterns = self.MODEL_FIRMWARE_PATTERNS.get(model_key)
+        patterns = cls.MODEL_FIRMWARE_PATTERNS.get(model_key)
         if patterns and "epmp-ax" in patterns:
             return True
         if model_key.startswith("epmp ax"):
             return True
         ax_numbers = {
             key.split()[-1]
-            for key, pats in self.MODEL_FIRMWARE_PATTERNS.items()
+            for key, pats in cls.MODEL_FIRMWARE_PATTERNS.items()
             if "epmp-ax" in pats
         }
         tokens = set(model_key.replace("-", " ").split())
@@ -477,7 +741,7 @@ class CambiumHandler(BaseHandler):
 
             if proc.returncode == 0:
                 response = stdout.decode("utf-8", errors="ignore")
-                logger.debug(f"set_param response: {response}")
+                logger.debug("set_param returned a response")
                 # Check for success
                 if "success" in response.lower() or '"err":""' in response or proc.returncode == 0:
                     logger.info(f"First-boot setup completed via set_param on {self.ip}")
@@ -1280,6 +1544,11 @@ class CambiumHandler(BaseHandler):
         Strips metadata keys and delegates to _apply_config_settings_curl.
         """
         try:
+            if self.is_full_config_export(config):
+                logger.error(
+                    "Cambium native field exports must use interface-bound config_import"
+                )
+                return False
             # Strip metadata keys
             props = {k: v for k, v in config.items()
                      if not k.startswith("_") and k not in ("device_props", "template_props")}
@@ -1372,6 +1641,17 @@ class CambiumHandler(BaseHandler):
             if key not in normalized_by_device
         }
 
+    @classmethod
+    def _field_export_verification_values(
+        cls, props: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Select stable policy fields for a full-export read-back."""
+        return {
+            key: value
+            for key, value in cls._verification_values(props).items()
+            if key in cls._FIELD_EXPORT_VERIFY_KEYS
+        }
+
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from JSON file.
 
@@ -1382,6 +1662,17 @@ class CambiumHandler(BaseHandler):
             config_file = Path(config_path)
             if not config_file.exists():
                 logger.error(f"Config file not found: {config_path}")
+                return False
+
+            is_full_export = False
+            if config_file.suffix.lower() == ".json":
+                with config_file.open("r", encoding="utf-8") as handle:
+                    is_full_export = self.is_full_config_export(json.load(handle))
+
+            if is_full_export and not self.interface:
+                logger.error(
+                    "Cambium native field exports require an interface-bound config_import"
+                )
                 return False
 
             # Use curl-based restore when interface binding is needed
@@ -1433,10 +1724,37 @@ class CambiumHandler(BaseHandler):
 
         See docs/cambium-config.md for full reference.
         """
+        temporary_path = None
         try:
             if not self._stok:
                 logger.error(f"No stok available for config_import on {self.ip}")
                 return False
+
+            import_path = config_path
+            config_data = None
+            if Path(config_path).suffix.lower() == ".json":
+                with open(config_path, "r", encoding="utf-8") as config_file:
+                    config_data = json.load(config_file)
+                if self.is_full_config_export(config_data):
+                    if not self.interface:
+                        logger.error(
+                            "Cambium native field exports require an interface-bound config_import"
+                        )
+                        return False
+                    model = self._device_info.model if self._device_info else None
+                    prepared = self.prepare_field_export_for_model(config_data, model)
+                    config_data = prepared
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".json", prefix="cambium_field_export_", delete=False
+                    ) as prepared_file:
+                        json.dump(prepared, prepared_file)
+                        prepared_file.flush()
+                        temporary_path = prepared_file.name
+                    try:
+                        os.chmod(temporary_path, 0o600)
+                    except OSError:
+                        pass
+                    import_path = temporary_path
 
             config_import_url = (
                 f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/config_import"
@@ -1451,7 +1769,7 @@ class CambiumHandler(BaseHandler):
                 "-b", self._cookie_file,
                 "-X", "POST",
                 "-F", "skipIllegal=1",
-                "-F", f"image=@{config_path};type=application/json",
+                "-F", f"image=@{import_path};type=application/json",
                 config_import_url,
             ]
 
@@ -1479,11 +1797,14 @@ class CambiumHandler(BaseHandler):
                 if success_val != 1 and success_val != "1":
                     err = resp_data.get("err", "")
                     logger.error(
-                        f"config_import failed on {self.ip}: success={success_val}, err={err!r}"
+                        "config_import failed on %s: success=%s, error_present=%s",
+                        self.ip,
+                        success_val,
+                        bool(err),
                     )
                     return False
             except json.JSONDecodeError:
-                logger.error(f"config_import returned non-JSON: {response[:500]}")
+                logger.error("config_import returned a non-JSON response")
                 return False
 
             logger.info(f"Config uploaded to {self.ip}, waiting for apply to finish...")
@@ -1494,15 +1815,21 @@ class CambiumHandler(BaseHandler):
                 logger.info(f"Configuration applied successfully on {self.ip}")
                 # Store that we applied a config (for verification)
                 try:
-                    with open(config_path, "r") as f:
-                        config_data = json.load(f)
+                    if config_data is None:
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            config_data = json.load(f)
                     # Extract flat keys for verification
                     if "device_props" in config_data:
                         flat_keys = config_data["device_props"]
                     else:
                         flat_keys = {k: v for k, v in config_data.items()
                                      if not k.startswith("_")}
-                    self._last_applied_config = flat_keys
+                    if self.is_full_config_export(config_data):
+                        self._last_applied_config = self._field_export_verification_values(
+                            flat_keys
+                        )
+                    else:
+                        self._last_applied_config = flat_keys
                 except Exception:
                     pass
             else:
@@ -1513,6 +1840,12 @@ class CambiumHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Failed to apply JSON config via config_import: {e}")
             return False
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
 
     async def _poll_config_apply_status(self, timeout: int = 60, interval: float = 3.0) -> bool:
         """Poll get_param until config apply finishes.
@@ -1747,7 +2080,11 @@ class CambiumHandler(BaseHandler):
                     pass
 
         if proc.returncode != 0:
-            logger.error(f"set_param curl failed: rc={proc.returncode}, stderr={stderr.decode() if stderr else ''}")
+            logger.error(
+                "set_param curl failed: rc=%s, stderr_present=%s",
+                proc.returncode,
+                bool(stderr),
+            )
             return False
 
         response = stdout.decode("utf-8", errors="ignore")
@@ -1840,7 +2177,7 @@ class CambiumHandler(BaseHandler):
                     pass
 
                 if not stok:
-                    logger.error(f"Failed to get stok token: {response[:200]}")
+                    logger.error("Failed to get stok token from the device")
                     return False
 
                 logger.debug(f"Got new stok: {stok[:16]}...")
@@ -1862,7 +2199,7 @@ class CambiumHandler(BaseHandler):
 
             if proc.returncode == 0:
                 response = stdout.decode("utf-8", errors="ignore")
-                logger.debug(f"Config restore response: {response[:500]}")
+                logger.debug("Config restore returned a response")
 
                 # Check for success - LuCI shows "Rebooting" or "Changes applied" on success
                 if "Rebooting" in response or "Changes applied" in response:
@@ -1874,7 +2211,7 @@ class CambiumHandler(BaseHandler):
                     if "session_expired" in response.lower():
                         logger.error(f"Config restore failed: session expired")
                     else:
-                        logger.error(f"Config restore failed: {response[:200]}")
+                        logger.error("Config restore failed: device reported an error")
                     return False
 
                 # Accept HTML response as likely success (page reload)
@@ -1885,7 +2222,11 @@ class CambiumHandler(BaseHandler):
                 logger.info(f"Configuration applied to {self.ip} via {self.interface}")
                 return True
             else:
-                logger.error(f"Config restore curl failed: {stderr.decode()}")
+                logger.error(
+                    "Config restore curl failed: rc=%s, stderr_present=%s",
+                    proc.returncode,
+                    bool(stderr),
+                )
                 return False
 
         except Exception as e:
@@ -3372,11 +3713,6 @@ class CambiumHandler(BaseHandler):
         "hostname": "snmpSystemName",
         "devicename": "systemConfigDeviceName",
     }
-    _SECRET_CONFIG_KEY_RE = re.compile(
-        r"(?:password|passphrase|psk|secret|token|private[_-]?key|encryption[_-]?key)",
-        re.IGNORECASE,
-    )
-
     @classmethod
     def _verification_values(cls, props: Dict[str, Any]) -> Dict[str, Any]:
         """Return safe scalar properties suitable for read-back verification.
@@ -3502,10 +3838,14 @@ class CambiumHandler(BaseHandler):
                     logger.warning(f"[CONFIG VERIFY] get_param response missing device_props: {list(data.keys())[:10]}")
                     return {}
                 except json.JSONDecodeError:
-                    logger.warning(f"[CONFIG VERIFY] get_param returned non-JSON: {text[:200]}")
+                    logger.warning("[CONFIG VERIFY] get_param returned a non-JSON response")
                     return {}
             else:
-                logger.warning(f"[CONFIG VERIFY] curl get_param failed: rc={proc.returncode}, stderr={stderr.decode() if stderr else ''}")
+                logger.warning(
+                    "[CONFIG VERIFY] curl get_param failed: rc=%s, stderr_present=%s",
+                    proc.returncode,
+                    bool(stderr),
+                )
                 return {}
         except Exception as e:
             logger.error(f"[CONFIG VERIFY] _get_config_curl error: {e}")

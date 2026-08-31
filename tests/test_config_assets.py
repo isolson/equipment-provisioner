@@ -77,6 +77,147 @@ def test_family_store_uses_sm_baseline_without_cross_family_fallback(tmp_path):
     assert store.get_config_template("cambium", "ePMP 4518") is None
 
 
+def test_shared_cambium_sm_baseline_precedes_all_model_fallbacks(tmp_path):
+    shared = tmp_path / "configs/templates/cambium/shared/5.11.1/SM/default.json"
+    shared.parent.mkdir(parents=True)
+    shared.write_text(json.dumps({"device_props": {"mgmtVLANVID": "12"}}))
+    store = ConfigStore(str(tmp_path))
+
+    for model in ("Force 300-25", "ePMP 3000", "ePMP 4518", "ePMP 4600C", "unknown"):
+        assert store.get_config_template("cambium", model) == shared
+
+    asset = ConfigAssetCatalog(tmp_path).list_assets(device_type="cambium")[0]
+    assert asset.scope == "shared"
+    assert asset.role == "SM"
+    assert asset.mode == "sm"
+
+
+def test_cambium_field_export_upload_preserves_original_and_protects_active(tmp_path):
+    client, data_path = make_client(tmp_path)
+    original = json.dumps(
+        {
+            "device_props": {
+                "networkBridgeIPAddr": "192.0.2.10",
+                "systemConfigDeviceName": "captured-name",
+                "wirelessInterfaceSSID": "captured-ssid",
+                "wirelessInterfaceScanFrequencyBandwidth": "19",
+                "wirelessInterfaceTDDAntennaGain": "25",
+                "snmpReadOnlyCommunity": "private-community",
+                "cambiumCNSDeviceAgentPassword": "private-password",
+            },
+            "template_props": {"version": "5.11.1"},
+        }
+    ).encode()
+    response = client.post(
+        "/api/config-assets/upload",
+        data={
+            "config_type": "template",
+            "device_type": "cambium",
+            "firmware": "5.11.1",
+            "role": "SM",
+            "mode": "sm",
+            "scope": "shared",
+            "asset_kind": "field_export",
+        },
+        files={"file": ("bench-export.json", original, "application/json")},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["metadata"]["export_type"] == "cambium_native_field_export"
+    assert body["metadata"]["firmware_version"] == "5.11.1"
+    assert body["metadata"]["secret_present"] is True
+    assert "private-password" not in response.text
+
+    active = data_path / "configs/templates/cambium/shared/5.11.1/SM/default.json"
+    active_props = json.loads(active.read_text())["device_props"]
+    assert active_props["mgmtVLANVID"] == "12"
+    assert active_props["wirelessInterfaceScanFrequencyBandwidth"] == "51"
+    assert active_props["wirelessInterfaceTDDAntennaGain"] == "17"
+    assert "networkBridgeIPAddr" not in active_props
+    assert "systemConfigDeviceName" not in active_props
+    assert "wirelessInterfaceSSID" not in active_props
+
+    source = (
+        data_path / "config-uploads" / "cambium" / body["metadata"]["source_id"]
+        / "bench-export.json"
+    )
+    assert source.read_bytes() == original
+    assert oct(source.parent.stat().st_mode & 0o777) == "0o700"
+    assert oct(active.stat().st_mode & 0o777) == "0o600"
+    assert client.get(
+        "/api/config-assets/content", params={"path": body["asset"]["path"]}
+    ).status_code == 403
+
+
+def test_cambium_field_export_ap_keeps_role_rf_and_ssid(tmp_path):
+    client, data_path = make_client(tmp_path)
+    original = json.dumps(
+        {
+            "device_props": {
+                "wirelessInterfaceSSID": "ORG-AP",
+                "centerFrequency": "5790",
+                "networkBridgeIPAddr": "192.0.2.11",
+            },
+            "template_props": {"version": "5.10.3"},
+        }
+    )
+    response = client.post(
+        "/api/config-assets/upload",
+        data={
+            "config_type": "template",
+            "device_type": "cambium",
+            "family": "ePMP-3K",
+            "firmware": "5.11.1",
+            "role": "AP",
+            "mode": "ap",
+            "scope": "family",
+            "profile": "East",
+            "asset_kind": "field_export",
+        },
+        files={"file": ("ap-export.json", original, "application/json")},
+    )
+    assert response.status_code == 200
+    active = data_path / "configs/templates/cambium/ePMP-3K/5.11.1/AP/East/default.json"
+    props = json.loads(active.read_text())["device_props"]
+    assert props["wirelessInterfaceSSID"] == "ORG-AP"
+    assert props["centerFrequency"] == "5790"
+    assert "networkBridgeIPAddr" not in props
+
+
+def test_cambium_field_export_ptp_uses_separate_side_path(tmp_path):
+    client, data_path = make_client(tmp_path)
+    original = json.dumps(
+        {
+            "device_props": {
+                "wirelessInterfaceSSID": "PTP-LINK",
+                "centerFrequency": "6835",
+            },
+            "template_props": {"version": "5.11.1"},
+        }
+    )
+    response = client.post(
+        "/api/config-assets/upload",
+        data={
+            "config_type": "template",
+            "device_type": "cambium",
+            "family": "ePMP-4K",
+            "firmware": "5.11.1",
+            "role": "PTP",
+            "mode": "ptp-a",
+            "scope": "family",
+            "link_profile": "tw32-tw18",
+            "profile": "Main",
+            "asset_kind": "field_export",
+        },
+        files={"file": ("ptp-a.json", original, "application/json")},
+    )
+    assert response.status_code == 200
+    assert response.json()["asset"]["path"] == (
+        "configs/templates/cambium/ePMP-4K/5.11.1/PTP/tw32-tw18/Main/default.json"
+    )
+    assert (data_path / response.json()["asset"]["path"]).is_file()
+
+
 def test_mode_profile_and_ptp_side_resolution(tmp_path):
     root = tmp_path / "configs/templates/tachyon/TNA-303X"
     (root / "AP/North").mkdir(parents=True)
@@ -202,7 +343,7 @@ def test_config_asset_api_lists_and_uploads_structured_assets(tmp_path):
 
 
 def test_config_asset_api_rejects_secret_and_unsupported_family_role(tmp_path):
-    client, _data_path = make_client(tmp_path)
+    client, data_path = make_client(tmp_path)
 
     secret = client.post(
         "/api/config-assets/upload",
@@ -217,6 +358,28 @@ def test_config_asset_api_rejects_secret_and_unsupported_family_role(tmp_path):
         files={"file": ("secret.json", '{"device_password": "redacted"}', "application/json")},
     )
     assert secret.status_code == 400
+
+    legacy_secret = client.post(
+        "/api/config-assets/upload",
+        data={
+            "config_type": "template",
+            "device_type": "cambium",
+        },
+        files={"file": ("legacy-secret.json", '{"password": "redacted"}', "application/json")},
+    )
+    assert legacy_secret.status_code == 400
+
+    legacy_path = data_path / "configs/templates/cambium/legacy.json"
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text('{"snmpReadOnlyCommunity": "redacted"}')
+    legacy_asset = next(
+        item for item in client.get("/api/config-assets?device_type=cambium").json()
+        if item["path"].endswith("legacy.json")
+    )
+    assert legacy_asset["protected"] is True
+    legacy_content = client.get("/api/configs/template/cambium/legacy.json")
+    assert legacy_content.status_code == 403
+    assert "redacted" not in legacy_content.text
 
     unsupported_role = client.post(
         "/api/config-assets/upload",
@@ -255,4 +418,6 @@ def test_config_asset_api_redacts_ptp_content(tmp_path):
 def test_repository_assets_have_no_tracked_ptp_files():
     assets = ConfigAssetCatalog(Path.cwd()).list_assets()
     assert assets
-    assert not any(asset.protected for asset in assets)
+    assert not any(
+        asset.role and asset.role.lower() == "ptp" for asset in assets
+    )

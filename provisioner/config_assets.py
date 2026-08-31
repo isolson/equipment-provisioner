@@ -9,7 +9,10 @@ the same source of truth without introducing another vendor enumeration.
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+import json
 from pathlib import Path, PurePosixPath
+import re
+import tarfile
 from typing import Dict, List, Optional, Tuple
 
 CONFIG_EXTENSIONS = (".json", ".rsc", ".yaml", ".yml", ".tar", ".tar.gz", ".tgz")
@@ -17,6 +20,14 @@ SAFE_TEXT_EXTENSIONS = (".json", ".rsc", ".yaml", ".yml")
 PTP_ROLE = "ptp"
 PTP_SIDE_TO_MODE = {"main": "ptp-a", "sm": "ptp-b"}
 MODE_TO_PTP_SIDE = {"ptp-a": "Main", "ptp-b": "SM"}
+_SECRET_FIELD_RE = re.compile(
+    r"(?:password|passphrase|psk|secret|token|community|private[_-]?key|encryption[_-]?key)",
+    re.IGNORECASE,
+)
+_DYNAMIC_FIELD_RE = re.compile(
+    r"(?:ip|addr|gateway|hostname|name|ssid|frequency|serial|mac|identity|location)",
+    re.IGNORECASE,
+)
 
 
 def is_config_asset(path: Path) -> bool:
@@ -73,6 +84,11 @@ class ConfigAsset:
     mode: Optional[str] = None
     profile: Optional[str] = None
     link_profile: Optional[str] = None
+    scope: Optional[str] = None
+    asset_kind: str = "standard"
+    secret_present: bool = False
+    property_count: int = 0
+    dynamic_fields: Tuple[str, ...] = ()
     content_type: str = ""
     protected: bool = False
     editable: bool = False
@@ -91,6 +107,11 @@ class ConfigAsset:
             "mode": self.mode,
             "profile": self.profile,
             "link_profile": self.link_profile,
+            "scope": self.scope,
+            "asset_kind": self.asset_kind,
+            "secret_present": self.secret_present,
+            "property_count": self.property_count,
+            "dynamic_fields": list(self.dynamic_fields),
             "content_type": self.content_type,
             "protected": self.protected,
             "editable": self.editable,
@@ -110,6 +131,60 @@ def _mode_for_role(role: Optional[str], profile: Optional[str]) -> Optional[str]
     return None
 
 
+def _has_secret_value(value: object) -> bool:
+    """Return whether a config contains a non-empty secret-shaped value."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if _SECRET_FIELD_RE.search(str(key)) and child not in (None, "", [], {}):
+                return True
+            if _has_secret_value(child):
+                return True
+    elif isinstance(value, list):
+        return any(_has_secret_value(child) for child in value)
+    return False
+
+
+def _content_metadata(path: Path, extension: str) -> Tuple[str, bool, int, Tuple[str, ...]]:
+    """Inspect safe metadata without retaining or logging config values."""
+    parsed = None
+    try:
+        if extension == ".json":
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        elif extension in (".tar", ".tar.gz", ".tgz"):
+            with tarfile.open(path, mode="r:*") as archive:
+                member = next(
+                    (entry for entry in archive.getmembers()
+                     if Path(entry.name).name == "config.json"),
+                    None,
+                )
+                if member is not None:
+                    config_file = archive.extractfile(member)
+                    if config_file is not None:
+                        parsed = json.load(config_file)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, tarfile.TarError, ValueError):
+        return "standard", False, 0, ()
+
+    if not isinstance(parsed, dict):
+        return "standard", False, 0, ()
+    device_props = parsed.get("device_props")
+    template_props = parsed.get("template_props")
+    is_full_export = isinstance(device_props, dict) and isinstance(template_props, dict)
+    if not isinstance(device_props, dict):
+        device_props = parsed
+    property_count = len(device_props)
+    if isinstance(template_props, dict):
+        property_count += len(template_props)
+    dynamic_fields = tuple(
+        sorted(key for key in device_props if _DYNAMIC_FIELD_RE.search(str(key)))
+    )
+    return (
+        "field_export" if is_full_export else "standard",
+        _has_secret_value(parsed),
+        property_count,
+        dynamic_fields,
+    )
+
+
 def describe_asset(path: Path, data_root: Path, config_type: str) -> ConfigAsset:
     """Build metadata for *path* using the canonical nested tree layout."""
     relative = path.relative_to(data_root).as_posix()
@@ -119,31 +194,44 @@ def describe_asset(path: Path, data_root: Path, config_type: str) -> ConfigAsset
     # legacy endpoint.  Do not mistake the filename for a device type.
     device_type = parts[2] if len(parts) >= 4 else "unknown"
     rest = list(parts[3:-1]) if len(parts) >= 4 else []
-    family = firmware = role = mode = profile = link_profile = None
+    family = firmware = role = mode = profile = link_profile = scope = None
 
     if len(rest) >= 2:
-        family = rest[0]
-        if rest[1].lower() in ("ap", "sm", "ptp"):
+        scope = "family"
+        if rest[0].lower() == "shared":
+            scope = "shared"
+            family = None
+            path_after_scope = rest[1:]
+        else:
+            family = rest[0]
+            path_after_scope = rest[1:]
+        if path_after_scope and path_after_scope[0].lower() in ("ap", "sm", "ptp"):
             # Tachyon's approved library is not firmware-versioned.
             firmware = None
-            role = rest[1]
-            role_parts = rest[2:]
+            role = path_after_scope[0]
+            role_parts = path_after_scope[1:]
         else:
-            firmware = rest[1]
-            role = rest[2] if len(rest) >= 3 else None
-            role_parts = rest[3:]
-        role_lower = role.lower()
-        if role_lower == "ap":
-            profile = role_parts[0] if role_parts else "default"
-        elif role_lower == "ptp":
-            link_profile = role_parts[0] if role_parts else None
-            profile = role_parts[1] if len(role_parts) >= 2 else None
-        else:
-            profile = role_parts[0] if role_parts else "default"
-        mode = _mode_for_role(role, profile)
+            firmware = path_after_scope[0] if path_after_scope else None
+            role = path_after_scope[1] if len(path_after_scope) >= 2 else None
+            role_parts = path_after_scope[2:]
+        if role:
+            role_lower = role.lower()
+            if role_lower == "ap":
+                profile = role_parts[0] if role_parts else "default"
+            elif role_lower == "ptp":
+                link_profile = role_parts[0] if role_parts else None
+                profile = role_parts[1] if len(role_parts) >= 2 else None
+            else:
+                profile = role_parts[0] if role_parts else "default"
+            mode = _mode_for_role(role, profile)
 
-    protected = bool(role and role.lower() == PTP_ROLE)
     extension = file_extension(path)
+    asset_kind, secret_present, property_count, dynamic_fields = _content_metadata(path, extension)
+    protected = (
+        bool(role and role.lower() == PTP_ROLE)
+        or asset_kind == "field_export"
+        or secret_present
+    )
     return ConfigAsset(
         path=relative,
         device_type=device_type,
@@ -157,6 +245,11 @@ def describe_asset(path: Path, data_root: Path, config_type: str) -> ConfigAsset
         mode=mode,
         profile=profile,
         link_profile=link_profile,
+        scope=scope,
+        asset_kind=asset_kind,
+        secret_present=secret_present,
+        property_count=property_count,
+        dynamic_fields=dynamic_fields,
         content_type=extension.lstrip("."),
         protected=protected,
         editable=(not protected and extension in SAFE_TEXT_EXTENSIONS),
@@ -193,6 +286,7 @@ class ConfigAssetCatalog:
         firmware: Optional[str] = None,
         role: Optional[str] = None,
         mode: Optional[str] = None,
+        scope: Optional[str] = None,
         config_type: Optional[str] = None,
     ) -> List[ConfigAsset]:
         values = list(self.iter_assets(config_type=config_type))
@@ -202,6 +296,7 @@ class ConfigAssetCatalog:
             "firmware": firmware,
             "role": role,
             "mode": mode,
+            "scope": scope,
         }
         return sorted(
             [
@@ -252,6 +347,7 @@ class ConfigAssetCatalog:
         profile: Optional[str],
         link_profile: Optional[str],
         filename: str,
+        scope: Optional[str] = None,
     ) -> Path:
         """Build a structured upload destination after validating components."""
         root = self._root_for_type(config_type)
@@ -261,7 +357,28 @@ class ConfigAssetCatalog:
             raise ValueError("Unsupported config file type")
 
         components = [root, device_type]
-        if family:
+        if scope:
+            scope = _clean_component(scope, "scope").lower()
+            if scope not in ("shared", "family"):
+                raise ValueError("Invalid asset scope")
+        if scope == "shared":
+            if family:
+                raise ValueError("Shared assets cannot specify a family")
+            if not role or not firmware:
+                raise ValueError("Shared assets require firmware and role")
+            components.extend(("shared", _clean_component(firmware, "firmware")))
+            components.append(_clean_component(role, "role"))
+            role_lower = role.lower()
+            if role_lower == "ap" and profile and profile.lower() != "default":
+                components.append(_clean_component(profile, "profile"))
+            elif role_lower == PTP_ROLE:
+                if not link_profile or not profile:
+                    raise ValueError("Shared PTP assets require link and side profiles")
+                components.extend(
+                    (_clean_component(link_profile, "link profile"),
+                     _clean_component(profile, "profile"))
+                )
+        elif family:
             if not role:
                 raise ValueError("Family uploads require a role")
             components.append(_clean_component(family, "family"))
@@ -278,7 +395,12 @@ class ConfigAssetCatalog:
                 # SM/default.json is directly below the role directory.
                 pass
             elif role_lower == PTP_ROLE:
-                raise ValueError("PTP assets must be installed through the host-only workflow")
+                if not link_profile or not profile:
+                    raise ValueError("PTP assets require link and side profiles")
+                components.extend(
+                    (_clean_component(link_profile, "link profile"),
+                     _clean_component(profile, "profile"))
+                )
             elif profile:
                 components.append(_clean_component(profile, "profile"))
         elif any(value for value in (firmware, role, mode, profile, link_profile)):

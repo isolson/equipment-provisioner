@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tarfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["api"])
 _SECRET_KEY_RE = re.compile(
-    r"(?:^|_)(?:password|passphrase|psk|secret|token|private_key)(?:$|_)",
+    r"(?:password|passphrase|psk|secret|token|community|private[_-]?key|encryption[_-]?key)",
     re.IGNORECASE,
 )
 
@@ -118,6 +119,9 @@ class ApplyModeRequest(BaseModel):
     # PTP fields
     my_tower: Optional[int] = None
     remote_tower: Optional[int] = None
+    # Optional post-provision override for connectorized Cambium radios.
+    # Omitted means the handler uses its safe connectorized default.
+    antenna_gain_db: Optional[int] = None
 
 
 class CredentialOverride(BaseModel):
@@ -1259,6 +1263,11 @@ class ConfigAssetInfo(BaseModel):
     mode: Optional[str] = None
     profile: Optional[str] = None
     link_profile: Optional[str] = None
+    scope: Optional[str] = None
+    asset_kind: str = "standard"
+    secret_present: bool = False
+    property_count: int = 0
+    dynamic_fields: List[str] = Field(default_factory=list)
     content_type: str
     protected: bool
     editable: bool
@@ -2003,7 +2012,7 @@ def _contains_secret_key(value: Any) -> bool:
     if isinstance(value, dict):
         for key, child in value.items():
             key_lower = str(key).lower()
-            if _SECRET_KEY_RE.search(key_lower) and isinstance(child, (str, bytes)) and child:
+            if _SECRET_KEY_RE.search(key_lower) and child not in (None, "", [], {}):
                 return True
             if _contains_secret_key(child):
                 return True
@@ -2012,20 +2021,35 @@ def _contains_secret_key(value: Any) -> bool:
     return False
 
 
-def _validate_uploaded_asset(filename: str, content: bytes, structured: bool) -> None:
-    """Validate JSON/TAR shape and reject secrets in tracked family assets."""
+def _validate_uploaded_asset(
+    filename: str,
+    content: bytes,
+    structured: bool,
+    allow_field_export: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Validate JSON/TAR shape and return JSON when one is uploaded.
+
+    Standard assets reject credential-like fields.  Native field exports are
+    the explicit exception: they keep their secrets in protected runtime
+    storage and are never returned by the content API.
+    """
     lower_name = filename.lower()
     if lower_name.endswith(".json"):
         try:
             parsed = json.loads(content.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=400, detail="Invalid JSON: %s" % exc)
-        if structured and _contains_secret_key(parsed):
+        if not allow_field_export and _contains_secret_key(parsed):
             raise HTTPException(
                 status_code=400,
-                detail="Family assets cannot contain credential or secret fields",
+                detail="Only field deployment exports may contain credential or secret fields",
             )
-        return
+        return parsed if isinstance(parsed, dict) else None
+    if allow_field_export:
+        raise HTTPException(
+            status_code=400,
+            detail="Field deployment exports must be native Cambium JSON",
+        )
     if lower_name.endswith((".tar", ".tar.gz", ".tgz")):
         try:
             with tarfile.open(fileobj=io.BytesIO(content), mode="r:*") as archive:
@@ -2052,6 +2076,35 @@ def _validate_uploaded_asset(filename: str, content: bytes, structured: bool) ->
             raise
         except (tarfile.TarError, ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=400, detail="Invalid TAR asset: %s" % exc)
+    return None
+
+
+def _protected_config_upload_path(data_root: Path, source_id: str, filename: str) -> Path:
+    """Return the private path for one original field export."""
+    return data_root / "config-uploads" / "cambium" / source_id / filename
+
+
+def _store_protected_config_upload(
+    data_root: Path,
+    source_id: str,
+    filename: str,
+    content: bytes,
+) -> Path:
+    """Store exact upload bytes outside the catalog with private permissions."""
+    destination = _protected_config_upload_path(data_root, source_id, filename)
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    protected_root = data_root / "config-uploads"
+    protected_vendor_root = protected_root / "cambium"
+    for directory in (protected_root, protected_vendor_root, destination.parent):
+        try:
+            os.chmod(str(directory), 0o700)
+        except OSError:
+            pass
+    temporary = destination.with_name(destination.name + ".part")
+    temporary.write_bytes(content)
+    os.chmod(str(temporary), 0o600)
+    os.replace(str(temporary), str(destination))
+    return destination
 
 
 @router.get("/config-assets", response_model=List[ConfigAssetInfo])
@@ -2062,6 +2115,7 @@ async def list_config_assets(
     firmware: Optional[str] = None,
     role: Optional[str] = None,
     mode: Optional[str] = None,
+    scope: Optional[str] = None,
     config_type: Optional[str] = None,
 ):
     """List the recursive family/mode configuration catalog."""
@@ -2074,6 +2128,7 @@ async def list_config_assets(
             firmware=firmware,
             role=role,
             mode=mode,
+            scope=scope,
             config_type=config_type,
         )
     except ValueError as exc:
@@ -2092,6 +2147,14 @@ async def config_asset_metadata():
             "ptp-a": "PTP Main",
             "ptp-b": "PTP SM",
         },
+        "scopes": {
+            "family": "Family profile",
+            "shared": "Shared baseline",
+        },
+        "asset_kinds": {
+            "standard": "Standard template",
+            "field_export": "Field deployment export",
+        },
     }
 
 
@@ -2105,7 +2168,7 @@ async def get_config_asset_content(request: Request, path: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Config asset not found")
     if asset.protected:
-        raise HTTPException(status_code=403, detail="Protected PTP asset content is host-only")
+        raise HTTPException(status_code=403, detail="Protected runtime asset content is host-only")
     if not asset.editable:
         raise HTTPException(status_code=415, detail="This asset is not editable text")
     try:
@@ -2133,24 +2196,107 @@ async def upload_config_asset(
     mode: Optional[str] = Form(None),
     profile: Optional[str] = Form(None),
     link_profile: Optional[str] = Form(None),
+    scope: Optional[str] = Form(None),
+    asset_kind: str = Form("standard"),
 ):
-    """Upload a safe structured asset; PTP is installed host-side only."""
+    """Upload a standard asset or an explicit Cambium field export."""
     device_type = _validate_device_type(device_type)
     if config_type not in ("template", "override"):
         raise HTTPException(status_code=400, detail="Invalid config type")
-    _validate_family_directory(device_type, family)
-    _validate_family_role(device_type, family, role, mode, profile)
-    if mode == "ptp-a" or mode == "ptp-b" or (role and role.lower() == "ptp"):
-        raise HTTPException(status_code=403, detail="PTP assets use the host-only installation workflow")
-    if mode == "ap" and role and role.lower() != "ap":
-        raise HTTPException(status_code=400, detail="AP mode requires AP role")
-    if mode == "sm" and role and role.lower() != "sm":
-        raise HTTPException(status_code=400, detail="SM mode requires SM role")
+    if asset_kind not in ("standard", "field_export"):
+        raise HTTPException(status_code=400, detail="Invalid asset kind")
+
+    is_field_export = asset_kind == "field_export"
+    if is_field_export:
+        if device_type != "cambium":
+            raise HTTPException(status_code=400, detail="Field exports are supported for Cambium only")
+        if config_type != "template":
+            raise HTTPException(status_code=400, detail="Field exports must be templates")
+        if not role or role.upper() not in {"AP", "SM", "PTP"}:
+            raise HTTPException(status_code=400, detail="Field exports require an explicit AP, SM, or PTP role")
+        if mode and mode not in ("ap", "sm", "ptp-a", "ptp-b"):
+            raise HTTPException(status_code=400, detail="Invalid field export mode")
+        if role.upper() == "SM":
+            if mode and mode != "sm":
+                raise HTTPException(status_code=400, detail="SM field exports require SM mode")
+            if scope != "shared" or family:
+                raise HTTPException(status_code=400, detail="SM field exports must use the shared scope")
+            if not firmware:
+                raise HTTPException(status_code=400, detail="Shared SM exports require firmware")
+        else:
+            if scope not in (None, "family"):
+                raise HTTPException(status_code=400, detail="Invalid field export scope")
+            if not family or not firmware:
+                raise HTTPException(status_code=400, detail="AP and PTP exports require family and firmware")
+            _validate_family_directory(device_type, family)
+            spec = spec_for(device_type)
+            family_spec = next(
+                (entry for entry in (spec.config_families if spec else ()) if entry.directory == family),
+                None,
+            )
+            if family_spec is None or role.upper() not in family_spec.roles:
+                raise HTTPException(status_code=400, detail="Role is not supported by this config family")
+            if role.upper() == "AP" and mode and mode != "ap":
+                raise HTTPException(status_code=400, detail="AP field exports require AP mode")
+            if role.upper() == "PTP":
+                if mode and mode not in ("ptp-a", "ptp-b"):
+                    raise HTTPException(status_code=400, detail="PTP field exports require PTP mode")
+                if not link_profile or not profile:
+                    raise HTTPException(status_code=400, detail="PTP exports require link and side profiles")
+            elif profile and profile.lower() not in {"default", "north", "east", "south", "west"}:
+                raise HTTPException(status_code=400, detail="Unknown AP profile")
+        if scope is None:
+            scope = "family"
+    else:
+        if scope == "shared":
+            if family or not role or not firmware:
+                raise HTTPException(status_code=400, detail="Shared assets require firmware and role")
+            if role.lower() not in {"ap", "sm"}:
+                raise HTTPException(status_code=400, detail="Shared uploads support AP or SM roles")
+            if mode and mode != role.lower():
+                raise HTTPException(status_code=400, detail="Mode must match the selected role")
+        else:
+            _validate_family_directory(device_type, family)
+            _validate_family_role(device_type, family, role, mode, profile)
+            if mode == "ptp-a" or mode == "ptp-b" or (role and role.lower() == "ptp"):
+                raise HTTPException(status_code=403, detail="PTP assets use the host-only installation workflow")
+            if mode == "ap" and role and role.lower() != "ap":
+                raise HTTPException(status_code=400, detail="AP mode requires AP role")
+            if mode == "sm" and role and role.lower() != "sm":
+                raise HTTPException(status_code=400, detail="SM mode requires SM role")
 
     safe_filename = _sanitize_filename(file.filename or "")
     if not safe_filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
     try:
+        content = await file.read()
+        original_content = content
+        parsed = _validate_uploaded_asset(
+            safe_filename,
+            content,
+            structured=bool(family or scope == "shared") or is_field_export,
+            allow_field_export=is_field_export,
+        )
+        upload_metadata = None
+        source_id = None
+        if is_field_export:
+            from ..handlers.cambium import CambiumHandler
+
+            if not CambiumHandler.is_full_config_export(parsed):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Field export must contain device_props and template_props",
+                )
+            upload_metadata = CambiumHandler.field_export_metadata(parsed)
+            role = role.upper()
+            parsed = CambiumHandler.normalize_field_export(parsed, role)
+            content = json.dumps(parsed, indent=2).encode("utf-8") + b"\n"
+            source_id = uuid.uuid4().hex
+            _store_protected_config_upload(
+                _get_data_path(request), source_id, safe_filename, original_content,
+            )
+
+        active_filename = "default.json" if is_field_export else safe_filename
         destination = _config_asset_catalog(request).destination(
             config_type,
             device_type,
@@ -2160,18 +2306,29 @@ async def upload_config_asset(
             mode,
             profile,
             link_profile,
-            safe_filename,
+            active_filename,
+            scope=scope,
         )
-        content = await file.read()
-        _validate_uploaded_asset(safe_filename, content, structured=bool(family))
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(destination.name + ".part")
+        if is_field_export:
+            try:
+                os.chmod(str(destination.parent), 0o700)
+            except OSError:
+                pass
+        temporary = destination.with_name(destination.name + ".part." + uuid.uuid4().hex)
         temporary.write_bytes(content)
+        if is_field_export:
+            os.chmod(str(temporary), 0o600)
         os.replace(str(temporary), str(destination))
+        data_root = _get_data_path(request).resolve()
         asset = _config_asset_catalog(request).resolve(
-            str(destination.relative_to(_get_data_path(request)))
+            str(destination.relative_to(data_root))
         )[1]
-        return {"success": True, "asset": _config_asset_response(asset)}
+        response = {"success": True, "asset": _config_asset_response(asset)}
+        if upload_metadata is not None:
+            response["metadata"] = upload_metadata
+            response["metadata"]["source_id"] = source_id
+        return response
     except HTTPException:
         raise
     except ValueError as exc:
@@ -2191,10 +2348,14 @@ async def update_config_asset(request: Request, body: ConfigAssetUpdate):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Config asset not found")
     if asset.protected:
-        raise HTTPException(status_code=403, detail="Protected PTP asset content is host-only")
+        raise HTTPException(status_code=403, detail="Protected runtime asset content is host-only")
     if not asset.editable:
         raise HTTPException(status_code=415, detail="This asset is not editable text")
-    _validate_uploaded_asset(asset.filename, body.content.encode("utf-8"), structured=bool(asset.family))
+    _validate_uploaded_asset(
+        asset.filename,
+        body.content.encode("utf-8"),
+        structured=bool(asset.family or asset.scope == "shared"),
+    )
     try:
         temporary = asset_path.with_name(asset_path.name + ".part")
         temporary.write_text(body.content)
@@ -2334,10 +2495,17 @@ async def get_config_content(
         if config_path.suffix == '.json':
             try:
                 parsed = json.loads(content)
+                if _contains_secret_key(parsed):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Protected runtime asset content is host-only",
+                    )
                 return {"filename": filename, "content": content, "parsed": parsed}
             except json.JSONDecodeError:
                 pass
         return {"filename": filename, "content": content}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to read config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2379,6 +2547,8 @@ async def upload_config(
                 json.loads(content.decode('utf-8'))
             except json.JSONDecodeError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+
+        _validate_uploaded_asset(safe_filename, content, structured=True)
 
         with open(dest_path, "wb") as f:
             f.write(content)
@@ -2443,6 +2613,8 @@ async def update_config_content(
                 json.loads(content)
             except json.JSONDecodeError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+
+        _validate_uploaded_asset(filename, content.encode('utf-8'), structured=True)
 
         config_path.write_text(content)
         return {"success": True, "message": f"Config updated: {filename}"}
@@ -3056,6 +3228,12 @@ async def _run_apply_mode(
                 # No template — just apply hostname/SSID via apply_ap_naming
                 success = await handler.apply_ap_naming(
                     naming["hostname"], naming["ssid"],
+                )
+
+            if success:
+                success = await handler.apply_antenna_gain(
+                    req.antenna_gain_db,
+                    model=device_model or fingerprint.model,
                 )
 
             if success:

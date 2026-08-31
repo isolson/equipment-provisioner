@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .config import _default_credentials
+from .config_assets import ConfigAssetCatalog
 from .handler_manager import provisionable_device_types
 
 STATUS_PRIORITY = {
@@ -243,6 +244,13 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
             data_path=data_path,
             device_type=device_type,
         )
+        shared_baseline = any(
+            asset.scope == "shared" and asset.role and asset.role.lower() == "sm"
+            for asset in ConfigAssetCatalog(data_path).list_assets(
+                device_type=device_type,
+                config_type="template",
+            )
+        )
         missing_modes = [mode for mode in info["modes"] if mode not in existing]
         required_default_missing = info["required"] and "default" not in existing
 
@@ -267,6 +275,7 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
                 "summary": summary,
                 "existing": existing,
                 "missing_modes": missing_modes,
+                "shared_baseline": shared_baseline,
             }
         )
 
