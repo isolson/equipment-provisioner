@@ -77,7 +77,7 @@ POST /api/provision  (ProvisionRequest)                    web/api.py:268
 
 | Vendor | File apply path | Semantics |
 |---|---|---|
-| Tachyon | `tachyon.py:1281` `apply_config_file` | `.tar` export or full-export-shaped JSON (`_is_full_config_export`, `tachyon.py:1025`) → applied **authoritatively (replace)**; partial JSON → GET live config, `_deep_merge(current, template)` (`tachyon.py:1271`), POST result |
+| Tachyon | `tachyon.py:1281` `apply_config_file` | Native six-section export (root `ethernet`) → applied **authoritatively (replace)**; reduced TAR or partial JSON → GET live config, `_deep_merge(current, template)` (`tachyon.py:1271`), POST result |
 | Cambium | `cambium.py:1280` `apply_config_file` | JSON → `config_import` multipart upload + `applyFinished` poll; `.tar` → LuCI flashops restore; inline dict → `set_param` (small key sets only). All endpoints CONFIRMED in `docs/cambium-config.md` |
 | MikroTik | `mikrotik.py:263` `apply_config_file` | SFTP `.rsc` + `/import` over SSH. Inline dict `apply_config` is **rejected by design** (`mikrotik.py:254`) |
 | Ubiquiti | `ubiquiti.py:973` `apply_config` | **Wave only** (`_api_style == "wave"`): PUT full config JSON + fail-closed read-back. AirOS: no config apply exists. Feature flag `apply_config_ubiquiti` defaults **False** |
@@ -243,8 +243,9 @@ when interface binding is active — without `self.interface`,
 (`cambium.py:1293-1299`). The provisioner always binds a VLAN interface in
 practice (STANDARDS.md §1); the resolver contract assumes it.
 Note for R1: the composed artifact for a Tachyon `.tar` base is a *JSON* file,
-which `apply_config_file` still treats as authoritative because the full-export
-key-set heuristic (`_is_full_config_export`) fires on the composed content.
+which `apply_config_file` treats as authoritative when the composed content has
+the native six-section shape, including root `ethernet`. Reduced legacy TAR
+profiles remain patch-like and merge with the live configuration.
 
 ---
 
@@ -328,8 +329,9 @@ configs/templates/{vendor}/roles/{role}/{model|alias|default}.{json,...}
 
 ### 2.4 Interaction with full-export templates (replace-not-merge)
 
-Tachyon `.tar` exports and full-export-shaped JSON are applied authoritatively
-(replace). Composition-wise, two distinct cases:
+Native Tachyon exports and full-export-shaped JSON are applied authoritatively
+(replace). Reduced legacy TAR profiles are patch-like and merge with the live
+configuration. Composition-wise, two distinct cases:
 
 - **Role overlays on a full-export base:** *forbidden in v1.* A full export is an
   interlocked complete config; a partial delta can produce combinations the

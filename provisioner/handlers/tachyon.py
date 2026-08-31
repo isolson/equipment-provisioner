@@ -961,9 +961,28 @@ class TachyonHandler(BaseHandler):
                 logger.info("Added default services.snmp_traps.port=162 for Tachyon config apply")
 
             ssh = services.get("ssh")
-            if isinstance(ssh, dict) and "password_login" not in ssh:
-                ssh["password_login"] = True
-                logger.info("Added default services.ssh.password_login=true for Tachyon config apply")
+            if not isinstance(ssh, dict):
+                services["ssh"] = {
+                    "enabled": True,
+                    "port": 22,
+                    "password_login": True,
+                }
+                logger.info("Added default services.ssh settings for Tachyon config apply")
+            else:
+                if "port" not in ssh:
+                    ssh["port"] = 22
+                    logger.info("Added default services.ssh.port=22 for Tachyon config apply")
+                if "password_login" not in ssh:
+                    ssh["password_login"] = True
+                    logger.info("Added default services.ssh.password_login=true for Tachyon config apply")
+
+            telnet = services.get("telnet")
+            if not isinstance(telnet, dict):
+                services["telnet"] = {"enabled": False, "port": 23}
+                logger.info("Added default services.telnet.enabled=false for Tachyon config apply")
+            elif "enabled" not in telnet:
+                telnet["enabled"] = False
+                logger.info("Added default services.telnet.enabled=false for Tachyon config apply")
 
             snmp = services.get("snmp")
             snmp_v3 = snmp.get("v3", {}) if isinstance(snmp, dict) else {}
@@ -977,6 +996,72 @@ class TachyonHandler(BaseHandler):
         network = config.get("network", {}) if isinstance(config.get("network"), dict) else {}
         wan = network.get("zones", {}).get("wan", {}) if isinstance(network.get("zones"), dict) else {}
         if isinstance(wan, dict):
+            management = wan.get("management")
+            if not isinstance(management, dict):
+                management = {}
+                wan["management"] = management
+            for key, default in (
+                ("enabled", True),
+                ("vlan", 12),
+                ("proto", "802.1q"),
+                ("use_zone_ip", True),
+            ):
+                if key not in management or management.get(key) is None:
+                    management[key] = default
+                    logger.info(
+                        "Added default network.zones.wan.management.%s=%r for Tachyon config apply",
+                        key,
+                        default,
+                    )
+            management_ip = management.get("ip")
+            if not isinstance(management_ip, dict):
+                management["ip"] = {"enabled": False}
+                logger.info(
+                    "Added default network.zones.wan.management.ip.enabled=false for Tachyon config apply"
+                )
+            elif "enabled" not in management_ip:
+                management_ip["enabled"] = False
+                logger.info(
+                    "Added default network.zones.wan.management.ip.enabled=false for Tachyon config apply"
+                )
+
+            if wan.get("mode") == "dhcp":
+                wan_ip = wan.get("ip")
+                if not isinstance(wan_ip, dict):
+                    wan["ip"] = {"enabled": True}
+                    logger.info(
+                        "Added default network.zones.wan.ip.enabled=true for Tachyon config apply"
+                    )
+                elif "enabled" not in wan_ip:
+                    wan_ip["enabled"] = True
+                    logger.info(
+                        "Added default network.zones.wan.ip.enabled=true for Tachyon config apply"
+                    )
+
+                dhcp = wan.get("dhcp")
+                if not isinstance(dhcp, dict):
+                    wan["dhcp"] = {"broadcast": False, "custom_dns": False}
+                    logger.info(
+                        "Added default network.zones.wan.dhcp custom_dns=false for Tachyon config apply"
+                    )
+                elif "custom_dns" not in dhcp:
+                    dhcp["custom_dns"] = False
+                    logger.info(
+                        "Added default network.zones.wan.dhcp.custom_dns=false for Tachyon config apply"
+                    )
+
+            custom_mac = wan.get("custom_mac")
+            if not isinstance(custom_mac, dict):
+                wan["custom_mac"] = {"enabled": False}
+                logger.info(
+                    "Added default network.zones.wan.custom_mac.enabled=false for Tachyon config apply"
+                )
+            elif "enabled" not in custom_mac:
+                custom_mac["enabled"] = False
+                logger.info(
+                    "Added default network.zones.wan.custom_mac.enabled=false for Tachyon config apply"
+                )
+
             if "lldp_forward" not in wan:
                 wan["lldp_forward"] = False
                 logger.info(
@@ -1070,16 +1155,21 @@ class TachyonHandler(BaseHandler):
     def is_full_config_export(config: Dict[str, Any]) -> bool:
         """Return True when a JSON template looks like a full Tachyon export.
 
-        Overrides the BaseHandler class-level hook so the config resolver
-        can detect replace-not-merge templates before instantiation.
+        A native export has all six top-level sections, including Ethernet at
+        the document root. Reduced legacy archives use patch semantics so
+        they cannot remove live DHCP or local fallback settings.
         """
         if not isinstance(config, dict):
             return False
         keys = set(config.keys())
-        return (
-            {"ethernet", "network", "version"}.issubset(keys)
-            or {"network", "wireless", "system", "version"}.issubset(keys)
-        )
+        return {
+            "ethernet",
+            "network",
+            "services",
+            "system",
+            "version",
+            "wireless",
+        }.issubset(keys) and isinstance(config.get("ethernet"), dict)
 
     def _has_verifiable_config_fields(self, config: Dict[str, Any]) -> bool:
         if not isinstance(config, dict):
@@ -1352,11 +1442,19 @@ class TachyonHandler(BaseHandler):
                 loaded_template.top_level_keys,
             )
 
-            if loaded_template.source_type == "tar" or self.is_full_config_export(config):
+            full_export = self.is_full_config_export(config)
+            if full_export:
                 logger.info("Applying Tachyon config export as authoritative full config")
             else:
-                # Partial JSON templates remain patch-like and merge into the
-                # live config before apply.
+                # Partial JSON templates and reduced legacy TAR templates remain
+                # patch-like. This prevents an old reduced archive from deleting
+                # live DHCP, interface, and local fallback sections.
+                if loaded_template.source_type == "tar":
+                    logger.info("Applying reduced Tachyon TAR as a live-config patch")
+                # Normalize the legacy nested Ethernet layout before merging.
+                # Otherwise the live root Ethernet section would win and the
+                # reduced template's port settings would be lost.
+                self._normalize_config_for_apply(config)
                 try:
                     current_config = await self._api_request("GET", self.API_CONFIG)
                     if isinstance(current_config, dict):

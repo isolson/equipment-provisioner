@@ -12,6 +12,7 @@ verification is made fail-closed (Wave 2).
 
 import json
 import tarfile
+from pathlib import Path
 
 from provisioner.handlers.tachyon import TachyonHandler
 
@@ -43,6 +44,9 @@ def _full_export_config():
                 "wan": {
                     "enabled": True,
                     "name": "Management",
+                    "mode": "dhcp",
+                    "type": "wan",
+                    "mtu": 1500,
                     "ip": {"enabled": True, "ipaddr": "192.168.2.1", "prefix": 24},
                     "dataVlan": {"proto": "802.1q", "vlan": 12},
                 }
@@ -248,6 +252,16 @@ async def test_apply_config_adds_missing_full_export_schema_defaults(fake_curl):
         "ntp_server": True,
         "timezone_offset": True,
     }
+    assert posted["network"]["zones"]["wan"]["management"] == {
+        "enabled": True,
+        "vlan": 12,
+        "proto": "802.1q",
+        "use_zone_ip": True,
+        "ip": {"enabled": False},
+    }
+    assert posted["network"]["zones"]["wan"]["ip"]["enabled"] is True
+    assert posted["network"]["zones"]["wan"]["custom_mac"] == {"enabled": False}
+    assert posted["services"]["telnet"] == {"enabled": False, "port": 23}
     assert posted["ethernet"]["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] is True
 
 
@@ -375,6 +389,118 @@ async def test_apply_config_file_partial_json_still_merges_live_config(
     assert fake_curl.methods == ["GET", "POST", "GET"]
     assert posted["system"]["hostname"] == "AP-1"
     assert "eth2" in posted["ethernet"]["ports"]
+
+
+def test_is_full_config_export_requires_native_root_sections():
+    full_config = _full_export_config()
+    assert TachyonHandler.is_full_config_export(full_config) is True
+
+    reduced_config = json.loads(json.dumps(full_config))
+    ethernet = reduced_config.pop("ethernet")
+    reduced_config["network"]["ethernet"] = ethernet
+    assert TachyonHandler.is_full_config_export(reduced_config) is False
+
+
+def test_tracked_tachyon_profiles_keep_common_management_defaults():
+    """Every bundled family profile must carry the common field network policy."""
+    template_root = Path(__file__).parents[1] / "configs" / "templates" / "tachyon"
+    profiles = sorted(template_root.rglob("*.tar"))
+    assert profiles
+
+    for profile in profiles:
+        with tarfile.open(profile) as archive:
+            member = next(
+                entry for entry in archive.getmembers()
+                if Path(entry.name).name == "config.json"
+            )
+            config = json.load(archive.extractfile(member))
+
+        wan = config["network"]["zones"]["wan"]
+        assert wan["management"]["enabled"] is True
+        assert wan["management"]["vlan"] == 12
+        assert wan["management"]["proto"] == "802.1q"
+        assert wan["management"]["use_zone_ip"] is True
+        assert wan["management"]["ip"]["enabled"] is False
+        assert wan["dhcp"]["custom_dns"] is False
+        assert wan["custom_mac"]["enabled"] is False
+        assert wan["dataVlan"]["vlan"] == 101
+        assert config["services"]["remote_syslog"]["enabled"] is True
+        assert config["services"]["remote_syslog"]["port"] == 514
+        assert config["services"]["remote_syslog"]["proto"] == "udp"
+        assert config["services"]["snmp"]["enabled"] is True
+        assert config["services"]["snmp"]["v2"]["ro"]["enabled"] is True
+        assert config["services"]["ntp"]["enabled"] is True
+        assert config["services"]["discovery"]["enabled"] is True
+        assert config["services"]["ssh"]["port"] == 22
+        assert config["services"]["telnet"]["enabled"] is False
+
+
+async def test_apply_config_file_reduced_tar_merges_live_config(
+    tmp_path, fake_curl, fast_sleep
+):
+    """Reduced legacy TARs must not delete live DHCP or interface sections."""
+    h = _curl_handler()
+    live_config = _full_export_config()
+    live_config["ethernet"]["ports"]["eth2"] = {"enabled": True, "mtu": 1500}
+    live_config["network"]["mode"] = "bridge"
+    live_config["network"]["zones"]["wan"].update(
+        {
+            "dhcp": {"broadcast": False, "custom_dns": False},
+            "management": {
+                "enabled": True,
+                "vlan": 12,
+                "proto": "802.1q",
+                "use_zone_ip": True,
+                "ip": {"enabled": False},
+            },
+            "custom_mac": {"enabled": False},
+        }
+    )
+    live_config["network"]["zones"]["lan"] = {
+        "enabled": True,
+        "dhcp": {"enabled": True, "first": "192.0.2.10", "last": "192.0.2.20"},
+    }
+    live_config["network"]["zones"]["local"] = {
+        "enabled": True,
+        "dhcp": {"enabled": True, "first": "198.51.100.10", "last": "198.51.100.20"},
+    }
+
+    reduced_config = json.loads(json.dumps(_full_export_config()))
+    live_config["wireless"]["radios"]["wlan0"]["vaps"][0]["mode"] = "ap"
+    reduced_config["wireless"]["radios"]["wlan0"]["vaps"][0]["mode"] = "ap"
+    ethernet = reduced_config.pop("ethernet")
+    ethernet["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] = True
+    reduced_config["network"]["ethernet"] = ethernet
+    reduced_config["network"].pop("mode", None)
+    reduced_config["network"]["zones"]["wan"].pop("mode")
+    reduced_config["network"]["zones"]["wan"].pop("dhcp", None)
+
+    tar_path = _write_config_tar(tmp_path, reduced_config)
+    posted = {}
+
+    def route(argv, stdin):
+        method = argv[argv.index("-X") + 1]
+        if method == "GET" and not posted:
+            return (0, json.dumps(live_config))
+        if method == "POST":
+            posted.update(curl_config_data(stdin))
+            return (0, json.dumps({}))
+        if method == "GET":
+            return (0, json.dumps(posted))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_input_handler(route)
+
+    assert await h.apply_config_file(str(tar_path)) is True
+    assert fake_curl.methods == ["GET", "POST", "GET"]
+    assert posted["network"]["mode"] == "bridge"
+    assert "eth2" in posted["ethernet"]["ports"]
+    assert posted["network"]["zones"]["lan"]["dhcp"]["enabled"] is True
+    assert posted["network"]["zones"]["local"]["dhcp"]["enabled"] is True
+    assert posted["network"]["zones"]["wan"]["dhcp"]["custom_dns"] is False
+    assert posted["network"]["zones"]["wan"]["management"]["use_zone_ip"] is True
+    assert posted["ethernet"]["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] is True
+    assert "ethernet" not in posted["network"]
 
 
 # ---------------------------------------------------------------------------

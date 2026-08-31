@@ -66,8 +66,17 @@ Store layout:
 Current repo state:
 
 - Mode templates exist in `configs/templates/cambium/` and `configs/templates/tachyon/`.
-- Those templates are not seeded automatically into `/var/lib/provisioner/repo`.
-- The repo does not currently ship seeded `default.*` templates for base auto-provisioning.
+- Tachyon family profiles are tracked in `configs/templates/tachyon/`.
+- Deployment must install the tracked profiles into `/var/lib/provisioner/repo`.
+- The code deploy does not seed host runtime data automatically.
+
+Tachyon family TAR profiles are included in the repository. They use
+management VLAN 12, protocol `802.1q`, DHCP-provided DNS, data VLAN 101,
+syslog, SNMP, NTP, discovery, SSH, and disabled Telnet. Native six-section
+exports replace the device configuration. Older reduced TAR profiles merge
+with the live configuration so they do not remove DHCP scopes or the local
+admin fallback. Add the approved SNMP credential through the protected
+operations workflow. Do not use an empty or default community.
 
 Implication:
 
