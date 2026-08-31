@@ -214,9 +214,8 @@
                                 <select id="cfg-family" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config family">
                                     <option value="">All families</option>
                                 </select>
-                                <select id="cfg-firmware" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config firmware">
-                                    <option value="">All firmware</option>
-                                </select>
+                                <input id="cfg-firmware" oninput="updateConfigFilters()" list="cfg-firmware-options" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="Firmware version" aria-label="Config firmware">
+                                <datalist id="cfg-firmware-options"></datalist>
                                 <select id="cfg-role" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config role">
                                     <option value="">All roles</option>
                                 </select>
@@ -226,6 +225,9 @@
                                 <input id="cfg-profile" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="AP profile (optional)" aria-label="AP profile">
                                 <input id="cfg-link-profile" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="PTP link profile (optional)" aria-label="PTP link profile">
                             </div>
+                            <p class="text-xs text-gray-500 mb-4">
+                                First Cambium SM export: choose Field deployment export and Shared baseline, enter the firmware version, then choose SM for role and mode.
+                            </p>
                             <div class="drop-zone rounded-lg flex items-center justify-center gap-2 p-4 text-center cursor-pointer bg-white"
                                  onclick="document.getElementById('cfg-file-input').click()"
                                  ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleConfigDrop(event)">
@@ -442,20 +444,38 @@
         function updateConfigFilterOptions() {
             const fields = [
                 ['family', 'All families'],
-                ['firmware', 'All firmware'],
                 ['role', 'All roles'],
                 ['mode', 'All modes'],
             ];
             const vendorAssets = configsData.filter(asset => asset.device_type === activeVendor);
+            const registryFamilies = (FAMILY_METADATA[activeVendor] || []);
+            const registryRoles = [...new Set(registryFamilies.flatMap(family => family.roles || []))];
+            const registryModes = [...new Set(registryRoles.flatMap(role => {
+                const normalized = role.toLowerCase();
+                return normalized === 'ptp' ? ['ptp-a', 'ptp-b'] : [normalized];
+            }))];
+            const registryValues = {
+                family: registryFamilies.map(family => family.directory),
+                role: registryRoles,
+                mode: registryModes,
+            };
+
+            const firmwareInput = document.getElementById('cfg-firmware');
+            const firmwareOptions = document.getElementById('cfg-firmware-options');
+            if (firmwareInput && firmwareOptions) {
+                const firmwareValues = [...new Set(vendorAssets.map(asset => asset.firmware).filter(Boolean))].sort();
+                firmwareOptions.innerHTML = firmwareValues.map(value =>
+                    `<option value="${escapeHtml(value)}"></option>`
+                ).join('');
+                firmwareInput.value = configFilters.firmware || '';
+            }
+
             for (const [field, emptyLabel] of fields) {
                 const select = document.getElementById(`cfg-${field}`);
                 if (!select) continue;
-                const registryFamilies = field === 'family'
-                    ? (FAMILY_METADATA[activeVendor] || []).map(family => family.directory)
-                    : [];
                 const values = [...new Set([
                     ...vendorAssets.map(asset => asset[field]).filter(Boolean),
-                    ...registryFamilies,
+                    ...(registryValues[field] || []),
                 ])].sort();
                 const current = configFilters[field];
                 select.innerHTML = `<option value="">${emptyLabel}</option>` + values.map(value =>

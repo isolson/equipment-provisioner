@@ -367,6 +367,20 @@ def test_manage_page_uses_vendor_tabs_for_assets():
     assert 'id="cred-device-type"' not in html
 
 
+def test_manage_page_keeps_first_cambium_export_controls_available_without_assets():
+    client = make_client()
+
+    html = client.get("/files").text
+
+    assert '<input id="cfg-firmware"' in html
+    assert 'list="cfg-firmware-options"' in html
+    assert 'id="cfg-firmware-options"' in html
+    assert '<select id="cfg-role"' in html
+    assert '<select id="cfg-mode"' in html
+    assert "const registryRoles" in html
+    assert "const registryModes" in html
+
+
 def test_firmware_page_uses_vendor_tabs_and_vendor_check():
     client = make_client()
 

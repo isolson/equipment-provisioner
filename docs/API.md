@@ -16,6 +16,7 @@ This report covers:
 - management VLAN interface presence
 - primary and custom credentials
 - default config templates
+- shared Cambium SM baseline
 - local firmware inventory
 - MikroTik provisioning switch state for the six provisioning ports, WAN uplink, and host trunk
 
@@ -53,6 +54,49 @@ Export the current bench state as a portable `.zip` bundle.
 Query parameters:
 
 - `include_system_files=true` to include `/etc/provisioner/config.yaml` and `/etc/provisioner/provisioner.env`
+
+Protected runtime config assets, including Cambium field deployment exports,
+are omitted from the bundle. The bundle can still contain
+`credentials.json` and optional system files. Export only to a trusted host.
+
+### GET /config-assets
+
+List installed configuration assets. Use `device_type`, `family`, `firmware`,
+`role`, `mode`, `scope`, and `config_type` as optional filters.
+
+Protected assets return metadata only. Their content is not returned by the
+list endpoint or by `GET /config-assets/content`.
+
+### GET /config-assets/metadata
+
+Return the registry-derived family, role, mode, scope, and asset-kind choices
+for the upload form. This endpoint works on a new install with no assets.
+
+### POST /config-assets/upload
+
+Upload a standard template or a Cambium field deployment export.
+
+Multipart form fields:
+
+- `file` - the configuration file
+- `config_type` - `template` or `override`
+- `device_type` - a provisionable device type
+- `family` - the model family for a family asset
+- `firmware` - the firmware version
+- `role` - `AP`, `SM`, or `PTP`
+- `mode` - `ap`, `sm`, `ptp-a`, or `ptp-b`
+- `profile` - an AP profile or PTP side profile
+- `link_profile` - a PTP link profile
+- `scope` - `family` or `shared`
+- `asset_kind` - `standard` or `field_export`
+
+For `field_export`, the file must be a native Cambium JSON export with
+`device_props` and `template_props`. The role is required. Shared SM exports
+must use `scope=shared`, `mode=sm`, and a firmware version. AP and PTP exports
+must use a family and firmware; PTP exports also require link and side
+profiles. The response includes metadata such as firmware version, property
+count, and whether protected fields were found. It does not include secret
+values or the protected source file.
 
 ### POST /setup/switch/configure
 

@@ -144,7 +144,11 @@ def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
 
 def _template_requirements(config: Any) -> Dict[str, Dict[str, Any]]:
     requirements = {
-        "cambium": {"required": True, "modes": ["default", "ap", "ptp-a", "ptp-b"]},
+        "cambium": {
+            "required": True,
+            "modes": ["default", "ap", "ptp-a", "ptp-b"],
+            "requires_shared_baseline": True,
+        },
         "tachyon": {"required": True, "modes": ["default", "ap", "ptp-a", "ptp-b"]},
         "tarana": {
             # Tarana's "config" is just an integer (operator_id); no template
@@ -263,9 +267,17 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
         elif not existing:
             status = "warning"
             summary = "No templates uploaded yet"
-        elif missing_modes:
-            status = "warning"
-            summary = f"Missing mode templates: {', '.join(missing_modes)}"
+        else:
+            warning_reasons = []
+            if missing_modes:
+                warning_reasons.append(
+                    "Missing mode templates: {}".format(", ".join(missing_modes))
+                )
+            if info.get("requires_shared_baseline") and not shared_baseline:
+                warning_reasons.append("Missing shared SM baseline")
+            if warning_reasons:
+                status = "warning"
+                summary = "; ".join(warning_reasons)
 
         device_checks.append(
             {
@@ -286,7 +298,7 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
         summary = "Upload a default template for each required device type."
     elif any(item["status"] == "warning" for item in device_checks):
         status = "warning"
-        summary = "Optional AP/PTP templates are still missing for some device types."
+        summary = "Some config baselines or optional mode templates are still missing."
 
     return {
         "id": "config_templates",
@@ -846,16 +858,39 @@ def write_setup_bundle(
         "system_files": 0,
     }
 
-    def add_tree(archive: zipfile.ZipFile, source: Path, prefix: str, key: str) -> None:
+    protected_config_paths = {
+        (data_path / asset.path).resolve()
+        for asset in ConfigAssetCatalog(data_path).list_assets()
+        if asset.protected
+    }
+
+    def add_tree(
+        archive: zipfile.ZipFile,
+        source: Path,
+        prefix: str,
+        key: str,
+        excluded_paths: Optional[set[Path]] = None,
+    ) -> None:
         if not source.exists():
             return
         for file_path in sorted(path for path in source.rglob("*") if path.is_file()):
-            archive.write(file_path, arcname=str(PurePosixPath(prefix) / file_path.relative_to(source)))
+            if excluded_paths and file_path.resolve() in excluded_paths:
+                continue
+            archive.write(
+                file_path,
+                arcname=str(PurePosixPath(prefix) / file_path.relative_to(source)),
+            )
             summary[key] += 1
 
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        add_tree(archive, data_path / "configs", "configs", "configs")
+        add_tree(
+            archive,
+            data_path / "configs",
+            "configs",
+            "configs",
+            excluded_paths=protected_config_paths,
+        )
         add_tree(archive, data_path / "firmware", "firmware", "firmware")
 
         credentials_path = data_path / "credentials.json"

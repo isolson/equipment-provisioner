@@ -199,6 +199,9 @@ normalized copy with an atomic rename. The original is not committed, listed as
 content, or written to logs. The API returns only export type, firmware version,
 property count, secret presence, and field names.
 
+Protected active profiles are omitted from setup-bundle exports. Keep the
+private source export and any exported bundle on a trusted host.
+
 The shared SM baseline is portable:
 
 | Policy | Value |
