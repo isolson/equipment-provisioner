@@ -37,6 +37,7 @@ from ..vendor_registry import (
     builtin_ui_credentials,
     config_family_metadata,
     nonprovisionable_device_types,
+    ptp_families_compatible,
     spec_for,
     ui_styles,
 )
@@ -3037,6 +3038,70 @@ async def get_display_status(request: Request):
 # Device Mode Endpoints (AP / PTP)
 # ============================================================================
 
+
+def _validate_ptp_request(
+    request: Request,
+    port_manager: Any,
+    port_number: int,
+    status: Dict[str, Any],
+    req: ApplyModeRequest,
+    capabilities: Dict[str, Any],
+) -> None:
+    """Validate the certified family pair and generated PTP settings."""
+    from ..mode_config import ModeConfigManager, make_ptp_link_id
+
+    link_id = make_ptp_link_id(req.my_tower, req.remote_tower)
+    side = port_manager.get_available_ptp_side(
+        req.my_tower, req.remote_tower, port_num=port_number
+    )
+    peer = port_manager.get_ptp_peer(link_id, port_number)
+    if peer is not None and not ptp_families_compatible(
+        status.get("device_type"),
+        status.get("device_model"),
+        peer.get("device_type"),
+        peer.get("device_model"),
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The two device families are not certified for PTP",
+        )
+
+    if not capabilities.get("ptp_settings_required"):
+        return
+
+    mode = "ptp-a" if side == "a" else "ptp-b"
+    manager = ModeConfigManager(
+        str(_get_data_path(request) / "configs" / "templates")
+    )
+    template = manager.load_template(
+        status.get("device_type"),
+        mode,
+        model=status.get("device_model"),
+        link_profile=link_id,
+    )
+    if template is None:
+        raise HTTPException(
+            status_code=409,
+            detail="A certified PTP settings profile is required for this family and link",
+        )
+
+    naming = manager.generate_ptp_naming(
+        req.my_tower,
+        req.remote_tower,
+        side,
+        status.get("device_type"),
+    )
+    try:
+        manager.generate_ptp_settings(
+            template,
+            naming,
+            status.get("device_type"),
+            side,
+            status.get("device_model"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
 @router.post("/ports/{port_number}/apply-mode")
 async def apply_device_mode(
     port_number: int,
@@ -3124,6 +3189,14 @@ async def apply_device_mode(
                 status_code=400,
                 detail="PTP mode requires 'my_tower' and 'remote_tower'",
             )
+        _validate_ptp_request(
+            request,
+            port_manager,
+            port_number,
+            status,
+            req,
+            capabilities,
+        )
     # Run config application in background
     background_tasks.add_task(
         _run_apply_mode,
@@ -3141,8 +3214,8 @@ async def apply_device_mode(
 async def get_ptp_links(request: Request):
     """Get all active PTP links.
 
-    Returns links with side info so the UI can show PTP-B shortcuts
-    on ports where the paired device's vendor matches.
+    Returns links with side and family info so the UI can show the paired
+    endpoint and the API can enforce the certified family matrix.
     """
     provisioner = request.app.state.provisioner
     if not provisioner or not provisioner.port_manager:
@@ -3169,6 +3242,9 @@ async def _run_apply_mode(
     device_model = (port_manager.get_port_status().get(port_number) or {}).get("device_model")
 
     try:
+        capabilities = HandlerManager.operator_capabilities_for(
+            device_type, device_model
+        )
         # Determine mode and naming
         if req.mode == "ap":
             mode = "ap"
@@ -3176,12 +3252,26 @@ async def _run_apply_mode(
             ptp_link_id = None
         else:
             # PTP: auto-assign side
-            side = port_manager.get_available_ptp_side(req.my_tower, req.remote_tower)
+            side = port_manager.get_available_ptp_side(
+                req.my_tower, req.remote_tower, port_num=port_number
+            )
             mode = f"ptp-{side}"
             naming = mcm.generate_ptp_naming(
                 req.my_tower, req.remote_tower, side, device_type,
             )
             ptp_link_id = make_ptp_link_id(req.my_tower, req.remote_tower)
+            peer = port_manager.get_ptp_peer(ptp_link_id, port_number)
+            if peer is not None and not ptp_families_compatible(
+                device_type,
+                device_model,
+                peer.get("device_type"),
+                peer.get("device_model"),
+            ):
+                logger.error(
+                    "Refusing uncertified PTP family pair on port %s",
+                    port_number,
+                )
+                return
 
         logger.info(
             f"Applying {mode} to port {port_number} ({device_type}): "
@@ -3199,6 +3289,13 @@ async def _run_apply_mode(
             profile=profile,
             link_profile=ptp_link_id,
         )
+        if req.mode == "ptp" and capabilities.get("ptp_settings_required") and not template:
+            logger.error(
+                "Required PTP settings profile disappeared before applying mode "
+                "on port %s",
+                port_number,
+            )
+            return
 
         # Create handler and connect
         interface = port_manager.get_interface_for_port(port_number)
@@ -3220,10 +3317,27 @@ async def _run_apply_mode(
             return
 
         try:
-            # Apply config: template + naming injection, or just naming if no template
+            # Apply config: template + generated identity/radio settings, or
+            # just naming for handlers that explicitly allow the fallback.
             if template:
-                rendered = mcm.render_template(template, naming, device_type)
+                if req.mode == "ptp":
+                    rendered = mcm.generate_ptp_settings(
+                        template,
+                        naming,
+                        device_type,
+                        side,
+                        device_model,
+                    )
+                else:
+                    rendered = mcm.render_template(template, naming, device_type)
                 success = await handler.apply_mode_config(rendered)
+            elif req.mode == "ptp" and capabilities.get("ptp_settings_required"):
+                logger.error(
+                    "Cannot apply PTP mode without the required settings profile "
+                    "on port %s",
+                    port_number,
+                )
+                return
             else:
                 # No template — just apply hostname/SSID via apply_ap_naming
                 success = await handler.apply_ap_naming(

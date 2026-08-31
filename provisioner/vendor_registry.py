@@ -125,6 +125,11 @@ class ConfigFamilySpec:
     directory: str
     model_patterns: Tuple[str, ...]
     roles: Tuple[str, ...] = ("AP", "SM", "PTP")
+    # Explicit certification list for PTP links.  An empty tuple means that
+    # the family is not certified for PTP, even when PTP is listed as a
+    # possible asset role.  Directory names are used because they are the
+    # stable on-disk family identifiers.
+    ptp_compatible_families: Tuple[str, ...] = ()
 
     def matches(self, model: Optional[str]) -> bool:
         if not model:
@@ -138,6 +143,7 @@ class ConfigFamilySpec:
             "directory": self.directory,
             "model_patterns": list(self.model_patterns),
             "roles": list(self.roles),
+            "ptp_compatible_families": list(self.ptp_compatible_families),
         }
 
 
@@ -272,6 +278,34 @@ def config_family_metadata() -> Dict[str, List[Dict[str, Any]]]:
         for spec in specs()
         if spec.config_families
     }
+
+
+def ptp_families_compatible(
+    device_type: str,
+    model: Optional[str],
+    peer_device_type: str,
+    peer_model: Optional[str],
+) -> bool:
+    """Return whether two detected models have a certified PTP pairing.
+
+    PTP certification is deliberately explicit in the family registry.  A
+    model without a recognized family, a family without a PTP role, or a
+    cross-vendor pair fails closed.
+    """
+    if device_type != peer_device_type:
+        return False
+
+    family = config_family_for_model(device_type, model)
+    peer_family = config_family_for_model(peer_device_type, peer_model)
+    if family is None or peer_family is None:
+        return False
+    if "PTP" not in family.roles or "PTP" not in peer_family.roles:
+        return False
+
+    return (
+        peer_family.directory in family.ptp_compatible_families
+        and family.directory in peer_family.ptp_compatible_families
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +485,8 @@ register(VendorSpec(
             name="ePMP 3K",
             directory="ePMP-3K",
             model_patterns=("epmp 3000", "epmp 3000l", "epmp 3000 mp"),
-            roles=("AP", "SM"),
+            roles=("AP", "SM", "PTP"),
+            ptp_compatible_families=("ePMP-3K", "ePMP-4K"),
         ),
         ConfigFamilySpec(
             name="ePMP 4K",
@@ -461,6 +496,7 @@ register(VendorSpec(
                 "epmp 4616", "epmp 4625",
             ),
             roles=("AP", "SM", "PTP"),
+            ptp_compatible_families=("ePMP-3K", "ePMP-4K"),
         ),
     ),
     ui_style={"name": "Cambium", "color": "#1A73E9"},
@@ -495,19 +531,28 @@ register(VendorSpec(
             name="TNA-301-302",
             directory="TNA-301-302",
             model_patterns=("tna-301*", "tna-302*"),
-            roles=("AP", "SM"),
+            roles=("AP", "SM", "PTP"),
+            ptp_compatible_families=(
+                "TNA-301-302", "TNA-303X", "TNA-303L-65",
+            ),
         ),
         ConfigFamilySpec(
             name="TNA-303X",
             directory="TNA-303X",
             model_patterns=("tna-303x*",),
             roles=("AP", "SM", "PTP"),
+            ptp_compatible_families=(
+                "TNA-301-302", "TNA-303X", "TNA-303L-65",
+            ),
         ),
         ConfigFamilySpec(
             name="TNA-303L-65",
             directory="TNA-303L-65",
             model_patterns=("tna-303l-65*",),
-            roles=("SM",),
+            roles=("SM", "PTP"),
+            ptp_compatible_families=(
+                "TNA-301-302", "TNA-303X", "TNA-303L-65",
+            ),
         ),
     ),
     ui_style={"name": "Tachyon", "color": "#a855f7"},

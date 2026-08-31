@@ -735,7 +735,7 @@ Out of scope by construction; the resolver is never invoked for it.
 | H3 | Tachyon | Exact PSK/passphrase key path under `vaps[]` / `sta_profiles` (and `security_mode` vocabulary) | R4, R5 | bench |
 | H4 | Cambium | Static-IP field set (address/mask/gateway keys) and whether IP mode is settable via `config_import` even though `set_param` treats `networkInterfaceIPMethod` as read-only. The only in-repo candidates are in the dead, never-called `set_management_ip` helper (`cambium.py:2818-2836`, nested `network.management.*` shape that does not match the flat `device_props` apply path) — dismissed as evidence, cited so later implementers know it was considered | R6 | bench |
 | H5 | Tachyon | Static-mode `network.zones.wan` field set (address/prefix/gateway) — repo only shows `"mode": "dhcp"` | R6 | bench |
-| H6 | Cambium + Tachyon | PTP radio-role keys (master/slave / mode fields) — repo PTP mode templates only set SSID/hostname | R6 | bench |
+| H6 | Cambium + Tachyon | PTP radio-role values remain in protected family profiles; the handler contract now requires those settings and the registry records certified family pairings | R6 | bench profile + hardware outcome |
 | H7 | all PTP vendors | OSPF parameter shape — **zero** OSPF-shaped fields exist anywhere in the repo; `identity.routing` beyond `{mode, area}` is reserved, not designed | R6 | bench + product (confirm OSPF is actually in scope per vendor) |
 | H8 | Ubiquiti | Wave PUT merge-vs-replace semantics; Wave PSK/mgmt-IP paths; capture + apply on **AirOS** (no apply path exists today); Wave-Nano pass | R4, R5, R6 | bench (epic follow-up #3) |
 | H9 | Tarana | Confirm replacement is a no-op (`operator_id` only) → formally descope | R5 | bench + product (epic follow-up #5) |

@@ -265,6 +265,51 @@ per-device value overrides `23` dBi. Integrated radios receive no gain write.
 separate role profiles. The later mode workflow applies the selected AP or PTP
 profile, then injects the generated site identity.**
 
+## Certified ePMP PTP family link profiles
+
+The PTP workflow certifies ePMP 3K and ePMP 4K family pairings. This includes
+links between two 46xx models and links between an ePMP 3K model and an ePMP
+4K model. Each endpoint still needs a PTP settings profile for its own family.
+The API rejects the link when the family pairing is not certified or either
+profile is missing.
+
+The supplied 46xx native exports are the ePMP 4K `tw32-tw18` link profile.
+Upload each export from the `/files` page. Use these values:
+
+| Field | PTP-A export | PTP-B export |
+|---|---|---|
+| Type | Field deployment export | Field deployment export |
+| Family | `ePMP-4K` | `ePMP-4K` |
+| Firmware | `5.11.1` | `5.11.1` |
+| Role | `PTP` | `PTP` |
+| Mode | `ptp-a` | `ptp-b` |
+| Scope | `family` | `family` |
+| Link profile | `tw32-tw18` | `tw32-tw18` |
+| Side profile | `Main` | `SM` |
+
+The service stores link IDs in ascending tower order. For this pair the
+runtime ID is `tw18-tw32`; the resolver also accepts the reverse order shown
+in the field export names.
+
+The upload stores the active profiles under the protected runtime path:
+
+```text
+configs/templates/cambium/ePMP-4K/5.11.1/PTP/tw32-tw18/Main/default.json
+configs/templates/cambium/ePMP-4K/5.11.1/PTP/tw32-tw18/SM/default.json
+```
+
+The source exports and active PTP profiles contain secrets and site identity.
+They are host-only. Do not commit them or include them in a setup bundle.
+The protected profile must retain the native PTP radio settings, including the
+radio mode, PTP role, protocol mode, TDD frame size, TDD ratio, and center
+frequency. The handler generates the link identity (hostname and SSID) from
+the two tower numbers and leaves these hardware-specific settings from the
+profile unchanged.
+
+The PTP action appears only after the device has completed and verified SM
+provisioning. The operator enters the two tower numbers; the backend assigns
+side A or B, checks the peer family, and injects the generated link identity.
+
 ---
 
 ## How Config Verify Works

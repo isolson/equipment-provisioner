@@ -129,6 +129,32 @@ class BaseHandler(ABC):
     #: not maintain a vendor allowlist.
     required_baseline_mode = None  # type: Optional[str]
 
+    #: PTP mode needs a vendor-native settings profile in addition to the
+    #: generated link identity.  Handlers set this when naming-only fallback
+    #: would not produce a working radio link.
+    requires_ptp_settings = False
+
+    @classmethod
+    def requires_ptp_settings_for_model(cls, model: Optional[str] = None) -> bool:
+        """Return whether PTP needs a complete vendor settings profile."""
+        return bool(cls.requires_ptp_settings)
+
+    @classmethod
+    def generate_ptp_settings(
+        cls,
+        config: Dict[str, Any],
+        side: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Validate or generate vendor PTP settings before mode apply.
+
+        The default keeps the existing behavior for handlers that do not
+        advertise qualified PTP.  Vendors that require a native PTP profile
+        must override this hook and raise ``ValueError`` when the profile is
+        incomplete.
+        """
+        return config
+
     #: Whether the kiosk may expose this handler's manual recovery workflow.
     #: The recovery implementation remains vendor-local; the shared UI only
     #: consumes this capability flag.

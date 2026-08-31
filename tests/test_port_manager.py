@@ -8,6 +8,35 @@ from provisioner import vendor_ips
 from provisioner.port_manager import DeviceLinkLocalIP, PortManager
 
 
+def test_ptp_link_tracks_model_and_family_for_peer_checks():
+    manager = PortManager(num_ports=2)
+    manager._generate_port_configs()
+    manager._ptp_links.clear()
+    try:
+        first = manager.port_states[1]
+        first.device_type = "cambium"
+        first.device_model = "ePMP 3000"
+        manager.set_device_mode(
+            1,
+            "ptp-a",
+            {"my_tower": "32", "remote_tower": "18"},
+            "tw18-tw32",
+        )
+
+        second = manager.port_states[2]
+        second.device_type = "cambium"
+        second.device_model = "ePMP 4616"
+        assert manager.get_available_ptp_side(32, 18, port_num=2) == "b"
+        assert manager.get_ptp_peer("tw18-tw32", 2) == {
+            "port": 1,
+            "device_type": "cambium",
+            "device_model": "ePMP 3000",
+            "family": "ePMP-3K",
+        }
+    finally:
+        manager._ptp_links.clear()
+
+
 @pytest.mark.asyncio
 async def test_ping_disconnect_clears_device_metadata():
     """When ping disconnect logic trips, stale model/checklist data should be cleared."""

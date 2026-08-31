@@ -10,20 +10,27 @@ from provisioner.web.app import create_app
 
 
 class _PortManager:
-    def __init__(self, status):
+    def __init__(self, status, peer=None):
         self._status = status
+        self._peer = peer
 
     def get_port_status(self):
         return {4: dict(self._status)}
 
+    def get_available_ptp_side(self, _my_tower, _remote_tower, port_num=None):
+        return "b" if self._peer else "a"
 
-def _client(monkeypatch, status, mode_config=False):
+    def get_ptp_peer(self, _link_id, _port_num):
+        return self._peer
+
+
+def _client(monkeypatch, status, mode_config=False, peer=None):
     config = Config()
     config.features.mode_config = mode_config
     monkeypatch.setattr("provisioner.config._config", config)
     provisioner = SimpleNamespace(
         config=config,
-        port_manager=_PortManager(status),
+        port_manager=_PortManager(status, peer=peer),
     )
     return TestClient(create_app(provisioner=provisioner))
 
@@ -140,6 +147,19 @@ def test_mode_endpoint_uses_model_qualified_cambium_ptp(monkeypatch):
         calls.append((port_number, device_type, req.mode, req.my_tower, req.remote_tower))
 
     monkeypatch.setattr("provisioner.web.api._run_apply_mode", fake_run)
+    monkeypatch.setattr(
+        "provisioner.mode_config.ModeConfigManager.load_template",
+        lambda *args, **kwargs: {
+            "device_props": {
+                "wirelessInterfaceMode": "configured",
+                "wirelessInterfacePTPMode": "configured",
+                "wirelessInterfaceProtocolMode": "configured",
+                "wirelessInterfaceTDDFrameSize": "configured",
+                "wirelessInterfaceTDDRatio": "configured",
+                "centerFrequency": "configured",
+            }
+        },
+    )
     client = _client(
         monkeypatch,
         dict(_status("cambium", "00:00:00:00:00:01"), device_model="ePMP 4616"),
@@ -155,7 +175,42 @@ def test_mode_endpoint_uses_model_qualified_cambium_ptp(monkeypatch):
     assert calls == [(4, "cambium", "ptp", 33, 35)]
 
 
-def test_mode_endpoint_keeps_other_cambium_models_locked(monkeypatch):
+def test_mode_endpoint_accepts_cambium_family_ptp(monkeypatch):
+    calls = []
+
+    async def fake_run(provisioner, port_number, device_type, device_ip, req):
+        calls.append((port_number, device_type, req.mode, req.my_tower, req.remote_tower))
+
+    monkeypatch.setattr("provisioner.web.api._run_apply_mode", fake_run)
+    monkeypatch.setattr(
+        "provisioner.mode_config.ModeConfigManager.load_template",
+        lambda *args, **kwargs: {
+            "device_props": {
+                "wirelessInterfaceMode": "configured",
+                "wirelessInterfacePTPMode": "configured",
+                "wirelessInterfaceProtocolMode": "configured",
+                "wirelessInterfaceTDDFrameSize": "configured",
+                "wirelessInterfaceTDDRatio": "configured",
+                "centerFrequency": "configured",
+            }
+        },
+    )
+    client = _client(
+        monkeypatch,
+        dict(_status("cambium", "00:00:00:00:00:01"), device_model="ePMP 3000"),
+        mode_config=True,
+    )
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "ptp", "my_tower": 32, "remote_tower": 18},
+    )
+
+    assert response.status_code == 200
+    assert calls == [(4, "cambium", "ptp", 32, 18)]
+
+
+def test_mode_endpoint_requires_cambium_ptp_profile(monkeypatch):
     client = _client(
         monkeypatch,
         dict(_status("cambium", "00:00:00:00:00:01"), device_model="ePMP 4518"),
@@ -167,9 +222,87 @@ def test_mode_endpoint_keeps_other_cambium_models_locked(monkeypatch):
         json={"mode": "ptp", "my_tower": 33, "remote_tower": 35},
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 409
     assert response.json()["detail"] == (
-        "Mode configuration not supported for cambium"
+        "A certified PTP settings profile is required for this family and link"
+    )
+
+
+def test_mode_endpoint_accepts_certified_cross_family_pair(monkeypatch):
+    monkeypatch.setattr(
+        "provisioner.web.api._run_apply_mode",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        "provisioner.mode_config.ModeConfigManager.load_template",
+        lambda *args, **kwargs: {
+            "device_props": {
+                "wirelessInterfaceMode": "configured",
+                "wirelessInterfacePTPMode": "configured",
+                "wirelessInterfaceProtocolMode": "configured",
+                "wirelessInterfaceTDDFrameSize": "configured",
+                "wirelessInterfaceTDDRatio": "configured",
+                "centerFrequency": "configured",
+            }
+        },
+    )
+    client = _client(
+        monkeypatch,
+        dict(_status("cambium", "00:00:00:00:00:01"), device_model="ePMP 3000"),
+        mode_config=True,
+        peer={
+            "device_type": "cambium",
+            "device_model": "ePMP 4616",
+            "port": 5,
+        },
+    )
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "ptp", "my_tower": 32, "remote_tower": 18},
+    )
+
+    assert response.status_code == 200
+
+
+def test_mode_endpoint_rejects_uncertified_ptp_pair(monkeypatch):
+    client = _client(
+        monkeypatch,
+        dict(_status("cambium", "00:00:00:00:00:01"), device_model="ePMP 4616"),
+        mode_config=True,
+        peer={
+            "device_type": "tachyon",
+            "device_model": "TNA-303X",
+            "port": 5,
+        },
+    )
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "ptp", "my_tower": 32, "remote_tower": 18},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "The two device families are not certified for PTP"
+    )
+
+
+def test_mode_endpoint_requires_tachyon_ptp_profile(monkeypatch):
+    client = _client(
+        monkeypatch,
+        dict(_status("tachyon", "78:5E:E8:D0:4C:38"), device_model="TNA-301"),
+        mode_config=True,
+    )
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "ptp", "my_tower": 32, "remote_tower": 18},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "A certified PTP settings profile is required for this family and link"
     )
 
 

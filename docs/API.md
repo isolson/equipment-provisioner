@@ -258,6 +258,31 @@ checklist and WebSocket events used by other provisioning operations.
 - `409` — Port already provisioning
 - `503` — Provisioner not available
 
+### POST /ports/{port_number}/apply-mode
+
+Applies a qualified AP or PTP mode after standard SM provisioning is complete
+and verified.
+
+For PTP, send `my_tower` and `remote_tower` (both 1-99). The server assigns
+side A or B, checks the peer family against the certified family matrix, and
+generates the link hostname and SSID. Cambium and Tachyon PTP handlers require
+a protected vendor settings profile. The request returns `409` when the peer
+family is not certified or the required profile is missing or incomplete.
+
+```json
+{
+  "mode": "ptp",
+  "my_tower": 32,
+  "remote_tower": 18
+}
+```
+
+PTP profiles contain radio settings and can contain secrets. Keep them in the
+host-only runtime template store. Do not commit them or include them in setup
+bundles. See [HANDLER_DEVELOPMENT.md](HANDLER_DEVELOPMENT.md) for the handler
+contract and [cambium-config.md](cambium-config.md) for the Cambium profile
+workflow.
+
 ## Credentials
 
 ### POST /credentials

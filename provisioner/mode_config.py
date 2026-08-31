@@ -128,6 +128,11 @@ class ModeConfigManager:
                     link_names = []
                     if link_profile:
                         link_names.append(link_profile)
+                        reverse_link_profile = self._reverse_ptp_link_profile(
+                            link_profile
+                        )
+                        if reverse_link_profile:
+                            link_names.append(reverse_link_profile)
                     link_names.append("twXX-twXX")
                 elif mode == "ap":
                     if family_profile.lower() == "default":
@@ -442,6 +447,28 @@ class ModeConfigManager:
 
         return rendered
 
+    def generate_ptp_settings(
+        self,
+        template: Dict[str, Any],
+        variables: Dict[str, str],
+        device_type: str,
+        side: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Render identity and require the handler's PTP settings contract.
+
+        PTP radio-role settings are vendor-specific.  The mode manager
+        renders the shared link identity, then delegates profile validation or
+        generation to the handler.  This keeps RF values out of shared code.
+        """
+        rendered = self.render_template(template, variables, device_type)
+        from .handler_manager import HandlerManager
+
+        handler_class = HandlerManager.handler_class_for(device_type)
+        if handler_class is None:
+            return rendered
+        return handler_class.generate_ptp_settings(rendered, side, model)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -503,6 +530,14 @@ class ModeConfigManager:
         elif isinstance(obj, str):
             return self._render_string(obj, variables)
         return obj
+
+    @staticmethod
+    def _reverse_ptp_link_profile(link_profile: str) -> Optional[str]:
+        """Return the opposite tower order used by some field exports."""
+        match = re.fullmatch(r"tw(\d{2})-tw(\d{2})", link_profile.lower())
+        if not match or match.group(1) == match.group(2):
+            return None
+        return "tw{}-tw{}".format(match.group(2), match.group(1))
 
     def _render_string(self, text: str, variables: Dict[str, str]) -> str:
         def replace_var(match):

@@ -2126,7 +2126,7 @@ class PortManager:
 
     # In-memory PTP link registry.
     # Maps link_id (e.g. "tw05-tw12") -> (data_dict, timestamp)
-    # data_dict contains: side_a_port, side_b_port, device_type, my_tower, remote_tower
+    # data_dict contains side ports, device identities, and link towers.
     _ptp_links: Dict[str, Tuple[Dict[str, Any], float]] = {}
     PTP_LINK_TTL_HOURS = 24  # Cleanup links older than this
 
@@ -2167,10 +2167,24 @@ class PortManager:
                     "my_tower": mode_config.get("my_tower"),
                     "remote_tower": mode_config.get("remote_tower"),
                 }
-            if mode == "ptp-a":
-                link_data["side_a_port"] = port_num
-            else:
-                link_data["side_b_port"] = port_num
+            side_prefix = "side_a" if mode == "ptp-a" else "side_b"
+            link_data[side_prefix + "_port"] = port_num
+            link_data[side_prefix + "_device_type"] = state.device_type
+            link_data[side_prefix + "_device_model"] = state.device_model
+            try:
+                from .vendor_registry import config_family_for_model
+
+                family = config_family_for_model(
+                    state.device_type or "", state.device_model
+                )
+                link_data[side_prefix + "_family"] = (
+                    family.directory if family is not None else None
+                )
+            except (ImportError, ValueError):
+                link_data[side_prefix + "_family"] = None
+            # Preserve the original summary fields for existing UI clients.
+            link_data.setdefault("device_type", state.device_type)
+            link_data.setdefault("device_model", state.device_model)
             self._ptp_links[ptp_link_id] = (link_data, time.time())
 
         logger.info(f"Port {port_num} mode set to {mode}"
@@ -2210,8 +2224,38 @@ class PortManager:
         """Get all active PTP links (without timestamps)."""
         return {k: v[0] for k, v in self._ptp_links.items()}
 
+    def get_ptp_peer(
+        self, link_id: str, port_num: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return the other device on a tracked PTP link, if present."""
+        entry = self._ptp_links.get(link_id)
+        if entry is None:
+            return None
+        link_data = entry[0]
+        if link_data.get("side_a_port") == port_num:
+            peer_prefix = "side_b"
+        elif link_data.get("side_b_port") == port_num:
+            peer_prefix = "side_a"
+        elif link_data.get("side_a_port") is not None:
+            peer_prefix = "side_a"
+        else:
+            return None
+        peer_port = link_data.get(peer_prefix + "_port")
+        if peer_port is None or peer_port == port_num:
+            return None
+        return {
+            "port": peer_port,
+            "device_type": link_data.get(
+                peer_prefix + "_device_type", link_data.get("device_type")
+            ),
+            "device_model": link_data.get(
+                peer_prefix + "_device_model", link_data.get("device_model")
+            ),
+            "family": link_data.get(peer_prefix + "_family"),
+        }
+
     def get_available_ptp_side(
-        self, my_tower: int, remote_tower: int
+        self, my_tower: int, remote_tower: int, port_num: Optional[int] = None
     ) -> str:
         """Determine which PTP side to assign (auto A or B).
 
@@ -2221,8 +2265,12 @@ class PortManager:
         from .mode_config import make_ptp_link_id
         link_id = make_ptp_link_id(my_tower, remote_tower)
         entry = self._ptp_links.get(link_id)
-        if entry is None or entry[0].get("side_a_port") is None:
+        if entry is None:
             return "a"
+        if entry[0].get("side_a_port") in (None, port_num):
+            return "a"
+        if entry[0].get("side_b_port") in (None, port_num):
+            return "b"
         return "b"
 
     def cleanup_stale_ptp_links(self, max_age_hours: Optional[int] = None) -> int:

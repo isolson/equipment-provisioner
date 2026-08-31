@@ -27,6 +27,7 @@ class CambiumHandler(BaseHandler):
     """
 
     required_baseline_mode = "sm"
+    requires_ptp_settings = True
 
     _SECRET_CONFIG_KEY_RE = re.compile(
         r"(?:password|passphrase|psk|secret|token|community|private[_-]?key|encryption[_-]?key)",
@@ -294,16 +295,56 @@ class CambiumHandler(BaseHandler):
     def qualified_post_provision_modes_for_model(
         cls, model: Optional[str] = None
     ) -> Tuple[str, ...]:
-        """Expose PTP only for the ePMP 4616 bench-qualified model.
-
-        The ePMP-4K PTP archives are shared by this family, but hardware
-        qualification is intentionally narrower until each model is tested.
-        """
+        """Expose PTP for models in an explicitly certified family."""
         modes = tuple(cls.qualified_post_provision_modes)
-        model_key = (model or "").lower().replace("cambium ", "").strip()
-        if model_key == "epmp 4616":
+        from ..vendor_registry import config_family_for_model
+
+        family = config_family_for_model("cambium", model)
+        if (
+            "ptp" not in modes
+            and family is not None
+            and "PTP" in family.roles
+            and family.ptp_compatible_families
+        ):
             return modes + ("ptp",)
         return modes
+
+    @classmethod
+    def generate_ptp_settings(
+        cls,
+        config: Dict[str, Any],
+        side: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Require the native radio settings needed for a Cambium PTP link.
+
+        The protected PTP profile supplies the hardware-specific values. The
+        shared mode workflow only injects the generated link identity; it
+        must never invent Cambium RF or master/slave values.
+        """
+        if side not in ("a", "b"):
+            raise ValueError("Cambium PTP settings require side 'a' or 'b'")
+        props = config.get("device_props") if isinstance(config, dict) else None
+        if not isinstance(props, dict):
+            props = config if isinstance(config, dict) else {}
+
+        required = (
+            "wirelessInterfaceMode",
+            "wirelessInterfacePTPMode",
+            "wirelessInterfaceProtocolMode",
+            "wirelessInterfaceTDDFrameSize",
+            "wirelessInterfaceTDDRatio",
+            "centerFrequency",
+        )
+        missing = [
+            key for key in required
+            if props.get(key) in (None, "")
+        ]
+        if missing:
+            raise ValueError(
+                "Cambium PTP settings profile is missing: " + ", ".join(missing)
+            )
+        return config
 
     # Model to firmware filename pattern mapping
     MODEL_FIRMWARE_PATTERNS = {

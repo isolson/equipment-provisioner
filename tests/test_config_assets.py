@@ -12,7 +12,10 @@ from provisioner.config import Config
 from provisioner.config_assets import ConfigAssetCatalog
 from provisioner.config_store import ConfigStore
 from provisioner.mode_config import ModeConfigManager, make_ptp_link_id
-from provisioner.vendor_registry import config_family_for_model
+from provisioner.vendor_registry import (
+    config_family_for_model,
+    ptp_families_compatible,
+)
 from provisioner.web.app import create_app
 
 
@@ -37,6 +40,27 @@ def test_registry_maps_approved_models_to_families():
     assert config_family_for_model("tachyon", "TNA-303X").directory == "TNA-303X"
     assert config_family_for_model("tachyon", "TNA-303L-65").directory == "TNA-303L-65"
     assert config_family_for_model("tachyon", "TNS-100") is None
+
+
+def test_registry_certifies_cross_family_ptp_pairs():
+    assert ptp_families_compatible(
+        "cambium", "ePMP 3000", "cambium", "ePMP 4616"
+    )
+    assert ptp_families_compatible(
+        "cambium", "ePMP 4616", "cambium", "ePMP 4625"
+    )
+    assert ptp_families_compatible(
+        "tachyon", "TNA-301", "tachyon", "TNA-303X"
+    )
+    assert ptp_families_compatible(
+        "tachyon", "TNA-303L-65", "tachyon", "TNA-303X"
+    )
+    assert not ptp_families_compatible(
+        "cambium", "ePMP 4616", "tachyon", "TNA-303X"
+    )
+    assert not ptp_families_compatible(
+        "tachyon", "TNA-303X", "tachyon", "TNS-100"
+    )
 
 
 def test_catalog_parses_versioned_and_unversioned_trees(tmp_path):
@@ -228,6 +252,8 @@ def test_mode_profile_and_ptp_side_resolution(tmp_path):
     (root / "PTP/twXX-twXX/SM/default.tar").write_bytes(b"tar")
     (root / "PTP/tw05-tw12/Main").mkdir(parents=True)
     (root / "PTP/tw05-tw12/Main/default.tar").write_bytes(b"exact")
+    (root / "PTP/tw13-tw06/Main").mkdir(parents=True)
+    (root / "PTP/tw13-tw06/Main/default.tar").write_bytes(b"reverse-exact")
 
     manager = ModeConfigManager(str(tmp_path / "configs/templates"))
     assert manager.get_template_path("tachyon", "ap", "TNA-303X", profile="North").name == "default.tar"
@@ -235,8 +261,11 @@ def test_mode_profile_and_ptp_side_resolution(tmp_path):
         "tachyon", "ptp-a", "TNA-303X", link_profile="tw05-tw12"
     ).read_bytes() == b"exact"
     assert manager.get_template_path(
-        "tachyon", "ptp-a", "TNA-303X", link_profile="tw06-tw13"
+        "tachyon", "ptp-a", "TNA-303X", link_profile="tw07-tw14"
     ).parts[-3:] == ("twXX-twXX", "Main", "default.tar")
+    assert manager.get_template_path(
+        "tachyon", "ptp-a", "TNA-303X", link_profile="tw06-tw13"
+    ).read_bytes() == b"reverse-exact"
     assert manager.get_template_path("tachyon", "ptp-a", "TNA-303X").parts[-2] == "Main"
     assert manager.get_template_path("tachyon", "ptp-b", "TNA-303X").parts[-2] == "SM"
 
@@ -304,6 +333,44 @@ def test_cambium_mode_injection_updates_wrapped_device_props():
     assert rendered["device_props"]["wirelessInterfaceSSID"] == "tw05-north"
     assert rendered["device_props"]["snmpSystemName"] == "tw05-north"
     assert "wirelessInterfaceSSID" not in rendered
+
+
+def test_ptp_settings_generation_requires_vendor_radio_settings():
+    manager = ModeConfigManager("unused")
+    naming = manager.generate_ptp_naming(32, 18, "a", "cambium")
+
+    with pytest.raises(ValueError, match="Cambium PTP settings profile"):
+        manager.generate_ptp_settings(
+            {"device_props": {"wirelessInterfaceSSID": "profile"}},
+            naming,
+            "cambium",
+            "a",
+            "ePMP 4616",
+        )
+
+    config = {
+        "device_props": {
+            "wirelessInterfaceMode": "profile",
+            "wirelessInterfacePTPMode": "profile",
+            "wirelessInterfaceProtocolMode": "profile",
+            "wirelessInterfaceTDDFrameSize": "profile",
+            "wirelessInterfaceTDDRatio": "profile",
+            "centerFrequency": "profile",
+        }
+    }
+    generated = manager.generate_ptp_settings(
+        config, naming, "cambium", "a", "ePMP 4616"
+    )
+    assert generated["device_props"]["wirelessInterfaceSSID"] == naming["ssid"]
+
+    with pytest.raises(ValueError, match="Tachyon PTP settings profile"):
+        manager.generate_ptp_settings(
+            {"system": {"hostname": "profile"}},
+            naming,
+            "tachyon",
+            "a",
+            "TNA-303X",
+        )
 
 
 def test_config_asset_api_lists_and_uploads_structured_assets(tmp_path):
