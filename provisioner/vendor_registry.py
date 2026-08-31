@@ -265,8 +265,13 @@ def config_family_for_model(
     spec = spec_for(device_type)
     if spec is None:
         return None
+    normalized_model = " ".join(str(model or "").lower().strip().split())
+    device_name = str(getattr(device_type, "value", device_type)).lower()
+    device_name = device_name.replace("_", " ")
+    if normalized_model.startswith(device_name + " "):
+        normalized_model = normalized_model[len(device_name) + 1:]
     for family in spec.config_families:
-        if family.matches(model):
+        if family.matches(normalized_model):
             return family
     return None
 
