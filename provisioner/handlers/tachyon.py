@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
 
@@ -60,6 +60,48 @@ class TachyonHandler(BaseHandler):
     config_alias_prefix_matching = True
     requires_model_preflight = True
     required_baseline_mode = "sm"
+    requires_ptp_settings = True
+
+    @classmethod
+    def qualified_post_provision_modes_for_model(
+        cls, model: Optional[str] = None
+    ) -> Tuple[str, ...]:
+        """Expose PTP for explicitly certified Tachyon radio families."""
+        modes = tuple(cls.qualified_post_provision_modes)
+        from ..vendor_registry import config_family_for_model
+
+        family = config_family_for_model("tachyon", model)
+        if (
+            "ptp" not in modes
+            and family is not None
+            and "PTP" in family.roles
+            and family.ptp_compatible_families
+        ):
+            return modes + ("ptp",)
+        return modes
+
+    @classmethod
+    def generate_ptp_settings(
+        cls,
+        config: Dict[str, Any],
+        side: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Require a Tachyon radio profile before applying PTP identity."""
+        if side not in ("a", "b"):
+            raise ValueError("Tachyon PTP settings require side 'a' or 'b'")
+        try:
+            radio = config["wireless"]["radios"]["wlan0"]
+            vaps = radio["vaps"]
+            if not isinstance(radio, dict) or not isinstance(vaps, list) or not vaps:
+                raise TypeError
+            if not isinstance(vaps[0], dict):
+                raise TypeError
+        except (KeyError, TypeError, IndexError):
+            raise ValueError(
+                "Tachyon PTP settings profile must include wireless.radios.wlan0.vaps"
+            )
+        return config
 
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None,
                  alternate_credentials: list = None):

@@ -853,6 +853,19 @@ def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch
 def test_setup_readiness_counts_recursive_family_assets(tmp_path, monkeypatch):
     client, _config, data_path = make_client(tmp_path)
 
+    shared_baseline = (
+        data_path
+        / "configs"
+        / "templates"
+        / "cambium"
+        / "shared"
+        / "5.11.1"
+        / "SM"
+        / "default.json"
+    )
+    shared_baseline.parent.mkdir(parents=True)
+    shared_baseline.write_bytes(b"asset")
+
     for vendor, family, extension in (
         ("cambium", "ePMP-4K/5.11.1", ".json"),
         ("tachyon", "TNA-303X", ".tar"),
@@ -886,6 +899,54 @@ def test_setup_readiness_counts_recursive_family_assets(tmp_path, monkeypatch):
     assert details["tachyon"]["status"] == "ready"
     assert details["cambium"]["missing_modes"] == []
     assert details["tachyon"]["missing_modes"] == []
+
+
+def test_setup_readiness_warns_when_cambium_shared_baseline_is_missing(tmp_path, monkeypatch):
+    client, _config, data_path = make_client(tmp_path)
+
+    family = (
+        data_path
+        / "configs"
+        / "templates"
+        / "cambium"
+        / "ePMP-4K"
+        / "5.11.1"
+    )
+    for relative_path in (
+        "SM/default.json",
+        "AP/North/default.json",
+        "PTP/twXX-twXX/Main/default.json",
+        "PTP/twXX-twXX/SM/default.json",
+    ):
+        path = family / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+
+    monkeypatch.setattr("provisioner.setup_tools._interface_exists", lambda _: True)
+    monkeypatch.setattr(
+        "provisioner.setup_tools.probe_mikrotik_switch",
+        lambda _cfg: {
+            "reachable": True,
+            "mode": "configured",
+            "status": "ready",
+            "summary": "configured",
+            "actions": [],
+            "checks": [],
+        },
+    )
+
+    checks = {
+        item["id"]: item
+        for item in client.get("/api/setup/readiness").json()["checks"]
+    }
+    template_check = checks["config_templates"]
+    cambium = next(
+        item for item in template_check["details"] if item["device_type"] == "cambium"
+    )
+
+    assert cambium["status"] == "warning"
+    assert cambium["shared_baseline"] is False
+    assert "shared SM baseline" in cambium["summary"]
 
 
 def test_setup_bundle_import_copies_repo_and_optional_system_files(tmp_path, monkeypatch):
@@ -972,6 +1033,40 @@ def test_setup_bundle_export_includes_repo_and_optional_system_files(tmp_path, m
         assert "manifest.yaml" in names
         assert "settings/config.yaml" in names
         assert "settings/provisioner.env" in names
+
+
+def test_setup_bundle_export_excludes_protected_config_assets(tmp_path):
+    client, _config, data_path = make_client(tmp_path)
+
+    protected = (
+        data_path
+        / "configs"
+        / "templates"
+        / "cambium"
+        / "shared"
+        / "5.11.1"
+        / "SM"
+        / "default.json"
+    )
+    protected.parent.mkdir(parents=True)
+    protected.write_text(
+        json.dumps(
+            {
+                "device_props": {"cambiumCNSDeviceAgentPassword": "bundle-secret-marker"},
+                "template_props": {"version": "5.11.1"},
+            }
+        )
+    )
+
+    response = client.get("/api/setup/bundle/export")
+    assert response.status_code == 200
+
+    bundle_path = tmp_path / "export.zip"
+    bundle_path.write_bytes(response.content)
+    with zipfile.ZipFile(bundle_path) as archive:
+        names = set(archive.namelist())
+        assert "configs/templates/cambium/shared/5.11.1/SM/default.json" not in names
+        assert not any(b"bundle-secret-marker" in archive.read(name) for name in names)
 
 
 def test_setup_switch_configure_runs_switch_script(tmp_path, monkeypatch):

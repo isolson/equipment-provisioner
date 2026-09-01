@@ -52,9 +52,16 @@ def test_handler_capabilities_require_explicit_qualification():
     assert HandlerManager.operator_capabilities_for("tarana")[
         "post_provision_modes"
     ] == []
+    assert HandlerManager.operator_capabilities_for(
+        "cambium", "ePMP 4616"
+    )["ptp_settings_required"] is True
+    assert HandlerManager.operator_capabilities_for(
+        "tachyon", "TNA-301"
+    )["ptp_settings_required"] is True
     assert HandlerManager.operator_capabilities_for("not-a-vendor") == {
         "post_provision_modes": [],
         "required_baseline_mode": "",
+        "ptp_settings_required": False,
         "manual_netinstall": False,
         "manual_netinstall_label": "",
     }
@@ -106,8 +113,8 @@ def test_success_actions_respect_feature_flag_and_qualification(monkeypatch):
     assert _action_ids(unsupported) == []
 
 
-def test_cambium_ptp_qualification_is_limited_to_epmp_4616():
-    qualified = workflow_for_port(
+def test_cambium_ptp_qualification_uses_certified_families():
+    qualified_4616 = workflow_for_port(
         _state(
             device_type="cambium",
             device_model="ePMP 4616",
@@ -115,17 +122,58 @@ def test_cambium_ptp_qualification_is_limited_to_epmp_4616():
         ),
         mode_config_enabled=True,
     )
+    qualified_4625 = workflow_for_port(
+        _state(
+            device_type="cambium",
+            device_model="ePMP 4625",
+            last_result="success",
+        ),
+        mode_config_enabled=True,
+    )
+    qualified_3000 = workflow_for_port(
+        _state(
+            device_type="cambium",
+            device_model="ePMP 3000",
+            last_result="success",
+        ),
+        mode_config_enabled=True,
+    )
     unqualified = workflow_for_port(
         _state(
             device_type="cambium",
-            device_model="ePMP 4518",
+            device_model="ePMP 2000",
             last_result="success",
         ),
         mode_config_enabled=True,
     )
 
-    assert _action_ids(qualified) == ["configure_ptp"]
+    assert _action_ids(qualified_4616) == ["configure_ptp"]
+    assert _action_ids(qualified_4625) == ["configure_ptp"]
+    assert _action_ids(qualified_3000) == ["configure_ptp"]
     assert _action_ids(unqualified) == []
+
+
+def test_tachyon_ptp_qualification_allows_certified_cross_family_radios():
+    for model in ("TNA-301", "TNA-303X", "TNA-303L-65"):
+        workflow = workflow_for_port(
+            _state(
+                device_type="tachyon",
+                device_model=model,
+                last_result="success",
+            ),
+            mode_config_enabled=True,
+        )
+        assert _action_ids(workflow) == ["configure_ptp"]
+
+    switch_workflow = workflow_for_port(
+        _state(
+            device_type="tachyon",
+            device_model="TNS-100",
+            last_result="success",
+        ),
+        mode_config_enabled=True,
+    )
+    assert _action_ids(switch_workflow) == []
 
 
 def test_mode_qualification_is_independent_per_mode(monkeypatch):

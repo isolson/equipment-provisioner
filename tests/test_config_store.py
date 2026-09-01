@@ -93,3 +93,20 @@ def test_non_tachyon_timestamp_export_does_not_override_alias(tmp_path):
     _write(cambium_export)
 
     assert store.get_config_template("cambium", "ePMP 4518") == alias_template
+
+
+def test_shared_profile_is_scoped_to_its_vendor(tmp_path):
+    cambium_shared = (
+        tmp_path / "configs" / "templates" / "cambium" /
+        "shared" / "5.11.1" / "SM" / "default.json"
+    )
+    tachyon_template = (
+        tmp_path / "configs" / "templates" / "tachyon" /
+        "TNA-303L-65" / "SM" / "default.tar"
+    )
+    _write(cambium_shared)
+    _write(tachyon_template)
+    store = ConfigStore(str(tmp_path))
+
+    assert store.get_config_template("cambium", "ePMP 4616") == cambium_shared
+    assert store.get_config_template("tachyon", "TNA-303L-65") == tachyon_template

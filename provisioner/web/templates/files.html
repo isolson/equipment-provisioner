@@ -200,20 +200,34 @@
                                 <option value="template">Default Template</option>
                                 <option value="override">Device Override (by MAC)</option>
                             </select>
+                            <div class="grid grid-cols-2 gap-2 mb-4">
+                                <select id="cfg-asset-kind" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Upload type">
+                                    <option value="standard">Standard template</option>
+                                    <option value="field_export">Field deployment export</option>
+                                </select>
+                                <select id="cfg-scope" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Asset scope">
+                                    <option value="family">Family profile</option>
+                                    <option value="shared">Shared baseline</option>
+                                </select>
+                            </div>
                             <div id="config-asset-filters" class="grid grid-cols-2 gap-2 mb-4">
                                 <select id="cfg-family" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config family">
                                     <option value="">All families</option>
                                 </select>
-                                <select id="cfg-firmware" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config firmware">
-                                    <option value="">All firmware</option>
-                                </select>
+                                <input id="cfg-firmware" oninput="updateConfigFilters()" list="cfg-firmware-options" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="Firmware version" aria-label="Config firmware">
+                                <datalist id="cfg-firmware-options"></datalist>
                                 <select id="cfg-role" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config role">
                                     <option value="">All roles</option>
                                 </select>
                                 <select id="cfg-mode" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config mode">
                                     <option value="">All modes</option>
                                 </select>
+                                <input id="cfg-profile" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="AP profile (optional)" aria-label="AP profile">
+                                <input id="cfg-link-profile" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="PTP link profile (optional)" aria-label="PTP link profile">
                             </div>
+                            <p class="text-xs text-gray-500 mb-4">
+                                First Cambium SM export: choose Field deployment export and Shared baseline, enter the firmware version, then choose SM for role and mode.
+                            </p>
                             <div class="drop-zone rounded-lg flex items-center justify-center gap-2 p-4 text-center cursor-pointer bg-white"
                                  onclick="document.getElementById('cfg-file-input').click()"
                                  ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleConfigDrop(event)">
@@ -430,20 +444,38 @@
         function updateConfigFilterOptions() {
             const fields = [
                 ['family', 'All families'],
-                ['firmware', 'All firmware'],
                 ['role', 'All roles'],
                 ['mode', 'All modes'],
             ];
             const vendorAssets = configsData.filter(asset => asset.device_type === activeVendor);
+            const registryFamilies = (FAMILY_METADATA[activeVendor] || []);
+            const registryRoles = [...new Set(registryFamilies.flatMap(family => family.roles || []))];
+            const registryModes = [...new Set(registryRoles.flatMap(role => {
+                const normalized = role.toLowerCase();
+                return normalized === 'ptp' ? ['ptp-a', 'ptp-b'] : [normalized];
+            }))];
+            const registryValues = {
+                family: registryFamilies.map(family => family.directory),
+                role: registryRoles,
+                mode: registryModes,
+            };
+
+            const firmwareInput = document.getElementById('cfg-firmware');
+            const firmwareOptions = document.getElementById('cfg-firmware-options');
+            if (firmwareInput && firmwareOptions) {
+                const firmwareValues = [...new Set(vendorAssets.map(asset => asset.firmware).filter(Boolean))].sort();
+                firmwareOptions.innerHTML = firmwareValues.map(value =>
+                    `<option value="${escapeHtml(value)}"></option>`
+                ).join('');
+                firmwareInput.value = configFilters.firmware || '';
+            }
+
             for (const [field, emptyLabel] of fields) {
                 const select = document.getElementById(`cfg-${field}`);
                 if (!select) continue;
-                const registryFamilies = field === 'family'
-                    ? (FAMILY_METADATA[activeVendor] || []).map(family => family.directory)
-                    : [];
                 const values = [...new Set([
                     ...vendorAssets.map(asset => asset[field]).filter(Boolean),
-                    ...registryFamilies,
+                    ...(registryValues[field] || []),
                 ])].sort();
                 const current = configFilters[field];
                 select.innerHTML = `<option value="">${emptyLabel}</option>` + values.map(value =>
@@ -506,7 +538,9 @@
             const firmware = vendorReadinessItem('firmware_inventory');
             const summaryText = (item) => (item && item.summary) ? item.summary : '';
             setColumnHeader('firmware', firmware ? firmware.status : 'warning', summaryText(firmware));
-            setColumnHeader('config', configs ? configs.status : 'ready', summaryText(configs));
+            const sharedNote = activeVendor === 'cambium' && configs && !configs.shared_baseline
+                ? ' Shared SM baseline not uploaded.' : '';
+            setColumnHeader('config', configs ? configs.status : 'ready', summaryText(configs) + sharedNote);
             setColumnHeader('credentials', credentials ? credentials.status : 'warning', summaryText(credentials));
         }
 
@@ -699,7 +733,7 @@
                     <div class="flex-1 min-w-0">
                         <div class="flex flex-wrap items-center gap-2 mb-1">
                             <span class="px-2 py-0.5 text-xs font-medium rounded ${cfg.config_type === 'template' ? 'bg-blue-500/20 text-blue-700' : 'bg-purple-500/20 text-purple-700'}">${escapeHtml(cfg.config_type)}</span>
-                            ${cfg.protected ? '<span class="px-2 py-0.5 text-xs font-medium rounded bg-amber-500/20 text-amber-700">HOST-ONLY PTP</span>' : ''}
+                            ${cfg.protected ? `<span class="px-2 py-0.5 text-xs font-medium rounded bg-amber-500/20 text-amber-700">${cfg.asset_kind === 'field_export' ? 'PROTECTED FIELD EXPORT' : (cfg.secret_present ? 'PROTECTED ASSET' : 'HOST-ONLY PTP')}</span>` : ''}
                             <span class="font-medium break-all">${escapeHtml(cfg.filename)}</span>
                         </div>
                         <div class="text-xs text-gray-500 break-all">${escapeHtml(assetLocation(cfg))}</div>
@@ -724,7 +758,7 @@
         }
 
         function assetLocation(asset) {
-            const values = [asset.family, asset.firmware, asset.role, asset.link_profile, asset.mode, asset.profile].filter(Boolean);
+            const values = [asset.scope, asset.family, asset.firmware, asset.role, asset.link_profile, asset.mode, asset.profile].filter(Boolean);
             return values.length ? values.join(' / ') : 'Legacy vendor asset';
         }
 
@@ -738,6 +772,10 @@
             formData.append('firmware', document.getElementById('cfg-firmware').value);
             formData.append('role', document.getElementById('cfg-role').value);
             formData.append('mode', document.getElementById('cfg-mode').value);
+            formData.append('profile', document.getElementById('cfg-profile').value);
+            formData.append('link_profile', document.getElementById('cfg-link-profile').value);
+            formData.append('scope', document.getElementById('cfg-scope').value);
+            formData.append('asset_kind', document.getElementById('cfg-asset-kind').value);
             showToast(`Uploading ${vendorMeta(activeVendor).label} config...`, 'info');
 
             try {

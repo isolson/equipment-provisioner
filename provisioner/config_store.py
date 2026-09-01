@@ -168,6 +168,42 @@ class ConfigStore:
                 return template
         return None
 
+    def _get_shared_template(
+        self, device_type: str, role: str = "SM"
+    ) -> Optional[Path]:
+        """Find the vendor-neutral shared baseline for a role.
+
+        Shared profiles are intentionally checked before model families.  A
+        shared SM profile is the no-touch baseline for every model that the
+        handler can provision.  The directory is still selected from the
+        filesystem, so adding a shared profile does not add a vendor registry.
+        """
+        shared_dir = self.templates_path / device_type / "shared"
+        if not shared_dir.is_dir():
+            return None
+
+        extensions = [".json", ".rsc", ".yaml", ".tar", ".tar.gz"]
+        version_dirs = sorted(
+            (entry for entry in shared_dir.iterdir() if entry.is_dir()),
+            key=lambda entry: entry.name.lower(),
+            reverse=True,
+        )
+        containers = [shared_dir] + version_dirs
+        for version_dir in containers:
+            role_dir = next(
+                (
+                    entry for entry in version_dir.iterdir()
+                    if entry.is_dir() and entry.name.lower() == role.lower()
+                ),
+                None,
+            )
+            if role_dir is None:
+                continue
+            template = self._find_named_template(role_dir, "default", extensions)
+            if template:
+                return template
+        return None
+
     def _has_family_tree(self, device_type: str) -> bool:
         """Return whether this vendor has any installed family assets.
 
@@ -191,8 +227,8 @@ class ConfigStore:
     def get_config_template(self, device_type: str, model: Optional[str] = None) -> Optional[Path]:
         """Get the path to the config template for a device type.
 
-        Searches the approved model family/firmware/SM tree first, then the
-        historical flat vendor tree and legacy root layout.
+        Searches the shared SM baseline first, then the approved model
+        family/firmware/SM tree, historical flat vendor tree, and legacy root.
         """
         from .vendor_registry import config_family_for_model
 
@@ -209,6 +245,16 @@ class ConfigStore:
         if model_alias:
             logger.debug(f"Config model alias: {model} -> {model_alias}")
         traits = self._handler_traits(device_type)
+
+        shared_template = self._get_shared_template(device_type)
+        if shared_template:
+            logger.info(
+                "Using shared config template: %s for %s/%s",
+                shared_template,
+                device_type,
+                model,
+            )
+            return shared_template
 
         family_template = self._get_family_template(device_type, model)
         if family_template:

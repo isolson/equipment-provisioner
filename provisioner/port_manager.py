@@ -17,6 +17,7 @@ import asyncio
 import collections
 import logging
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -188,6 +189,7 @@ class PortState:
     device_mac: Optional[str] = None  # MAC address (retrieved during provisioning)
     device_serial: Optional[str] = None  # Serial number (retrieved during provisioning)
     device_model: Optional[str] = None  # Device model (retrieved during fingerprint/provisioning)
+    firmware_version: Optional[str] = None  # Firmware version (retrieved during fingerprint/provisioning)
     provisioning: bool = False
     last_seen: Optional[float] = None
     provisioning_ended: Optional[float] = None  # When provisioning finished (for grace period)
@@ -319,6 +321,8 @@ class PortManager:
 
         self._running = False
         self._initialized = False
+        self._ptp_reservations: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._ptp_reservation_lock = threading.RLock()
 
     def _generate_port_configs(self) -> None:
         """Generate port configurations."""
@@ -1723,6 +1727,7 @@ class PortManager:
         state.device_mac = None
         state.device_serial = None
         state.device_model = None
+        state.firmware_version = None
         state.ping_failures = 0
         state.link_speed = None
         state.waiting_for_boot = False
@@ -1787,6 +1792,7 @@ class PortManager:
         state.last_bootp_fired_at = None
         state.last_bootp_fired_mac = None
         state.device_model = None
+        state.firmware_version = None
         state.device_serial = None
         self.reset_checklist(port_num)
         self.clear_device_mode(port_num)
@@ -1798,6 +1804,7 @@ class PortManager:
         mac: Optional[str] = None,
         serial: Optional[str] = None,
         model: Optional[str] = None,
+        firmware_version: Optional[str] = None,
     ) -> None:
         """Update device info for a port (called by handlers after login).
 
@@ -1806,6 +1813,7 @@ class PortManager:
             mac: Device MAC address
             serial: Device serial number
             model: Device model
+            firmware_version: Device firmware version
         """
         if port_num in self.port_states:
             state = self.port_states[port_num]
@@ -1817,6 +1825,8 @@ class PortManager:
                 state.checklist.serial_number = serial
             if model:
                 state.device_model = model
+            if firmware_version:
+                state.firmware_version = firmware_version
 
     def update_checklist(
         self,
@@ -1926,6 +1936,7 @@ class PortManager:
             "device_mac": state.device_mac,
             "device_serial": state.device_serial,
             "device_model": state.device_model,
+            "firmware_version": state.firmware_version,
             "provisioning": state.provisioning,
             "link_speed": state.link_speed,
             "waiting_for_boot": state.waiting_for_boot,
@@ -2126,7 +2137,7 @@ class PortManager:
 
     # In-memory PTP link registry.
     # Maps link_id (e.g. "tw05-tw12") -> (data_dict, timestamp)
-    # data_dict contains: side_a_port, side_b_port, device_type, my_tower, remote_tower
+    # data_dict contains side ports, device identities, and link towers.
     _ptp_links: Dict[str, Tuple[Dict[str, Any], float]] = {}
     PTP_LINK_TTL_HOURS = 24  # Cleanup links older than this
 
@@ -2149,6 +2160,19 @@ class PortManager:
         if not state:
             return
 
+        if ptp_link_id and mode in ("ptp-a", "ptp-b"):
+            side_prefix = "side_a" if mode == "ptp-a" else "side_b"
+            with self._ptp_reservation_lock:
+                existing = self._ptp_links.get(ptp_link_id)
+                if existing and existing[0].get(side_prefix + "_port") not in (
+                    None,
+                    port_num,
+                ):
+                    raise ValueError(
+                        f"PTP {mode} is already assigned to port "
+                        f"{existing[0].get(side_prefix + '_port')}"
+                    )
+
         state.device_mode = mode
         state.mode_config = mode_config
         state.ptp_link_id = ptp_link_id
@@ -2156,22 +2180,47 @@ class PortManager:
 
         # Update PTP link registry with timestamp
         if ptp_link_id and mode in ("ptp-a", "ptp-b"):
-            existing = self._ptp_links.get(ptp_link_id)
-            if existing:
-                link_data, _ = existing
-            else:
-                link_data = {
-                    "side_a_port": None,
-                    "side_b_port": None,
-                    "device_type": state.device_type,
-                    "my_tower": mode_config.get("my_tower"),
-                    "remote_tower": mode_config.get("remote_tower"),
-                }
-            if mode == "ptp-a":
-                link_data["side_a_port"] = port_num
-            else:
-                link_data["side_b_port"] = port_num
-            self._ptp_links[ptp_link_id] = (link_data, time.time())
+            with self._ptp_reservation_lock:
+                existing = self._ptp_links.get(ptp_link_id)
+                if existing:
+                    link_data, _ = existing
+                else:
+                    link_data = {
+                        "side_a_port": None,
+                        "side_b_port": None,
+                        "device_type": state.device_type,
+                        "my_tower": mode_config.get("my_tower"),
+                        "remote_tower": mode_config.get("remote_tower"),
+                    }
+                side_prefix = "side_a" if mode == "ptp-a" else "side_b"
+                registered_port = link_data.get(side_prefix + "_port")
+                if registered_port not in (None, port_num):
+                    raise ValueError(
+                        f"PTP {mode} is already assigned to port {registered_port}"
+                    )
+                link_data[side_prefix + "_port"] = port_num
+                link_data[side_prefix + "_device_type"] = state.device_type
+                link_data[side_prefix + "_device_model"] = state.device_model
+                try:
+                    from .vendor_registry import config_family_for_model
+
+                    family = config_family_for_model(
+                        state.device_type or "", state.device_model
+                    )
+                    link_data[side_prefix + "_family"] = (
+                        family.directory if family is not None else None
+                    )
+                except (ImportError, ValueError):
+                    link_data[side_prefix + "_family"] = None
+                # Preserve the original summary fields for existing UI clients.
+                link_data.setdefault("device_type", state.device_type)
+                link_data.setdefault("device_model", state.device_model)
+                self._ptp_links[ptp_link_id] = (link_data, time.time())
+                reservation = self._ptp_reservations.get(ptp_link_id)
+                if reservation:
+                    reservation.pop("a" if mode == "ptp-a" else "b", None)
+                    if not reservation:
+                        self._ptp_reservations.pop(ptp_link_id, None)
 
         logger.info(f"Port {port_num} mode set to {mode}"
                      + (f" (link {ptp_link_id})" if ptp_link_id else ""))
@@ -2196,6 +2245,14 @@ class PortManager:
                 # Update timestamp
                 self._ptp_links[state.ptp_link_id] = (link_data, time.time())
 
+        with self._ptp_reservation_lock:
+            for link_id, reservation in list(self._ptp_reservations.items()):
+                for side, reserved in list(reservation.items()):
+                    if (reserved or {}).get("port") == port_num:
+                        reservation.pop(side, None)
+                if not reservation:
+                    self._ptp_reservations.pop(link_id, None)
+
         state.device_mode = None
         state.mode_config = None
         state.ptp_link_id = None
@@ -2210,8 +2267,55 @@ class PortManager:
         """Get all active PTP links (without timestamps)."""
         return {k: v[0] for k, v in self._ptp_links.items()}
 
+    def get_ptp_peer(
+        self, link_id: str, port_num: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return the other device on a tracked PTP link, if present."""
+        with self._ptp_reservation_lock:
+            entry = self._ptp_links.get(link_id)
+            link_data = entry[0] if entry else {}
+            reservations = self._ptp_reservations.get(link_id, {})
+
+            def side_port(side: str) -> Optional[int]:
+                registered = link_data.get("side_{}_port".format(side))
+                if registered is not None:
+                    return registered
+                reservation = reservations.get(side) or {}
+                return reservation.get("port")
+
+            side_a_port = side_port("a")
+            side_b_port = side_port("b")
+            if side_a_port == port_num:
+                peer_side = "b"
+            elif side_b_port == port_num:
+                peer_side = "a"
+            elif side_a_port is not None:
+                peer_side = "a"
+            else:
+                return None
+
+            peer_port = side_b_port if peer_side == "b" else side_a_port
+            if peer_port is None or peer_port == port_num:
+                return None
+            peer_reservation = reservations.get(peer_side) or {}
+            return {
+                "port": peer_port,
+                "device_type": link_data.get(
+                    "side_{}_device_type".format(peer_side),
+                    peer_reservation.get("device_type", link_data.get("device_type")),
+                ),
+                "device_model": link_data.get(
+                    "side_{}_device_model".format(peer_side),
+                    peer_reservation.get("device_model", link_data.get("device_model")),
+                ),
+                "family": link_data.get(
+                    "side_{}_family".format(peer_side),
+                    peer_reservation.get("family"),
+                ),
+            }
+
     def get_available_ptp_side(
-        self, my_tower: int, remote_tower: int
+        self, my_tower: int, remote_tower: int, port_num: Optional[int] = None
     ) -> str:
         """Determine which PTP side to assign (auto A or B).
 
@@ -2220,10 +2324,103 @@ class PortManager:
         """
         from .mode_config import make_ptp_link_id
         link_id = make_ptp_link_id(my_tower, remote_tower)
-        entry = self._ptp_links.get(link_id)
-        if entry is None or entry[0].get("side_a_port") is None:
-            return "a"
-        return "b"
+        with self._ptp_reservation_lock:
+            entry = self._ptp_links.get(link_id)
+            if entry is None:
+                entry_data = {"side_a_port": None, "side_b_port": None}
+            else:
+                entry_data = entry[0]
+            reservation = self._ptp_reservations.get(link_id, {})
+            reserved_a = (reservation.get("a") or {}).get("port")
+            reserved_b = (reservation.get("b") or {}).get("port")
+            if (
+                entry_data.get("side_a_port") in (None, port_num)
+                and reserved_a in (None, port_num)
+            ):
+                return "a"
+            if (
+                entry_data.get("side_b_port") in (None, port_num)
+                and reserved_b in (None, port_num)
+            ):
+                return "b"
+            return "b"
+
+    def reserve_ptp_side(
+        self,
+        my_tower: int,
+        remote_tower: int,
+        port_num: int,
+        requested_side: Optional[str] = None,
+        device_type: Optional[str] = None,
+        device_model: Optional[str] = None,
+    ) -> str:
+        """Reserve one PTP side before the asynchronous mode task starts."""
+        from .mode_config import make_ptp_link_id
+
+        link_id = make_ptp_link_id(my_tower, remote_tower)
+        requested = requested_side.lower() if requested_side else None
+        if requested is not None and requested not in ("a", "b"):
+            raise ValueError("PTP side must be 'a' or 'b'")
+
+        with self._ptp_reservation_lock:
+            for reservation in self._ptp_reservations.values():
+                if any(
+                    (reserved or {}).get("port") == port_num
+                    for reserved in reservation.values()
+                ):
+                    raise ValueError(
+                        f"Port {port_num} already has a PTP configuration in progress"
+                    )
+
+            entry = self._ptp_links.get(link_id)
+            link_data = entry[0] if entry else {}
+            reservation = self._ptp_reservations.setdefault(link_id, {})
+            candidates = (requested,) if requested else ("a", "b")
+            for side in candidates:
+                side_key = "side_{}_port".format(side)
+                registered_port = link_data.get(side_key)
+                if registered_port not in (None, port_num):
+                    continue
+                reserved_entry = reservation.get(side)
+                reserved_port = (reserved_entry or {}).get("port")
+                if reserved_port not in (None, port_num):
+                    continue
+                family = None
+                try:
+                    from .vendor_registry import config_family_for_model
+
+                    resolved = config_family_for_model(device_type or "", device_model)
+                    family = resolved.directory if resolved is not None else None
+                except (ImportError, ValueError):
+                    pass
+                reservation[side] = {
+                    "port": port_num,
+                    "device_type": device_type,
+                    "device_model": device_model,
+                    "family": family,
+                }
+                return side
+
+        raise ValueError("Both PTP sides are already assigned for this link")
+
+    def get_reserved_ptp_side(self, link_id: str, port_num: int) -> Optional[str]:
+        """Return the side reserved for a port's pending PTP task."""
+        with self._ptp_reservation_lock:
+            reservation = self._ptp_reservations.get(link_id, {})
+            for side, reserved in reservation.items():
+                if (reserved or {}).get("port") == port_num:
+                    return side
+        return None
+
+    def release_ptp_side(self, link_id: str, port_num: int, side: str) -> None:
+        """Release a PTP reservation when the mode task cannot complete."""
+        with self._ptp_reservation_lock:
+            reservation = self._ptp_reservations.get(link_id)
+            if not reservation or (reservation.get(side) or {}).get("port") != port_num:
+                return
+            reservation.pop(side, None)
+            if not reservation:
+                self._ptp_reservations.pop(link_id, None)
 
     def cleanup_stale_ptp_links(self, max_age_hours: Optional[int] = None) -> int:
         """Remove PTP link entries older than max_age_hours.

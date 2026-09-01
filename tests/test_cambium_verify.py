@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from provisioner.handlers.base import UNVERIFIED, DeviceInfo
 from provisioner.handlers.cambium import CambiumHandler
 
@@ -15,6 +17,141 @@ def _handler() -> CambiumHandler:
     h._stok = "stok"
     h._cookie_file = "/tmp/does-not-matter"
     return h
+
+
+def _full_export():
+    return {
+        "device_props": {
+            "wirelessInterfaceSSID": "captured-ssid",
+            "centerFrequency": "5180",
+            "wirelessInterfaceScanFrequencyListEighty": "5180,5200",
+            "wirelessInterfaceScanFrequencyBandwidth": "51",
+            "networkBridgeIPAddr": "192.0.2.10",
+            "networkBridgeNetmask": "255.255.255.0",
+            "mgmtIFEnable": "1",
+            "mgmtIFVLAN": "99",
+            "systemConfigDeviceName": "captured-name",
+            "cambiumCNSDeviceAgentID": "captured-agent-id",
+            "wirelessInterfaceTDDAntennaGain": "25",
+            "mgmtVLANVID": "99",
+        },
+        "template_props": {"version": "5.11.1"},
+    }
+
+
+def test_cambium_shared_export_normalization_keeps_policy_and_removes_identity():
+    normalized = CambiumHandler.normalize_field_export(_full_export(), "SM")
+    props = normalized["device_props"]
+    assert props["mgmtVLANVID"] == "12"
+    assert props["mgmtIFEnable"] == "0"
+    assert "mgmtIFVLAN" not in props
+    assert props["networkBridgeIPAddressMode"] == "2"
+    assert props["wirelessInterfaceScanFrequencyBandwidth"] == "51"
+    assert props["wirelessInterfaceTDDAntennaGain"] == "17"
+    assert props["wirelessInterfaceScanFrequencyListEighty"] == "5180,5200"
+    assert "wirelessInterfaceSSID" not in props
+    assert "centerFrequency" not in props
+    assert "networkBridgeIPAddr" not in props
+    assert "networkBridgeNetmask" not in props
+    assert "systemConfigDeviceName" not in props
+    assert "cambiumCNSDeviceAgentID" not in props
+
+
+@pytest.mark.parametrize(
+    "model,expected",
+    [
+        ("Force 300-25", "19"),
+        ("ePMP 3000", "19"),
+        ("ePMP 4600C", "51"),
+        ("ePMP 4518", "51"),
+        ("unknown", "51"),
+    ],
+)
+def test_cambium_shared_export_projects_scan_mask_by_model(model, expected):
+    normalized = CambiumHandler.normalize_field_export(_full_export(), "SM")
+    prepared = CambiumHandler.prepare_field_export_for_model(normalized, model)
+    assert prepared["device_props"]["wirelessInterfaceScanFrequencyBandwidth"] == expected
+
+
+async def test_cambium_full_export_never_uses_set_param(monkeypatch):
+    h = _handler()
+    called = False
+
+    async def fail_if_called(_props):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(h, "_apply_config_settings_curl", fail_if_called)
+    assert await h.apply_config(_full_export()) is False
+    assert called is False
+
+
+async def test_cambium_full_export_uses_native_import_and_skip_illegal(tmp_path, monkeypatch):
+    h = _handler()
+    h.interface = "eth0.1996"
+    h._device_info = DeviceInfo(device_type="cambium", model="Force 300-25")
+    config_path = tmp_path / "field-export.json"
+    config_path.write_text(json.dumps(_full_export()))
+    commands = []
+    uploaded = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, output):
+            self.output = output
+
+        async def communicate(self):
+            return self.output, b""
+
+    async def fake_exec(*args, **kwargs):
+        commands.append(args)
+        if "config_import" in args[-1]:
+            image_arg = next(argument for argument in args if argument.startswith("image=@"))
+            image_path = image_arg.split("@", 1)[1].split(";", 1)[0]
+            uploaded.update(json.loads(Path(image_path).read_text()))
+            return FakeProcess(b'{"success":1}')
+        return FakeProcess(b'{"template_props":{"applyFinished":1}}')
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    assert await h.apply_config_file(str(config_path)) is True
+    import_command = next(command for command in commands if "config_import" in command[-1])
+    assert "-F" in import_command
+    assert "skipIllegal=1" in import_command
+    assert "set_param" not in " ".join(import_command)
+    assert uploaded["device_props"]["wirelessInterfaceScanFrequencyBandwidth"] == "19"
+
+
+async def test_cambium_connectorized_gain_defaults_and_overrides(monkeypatch):
+    h = _handler()
+    seen = []
+
+    async def fake_set(props):
+        seen.append(props)
+        return True
+
+    monkeypatch.setattr(h, "_apply_config_settings_curl", fake_set)
+    assert await h.apply_antenna_gain(model="ePMP 4600C") is True
+    assert await h.apply_antenna_gain(18, model="ePMP 4600C") is True
+    assert seen == [
+        {"wirelessInterfaceTDDAntennaGain": "23"},
+        {"wirelessInterfaceTDDAntennaGain": "18"},
+    ]
+
+
+async def test_cambium_integrated_gain_is_not_injected(monkeypatch):
+    h = _handler()
+    called = False
+
+    async def fail_if_called(_props):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(h, "_apply_config_settings_curl", fail_if_called)
+    assert await h.apply_antenna_gain(23, model="Force 300-25") is True
+    assert called is False
 
 
 async def test_mode_config_uses_native_import_and_verifies(monkeypatch):
