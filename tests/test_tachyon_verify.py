@@ -97,7 +97,9 @@ def curl_config_data(stdin: bytes):
     for line in stdin.decode("utf-8").splitlines():
         if line.startswith("data-binary = "):
             encoded_value = line.split(" = ", 1)[1]
-            return json.loads(json.loads(encoded_value))
+            request_body = json.loads(json.loads(encoded_value))
+            assert set(request_body) == {"data"}
+            return request_body["data"]
     raise AssertionError("curl config did not include a data-binary value")
 
 
@@ -251,6 +253,43 @@ async def test_apply_config_adds_missing_full_export_schema_defaults(fake_curl):
     assert posted["ethernet"]["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] is True
 
 
+async def test_apply_config_moves_legacy_network_ethernet_to_top_level(
+    fake_curl, fast_sleep
+):
+    """Older bench exports put ethernet below network; Tachyon requires a top-level section."""
+    h = _curl_handler()
+    config = {
+        "version": 3,
+        "network": {
+            "ethernet": {
+                "ports": {
+                    "eth0": {"enabled": True, "network": {"zone": "wan"}}
+                }
+            },
+            "zones": {"wan": {"enabled": True}},
+        },
+        "services": {},
+        "system": {},
+        "wireless": {"radios": {}},
+    }
+    posted = {}
+
+    def route(argv, stdin):
+        method = argv[argv.index("-X") + 1]
+        if method == "POST":
+            posted.update(curl_config_data(stdin))
+            return (0, json.dumps({}))
+        if method == "GET":
+            return (0, json.dumps(posted))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_input_handler(route)
+
+    assert await h.apply_config(config) is True
+    assert posted["ethernet"]["ports"]["eth0"]["enabled"] is True
+    assert "ethernet" not in posted["network"]
+
+
 async def test_apply_config_file_tar_posts_authoritative_export_without_deep_merge(
     tmp_path, fake_curl, fast_sleep
 ):
@@ -275,6 +314,97 @@ async def test_apply_config_file_tar_posts_authoritative_export_without_deep_mer
     assert fake_curl.methods == ["POST", "GET"]
     assert sorted(posted["ethernet"]["ports"].keys()) == ["eth0", "eth1"]
     assert "vlans" not in posted["network"]["zones"]["wan"]
+
+
+async def test_apply_config_file_legacy_tar_merges_live_config(
+    tmp_path, fake_curl, fast_sleep
+):
+    """Legacy Tachyon archives merge with live fields instead of replacing them."""
+    h = _curl_handler()
+    legacy_config = {
+        "version": 3,
+        "network": {
+            "ethernet": {
+                "ports": {
+                    "eth0": {"enabled": True, "network": {"zone": "wan"}}
+                }
+            },
+            "zones": {"wan": {"enabled": True}},
+        },
+        "services": {},
+        "system": {},
+        "wireless": {"radios": {}},
+    }
+    tar_path = _write_config_tar(tmp_path, legacy_config)
+    live_config = _full_export_config()
+    live_config["ethernet"]["ports"]["eth2"] = {"enabled": True}
+    posted = {}
+    get_count = 0
+
+    def route(argv, stdin):
+        nonlocal get_count
+        method = argv[argv.index("-X") + 1]
+        if method == "GET":
+            get_count += 1
+            return (0, json.dumps(live_config if get_count == 1 else posted))
+        if method == "POST":
+            posted.update(curl_config_data(stdin))
+            return (0, json.dumps({}))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_input_handler(route)
+
+    assert await h.apply_config_file(str(tar_path)) is True
+    assert posted["ethernet"]["ports"]["eth0"]["enabled"] is True
+    assert posted["ethernet"]["ports"]["eth2"]["enabled"] is True
+    assert "ethernet" not in posted["network"]
+    assert fake_curl.methods == ["GET", "POST", "GET"]
+
+
+async def test_apply_config_file_legacy_tar_preserves_vap_fields(
+    tmp_path, fake_curl, fast_sleep
+):
+    """Legacy VAP entries merge by index and keep fields omitted by the archive."""
+    h = _curl_handler()
+    legacy_config = {
+        "version": 3,
+        "network": {"zones": {"wan": {"enabled": True}}},
+        "services": {},
+        "system": {},
+        "wireless": {
+            "radios": {
+                "wlan0": {
+                    "enabled": True,
+                    "vaps": [
+                        {"enabled": True, "mode": "sta", "network": {"zone": "wan"}}
+                    ],
+                }
+            }
+        },
+    }
+    tar_path = _write_config_tar(tmp_path, legacy_config)
+    live_config = _full_export_config()
+    posted = {}
+    get_count = 0
+
+    def route(argv, stdin):
+        nonlocal get_count
+        method = argv[argv.index("-X") + 1]
+        if method == "GET":
+            get_count += 1
+            return (0, json.dumps(live_config if get_count == 1 else posted))
+        if method == "POST":
+            posted.update(curl_config_data(stdin))
+            return (0, json.dumps({}))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_input_handler(route)
+
+    assert await h.apply_config_file(str(tar_path)) is True
+    vap = posted["wireless"]["radios"]["wlan0"]["vaps"][0]
+    assert vap["ssid"] == "WEST"
+    assert "sta_profiles" in vap
+    assert fake_curl.methods == ["GET", "POST", "GET"]
 
 
 async def test_apply_config_file_partial_json_still_merges_live_config(

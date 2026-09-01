@@ -81,6 +81,16 @@ health_check() {
     echo "  ✗ provisioner-web is not active"; ok=0
   fi
 
+  if $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" \
+       'systemctl is-enabled --quiet kiosk-watchdog.service'; then
+    if $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" \
+         'systemctl is-active --quiet kiosk-watchdog.service'; then
+      echo "  ✓ kiosk-watchdog active"
+    else
+      echo "  ✗ kiosk-watchdog is not active"; ok=0
+    fi
+  fi
+
   # Boot-crash signatures from a missed registry site (see CLAUDE.md S1 list).
   # Match the specific fatal exception types, NOT a bare "Traceback" — the
   # service logs a benign asyncio CancelledError traceback on every startup.
@@ -91,6 +101,17 @@ health_check() {
     echo "  ✓ no import/attribute error in recent logs"
   fi
   [[ "$ok" == "1" ]]
+}
+
+restart_kiosk_watchdog() {
+  # Restart the optional kiosk browser watchdog after its required web service.
+  # A web-service restart stops a unit that Requires it, but does not start it.
+  if $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" \
+       'systemctl is-enabled --quiet kiosk-watchdog.service'; then
+    echo "Restarting kiosk-watchdog service..."
+    $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" \
+      'sudo -n systemctl restart kiosk-watchdog.service'
+  fi
 }
 
 # --- rollback --------------------------------------------------------------
@@ -105,6 +126,7 @@ if [[ "$ROLLBACK" == "1" ]]; then
      ([ -f ${PREV_PATH}/.deployed-rev ] && sudo -n cp ${PREV_PATH}/.deployed-rev ${TARGET_PATH}/.deployed-rev || true)"
   echo "Restarting provisioner-web service..."
   $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" 'sudo -n systemctl restart provisioner-web'
+  restart_kiosk_watchdog
   if health_check; then
     echo "Rollback complete and healthy. Deployed rev:"
     $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" "cat ${TARGET_PATH}/.deployed-rev" || true
@@ -190,6 +212,7 @@ printf '%s %s %s\n' "${SHA}${DIRTY}" "$BRANCH" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 
 
 echo "Restarting provisioner-web service..."
 $SSH_CMD "${TARGET_USER}@${TARGET_HOST}" 'sudo -n systemctl restart provisioner-web'
+restart_kiosk_watchdog
 
 if health_check; then
   echo "Done. Deploy healthy."

@@ -50,7 +50,7 @@ and uses the same `sudo` transition. See "Display sleep/wake" below.
 
 | Unit | What it does |
 | ---- | ------------ |
-| `kiosk-watchdog.service` | Runs `/opt/provisioner/restart-kiosk.sh` as root. Polls every 10s; if chromium isn't running, wakes the screen (`xset dpms force on`, `xset s reset`) and respawns the browser. Important: it only wakes on **respawn**, not in the poll loop — otherwise it would defeat X DPMS idle. |
+| `kiosk-watchdog.service` | Runs `/opt/provisioner/restart-kiosk.sh` as root. Polls every 10s; if chromium isn't running, wakes the screen (`xset dpms force on`, `xset s reset`) and respawns the browser. It has `PartOf=provisioner-web.service`, so a web-service restart also restarts the watchdog. |
 | `auto-rotate.service` | Runs `/usr/local/bin/auto-rotate.py` as `kiosk` user. Polls the lid accelerometer; rotates display + Wacom touchscreen on orientation change. Exits 0 if there's no `accel-display` iio sensor — the unit stays dormant on non-Yoga hardware. |
 | `provisioner-web.service` | The provisioner itself. Runs as root, serves port 8080, **and runs the full provisioner loop** — `web_server.run_standalone()` calls `Provisioner.run()`, so this single process owns port monitoring, BOOTP listeners, and provisioning. This is the only unit the kiosk image enables. |
 | `provisioner.service` | Headless (no-UI) variant that runs `Provisioner.run()` directly. **Do not enable it alongside `provisioner-web.service`** — two full provisioners means duplicate BOOTP listeners, so one plugged-in device fires two concurrent netinstalls that race on the interface IP. Kept on disk for no-UI deployments only. |
