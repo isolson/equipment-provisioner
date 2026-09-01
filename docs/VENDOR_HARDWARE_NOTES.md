@@ -70,6 +70,14 @@ The device reboots after the update. The handler waits for link recovery, logs
 in again, and checks the active bank. Do not send an extra reboot command after
 the update.
 
+A successful config POST can restart the device web service. The first config
+readback can fail while the service returns. The handler retries the readback
+and refreshes the session before it reports a config failure.
+
+The 2026-09-01 TNA-303L-65 bench test showed this timing. The config POST
+returned HTTP 200. The first readback failed during service restart. A later
+readback passed after the device returned.
+
 ### Ping watchdog on an isolated bench
 
 Tachyon exports include `services.ping_watchdog`. The watchdog can reboot a

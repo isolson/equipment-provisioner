@@ -128,6 +128,61 @@ async def test_apply_config_false_when_readback_curl_fails(fake_curl, fast_sleep
     assert await h.apply_config(config) is False
 
 
+async def test_apply_config_retries_readback_after_config_reload(fake_curl, fast_sleep):
+    """A temporary web-service restart must not turn a successful apply into a failure."""
+    h = _curl_handler()
+    config = {"system": {"hostname": "AP-1"}}
+    get_count = 0
+
+    def route(argv):
+        nonlocal get_count
+        method = argv[argv.index("-X") + 1]
+        if method == "POST":
+            return (0, json.dumps({"reboot_required": False}))
+        get_count += 1
+        if get_count < 3:
+            return (1, "", "curl: (7) Failed to connect")
+        return (0, json.dumps(config))
+
+    fake_curl.set_handler(route)
+    assert await h.apply_config(config) is True
+    assert get_count == 3
+
+
+async def test_apply_config_refreshes_session_after_repeated_readback_failures(
+    monkeypatch, fast_sleep
+):
+    """Repeated readback failures refresh the session before the final attempts."""
+    h = _curl_handler()
+    config = {"system": {"hostname": "AP-1"}}
+    events = []
+    get_count = 0
+
+    async def apply_config(_config):
+        return True
+
+    async def readback():
+        nonlocal get_count
+        get_count += 1
+        return {} if get_count < 3 else config
+
+    async def disconnect():
+        events.append("disconnect")
+
+    async def connect():
+        events.append("connect")
+        return True
+
+    monkeypatch.setattr(h, "_apply_config_curl", apply_config)
+    monkeypatch.setattr(h, "_get_config_curl", readback)
+    monkeypatch.setattr(h, "disconnect", disconnect)
+    monkeypatch.setattr(h, "connect", connect)
+
+    assert await h.apply_config(config) is True
+    assert get_count == 3
+    assert events == ["disconnect", "connect"]
+
+
 async def test_apply_config_false_on_hostname_mismatch(fake_curl, fast_sleep):
     """The device echoes a different hostname than we sent -> not applied."""
     h = _curl_handler()

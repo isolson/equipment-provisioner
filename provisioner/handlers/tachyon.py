@@ -48,6 +48,12 @@ class TachyonHandler(BaseHandler):
     API_UPDATE = "/cgi.lua/update"
     API_REBOOT = "/cgi.lua/reboot"
 
+    # A config apply can restart the web service before the API is available
+    # again. Poll readback and refresh the session once before failing closed.
+    CONFIG_READBACK_ATTEMPTS = 5
+    CONFIG_READBACK_DELAYS = (2, 4, 6, 8)
+    CONFIG_READBACK_RECONNECT_AFTER = 2
+
     # Default credentials (factory default)
     DEFAULT_CREDENTIALS = {"username": "root", "password": "admin"}
 
@@ -962,8 +968,7 @@ class TachyonHandler(BaseHandler):
         # is FAIL-CLOSED: if we cannot read the config back, or it does not
         # match, we report failure. We never claim success we could not confirm.
         if self._has_verifiable_config_fields(config):
-            await asyncio.sleep(2)  # Brief pause for config to settle
-            readback = await self._get_config_curl()
+            readback = await self._read_config_after_apply()
             if not readback:
                 logger.error(
                     f"[CONFIG VERIFY] Could not read back config on {self.ip} — failing closed"
@@ -981,6 +986,66 @@ class TachyonHandler(BaseHandler):
             logger.info(f"[CONFIG VERIFY] Config confirmed on {self.ip}")
 
         return True
+
+    async def _read_config_after_apply(self) -> Dict[str, Any]:
+        """Read config after apply while the device reloads its web service.
+
+        A successful config POST can restart the Tachyon web service. The first
+        readback can fail while that service returns. Retry with bounded delays,
+        then reconnect once to refresh an expired session before failing closed.
+        """
+        reconnect_attempted = False
+        for attempt in range(1, self.CONFIG_READBACK_ATTEMPTS + 1):
+            readback = await self._get_config_curl()
+            if readback:
+                return readback
+
+            if attempt >= self.CONFIG_READBACK_ATTEMPTS:
+                break
+
+            delay = self.CONFIG_READBACK_DELAYS[attempt - 1]
+            logger.info(
+                "[CONFIG VERIFY] Read-back unavailable on %s; retrying in %ss "
+                "(%s/%s)",
+                self.ip,
+                delay,
+                attempt,
+                self.CONFIG_READBACK_ATTEMPTS,
+            )
+            await asyncio.sleep(delay)
+
+            if (
+                attempt == self.CONFIG_READBACK_RECONNECT_AFTER
+                and not reconnect_attempted
+            ):
+                reconnect_attempted = True
+                logger.info(
+                    "[CONFIG VERIFY] Refreshing the Tachyon session on %s before "
+                    "the next read-back",
+                    self.ip,
+                )
+                try:
+                    await self.disconnect()
+                    if await self.connect():
+                        logger.info(
+                            "[CONFIG VERIFY] Tachyon session refreshed on %s",
+                            self.ip,
+                        )
+                    else:
+                        logger.warning(
+                            "[CONFIG VERIFY] Could not refresh the Tachyon session "
+                            "on %s: %s",
+                            self.ip,
+                            self.login_error or "unknown connection error",
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[CONFIG VERIFY] Tachyon session refresh failed on %s: %s",
+                        self.ip,
+                        exc,
+                    )
+
+        return {}
 
     def _normalize_config_for_apply(self, config: Dict[str, Any]) -> None:
         """Fill Tachyon API-required defaults omitted by older config exports."""
