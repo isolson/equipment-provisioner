@@ -24,6 +24,7 @@ from starlette.background import BackgroundTask
 from ..config_assets import (
     ConfigAsset,
     ConfigAssetCatalog,
+    MODE_TO_PTP_SIDE,
 )
 from ..fingerprint import is_mikrotik_oui
 from ..handler_manager import HandlerManager, provisionable_device_types
@@ -2244,6 +2245,19 @@ async def upload_config_asset(
                     raise HTTPException(status_code=400, detail="PTP field exports require PTP mode")
                 if not link_profile or not profile:
                     raise HTTPException(status_code=400, detail="PTP exports require link and side profiles")
+                expected_profile = MODE_TO_PTP_SIDE.get(mode) if mode else None
+                if expected_profile is None and profile.lower() not in {
+                    value.lower() for value in MODE_TO_PTP_SIDE.values()
+                }:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="PTP exports require a Main or SM side profile",
+                    )
+                if expected_profile and profile.lower() != expected_profile.lower():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{mode} exports require the {expected_profile} side profile",
+                    )
             elif profile and profile.lower() not in {"default", "north", "east", "south", "west"}:
                 raise HTTPException(status_code=400, detail="Unknown AP profile")
         if scope is None:
@@ -3046,7 +3060,7 @@ def _validate_ptp_request(
     status: Dict[str, Any],
     req: ApplyModeRequest,
     capabilities: Dict[str, Any],
-) -> None:
+) -> str:
     """Validate the certified family pair and generated PTP settings."""
     from ..mode_config import ModeConfigManager, make_ptp_link_id
 
@@ -3067,7 +3081,16 @@ def _validate_ptp_request(
         )
 
     if not capabilities.get("ptp_settings_required"):
-        return
+        _reserve_ptp_side(
+            port_manager,
+            req.my_tower,
+            req.remote_tower,
+            port_number,
+            side,
+            status.get("device_type"),
+            status.get("device_model"),
+        )
+        return side
 
     mode = "ptp-a" if side == "a" else "ptp-b"
     manager = ModeConfigManager(
@@ -3078,6 +3101,8 @@ def _validate_ptp_request(
         mode,
         model=status.get("device_model"),
         link_profile=link_id,
+        firmware=status.get("firmware_version"),
+        require_firmware_match=True,
     )
     if template is None:
         raise HTTPException(
@@ -3098,6 +3123,43 @@ def _validate_ptp_request(
             status.get("device_type"),
             side,
             status.get("device_model"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    _reserve_ptp_side(
+        port_manager,
+        req.my_tower,
+        req.remote_tower,
+        port_number,
+        side,
+        status.get("device_type"),
+        status.get("device_model"),
+    )
+    return side
+
+
+def _reserve_ptp_side(
+    port_manager: Any,
+    my_tower: int,
+    remote_tower: int,
+    port_number: int,
+    side: str,
+    device_type: Optional[str] = None,
+    device_model: Optional[str] = None,
+) -> None:
+    """Reserve a side before the asynchronous mode task starts."""
+    reserve = getattr(port_manager, "reserve_ptp_side", None)
+    if not callable(reserve):
+        return
+    try:
+        reserve(
+            my_tower,
+            remote_tower,
+            port_number,
+            requested_side=side,
+            device_type=device_type,
+            device_model=device_model,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3240,6 +3302,12 @@ async def _run_apply_mode(
     port_manager = provisioner.port_manager
     mcm = get_mode_config_manager()
     device_model = (port_manager.get_port_status().get(port_number) or {}).get("device_model")
+    device_firmware = (port_manager.get_port_status().get(port_number) or {}).get(
+        "firmware_version"
+    )
+    ptp_link_id = None
+    ptp_side = None
+    ptp_reservation_active = False
 
     try:
         capabilities = HandlerManager.operator_capabilities_for(
@@ -3252,14 +3320,30 @@ async def _run_apply_mode(
             ptp_link_id = None
         else:
             # PTP: auto-assign side
-            side = port_manager.get_available_ptp_side(
-                req.my_tower, req.remote_tower, port_num=port_number
-            )
-            mode = f"ptp-{side}"
-            naming = mcm.generate_ptp_naming(
-                req.my_tower, req.remote_tower, side, device_type,
-            )
             ptp_link_id = make_ptp_link_id(req.my_tower, req.remote_tower)
+            get_reserved_side = getattr(port_manager, "get_reserved_ptp_side", None)
+            if callable(get_reserved_side):
+                ptp_side = get_reserved_side(ptp_link_id, port_number)
+                ptp_reservation_active = ptp_side is not None
+            if ptp_side is None:
+                reserve = getattr(port_manager, "reserve_ptp_side", None)
+                if callable(reserve):
+                    ptp_side = reserve(
+                        req.my_tower,
+                        req.remote_tower,
+                        port_number,
+                        device_type=device_type,
+                        device_model=device_model,
+                    )
+                    ptp_reservation_active = True
+                else:
+                    ptp_side = port_manager.get_available_ptp_side(
+                        req.my_tower, req.remote_tower, port_num=port_number
+                    )
+            mode = f"ptp-{ptp_side}"
+            naming = mcm.generate_ptp_naming(
+                req.my_tower, req.remote_tower, ptp_side, device_type,
+            )
             peer = port_manager.get_ptp_peer(ptp_link_id, port_number)
             if peer is not None and not ptp_families_compatible(
                 device_type,
@@ -3288,6 +3372,8 @@ async def _run_apply_mode(
             model=device_model,
             profile=profile,
             link_profile=ptp_link_id,
+            firmware=device_firmware,
+            require_firmware_match=True,
         )
         if req.mode == "ptp" and capabilities.get("ptp_settings_required") and not template:
             logger.error(
@@ -3325,7 +3411,7 @@ async def _run_apply_mode(
                         template,
                         naming,
                         device_type,
-                        side,
+                        ptp_side,
                         device_model,
                     )
                 else:
@@ -3355,6 +3441,7 @@ async def _run_apply_mode(
                 port_manager.set_device_mode(
                     port_number, mode, naming, ptp_link_id,
                 )
+                ptp_reservation_active = False
             else:
                 logger.error(f"Failed to apply {mode} config on port {port_number}")
         finally:
@@ -3366,6 +3453,11 @@ async def _run_apply_mode(
 
     except Exception as e:
         logger.exception(f"Error applying mode on port {port_number}: {e}")
+    finally:
+        if ptp_reservation_active and ptp_link_id and ptp_side:
+            release = getattr(port_manager, "release_ptp_side", None)
+            if callable(release):
+                release(ptp_link_id, port_number, ptp_side)
 
 
 # ============================================================================

@@ -43,6 +43,7 @@ def _status(device_type, mac):
         "device_type": device_type,
         "device_ip": "192.0.2.1",
         "device_mac": mac,
+        "firmware_version": "5.11.1",
         "provisioning": False,
         "last_result": "success",
         "checklist": {"config_upload": True, "config_verify": True},
@@ -151,12 +152,12 @@ def test_mode_endpoint_uses_model_qualified_cambium_ptp(monkeypatch):
         "provisioner.mode_config.ModeConfigManager.load_template",
         lambda *args, **kwargs: {
             "device_props": {
-                "wirelessInterfaceMode": "configured",
-                "wirelessInterfacePTPMode": "configured",
-                "wirelessInterfaceProtocolMode": "configured",
-                "wirelessInterfaceTDDFrameSize": "configured",
-                "wirelessInterfaceTDDRatio": "configured",
-                "centerFrequency": "configured",
+                "wirelessInterfaceMode": "1",
+                "wirelessInterfacePTPMode": "1",
+                "wirelessInterfaceProtocolMode": "3",
+                "wirelessInterfaceTDDFrameSize": "5000",
+                "wirelessInterfaceTDDRatio": "4",
+                "centerFrequency": "6835",
             }
         },
     )
@@ -186,12 +187,12 @@ def test_mode_endpoint_accepts_cambium_family_ptp(monkeypatch):
         "provisioner.mode_config.ModeConfigManager.load_template",
         lambda *args, **kwargs: {
             "device_props": {
-                "wirelessInterfaceMode": "configured",
-                "wirelessInterfacePTPMode": "configured",
-                "wirelessInterfaceProtocolMode": "configured",
-                "wirelessInterfaceTDDFrameSize": "configured",
-                "wirelessInterfaceTDDRatio": "configured",
-                "centerFrequency": "configured",
+                "wirelessInterfaceMode": "1",
+                "wirelessInterfacePTPMode": "1",
+                "wirelessInterfaceProtocolMode": "3",
+                "wirelessInterfaceTDDFrameSize": "5000",
+                "wirelessInterfaceTDDRatio": "4",
+                "centerFrequency": "6835",
             }
         },
     )
@@ -237,12 +238,16 @@ def test_mode_endpoint_accepts_certified_cross_family_pair(monkeypatch):
         "provisioner.mode_config.ModeConfigManager.load_template",
         lambda *args, **kwargs: {
             "device_props": {
-                "wirelessInterfaceMode": "configured",
-                "wirelessInterfacePTPMode": "configured",
-                "wirelessInterfaceProtocolMode": "configured",
-                "wirelessInterfaceTDDFrameSize": "configured",
-                "wirelessInterfaceTDDRatio": "configured",
-                "centerFrequency": "configured",
+                "wirelessInterfaceMode": "2",
+                "wirelessInterfacePTPMode": "1",
+                "wirelessInterfaceProtocolMode": "3",
+                "wirelessInterfaceTDDFrameSize": "5000",
+                "wirelessInterfaceTDDRatio": "2",
+                "centerFrequency": "6565",
+                "wirelessInterfaceSSID": "captured-ssid",
+                "prefferedAPTable": [
+                    {"prefferedListTableEntrySSID": "captured-ssid"}
+                ],
             }
         },
     )

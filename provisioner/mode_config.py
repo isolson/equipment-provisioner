@@ -86,6 +86,8 @@ class ModeConfigManager:
         model: Optional[str] = None,
         profile: Optional[str] = None,
         link_profile: Optional[str] = None,
+        firmware: Optional[str] = None,
+        require_firmware_match: bool = False,
     ) -> Optional[Path]:
         """Get path to a mode config template.
 
@@ -96,7 +98,8 @@ class ModeConfigManager:
         AP ``profile`` is a direction.  PTP ``link_profile`` is an exact link
         directory when present, otherwise the approved ``twXX-twXX`` generic
         directory is used.  ``ptp-a`` is always the Main archive and
-        ``ptp-b`` is always the SM archive.
+        ``ptp-b`` is always the SM archive.  Versioned family assets match the
+        requested device firmware when ``firmware`` is supplied.
 
         Legacy flat templates remain available for models without an approved
         family tree.
@@ -118,10 +121,39 @@ class ModeConfigManager:
                     key=lambda entry: entry.name.lower(),
                     reverse=True,
                 )
+                role_names = {"ap", "sm", "ptp"}
+                version_containers = [
+                    entry for entry in version_dirs
+                    if entry.name.lower() not in role_names
+                ]
+                matched_version_only = False
+                if version_containers and firmware:
+                    firmware_key = str(firmware).strip().lower()
+                    firmware_key = re.sub(r"^v", "", firmware_key)
+                    version_dirs = [
+                        entry for entry in version_containers
+                        if re.sub(r"^v", "", entry.name.lower()) == firmware_key
+                    ]
+                    if not version_dirs:
+                        logger.warning(
+                            "No config asset version %s for %s/%s",
+                            firmware,
+                            device_type,
+                            model,
+                        )
+                        return None
+                    matched_version_only = True
+                elif version_containers and require_firmware_match:
+                    logger.warning(
+                        "Device firmware is required for versioned %s/%s assets",
+                        device_type,
+                        model,
+                    )
+                    return None
                 # Cambium includes a firmware directory; Tachyon's approved
                 # exports are version-independent and place AP/SM directly
                 # below the family directory.
-                containers = [family_dir] + version_dirs
+                containers = version_dirs if matched_version_only else [family_dir] + version_dirs
                 family_profile = profile or "default"
                 if mode in MODE_TO_PTP_SIDE:
                     side = MODE_TO_PTP_SIDE[mode]
@@ -237,6 +269,8 @@ class ModeConfigManager:
         model: Optional[str] = None,
         profile: Optional[str] = None,
         link_profile: Optional[str] = None,
+        firmware: Optional[str] = None,
+        require_firmware_match: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Load a mode config template as a dictionary."""
         template_path = self.get_template_path(
@@ -245,6 +279,8 @@ class ModeConfigManager:
             model,
             profile=profile,
             link_profile=link_profile,
+            firmware=firmware,
+            require_firmware_match=require_firmware_match,
         )
         if not template_path:
             return None
@@ -372,8 +408,9 @@ class ModeConfigManager:
         my_padded = f"{my_tower:02d}"
         remote_padded = f"{remote_tower:02d}"
 
-        # SSID is the same for both sides
-        ptp_ssid = f"tw{my_padded}-tw{remote_padded}"
+        # SSID is the same for both sides and follows the canonical link ID.
+        link_low, link_high = sorted((my_tower, remote_tower))
+        ptp_ssid = f"tw{link_low:02d}-tw{link_high:02d}"
 
         # Hostname: side letter goes on *this* device's tower number
         if side == "a":

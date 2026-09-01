@@ -356,6 +356,18 @@ class ConfigAssetCatalog:
         if not is_config_asset(Path(filename)):
             raise ValueError("Unsupported config file type")
 
+        if role and role.lower() == PTP_ROLE and mode:
+            expected_mode = _mode_for_role(role, profile)
+            if expected_mode != mode:
+                expected_profile = MODE_TO_PTP_SIDE.get(mode)
+                if expected_profile:
+                    raise ValueError(
+                        "{} exports require the {} side profile".format(
+                            mode, expected_profile
+                        )
+                    )
+                raise ValueError("PTP assets require a valid PTP mode")
+
         components = [root, device_type]
         if scope:
             scope = _clean_component(scope, "scope").lower()

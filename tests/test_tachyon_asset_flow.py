@@ -256,5 +256,6 @@ async def test_tachyon_preflight_model_selects_family_config_not_tns100(tmp_path
             "mac": None,
             "serial": "TNA303L462500013",
             "model": "TNA-303L-65",
+            "firmware_version": "1.15.0.8503",
         },
     )

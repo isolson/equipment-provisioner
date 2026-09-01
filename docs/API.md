@@ -94,7 +94,8 @@ For `field_export`, the file must be a native Cambium JSON export with
 `device_props` and `template_props`. The role is required. Shared SM exports
 must use `scope=shared`, `mode=sm`, and a firmware version. AP and PTP exports
 must use a family and firmware; PTP exports also require link and side
-profiles. The response includes metadata such as firmware version, property
+profiles. `ptp-a` requires the `Main` profile. `ptp-b` requires the `SM`
+profile. The response includes metadata such as firmware version, property
 count, and whether protected fields were found. It does not include secret
 values or the protected source file.
 
@@ -264,10 +265,13 @@ Applies a qualified AP or PTP mode after standard SM provisioning is complete
 and verified.
 
 For PTP, send `my_tower` and `remote_tower` (both 1-99). The server assigns
-side A or B, checks the peer family against the certified family matrix, and
-generates the link hostname and SSID. Cambium and Tachyon PTP handlers require
-a protected vendor settings profile. The request returns `409` when the peer
-family is not certified or the required profile is missing or incomplete.
+side A or B, reserves that side before the background task starts, and checks
+the peer family against the certified family matrix. The server uses the
+ascending tower order for the link ID and SSID. Reversing the two tower values
+does not change the SSID. Cambium and Tachyon PTP handlers require a
+protected vendor settings profile that matches the device firmware. The request
+returns `409` when the peer family is not certified, a side is in use, or the
+required profile is missing or incomplete.
 
 ```json
 {

@@ -345,6 +345,45 @@ class CambiumHandler(BaseHandler):
                 "Cambium PTP settings profile is missing: " + ", ".join(missing)
             )
 
+        def integer_value(key: str) -> Optional[int]:
+            value = props.get(key)
+            try:
+                if isinstance(value, bool):
+                    return None
+                return int(str(value).strip())
+            except (TypeError, ValueError):
+                return None
+
+        expected_mode = 1 if side == "a" else 2
+        mode = integer_value("wirelessInterfaceMode")
+        if mode != expected_mode:
+            raise ValueError(
+                "Cambium PTP settings profile must use wirelessInterfaceMode "
+                f"{expected_mode} for side {side}"
+            )
+        if integer_value("wirelessInterfacePTPMode") not in (1, 2):
+            raise ValueError(
+                "Cambium PTP settings profile must enable a PTP mode"
+            )
+        if integer_value("wirelessInterfaceProtocolMode") != 3:
+            raise ValueError(
+                "Cambium PTP settings profile must use protocol mode 3"
+            )
+        frame_size = integer_value("wirelessInterfaceTDDFrameSize")
+        if frame_size is None or frame_size <= 0:
+            raise ValueError(
+                "Cambium PTP settings profile must use a positive TDD frame size"
+            )
+        if integer_value("wirelessInterfaceTDDRatio") not in (1, 2, 3, 4):
+            raise ValueError(
+                "Cambium PTP settings profile must use a valid TDD ratio"
+            )
+        center_frequency = integer_value("centerFrequency")
+        if center_frequency is None or center_frequency <= 0:
+            raise ValueError(
+                "Cambium PTP settings profile must use a positive center frequency"
+            )
+
         # On the SM side, Cambium registers against the SSID in the preferred
         # AP table. The top-level wirelessInterfaceSSID field is an AP field
         # and does not update that table. Keep the profile's security key and
@@ -359,13 +398,20 @@ class CambiumHandler(BaseHandler):
             else:
                 entries = []
             ssid = props.get("wirelessInterfaceSSID")
-            if ssid:
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    if "prefferedListTableEntrySSID" in entry:
-                        entry["prefferedListTableEntrySSID"] = ssid
-                        break
+            if not ssid:
+                raise ValueError(
+                    "Cambium PTP settings profile requires an SM SSID"
+                )
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                if "prefferedListTableEntrySSID" in entry:
+                    entry["prefferedListTableEntrySSID"] = ssid
+                    break
+            else:
+                raise ValueError(
+                    "Cambium PTP settings profile requires a preferred AP entry"
+                )
         return config
 
     # Model to firmware filename pattern mapping

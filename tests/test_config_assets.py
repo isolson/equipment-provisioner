@@ -243,6 +243,37 @@ def test_cambium_field_export_ptp_uses_separate_side_path(tmp_path):
     assert (data_path / response.json()["asset"]["path"]).is_file()
 
 
+def test_cambium_field_export_ptp_mode_matches_side_profile(tmp_path):
+    client, _ = make_client(tmp_path)
+    original = json.dumps(
+        {
+            "device_props": {"wirelessInterfaceSSID": "PTP-LINK"},
+            "template_props": {"version": "5.11.1"},
+        }
+    )
+    response = client.post(
+        "/api/config-assets/upload",
+        data={
+            "config_type": "template",
+            "device_type": "cambium",
+            "family": "ePMP-4K",
+            "firmware": "5.11.1",
+            "role": "PTP",
+            "mode": "ptp-b",
+            "scope": "family",
+            "link_profile": "tw32-tw18",
+            "profile": "Main",
+            "asset_kind": "field_export",
+        },
+        files={"file": ("ptp-b.json", original, "application/json")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "ptp-b exports require the SM side profile"
+    )
+
+
 def test_mode_profile_and_ptp_side_resolution(tmp_path):
     root = tmp_path / "configs/templates/tachyon/TNA-303X"
     (root / "AP/North").mkdir(parents=True)
@@ -290,6 +321,9 @@ def test_ptp_33_35_naming_keeps_shared_link_identity():
         "tw33-tw35b"
     )
     assert manager.generate_ptp_naming(33, 35, "b", "cambium")["ssid"] == (
+        "tw33-tw35"
+    )
+    assert manager.generate_ptp_naming(35, 33, "a", "cambium")["ssid"] == (
         "tw33-tw35"
     )
 
@@ -359,6 +393,21 @@ def test_ptp_settings_generation_requires_vendor_radio_settings():
             "centerFrequency": "profile",
         }
     }
+    with pytest.raises(ValueError, match="wirelessInterfaceMode"):
+        manager.generate_ptp_settings(
+            config, naming, "cambium", "a", "ePMP 4616"
+        )
+
+    config["device_props"].update(
+        {
+            "wirelessInterfaceMode": "1",
+            "wirelessInterfacePTPMode": "1",
+            "wirelessInterfaceProtocolMode": "3",
+            "wirelessInterfaceTDDFrameSize": "5000",
+            "wirelessInterfaceTDDRatio": "4",
+            "centerFrequency": "6835",
+        }
+    )
     generated = manager.generate_ptp_settings(
         config, naming, "cambium", "a", "ePMP 4616"
     )
@@ -403,6 +452,46 @@ def test_cambium_ptp_sm_settings_use_generated_preferred_ap_ssid():
     assert props["wirelessInterfaceSSID"] == naming["ssid"]
     assert props["prefferedAPTable"][0]["prefferedListTableEntrySSID"] == naming["ssid"]
     assert props["prefferedAPTable"][0]["prefferedListTableEntryKEY"] == "kept-private"
+
+
+def test_cambium_ptp_sm_settings_require_preferred_ap_entry():
+    manager = ModeConfigManager("unused")
+    naming = manager.generate_ptp_naming(32, 18, "b", "cambium")
+    config = {
+        "device_props": {
+            "wirelessInterfaceSSID": "captured-ssid",
+            "wirelessInterfaceMode": "2",
+            "wirelessInterfacePTPMode": "1",
+            "wirelessInterfaceProtocolMode": "3",
+            "wirelessInterfaceTDDFrameSize": "5000",
+            "wirelessInterfaceTDDRatio": "2",
+            "centerFrequency": "6565",
+        }
+    }
+
+    with pytest.raises(ValueError, match="preferred AP entry"):
+        manager.generate_ptp_settings(
+            config, naming, "cambium", "b", "ePMP 4616"
+        )
+
+
+def test_mode_loader_matches_requested_firmware_version(tmp_path):
+    root = tmp_path / "configs/templates/cambium/ePMP-4K"
+    for version, marker in (("5.9.0", "old"), ("5.11.1", "current")):
+        path = root / version / "PTP" / "tw18-tw32" / "Main"
+        path.mkdir(parents=True)
+        (path / "default.json").write_text(json.dumps({"marker": marker}))
+
+    manager = ModeConfigManager(str(tmp_path / "configs/templates"))
+    selected = manager.load_template(
+        "cambium",
+        "ptp-a",
+        "ePMP 4616",
+        link_profile="tw18-tw32",
+        firmware="5.11.1",
+    )
+
+    assert selected == {"marker": "current"}
 
 
 def test_config_asset_api_lists_and_uploads_structured_assets(tmp_path):

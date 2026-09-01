@@ -37,6 +37,48 @@ def test_ptp_link_tracks_model_and_family_for_peer_checks():
         manager._ptp_links.clear()
 
 
+def test_ptp_side_reservation_prevents_two_async_masters():
+    manager = PortManager(num_ports=3)
+    manager._generate_port_configs()
+    manager._ptp_links.clear()
+    manager._ptp_reservations.clear()
+    try:
+        assert manager.reserve_ptp_side(32, 18, 1) == "a"
+        assert manager.reserve_ptp_side(32, 18, 2) == "b"
+        with pytest.raises(ValueError, match="Both PTP sides"):
+            manager.reserve_ptp_side(32, 18, 3)
+        assert manager.get_reserved_ptp_side("tw18-tw32", 1) == "a"
+        assert manager.get_reserved_ptp_side("tw18-tw32", 2) == "b"
+    finally:
+        manager._ptp_links.clear()
+        manager._ptp_reservations.clear()
+
+
+def test_ptp_peer_includes_pending_reservation_identity():
+    manager = PortManager(num_ports=2)
+    manager._generate_port_configs()
+    manager._ptp_links.clear()
+    manager._ptp_reservations.clear()
+    try:
+        manager.reserve_ptp_side(
+            32,
+            18,
+            1,
+            device_type="cambium",
+            device_model="ePMP 3000",
+        )
+
+        assert manager.get_ptp_peer("tw18-tw32", 2) == {
+            "port": 1,
+            "device_type": "cambium",
+            "device_model": "ePMP 3000",
+            "family": "ePMP-3K",
+        }
+    finally:
+        manager._ptp_links.clear()
+        manager._ptp_reservations.clear()
+
+
 @pytest.mark.asyncio
 async def test_ping_disconnect_clears_device_metadata():
     """When ping disconnect logic trips, stale model/checklist data should be cleared."""

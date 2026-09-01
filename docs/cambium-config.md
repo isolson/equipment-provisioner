@@ -287,9 +287,10 @@ Upload each export from the `/files` page. Use these values:
 | Link profile | `tw32-tw18` | `tw32-tw18` |
 | Side profile | `Main` | `SM` |
 
-The service stores link IDs in ascending tower order. For this pair the
-runtime ID is `tw18-tw32`; the resolver also accepts the reverse order shown
-in the field export names.
+The service stores link IDs in ascending tower order. The generated SSID uses
+this same order. Reversing the two tower values does not change the link ID or
+SSID. For this pair the runtime ID is `tw18-tw32`; the resolver also accepts
+the reverse order shown in the field export names.
 
 The upload stores the active profiles under the protected runtime path:
 
@@ -307,8 +308,11 @@ the two tower numbers and leaves these hardware-specific settings from the
 profile unchanged.
 
 The PTP action appears only after the device has completed and verified SM
-provisioning. The operator enters the two tower numbers; the backend assigns
-side A or B, checks the peer family, and injects the generated link identity.
+provisioning. The operator enters the two tower numbers. The backend reserves
+one side before it starts the background task, checks the peer family, matches
+the device firmware to the profile version, and injects the generated link
+identity. A PTP-A upload must use the `Main` profile. A PTP-B upload must use
+the `SM` profile.
 
 ---
 

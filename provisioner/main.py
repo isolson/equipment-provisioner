@@ -583,7 +583,11 @@ class Provisioner:
 
             # Push fingerprint info to port state for immediate UI display
             if fingerprint.model:
-                self.port_manager.update_port_device_info(port_num, model=fingerprint.model)
+                self.port_manager.update_port_device_info(
+                    port_num,
+                    model=fingerprint.model,
+                    firmware_version=fingerprint.firmware_version,
+                )
                 # Broadcast the update so UI shows model immediately
                 port_status = self.port_manager._get_single_port_status(port_num)
                 await notify_port_change(port_num, port_status)
@@ -624,6 +628,7 @@ class Provisioner:
                         mac=info.mac_address,
                         serial=info.serial_number,
                         model=info.model,
+                        firmware_version=info.firmware_version,
                     )
                     port_status = self.port_manager._get_single_port_status(port_num)
                     await notify_port_change(port_num, port_status)
@@ -753,6 +758,7 @@ class Provisioner:
                     mac=result.device_info.mac_address,
                     serial=result.device_info.serial_number,
                     model=result.device_info.model,
+                    firmware_version=result.device_info.firmware_version,
                 )
 
                 # Device override provisioning (gated by feature flag)
