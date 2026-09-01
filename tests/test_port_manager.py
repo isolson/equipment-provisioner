@@ -8,6 +8,31 @@ from provisioner import vendor_ips
 from provisioner.port_manager import DeviceLinkLocalIP, PortManager
 
 
+def test_ptp_side_reapply_preserves_existing_port_side():
+    """A corrective reapply must not swap Main and SM on the same port."""
+    manager = PortManager(num_ports=2)
+    manager._ptp_links = {
+        "tw33-tw35": ({
+            "side_a_port": 1,
+            "side_b_port": 2,
+        }, 0.0)
+    }
+
+    assert manager.get_available_ptp_side(33, 35, port_num=1) == "a"
+    assert manager.get_available_ptp_side(33, 35, port_num=2) == "b"
+    assert manager.get_available_ptp_side(33, 35, port_num=3) == "b"
+
+
+def test_ptp_side_reapply_uses_port_state_after_registry_reset():
+    """Persisted port state remains authoritative if the link registry is empty."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+    state = manager.port_states[1]
+    state.ptp_link_id = "tw33-tw35"
+    state.device_mode = "ptp-a"
+    manager._ptp_links = {}
+
+    assert manager.get_available_ptp_side(33, 35, port_num=1) == "a"
 def test_ptp_link_tracks_model_and_family_for_peer_checks():
     manager = PortManager(num_ports=2)
     manager._generate_port_configs()

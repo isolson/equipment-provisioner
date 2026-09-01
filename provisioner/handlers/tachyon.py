@@ -15,6 +15,7 @@ API Endpoints (discovered via browser inspection):
 """
 
 import asyncio
+from copy import deepcopy
 import json
 import logging
 from pathlib import Path
@@ -46,6 +47,12 @@ class TachyonHandler(BaseHandler):
     API_FIRMWARES = "/cgi.lua/firmwares"
     API_UPDATE = "/cgi.lua/update"
     API_REBOOT = "/cgi.lua/reboot"
+
+    # A config apply can restart the web service before the API is available
+    # again. Poll readback and refresh the session once before failing closed.
+    CONFIG_READBACK_ATTEMPTS = 5
+    CONFIG_READBACK_DELAYS = (2, 4, 6, 8)
+    CONFIG_READBACK_RECONNECT_AFTER = 2
 
     # Default credentials (factory default)
     DEFAULT_CREDENTIALS = {"username": "root", "password": "admin"}
@@ -543,6 +550,11 @@ class TachyonHandler(BaseHandler):
         """
         return {"Content-Type": "application/json"}
 
+    @staticmethod
+    def _config_request_payload(config: Dict[str, Any]) -> Dict[str, Any]:
+        """Wrap a config document in the payload expected by Tachyon."""
+        return {"data": config}
+
     async def _api_request(
         self,
         method: str,
@@ -566,10 +578,14 @@ class TachyonHandler(BaseHandler):
         if self._api_token:
             cookies["token"] = self._api_token
 
+        request_data = data if data else None
+        if method == "POST" and endpoint == self.API_CONFIG and data is not None:
+            request_data = self._config_request_payload(data)
+
         async with self._session.request(
             method,
             url,
-            json=data if data else None,
+            json=request_data,
             params=params,
             cookies=cookies,
             headers=headers
@@ -635,9 +651,12 @@ class TachyonHandler(BaseHandler):
             logger.warning(f"No token for API request to {endpoint}")
 
         if data and method in ("POST", "PUT", "PATCH"):
+            request_data = data
+            if method == "POST" and endpoint == self.API_CONFIG:
+                request_data = self._config_request_payload(data)
             config_lines.append(
                 'data-binary = "{}"'.format(
-                    self._curl_config_value(json.dumps(data))
+                    self._curl_config_value(json.dumps(request_data))
                 )
             )
 
@@ -904,7 +923,7 @@ class TachyonHandler(BaseHandler):
             ok = await self._apply_config_curl(config)
         else:
             try:
-                # Post full config directly (API expects raw config, not wrapped)
+                # Post the full config with the wrapper required by Tachyon.
                 result = await self._api_request(
                     "POST",
                     self.API_CONFIG,
@@ -949,8 +968,7 @@ class TachyonHandler(BaseHandler):
         # is FAIL-CLOSED: if we cannot read the config back, or it does not
         # match, we report failure. We never claim success we could not confirm.
         if self._has_verifiable_config_fields(config):
-            await asyncio.sleep(2)  # Brief pause for config to settle
-            readback = await self._get_config_curl()
+            readback = await self._read_config_after_apply()
             if not readback:
                 logger.error(
                     f"[CONFIG VERIFY] Could not read back config on {self.ip} — failing closed"
@@ -969,6 +987,66 @@ class TachyonHandler(BaseHandler):
 
         return True
 
+    async def _read_config_after_apply(self) -> Dict[str, Any]:
+        """Read config after apply while the device reloads its web service.
+
+        A successful config POST can restart the Tachyon web service. The first
+        readback can fail while that service returns. Retry with bounded delays,
+        then reconnect once to refresh an expired session before failing closed.
+        """
+        reconnect_attempted = False
+        for attempt in range(1, self.CONFIG_READBACK_ATTEMPTS + 1):
+            readback = await self._get_config_curl()
+            if readback:
+                return readback
+
+            if attempt >= self.CONFIG_READBACK_ATTEMPTS:
+                break
+
+            delay = self.CONFIG_READBACK_DELAYS[attempt - 1]
+            logger.info(
+                "[CONFIG VERIFY] Read-back unavailable on %s; retrying in %ss "
+                "(%s/%s)",
+                self.ip,
+                delay,
+                attempt,
+                self.CONFIG_READBACK_ATTEMPTS,
+            )
+            await asyncio.sleep(delay)
+
+            if (
+                attempt == self.CONFIG_READBACK_RECONNECT_AFTER
+                and not reconnect_attempted
+            ):
+                reconnect_attempted = True
+                logger.info(
+                    "[CONFIG VERIFY] Refreshing the Tachyon session on %s before "
+                    "the next read-back",
+                    self.ip,
+                )
+                try:
+                    await self.disconnect()
+                    if await self.connect():
+                        logger.info(
+                            "[CONFIG VERIFY] Tachyon session refreshed on %s",
+                            self.ip,
+                        )
+                    else:
+                        logger.warning(
+                            "[CONFIG VERIFY] Could not refresh the Tachyon session "
+                            "on %s: %s",
+                            self.ip,
+                            self.login_error or "unknown connection error",
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[CONFIG VERIFY] Tachyon session refresh failed on %s: %s",
+                        self.ip,
+                        exc,
+                    )
+
+        return {}
+
     def _normalize_config_for_apply(self, config: Dict[str, Any]) -> None:
         """Fill Tachyon API-required defaults omitted by older config exports."""
         try:
@@ -977,6 +1055,19 @@ class TachyonHandler(BaseHandler):
             radios = config.get("wireless", {}).get("radios", {})
         except AttributeError:
             return
+
+        # Some older bench exports placed the ethernet section below network.
+        # The device API accepts it only as a top-level section.
+        network_section = config.get("network")
+        if (
+            "ethernet" not in config
+            and isinstance(network_section, dict)
+            and isinstance(network_section.get("ethernet"), dict)
+        ):
+            config["ethernet"] = network_section.pop("ethernet")
+            logger.warning(
+                "Moved legacy network.ethernet section to top-level ethernet"
+            )
 
         if isinstance(system, dict):
             for key, default in (
@@ -1105,10 +1196,14 @@ class TachyonHandler(BaseHandler):
         if not isinstance(config, dict):
             return False
         keys = set(config.keys())
-        return (
-            {"ethernet", "network", "version"}.issubset(keys)
-            or {"network", "wireless", "system", "version"}.issubset(keys)
-        )
+        return {
+            "ethernet",
+            "network",
+            "services",
+            "system",
+            "version",
+            "wireless",
+        }.issubset(keys)
 
     def _has_verifiable_config_fields(self, config: Dict[str, Any]) -> bool:
         if not isinstance(config, dict):
@@ -1278,7 +1373,7 @@ class TachyonHandler(BaseHandler):
         """
         try:
             url = f"{self._base_url}{self.API_CONFIG}"
-            payload = json.dumps(config)  # API expects raw config, not wrapped
+            payload = json.dumps(self._config_request_payload(config))
 
             # Log config keys being applied (not values - may contain sensitive data)
             config_keys = list(config.keys()) if isinstance(config, dict) else "non-dict"
@@ -1363,6 +1458,33 @@ class TachyonHandler(BaseHandler):
         """
         return deep_merge(base, overlay)
 
+    def _merge_legacy_config(self, base: Any, overlay: Any) -> Any:
+        """Merge a reduced Tachyon archive while preserving omitted list fields.
+
+        Legacy archives contain partial VAP objects. The shared merge rule
+        replaces lists, which would remove required fields from the live VAP.
+        Merge list items by index only for this legacy archive path.
+        """
+        if isinstance(base, dict) and isinstance(overlay, dict):
+            merged = deepcopy(base)
+            for key, value in overlay.items():
+                if key in merged:
+                    merged[key] = self._merge_legacy_config(merged[key], value)
+                else:
+                    merged[key] = deepcopy(value)
+            return merged
+
+        if isinstance(base, list) and isinstance(overlay, list):
+            merged = deepcopy(base)
+            for index, value in enumerate(overlay):
+                if index < len(merged):
+                    merged[index] = self._merge_legacy_config(merged[index], value)
+                else:
+                    merged.append(deepcopy(value))
+            return merged
+
+        return deepcopy(overlay)
+
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from JSON file or tarball.
 
@@ -1381,7 +1503,14 @@ class TachyonHandler(BaseHandler):
                 loaded_template.top_level_keys,
             )
 
-            if loaded_template.source_type == "tar" or self.is_full_config_export(config):
+            is_full_export = self.is_full_config_export(config)
+            is_legacy_tar = loaded_template.source_type == "tar" and not is_full_export
+            if is_legacy_tar:
+                # Older Tachyon archives are reduced profiles with a legacy
+                # network.ethernet section. Normalize them before merging.
+                self._normalize_config_for_apply(config)
+
+            if is_full_export:
                 logger.info("Applying Tachyon config export as authoritative full config")
             else:
                 # Partial JSON templates remain patch-like and merge into the
@@ -1389,7 +1518,10 @@ class TachyonHandler(BaseHandler):
                 try:
                     current_config = await self._api_request("GET", self.API_CONFIG)
                     if isinstance(current_config, dict):
-                        config = self._deep_merge(current_config, config)
+                        if is_legacy_tar:
+                            config = self._merge_legacy_config(current_config, config)
+                        else:
+                            config = self._deep_merge(current_config, config)
                         logger.info(f"Merged partial template config into current device config")
                 except Exception as e:
                     logger.warning(f"Could not GET current config for merge, applying template as-is: {e}")

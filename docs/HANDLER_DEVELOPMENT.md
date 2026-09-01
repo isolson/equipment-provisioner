@@ -6,6 +6,9 @@ This document outlines the standards and flow for building device handlers in th
 
 Each vendor handler inherits from `BaseHandler` and implements vendor-specific API communication.
 
+See [Vendor Hardware Notes](VENDOR_HARDWARE_NOTES.md) for verified vendor API shapes,
+firmware behavior, and bench recovery notes.
+
 ```
 provisioner/handlers/
 ├── base.py          # Base class with provisioning orchestration + property defaults

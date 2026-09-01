@@ -10,6 +10,9 @@ The procedure has four goals:
 3. Prove the full provisioning path on hardware.
 4. Leave enough evidence for another operator to repeat the result.
 
+Record verified vendor behavior in [Vendor Hardware Notes](VENDOR_HARDWARE_NOTES.md).
+Keep raw captures outside Git and outside web-served directories.
+
 ## 1. Record the intent
 
 Create a short hardware intent record before you edit code or configuration.
