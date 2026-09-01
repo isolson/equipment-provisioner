@@ -96,7 +96,8 @@ must use `scope=shared`, `mode=sm`, and a firmware version. AP and PTP exports
 must use a family and firmware; PTP exports also require link and side
 profiles. `ptp-a` requires the `Main` profile. `ptp-b` requires the `SM`
 profile. The response includes metadata such as firmware version, property
-count, and whether protected fields were found. It does not include secret
+count, and whether protected fields were found. The selected firmware must
+match the firmware version in the native export. It does not include secret
 values or the protected source file.
 
 ### POST /setup/switch/configure

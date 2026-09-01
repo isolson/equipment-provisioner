@@ -178,7 +178,7 @@ class _StubHandlerManager:
         return ProvisioningResult(
             success=True,
             old_firmware="1.15.0.8503",
-            new_firmware="1.15.0.8503",
+            new_firmware="1.16.0.9000",
             config_applied=kwargs.get("config_path"),
             device_info=DeviceInfo(
                 device_type="tachyon",
@@ -256,6 +256,6 @@ async def test_tachyon_preflight_model_selects_family_config_not_tns100(tmp_path
             "mac": None,
             "serial": "TNA303L462500013",
             "model": "TNA-303L-65",
-            "firmware_version": "1.15.0.8503",
+            "firmware_version": "1.16.0.9000",
         },
     )

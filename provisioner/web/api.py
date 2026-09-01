@@ -52,6 +52,12 @@ _SECRET_KEY_RE = re.compile(
 )
 
 
+def _normalized_firmware_version(value: Any) -> str:
+    """Return a firmware version in the form used by asset directories."""
+    normalized = str(value or "").strip().lower()
+    return re.sub(r"^v", "", normalized)
+
+
 # ============================================================================
 # Request/Response Models
 # ============================================================================
@@ -2303,6 +2309,19 @@ async def upload_config_asset(
                     detail="Field export must contain device_props and template_props",
                 )
             upload_metadata = CambiumHandler.field_export_metadata(parsed)
+            exported_firmware = upload_metadata.get("firmware_version")
+            if not exported_firmware:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Field export must include a firmware version",
+                )
+            if _normalized_firmware_version(firmware) != _normalized_firmware_version(
+                exported_firmware
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Selected firmware must match the native export firmware version",
+                )
             role = role.upper()
             parsed = CambiumHandler.normalize_field_export(parsed, role)
             content = json.dumps(parsed, indent=2).encode("utf-8") + b"\n"

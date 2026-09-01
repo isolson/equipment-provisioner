@@ -183,7 +183,7 @@ def test_cambium_field_export_ap_keeps_role_rf_and_ssid(tmp_path):
                 "centerFrequency": "5790",
                 "networkBridgeIPAddr": "192.0.2.11",
             },
-            "template_props": {"version": "5.10.3"},
+            "template_props": {"version": "5.11.1"},
         }
     )
     response = client.post(
@@ -207,6 +207,37 @@ def test_cambium_field_export_ap_keeps_role_rf_and_ssid(tmp_path):
     assert props["wirelessInterfaceSSID"] == "ORG-AP"
     assert props["centerFrequency"] == "5790"
     assert "networkBridgeIPAddr" not in props
+
+
+def test_cambium_field_export_rejects_firmware_metadata_mismatch(tmp_path):
+    client, data_path = make_client(tmp_path)
+    original = json.dumps(
+        {
+            "device_props": {"wirelessInterfaceSSID": "ORG-AP"},
+            "template_props": {"version": "5.10.3"},
+        }
+    )
+    response = client.post(
+        "/api/config-assets/upload",
+        data={
+            "config_type": "template",
+            "device_type": "cambium",
+            "family": "ePMP-3K",
+            "firmware": "5.11.1",
+            "role": "AP",
+            "mode": "ap",
+            "scope": "family",
+            "profile": "East",
+            "asset_kind": "field_export",
+        },
+        files={"file": ("ap-export.json", original, "application/json")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Selected firmware must match the native export firmware version"
+    )
+    assert not list(data_path.glob("config-uploads/cambium/*"))
 
 
 def test_cambium_field_export_ptp_uses_separate_side_path(tmp_path):

@@ -287,6 +287,9 @@ Upload each export from the `/files` page. Use these values:
 | Link profile | `tw32-tw18` | `tw32-tw18` |
 | Side profile | `Main` | `SM` |
 
+The firmware field must match the native export version in `template_props`.
+The service rejects an upload when the versions do not match.
+
 The service stores link IDs in ascending tower order. The generated SSID uses
 this same order. Reversing the two tower values does not change the link ID or
 SSID. For this pair the runtime ID is `tw18-tw32`; the resolver also accepts
