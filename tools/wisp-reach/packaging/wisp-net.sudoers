@@ -1,0 +1,6 @@
+# Installed at /etc/sudoers.d/wisp-net (root:wheel, 0440).
+# Lets WISP-Reach run ONLY the locked-down helper without a password prompt.
+# The helper validates every argument and owns the authoritative IP list, so
+# this grants no ability beyond "add/remove our fixed WISP aliases on a non-Wi-Fi
+# Ethernet interface". __USER__ is substituted by install.sh.
+__USER__ ALL=(root) NOPASSWD: /usr/local/libexec/wisp-net

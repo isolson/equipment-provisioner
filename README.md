@@ -382,6 +382,8 @@ ws.onmessage = (event) => {
 
 See [API.md](docs/API.md) for complete endpoint documentation.
 
+See [wisp-reach-sop.md](docs/wisp-reach-sop.md) for the macOS USB Ethernet factory-device access procedure.
+
 ---
 
 ## Troubleshooting
