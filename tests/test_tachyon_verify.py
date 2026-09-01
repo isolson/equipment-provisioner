@@ -326,16 +326,16 @@ async def test_apply_config_preserves_explicit_mgmt_vlan_enabled(fake_curl, fast
     config["wireless"]["radios"]["wlan0"]["vaps"][0]["network"]["mgmt_vlan_enabled"] = True
     posted = {}
 
-    def route(argv):
-        method = argv[argv.index("-X") + 1]
+    def route(argv, stdin):
+        method = argv[argv.index("-X") + 1] if "-X" in argv else "GET"
         if method == "POST":
-            posted.update(json.loads(argv[argv.index("-d") + 1]))
-            return (0, json.dumps({}))
+            posted.update(curl_config_data(stdin))
+            return (0, json.dumps({"reboot_required": False}))
         if method == "GET":
             return (0, json.dumps(posted))
         raise AssertionError("unexpected method: %s" % method)
 
-    fake_curl.set_handler(route)
+    fake_curl.set_input_handler(route)
 
     assert await h.apply_config(config) is True
     # Device-authored values survive untouched — not flipped to false.
