@@ -196,6 +196,18 @@ def test_dashboard_uses_server_owned_workflow_actions():
     assert "port.device_type === 'tachyon' ? dir.toUpperCase() : hostname" in html
 
 
+def test_dashboard_renders_sm_restore_action_and_confirmation():
+    client = make_client()
+    html = client.get("/").text
+
+    assert "action.id === 'configure_sm'" in html
+    assert "function openSMModal(portNum)" in html
+    assert "function applySMMode(portNum)" in html
+    assert "body: JSON.stringify({ mode: 'sm' })" in html
+    assert "PTP settings and link tracking will be cleared" in html
+    assert "Restore SM Config" in html
+
+
 def test_dashboard_footer_is_contextual_and_touch_friendly():
     client = make_client()
     html = client.get("/").text

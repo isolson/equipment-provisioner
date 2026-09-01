@@ -153,6 +153,37 @@ def test_cambium_ptp_qualification_uses_certified_families():
     assert _action_ids(unqualified) == []
 
 
+def test_configured_4616_offers_only_sm_restore():
+    workflow = workflow_for_port(
+        _state(
+            device_type="cambium",
+            device_model="ePMP 4616",
+            last_result="success",
+            device_mode="ptp-a",
+        ),
+        mode_config_enabled=True,
+    )
+
+    assert workflow["state"] == "ready"
+    assert _action_ids(workflow) == ["configure_sm"]
+
+
+def test_configured_mode_without_verified_baseline_has_no_restore_action():
+    workflow = workflow_for_port(
+        _state(
+            device_type="cambium",
+            device_model="ePMP 4616",
+            last_result="success",
+            device_mode="ptp-a",
+            checklist={"config_upload": True, "config_verify": "unverified"},
+        ),
+        mode_config_enabled=True,
+    )
+
+    assert workflow["state"] == "ready"
+    assert _action_ids(workflow) == []
+
+
 def test_tachyon_ptp_qualification_allows_certified_cross_family_radios():
     for model in ("TNA-301", "TNA-303X", "TNA-303L-65"):
         workflow = workflow_for_port(
@@ -211,7 +242,7 @@ def test_configured_mode_finishes_required_follow_up(monkeypatch):
 
     assert workflow["state"] == "ready"
     assert workflow["required_action"] is None
-    assert _action_ids(workflow) == []
+    assert _action_ids(workflow) == ["configure_sm"]
 
 
 def test_failures_offer_only_the_contextual_retry():

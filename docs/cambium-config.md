@@ -221,6 +221,10 @@ static address fields. This prevents one device export from configuring every
 SM with one site's values. AP, PTP-A, and PTP-B exports stay separate and keep
 their role-specific RF and operational settings.
 
+The ePMP-4K SM baseline also sets the radio role fields required to leave PTP:
+`wirelessInterfaceMode` is `1`, and both PTP mode fields are `0`. It does not
+copy PTP SSIDs, frequencies, or link identity fields.
+
 Full exports always use native `config_import` with `skipIllegal=1`. They never
 use `set_param`. Known 5 GHz models receive a model-specific scan mask of `19`
 before import. Known AX and 6 GHz models keep `51`. An unknown model keeps the
@@ -242,6 +246,7 @@ per-device value overrides `23` dBi. Integrated radios receive no gain write.
 | Change a few fields (SSID, hostname) | `set_param` | Form-encoded, immediate, no polling needed |
 | Read current config | `get_param` | act=config_regular for full config, act=status for polling |
 | Post-provisioning AP naming | `set_param` | Only 3 keys: SSID, snmpName, deviceName |
+| Restore SM after AP or PTP | `config_import` | Apply the standard SM profile, verify it, then clear local PTP state |
 
 ---
 
@@ -261,9 +266,9 @@ per-device value overrides `23` dBi. Integrated radios receive no gain write.
 3. URL-encoded and POSTed to `/admin/set_param`
 4. Response checked for `"success": 1`
 
-**The shared SM config is used for initial provisioning. AP and PTP exports are
-separate role profiles. The later mode workflow applies the selected AP or PTP
-profile, then injects the generated site identity.**
+**The shared SM config is used for initial provisioning and for SM restore. AP
+and PTP exports are separate role profiles. The later mode workflow applies the
+selected AP or PTP profile, then injects the generated site identity.**
 
 ## Certified ePMP PTP family link profiles
 

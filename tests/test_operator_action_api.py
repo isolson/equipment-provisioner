@@ -47,6 +47,7 @@ def _status(device_type, mac):
         "provisioning": False,
         "last_result": "success",
         "checklist": {"config_upload": True, "config_verify": True},
+        "device_mode": None,
     }
 
 
@@ -139,6 +140,107 @@ def test_mode_endpoint_uses_handler_capability(monkeypatch):
 
     assert response.status_code == 200
     assert calls == [(4, "tachyon", "ap")]
+
+
+def test_mode_endpoint_accepts_sm_restore_for_configured_cambium(monkeypatch):
+    calls = []
+
+    async def fake_run(*args):
+        calls.append((args[1], args[4].mode, args[5]))
+
+    monkeypatch.setattr("provisioner.web.api._run_apply_mode", fake_run)
+    monkeypatch.setattr(
+        "provisioner.web.api._resolve_sm_template",
+        lambda *args: ("/tmp/sm.json", None),
+    )
+    client = _client(
+        monkeypatch,
+        dict(
+            _status("cambium", "00:00:00:00:00:01"),
+            device_model="ePMP 4616",
+            device_mode="ptp-a",
+        ),
+        mode_config=True,
+    )
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "sm"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [(4, "sm", "/tmp/sm.json")]
+
+
+def test_mode_endpoint_rejects_sm_restore_for_unsupported_handler(monkeypatch):
+    client = _client(
+        monkeypatch,
+        dict(
+            _status("tarana", "00:00:00:00:00:01"),
+            device_mode="ptp-a",
+        ),
+        mode_config=True,
+    )
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "sm"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "SM configuration restore not supported for tarana"
+    )
+
+
+def test_mode_endpoint_rejects_sm_restore_without_template(monkeypatch):
+    monkeypatch.setattr(
+        "provisioner.web.api._resolve_sm_template",
+        lambda *args: (None, None),
+    )
+    client = _client(
+        monkeypatch,
+        dict(
+            _status("cambium", "00:00:00:00:00:01"),
+            device_model="ePMP 4616",
+            device_mode="ptp-a",
+        ),
+        mode_config=True,
+    )
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "sm"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "A standard SM configuration template is required for restore"
+    )
+
+
+def test_mode_endpoint_rejects_sm_restore_without_verified_baseline(monkeypatch):
+    monkeypatch.setattr(
+        "provisioner.web.api._resolve_sm_template",
+        lambda *args: ("/tmp/sm.json", None),
+    )
+    status = dict(
+        _status("cambium", "00:00:00:00:00:01"),
+        device_model="ePMP 4616",
+        device_mode="ptp-a",
+        checklist={"config_upload": True, "config_verify": "unverified"},
+    )
+    client = _client(monkeypatch, status, mode_config=True)
+
+    response = client.post(
+        "/api/ports/4/apply-mode",
+        json={"mode": "sm"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Verified SM configuration is required before SM restore"
+    )
 
 
 def test_mode_endpoint_uses_model_qualified_cambium_ptp(monkeypatch):

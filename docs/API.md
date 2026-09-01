@@ -263,7 +263,22 @@ checklist and WebSocket events used by other provisioning operations.
 ### POST /ports/{port_number}/apply-mode
 
 Applies a qualified AP or PTP mode after standard SM provisioning is complete
-and verified.
+and verified. It also restores the standard SM config for a device that is
+already in AP or PTP mode.
+
+To restore SM, send only the mode value:
+
+```json
+{
+  "mode": "sm"
+}
+```
+
+The server resolves the same standard SM template used by provisioning. It
+applies and verifies that template before it clears the selected device mode
+and PTP link state. If the link has a peer, the peer side remains registered.
+If the apply or verification fails, the existing PTP state stays in place. The
+request does not update firmware or antenna gain.
 
 For PTP, send `my_tower` and `remote_tower` (both 1-99). The server assigns
 side A or B, reserves that side before the background task starts, and checks
