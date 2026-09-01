@@ -1,0 +1,96 @@
+#!/bin/bash
+#
+# wisp-net — privileged helper for WISP-Reach.
+#
+# Installed at /usr/local/libexec/wisp-net, owned root:wheel, mode 0755
+# (NOT writable by the invoking user — that would be a privilege-escalation hole).
+# Invoked via a scoped NOPASSWD sudoers rule, so the ONLY trusted input is argv,
+# and we treat it as hostile:
+#   - the caller may name an interface, never an IP (the IP list is baked in here);
+#   - the interface must be a real Ethernet hardware port and must NOT be Wi-Fi;
+#   - everything is validated before any ifconfig runs.
+#
+# Usage:
+#   wisp-net apply <ifname> [preset]     # add alias(es)
+#   wisp-net clear <ifname> [preset]     # remove alias(es)
+# preset omitted / "all" => the full "reach everything" set.
+
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+IFCONFIG=/sbin/ifconfig
+NETWORKSETUP=/usr/sbin/networksetup
+NETMASK=255.255.255.0
+
+die() { echo "wisp-net: $*" >&2; exit 1; }
+
+# --- authoritative alias list (mirrors Sources/WispReach/Presets.swift) --------
+# ips_for_preset <preset>  -> echoes space-separated IPs
+ips_for_preset() {
+  case "$1" in
+    cambium-tachyon) echo "169.254.1.2" ;;
+    tarana)          echo "169.254.100.2" ;;
+    ubiquiti)        echo "192.168.1.2" ;;
+    mikrotik)        echo "192.168.88.10" ;;
+    all)             echo "169.254.1.2 169.254.100.2 192.168.1.2 192.168.88.10" ;;
+    *) die "unknown preset: $1" ;;
+  esac
+}
+
+# --- argument validation ------------------------------------------------------
+[ $# -ge 2 ] || die "usage: wisp-net apply|clear <ifname> [preset]"
+
+ACTION="$1"
+IFNAME="$2"
+PRESET="${3:-all}"
+
+case "$ACTION" in apply|clear) ;; *) die "unknown action: $ACTION" ;; esac
+
+# ifname must be en<digits>, nothing else.
+case "$IFNAME" in
+  en[0-9]|en[0-9][0-9]) ;;
+  *) die "refused interface name: $IFNAME" ;;
+esac
+
+# preset must be one of the known keys (ips_for_preset also guards, but validate
+# the character set first).
+case "$PRESET" in
+  cambium-tachyon|tarana|ubiquiti|mikrotik|all) ;;
+  *) die "refused preset: $PRESET" ;;
+esac
+
+# --- interface safety cross-check --------------------------------------------
+# Parse `networksetup -listallhardwareports` into (Hardware Port, Device) pairs.
+# 1) the requested device must exist as a hardware port (a real managed NIC);
+# 2) it must NOT be the Wi-Fi device (never clobber the user's Wi-Fi).
+PORTS="$("$NETWORKSETUP" -listallhardwareports 2>/dev/null || true)"
+
+wifi_device="$(echo "$PORTS" | awk '
+  /^Hardware Port: /{ port=$0 }
+  /^Device: /{ dev=$2; if (port ~ /Wi-Fi|AirPort/) print dev }')"
+
+known_device="$(echo "$PORTS" | awk -v want="$IFNAME" '
+  /^Device: /{ if ($2 == want) { print "yes"; exit } }')"
+
+[ "$known_device" = "yes" ] || die "$IFNAME is not a known hardware port"
+[ "$IFNAME" != "$wifi_device" ] || die "refusing to touch Wi-Fi interface $IFNAME"
+
+# --- apply / clear ------------------------------------------------------------
+IPS="$(ips_for_preset "$PRESET")"
+
+for ip in $IPS; do
+  if [ "$ACTION" = "apply" ]; then
+    if "$IFCONFIG" "$IFNAME" | grep -q "inet $ip "; then
+      echo "wisp-net: $ip already on $IFNAME"
+    else
+      "$IFCONFIG" "$IFNAME" alias "$ip" netmask "$NETMASK"
+      echo "wisp-net: added $ip on $IFNAME"
+    fi
+  else
+    # clear: remove if present, ignore if absent.
+    if "$IFCONFIG" "$IFNAME" | grep -q "inet $ip "; then
+      "$IFCONFIG" "$IFNAME" -alias "$ip"
+      echo "wisp-net: removed $ip from $IFNAME"
+    fi
+  fi
+done
