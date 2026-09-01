@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Equipment auto provisioner">
+  <rect width="128" height="128" rx="28" fill="#0c4a6e"/>
+  <rect x="23" y="51" width="82" height="35" rx="8" fill="#e0f2fe"/>
+  <path d="M36 64h56M36 75h56" stroke="#0369a1" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="46" cy="64" r="5" fill="#fbbf24"/><circle cx="82" cy="75" r="5" fill="#22c55e"/>
+  <path d="M64 51V31M64 86v12" stroke="#bae6fd" stroke-width="6" stroke-linecap="round"/>
+  <path d="m93 29 7 7-7 7M35 29l-7 7 7 7" fill="none" stroke="#fbbf24" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
