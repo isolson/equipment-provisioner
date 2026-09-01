@@ -73,6 +73,12 @@ journalctl -u provisioner-web -f | grep -i "login\|auth\|credential"
 - Cambium `config_import` is asynchronous — the provisioner polls until `applyFinished` is true
 - Check logs: `journalctl -u provisioner-web -f | grep -i "config\|apply"`
 
+**Tachyon config returns HTTP 400:**
+- Tachyon requires the full config document under a `data` JSON key.
+- A full export uses top-level `ethernet`, `network`, `services`, `system`, `version`, and `wireless` keys.
+- An old export with `network.ethernet` is migrated by the handler before apply.
+- Check [Vendor Hardware Notes](VENDOR_HARDWARE_NOTES.md) before you capture or replace a template.
+
 **Device rebooted unexpectedly:**
 - Some devices (Tachyon) auto-reboot after firmware flash without explicit reboot command
 - The provisioner handles this, but if the link drops for too long, it may time out

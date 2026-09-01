@@ -292,6 +292,7 @@ RESTART
 Description=Kiosk Browser Watchdog
 After=provisioner-web.service
 Requires=provisioner-web.service
+PartOf=provisioner-web.service
 
 [Service]
 Type=simple

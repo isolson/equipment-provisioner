@@ -17,6 +17,7 @@ against the original handler and GREEN after the fix.
 Python 3.9 — no 3.10+ syntax.
 """
 
+import json
 from typing import Callable, List, Tuple
 
 import pytest
@@ -51,6 +52,33 @@ class DummyProc:
     async def communicate(self, stdin=None):
         self.stdin = stdin
         return (self._stdout, self._stderr)
+
+
+class DummyResponse:
+    status = 200
+    request_info = None
+    history = ()
+
+    def __init__(self, body: str):
+        self.body = body
+
+    async def text(self):
+        return self.body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class DummySession:
+    def __init__(self):
+        self.request_kwargs = None
+
+    def request(self, *args, **kwargs):
+        self.request_kwargs = kwargs
+        return DummyResponse("{}")
 
 
 def method_of(cmd: List[str]) -> str:
@@ -216,6 +244,45 @@ async def test_config_apply_clean_json_is_true(monkeypatch):
     assert method_of(captured[-1]) == "POST"
 
 
+@pytest.mark.asyncio
+async def test_config_apply_wraps_document_in_data(monkeypatch):
+    """Tachyon accepts config POSTs only when the document is under ``data``."""
+    processes = []
+
+    async def fake_exec(*cmd, **kwargs):
+        process = DummyProc(0, mk_stdout("{}", 200), "")
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    handler = make_handler()
+
+    assert await handler._apply_config_curl(CONFIG_WITH_HOSTNAME) is True
+
+    config_input = processes[0].stdin.decode("utf-8")
+    data_line = next(
+        line for line in config_input.splitlines() if line.startswith("data-binary = ")
+    )
+    request_body = json.loads(json.loads(data_line.split(" = ", 1)[1]))
+    assert request_body == {"data": CONFIG_WITH_HOSTNAME}
+
+
+@pytest.mark.asyncio
+async def test_api_request_aiohttp_wraps_config_document():
+    """The non-curl transport uses the same Tachyon config request shape."""
+    handler = make_handler()
+    handler._use_curl = False
+    handler._session = DummySession()
+
+    await handler._api_request(
+        "POST",
+        handler.API_CONFIG,
+        data=CONFIG_WITH_HOSTNAME,
+    )
+
+    assert handler._session.request_kwargs["json"] == {"data": CONFIG_WITH_HOSTNAME}
+
+
 # ---------------------------------------------------------------------------------------
 # Low-level API request — _api_request_curl() must surface HTTP errors
 # ---------------------------------------------------------------------------------------
@@ -262,6 +329,12 @@ async def test_api_request_curl_keeps_token_and_body_out_of_argv(monkeypatch):
     config_input = processes[0].stdin.decode("utf-8")
     assert "Cookie: token=tok-123" in config_input
     assert "unit-password" in config_input
+    data_line = next(
+        line for line in config_input.splitlines() if line.startswith("data-binary = ")
+    )
+    assert json.loads(json.loads(data_line.split(" = ", 1)[1])) == {
+        "data": {"password": "unit-password"}
+    }
 
 
 # ---------------------------------------------------------------------------------------

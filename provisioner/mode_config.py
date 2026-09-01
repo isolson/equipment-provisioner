@@ -86,6 +86,8 @@ class ModeConfigManager:
         model: Optional[str] = None,
         profile: Optional[str] = None,
         link_profile: Optional[str] = None,
+        firmware: Optional[str] = None,
+        require_firmware_match: bool = False,
     ) -> Optional[Path]:
         """Get path to a mode config template.
 
@@ -96,7 +98,8 @@ class ModeConfigManager:
         AP ``profile`` is a direction.  PTP ``link_profile`` is an exact link
         directory when present, otherwise the approved ``twXX-twXX`` generic
         directory is used.  ``ptp-a`` is always the Main archive and
-        ``ptp-b`` is always the SM archive.
+        ``ptp-b`` is always the SM archive.  Versioned family assets match the
+        requested device firmware when ``firmware`` is supplied.
 
         Legacy flat templates remain available for models without an approved
         family tree.
@@ -118,16 +121,50 @@ class ModeConfigManager:
                     key=lambda entry: entry.name.lower(),
                     reverse=True,
                 )
+                role_names = {"ap", "sm", "ptp"}
+                version_containers = [
+                    entry for entry in version_dirs
+                    if entry.name.lower() not in role_names
+                ]
+                matched_version_only = False
+                if version_containers and firmware:
+                    firmware_key = str(firmware).strip().lower()
+                    firmware_key = re.sub(r"^v", "", firmware_key)
+                    version_dirs = [
+                        entry for entry in version_containers
+                        if re.sub(r"^v", "", entry.name.lower()) == firmware_key
+                    ]
+                    if not version_dirs:
+                        logger.warning(
+                            "No config asset version %s for %s/%s",
+                            firmware,
+                            device_type,
+                            model,
+                        )
+                        return None
+                    matched_version_only = True
+                elif version_containers and require_firmware_match:
+                    logger.warning(
+                        "Device firmware is required for versioned %s/%s assets",
+                        device_type,
+                        model,
+                    )
+                    return None
                 # Cambium includes a firmware directory; Tachyon's approved
                 # exports are version-independent and place AP/SM directly
                 # below the family directory.
-                containers = [family_dir] + version_dirs
+                containers = version_dirs if matched_version_only else [family_dir] + version_dirs
                 family_profile = profile or "default"
                 if mode in MODE_TO_PTP_SIDE:
                     side = MODE_TO_PTP_SIDE[mode]
                     link_names = []
                     if link_profile:
                         link_names.append(link_profile)
+                        reverse_link_profile = self._reverse_ptp_link_profile(
+                            link_profile
+                        )
+                        if reverse_link_profile:
+                            link_names.append(reverse_link_profile)
                     link_names.append("twXX-twXX")
                 elif mode == "ap":
                     if family_profile.lower() == "default":
@@ -232,6 +269,8 @@ class ModeConfigManager:
         model: Optional[str] = None,
         profile: Optional[str] = None,
         link_profile: Optional[str] = None,
+        firmware: Optional[str] = None,
+        require_firmware_match: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Load a mode config template as a dictionary."""
         template_path = self.get_template_path(
@@ -240,6 +279,8 @@ class ModeConfigManager:
             model,
             profile=profile,
             link_profile=link_profile,
+            firmware=firmware,
+            require_firmware_match=require_firmware_match,
         )
         if not template_path:
             return None
@@ -367,8 +408,9 @@ class ModeConfigManager:
         my_padded = f"{my_tower:02d}"
         remote_padded = f"{remote_tower:02d}"
 
-        # SSID is the same for both sides
-        ptp_ssid = f"tw{my_padded}-tw{remote_padded}"
+        # SSID is the same for both sides and follows the canonical link ID.
+        link_low, link_high = sorted((my_tower, remote_tower))
+        ptp_ssid = f"tw{link_low:02d}-tw{link_high:02d}"
 
         # Hostname: side letter goes on *this* device's tower number
         if side == "a":
@@ -442,6 +484,28 @@ class ModeConfigManager:
 
         return rendered
 
+    def generate_ptp_settings(
+        self,
+        template: Dict[str, Any],
+        variables: Dict[str, str],
+        device_type: str,
+        side: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Render identity and require the handler's PTP settings contract.
+
+        PTP radio-role settings are vendor-specific.  The mode manager
+        renders the shared link identity, then delegates profile validation or
+        generation to the handler.  This keeps RF values out of shared code.
+        """
+        rendered = self.render_template(template, variables, device_type)
+        from .handler_manager import HandlerManager
+
+        handler_class = HandlerManager.handler_class_for(device_type)
+        if handler_class is None:
+            return rendered
+        return handler_class.generate_ptp_settings(rendered, side, model)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -503,6 +567,14 @@ class ModeConfigManager:
         elif isinstance(obj, str):
             return self._render_string(obj, variables)
         return obj
+
+    @staticmethod
+    def _reverse_ptp_link_profile(link_profile: str) -> Optional[str]:
+        """Return the opposite tower order used by some field exports."""
+        match = re.fullmatch(r"tw(\d{2})-tw(\d{2})", link_profile.lower())
+        if not match or match.group(1) == match.group(2):
+            return None
+        return "tw{}-tw{}".format(match.group(2), match.group(1))
 
     def _render_string(self, text: str, variables: Dict[str, str]) -> str:
         def replace_var(match):

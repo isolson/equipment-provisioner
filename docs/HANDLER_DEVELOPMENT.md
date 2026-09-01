@@ -6,6 +6,9 @@ This document outlines the standards and flow for building device handlers in th
 
 Each vendor handler inherits from `BaseHandler` and implements vendor-specific API communication.
 
+See [Vendor Hardware Notes](VENDOR_HARDWARE_NOTES.md) for verified vendor API shapes,
+firmware behavior, and bench recovery notes.
+
 ```
 provisioner/handlers/
 ├── base.py          # Base class with provisioning orchestration + property defaults
@@ -45,10 +48,25 @@ Never branch on vendor names in shared modules; add/override a trait instead.
 | `config_alias_prefix_matching` | `False` | `True`: `CONFIG_MODEL_ALIASES` keys also match as model-name prefixes (`tna-305` covers `tna-305-xyz`). Tachyon: `True` |
 | `requires_model_preflight` | `False` | `True`: when fingerprinting identifies the vendor but not the model, run a read-only login/get-info preflight (`HandlerManager.login_and_get_info`) before firmware/config asset lookup. Enable for vendors with model-specific assets. Tachyon: `True` |
 | `supports_config_overlays` | `False` | `True`: the config resolver (`config_resolver.py`) may compose site-role overlays over this vendor's base template. `False` refuses overlays with an operator-visible note (base-only resolution). Enable per vendor **only after bench verification** — no vendor sets it yet. See "Site-Role Config Overlays" below |
-| `qualified_post_provision_modes` | `()` | Declares deployment modes that may be offered after infrastructure provisioning. Add a mode only after its vendor-specific template, injected identity/radio-role fields, handler apply path, and hardware outcome are verified. Template presence alone is insufficient. The API and kiosk derive AP/PTP actions from this tuple; shared code must not maintain a vendor allowlist. No vendor is qualified yet. |
+| `qualified_post_provision_modes` | `()` | Declares deployment modes that may be offered after infrastructure provisioning. Add a mode only after its vendor-specific template, injected identity/radio-role fields, handler apply path, and hardware outcome are verified. Template presence alone is insufficient. The API and kiosk derive AP/PTP actions from this tuple; shared code must not maintain a vendor allowlist. Cambium ePMP 3K/4K families and Tachyon TNA radio families are certified for PTP family pairings. |
+| `requires_ptp_settings` | `False` | `True`: PTP mode must load a vendor settings profile and pass the handler's `generate_ptp_settings()` contract. Naming-only fallback is rejected. Cambium and Tachyon set this to `True`. |
 | `supports_manual_netinstall` | `False` | Exposes the guarded manual recovery action for this handler. MikroTik: `True`. The Netinstall API still requires a detected MikroTik OUI before it starts the destructive operation. |
 | `manual_netinstall_label` | `"Recovery (Netinstall)"` | Operator-facing label for the manual recovery action. Override it when the recovery mechanism needs vendor-specific context. |
 | `is_full_config_export(config)` | `False` (staticmethod) | Returns `True` when a loaded JSON config is a full device export (applied replace-not-merge), so the resolver refuses to compose partial overlays over it. Method-shaped because the answer depends on the config's content, not the vendor alone — still callable before instantiation. Tachyon: key-set heuristic |
+
+### PTP family certification
+
+The vendor registry stores the certified PTP family matrix. Both endpoint
+families must list the other family, and both must support the `PTP` role.
+The API checks this matrix when the second device joins a link. Cambium ePMP
+3K and 4K families are cross-compatible. Tachyon TNA radio families are
+cross-compatible. Switch families are not PTP families.
+
+The handler contract is also required for these vendors. `requires_ptp_settings`
+prevents the generic naming-only fallback. `generate_ptp_settings()` must
+validate or create the vendor radio-role settings from the protected host
+profile before the handler applies the rendered configuration. Do not add RF
+values to shared mode code.
 
 ### Property Combinations by Vendor
 

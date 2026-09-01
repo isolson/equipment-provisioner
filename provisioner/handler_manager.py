@@ -116,6 +116,7 @@ class HandlerManager:
             return {
                 "post_provision_modes": [],
                 "required_baseline_mode": "",
+                "ptp_settings_required": False,
                 "manual_netinstall": False,
                 "manual_netinstall_label": "",
             }
@@ -124,6 +125,7 @@ class HandlerManager:
             return {
                 "post_provision_modes": [],
                 "required_baseline_mode": "",
+                "ptp_settings_required": False,
                 "manual_netinstall": False,
                 "manual_netinstall_label": "",
             }
@@ -132,6 +134,9 @@ class HandlerManager:
             "post_provision_modes": list(qualified_modes),
             "required_baseline_mode": str(
                 getattr(handler_class, "required_baseline_mode", "") or ""
+            ),
+            "ptp_settings_required": bool(
+                handler_class.requires_ptp_settings_for_model(model)
             ),
             "manual_netinstall": bool(
                 getattr(handler_class, "supports_manual_netinstall", False)

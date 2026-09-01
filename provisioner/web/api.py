@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tarfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -23,6 +24,7 @@ from starlette.background import BackgroundTask
 from ..config_assets import (
     ConfigAsset,
     ConfigAssetCatalog,
+    MODE_TO_PTP_SIDE,
 )
 from ..fingerprint import is_mikrotik_oui
 from ..handler_manager import HandlerManager, provisionable_device_types
@@ -36,6 +38,7 @@ from ..vendor_registry import (
     builtin_ui_credentials,
     config_family_metadata,
     nonprovisionable_device_types,
+    ptp_families_compatible,
     spec_for,
     ui_styles,
 )
@@ -44,9 +47,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["api"])
 _SECRET_KEY_RE = re.compile(
-    r"(?:^|_)(?:password|passphrase|psk|secret|token|private_key)(?:$|_)",
+    r"(?:password|passphrase|psk|secret|token|community|private[_-]?key|encryption[_-]?key)",
     re.IGNORECASE,
 )
+
+
+def _normalized_firmware_version(value: Any) -> str:
+    """Return a firmware version in the form used by asset directories."""
+    normalized = str(value or "").strip().lower()
+    return re.sub(r"^v", "", normalized)
 
 
 # ============================================================================
@@ -118,6 +127,9 @@ class ApplyModeRequest(BaseModel):
     # PTP fields
     my_tower: Optional[int] = None
     remote_tower: Optional[int] = None
+    # Optional post-provision override for connectorized Cambium radios.
+    # Omitted means the handler uses its safe connectorized default.
+    antenna_gain_db: Optional[int] = None
 
 
 class CredentialOverride(BaseModel):
@@ -1259,6 +1271,11 @@ class ConfigAssetInfo(BaseModel):
     mode: Optional[str] = None
     profile: Optional[str] = None
     link_profile: Optional[str] = None
+    scope: Optional[str] = None
+    asset_kind: str = "standard"
+    secret_present: bool = False
+    property_count: int = 0
+    dynamic_fields: List[str] = Field(default_factory=list)
     content_type: str
     protected: bool
     editable: bool
@@ -2003,7 +2020,7 @@ def _contains_secret_key(value: Any) -> bool:
     if isinstance(value, dict):
         for key, child in value.items():
             key_lower = str(key).lower()
-            if _SECRET_KEY_RE.search(key_lower) and isinstance(child, (str, bytes)) and child:
+            if _SECRET_KEY_RE.search(key_lower) and child not in (None, "", [], {}):
                 return True
             if _contains_secret_key(child):
                 return True
@@ -2012,20 +2029,35 @@ def _contains_secret_key(value: Any) -> bool:
     return False
 
 
-def _validate_uploaded_asset(filename: str, content: bytes, structured: bool) -> None:
-    """Validate JSON/TAR shape and reject secrets in tracked family assets."""
+def _validate_uploaded_asset(
+    filename: str,
+    content: bytes,
+    structured: bool,
+    allow_field_export: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Validate JSON/TAR shape and return JSON when one is uploaded.
+
+    Standard assets reject credential-like fields.  Native field exports are
+    the explicit exception: they keep their secrets in protected runtime
+    storage and are never returned by the content API.
+    """
     lower_name = filename.lower()
     if lower_name.endswith(".json"):
         try:
             parsed = json.loads(content.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=400, detail="Invalid JSON: %s" % exc)
-        if structured and _contains_secret_key(parsed):
+        if not allow_field_export and _contains_secret_key(parsed):
             raise HTTPException(
                 status_code=400,
-                detail="Family assets cannot contain credential or secret fields",
+                detail="Only field deployment exports may contain credential or secret fields",
             )
-        return
+        return parsed if isinstance(parsed, dict) else None
+    if allow_field_export:
+        raise HTTPException(
+            status_code=400,
+            detail="Field deployment exports must be native Cambium JSON",
+        )
     if lower_name.endswith((".tar", ".tar.gz", ".tgz")):
         try:
             with tarfile.open(fileobj=io.BytesIO(content), mode="r:*") as archive:
@@ -2052,6 +2084,35 @@ def _validate_uploaded_asset(filename: str, content: bytes, structured: bool) ->
             raise
         except (tarfile.TarError, ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=400, detail="Invalid TAR asset: %s" % exc)
+    return None
+
+
+def _protected_config_upload_path(data_root: Path, source_id: str, filename: str) -> Path:
+    """Return the private path for one original field export."""
+    return data_root / "config-uploads" / "cambium" / source_id / filename
+
+
+def _store_protected_config_upload(
+    data_root: Path,
+    source_id: str,
+    filename: str,
+    content: bytes,
+) -> Path:
+    """Store exact upload bytes outside the catalog with private permissions."""
+    destination = _protected_config_upload_path(data_root, source_id, filename)
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    protected_root = data_root / "config-uploads"
+    protected_vendor_root = protected_root / "cambium"
+    for directory in (protected_root, protected_vendor_root, destination.parent):
+        try:
+            os.chmod(str(directory), 0o700)
+        except OSError:
+            pass
+    temporary = destination.with_name(destination.name + ".part")
+    temporary.write_bytes(content)
+    os.chmod(str(temporary), 0o600)
+    os.replace(str(temporary), str(destination))
+    return destination
 
 
 @router.get("/config-assets", response_model=List[ConfigAssetInfo])
@@ -2062,6 +2123,7 @@ async def list_config_assets(
     firmware: Optional[str] = None,
     role: Optional[str] = None,
     mode: Optional[str] = None,
+    scope: Optional[str] = None,
     config_type: Optional[str] = None,
 ):
     """List the recursive family/mode configuration catalog."""
@@ -2074,6 +2136,7 @@ async def list_config_assets(
             firmware=firmware,
             role=role,
             mode=mode,
+            scope=scope,
             config_type=config_type,
         )
     except ValueError as exc:
@@ -2092,6 +2155,14 @@ async def config_asset_metadata():
             "ptp-a": "PTP Main",
             "ptp-b": "PTP SM",
         },
+        "scopes": {
+            "family": "Family profile",
+            "shared": "Shared baseline",
+        },
+        "asset_kinds": {
+            "standard": "Standard template",
+            "field_export": "Field deployment export",
+        },
     }
 
 
@@ -2105,7 +2176,7 @@ async def get_config_asset_content(request: Request, path: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Config asset not found")
     if asset.protected:
-        raise HTTPException(status_code=403, detail="Protected PTP asset content is host-only")
+        raise HTTPException(status_code=403, detail="Protected runtime asset content is host-only")
     if not asset.editable:
         raise HTTPException(status_code=415, detail="This asset is not editable text")
     try:
@@ -2133,24 +2204,133 @@ async def upload_config_asset(
     mode: Optional[str] = Form(None),
     profile: Optional[str] = Form(None),
     link_profile: Optional[str] = Form(None),
+    scope: Optional[str] = Form(None),
+    asset_kind: str = Form("standard"),
 ):
-    """Upload a safe structured asset; PTP is installed host-side only."""
+    """Upload a standard asset or an explicit Cambium field export."""
     device_type = _validate_device_type(device_type)
     if config_type not in ("template", "override"):
         raise HTTPException(status_code=400, detail="Invalid config type")
-    _validate_family_directory(device_type, family)
-    _validate_family_role(device_type, family, role, mode, profile)
-    if mode == "ptp-a" or mode == "ptp-b" or (role and role.lower() == "ptp"):
-        raise HTTPException(status_code=403, detail="PTP assets use the host-only installation workflow")
-    if mode == "ap" and role and role.lower() != "ap":
-        raise HTTPException(status_code=400, detail="AP mode requires AP role")
-    if mode == "sm" and role and role.lower() != "sm":
-        raise HTTPException(status_code=400, detail="SM mode requires SM role")
+    if asset_kind not in ("standard", "field_export"):
+        raise HTTPException(status_code=400, detail="Invalid asset kind")
+
+    is_field_export = asset_kind == "field_export"
+    if is_field_export:
+        if device_type != "cambium":
+            raise HTTPException(status_code=400, detail="Field exports are supported for Cambium only")
+        if config_type != "template":
+            raise HTTPException(status_code=400, detail="Field exports must be templates")
+        if not role or role.upper() not in {"AP", "SM", "PTP"}:
+            raise HTTPException(status_code=400, detail="Field exports require an explicit AP, SM, or PTP role")
+        if mode and mode not in ("ap", "sm", "ptp-a", "ptp-b"):
+            raise HTTPException(status_code=400, detail="Invalid field export mode")
+        if role.upper() == "SM":
+            if mode and mode != "sm":
+                raise HTTPException(status_code=400, detail="SM field exports require SM mode")
+            if scope != "shared" or family:
+                raise HTTPException(status_code=400, detail="SM field exports must use the shared scope")
+            if not firmware:
+                raise HTTPException(status_code=400, detail="Shared SM exports require firmware")
+        else:
+            if scope not in (None, "family"):
+                raise HTTPException(status_code=400, detail="Invalid field export scope")
+            if not family or not firmware:
+                raise HTTPException(status_code=400, detail="AP and PTP exports require family and firmware")
+            _validate_family_directory(device_type, family)
+            spec = spec_for(device_type)
+            family_spec = next(
+                (entry for entry in (spec.config_families if spec else ()) if entry.directory == family),
+                None,
+            )
+            if family_spec is None or role.upper() not in family_spec.roles:
+                raise HTTPException(status_code=400, detail="Role is not supported by this config family")
+            if role.upper() == "AP" and mode and mode != "ap":
+                raise HTTPException(status_code=400, detail="AP field exports require AP mode")
+            if role.upper() == "PTP":
+                if mode and mode not in ("ptp-a", "ptp-b"):
+                    raise HTTPException(status_code=400, detail="PTP field exports require PTP mode")
+                if not link_profile or not profile:
+                    raise HTTPException(status_code=400, detail="PTP exports require link and side profiles")
+                expected_profile = MODE_TO_PTP_SIDE.get(mode) if mode else None
+                if expected_profile is None and profile.lower() not in {
+                    value.lower() for value in MODE_TO_PTP_SIDE.values()
+                }:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="PTP exports require a Main or SM side profile",
+                    )
+                if expected_profile and profile.lower() != expected_profile.lower():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{mode} exports require the {expected_profile} side profile",
+                    )
+            elif profile and profile.lower() not in {"default", "north", "east", "south", "west"}:
+                raise HTTPException(status_code=400, detail="Unknown AP profile")
+        if scope is None:
+            scope = "family"
+    else:
+        if scope == "shared":
+            if family or not role or not firmware:
+                raise HTTPException(status_code=400, detail="Shared assets require firmware and role")
+            if role.lower() not in {"ap", "sm"}:
+                raise HTTPException(status_code=400, detail="Shared uploads support AP or SM roles")
+            if mode and mode != role.lower():
+                raise HTTPException(status_code=400, detail="Mode must match the selected role")
+        else:
+            _validate_family_directory(device_type, family)
+            _validate_family_role(device_type, family, role, mode, profile)
+            if mode == "ptp-a" or mode == "ptp-b" or (role and role.lower() == "ptp"):
+                raise HTTPException(status_code=403, detail="PTP assets use the host-only installation workflow")
+            if mode == "ap" and role and role.lower() != "ap":
+                raise HTTPException(status_code=400, detail="AP mode requires AP role")
+            if mode == "sm" and role and role.lower() != "sm":
+                raise HTTPException(status_code=400, detail="SM mode requires SM role")
 
     safe_filename = _sanitize_filename(file.filename or "")
     if not safe_filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
     try:
+        content = await file.read()
+        original_content = content
+        parsed = _validate_uploaded_asset(
+            safe_filename,
+            content,
+            structured=bool(family or scope == "shared") or is_field_export,
+            allow_field_export=is_field_export,
+        )
+        upload_metadata = None
+        source_id = None
+        if is_field_export:
+            from ..handlers.cambium import CambiumHandler
+
+            if not CambiumHandler.is_full_config_export(parsed):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Field export must contain device_props and template_props",
+                )
+            upload_metadata = CambiumHandler.field_export_metadata(parsed)
+            exported_firmware = upload_metadata.get("firmware_version")
+            if not exported_firmware:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Field export must include a firmware version",
+                )
+            if _normalized_firmware_version(firmware) != _normalized_firmware_version(
+                exported_firmware
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Selected firmware must match the native export firmware version",
+                )
+            role = role.upper()
+            parsed = CambiumHandler.normalize_field_export(parsed, role)
+            content = json.dumps(parsed, indent=2).encode("utf-8") + b"\n"
+            source_id = uuid.uuid4().hex
+            _store_protected_config_upload(
+                _get_data_path(request), source_id, safe_filename, original_content,
+            )
+
+        active_filename = "default.json" if is_field_export else safe_filename
         destination = _config_asset_catalog(request).destination(
             config_type,
             device_type,
@@ -2160,18 +2340,29 @@ async def upload_config_asset(
             mode,
             profile,
             link_profile,
-            safe_filename,
+            active_filename,
+            scope=scope,
         )
-        content = await file.read()
-        _validate_uploaded_asset(safe_filename, content, structured=bool(family))
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_name(destination.name + ".part")
+        if is_field_export:
+            try:
+                os.chmod(str(destination.parent), 0o700)
+            except OSError:
+                pass
+        temporary = destination.with_name(destination.name + ".part." + uuid.uuid4().hex)
         temporary.write_bytes(content)
+        if is_field_export:
+            os.chmod(str(temporary), 0o600)
         os.replace(str(temporary), str(destination))
+        data_root = _get_data_path(request).resolve()
         asset = _config_asset_catalog(request).resolve(
-            str(destination.relative_to(_get_data_path(request)))
+            str(destination.relative_to(data_root))
         )[1]
-        return {"success": True, "asset": _config_asset_response(asset)}
+        response = {"success": True, "asset": _config_asset_response(asset)}
+        if upload_metadata is not None:
+            response["metadata"] = upload_metadata
+            response["metadata"]["source_id"] = source_id
+        return response
     except HTTPException:
         raise
     except ValueError as exc:
@@ -2191,10 +2382,14 @@ async def update_config_asset(request: Request, body: ConfigAssetUpdate):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Config asset not found")
     if asset.protected:
-        raise HTTPException(status_code=403, detail="Protected PTP asset content is host-only")
+        raise HTTPException(status_code=403, detail="Protected runtime asset content is host-only")
     if not asset.editable:
         raise HTTPException(status_code=415, detail="This asset is not editable text")
-    _validate_uploaded_asset(asset.filename, body.content.encode("utf-8"), structured=bool(asset.family))
+    _validate_uploaded_asset(
+        asset.filename,
+        body.content.encode("utf-8"),
+        structured=bool(asset.family or asset.scope == "shared"),
+    )
     try:
         temporary = asset_path.with_name(asset_path.name + ".part")
         temporary.write_text(body.content)
@@ -2334,10 +2529,17 @@ async def get_config_content(
         if config_path.suffix == '.json':
             try:
                 parsed = json.loads(content)
+                if _contains_secret_key(parsed):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Protected runtime asset content is host-only",
+                    )
                 return {"filename": filename, "content": content, "parsed": parsed}
             except json.JSONDecodeError:
                 pass
         return {"filename": filename, "content": content}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to read config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2379,6 +2581,8 @@ async def upload_config(
                 json.loads(content.decode('utf-8'))
             except json.JSONDecodeError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+
+        _validate_uploaded_asset(safe_filename, content, structured=True)
 
         with open(dest_path, "wb") as f:
             f.write(content)
@@ -2443,6 +2647,8 @@ async def update_config_content(
                 json.loads(content)
             except json.JSONDecodeError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+
+        _validate_uploaded_asset(filename, content.encode('utf-8'), structured=True)
 
         config_path.write_text(content)
         return {"success": True, "message": f"Config updated: {filename}"}
@@ -2865,6 +3071,118 @@ async def get_display_status(request: Request):
 # Device Mode Endpoints (AP / PTP)
 # ============================================================================
 
+
+def _validate_ptp_request(
+    request: Request,
+    port_manager: Any,
+    port_number: int,
+    status: Dict[str, Any],
+    req: ApplyModeRequest,
+    capabilities: Dict[str, Any],
+) -> str:
+    """Validate the certified family pair and generated PTP settings."""
+    from ..mode_config import ModeConfigManager, make_ptp_link_id
+
+    link_id = make_ptp_link_id(req.my_tower, req.remote_tower)
+    side = port_manager.get_available_ptp_side(
+        req.my_tower, req.remote_tower, port_num=port_number
+    )
+    peer = port_manager.get_ptp_peer(link_id, port_number)
+    if peer is not None and not ptp_families_compatible(
+        status.get("device_type"),
+        status.get("device_model"),
+        peer.get("device_type"),
+        peer.get("device_model"),
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The two device families are not certified for PTP",
+        )
+
+    if not capabilities.get("ptp_settings_required"):
+        _reserve_ptp_side(
+            port_manager,
+            req.my_tower,
+            req.remote_tower,
+            port_number,
+            side,
+            status.get("device_type"),
+            status.get("device_model"),
+        )
+        return side
+
+    mode = "ptp-a" if side == "a" else "ptp-b"
+    manager = ModeConfigManager(
+        str(_get_data_path(request) / "configs" / "templates")
+    )
+    template = manager.load_template(
+        status.get("device_type"),
+        mode,
+        model=status.get("device_model"),
+        link_profile=link_id,
+        firmware=status.get("firmware_version"),
+        require_firmware_match=True,
+    )
+    if template is None:
+        raise HTTPException(
+            status_code=409,
+            detail="A certified PTP settings profile is required for this family and link",
+        )
+
+    naming = manager.generate_ptp_naming(
+        req.my_tower,
+        req.remote_tower,
+        side,
+        status.get("device_type"),
+    )
+    try:
+        manager.generate_ptp_settings(
+            template,
+            naming,
+            status.get("device_type"),
+            side,
+            status.get("device_model"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    _reserve_ptp_side(
+        port_manager,
+        req.my_tower,
+        req.remote_tower,
+        port_number,
+        side,
+        status.get("device_type"),
+        status.get("device_model"),
+    )
+    return side
+
+
+def _reserve_ptp_side(
+    port_manager: Any,
+    my_tower: int,
+    remote_tower: int,
+    port_number: int,
+    side: str,
+    device_type: Optional[str] = None,
+    device_model: Optional[str] = None,
+) -> None:
+    """Reserve a side before the asynchronous mode task starts."""
+    reserve = getattr(port_manager, "reserve_ptp_side", None)
+    if not callable(reserve):
+        return
+    try:
+        reserve(
+            my_tower,
+            remote_tower,
+            port_number,
+            requested_side=side,
+            device_type=device_type,
+            device_model=device_model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
 @router.post("/ports/{port_number}/apply-mode")
 async def apply_device_mode(
     port_number: int,
@@ -2952,6 +3270,14 @@ async def apply_device_mode(
                 status_code=400,
                 detail="PTP mode requires 'my_tower' and 'remote_tower'",
             )
+        _validate_ptp_request(
+            request,
+            port_manager,
+            port_number,
+            status,
+            req,
+            capabilities,
+        )
     # Run config application in background
     background_tasks.add_task(
         _run_apply_mode,
@@ -2969,8 +3295,8 @@ async def apply_device_mode(
 async def get_ptp_links(request: Request):
     """Get all active PTP links.
 
-    Returns links with side info so the UI can show PTP-B shortcuts
-    on ports where the paired device's vendor matches.
+    Returns links with side and family info so the UI can show the paired
+    endpoint and the API can enforce the certified family matrix.
     """
     provisioner = request.app.state.provisioner
     if not provisioner or not provisioner.port_manager:
@@ -2995,8 +3321,17 @@ async def _run_apply_mode(
     port_manager = provisioner.port_manager
     mcm = get_mode_config_manager()
     device_model = (port_manager.get_port_status().get(port_number) or {}).get("device_model")
+    device_firmware = (port_manager.get_port_status().get(port_number) or {}).get(
+        "firmware_version"
+    )
+    ptp_link_id = None
+    ptp_side = None
+    ptp_reservation_active = False
 
     try:
+        capabilities = HandlerManager.operator_capabilities_for(
+            device_type, device_model
+        )
         # Determine mode and naming
         if req.mode == "ap":
             mode = "ap"
@@ -3004,16 +3339,42 @@ async def _run_apply_mode(
             ptp_link_id = None
         else:
             # PTP: auto-assign side
-            side = port_manager.get_available_ptp_side(
-                req.my_tower,
-                req.remote_tower,
-                port_num=port_number,
-            )
-            mode = f"ptp-{side}"
-            naming = mcm.generate_ptp_naming(
-                req.my_tower, req.remote_tower, side, device_type,
-            )
             ptp_link_id = make_ptp_link_id(req.my_tower, req.remote_tower)
+            get_reserved_side = getattr(port_manager, "get_reserved_ptp_side", None)
+            if callable(get_reserved_side):
+                ptp_side = get_reserved_side(ptp_link_id, port_number)
+                ptp_reservation_active = ptp_side is not None
+            if ptp_side is None:
+                reserve = getattr(port_manager, "reserve_ptp_side", None)
+                if callable(reserve):
+                    ptp_side = reserve(
+                        req.my_tower,
+                        req.remote_tower,
+                        port_number,
+                        device_type=device_type,
+                        device_model=device_model,
+                    )
+                    ptp_reservation_active = True
+                else:
+                    ptp_side = port_manager.get_available_ptp_side(
+                        req.my_tower, req.remote_tower, port_num=port_number
+                    )
+            mode = f"ptp-{ptp_side}"
+            naming = mcm.generate_ptp_naming(
+                req.my_tower, req.remote_tower, ptp_side, device_type,
+            )
+            peer = port_manager.get_ptp_peer(ptp_link_id, port_number)
+            if peer is not None and not ptp_families_compatible(
+                device_type,
+                device_model,
+                peer.get("device_type"),
+                peer.get("device_model"),
+            ):
+                logger.error(
+                    "Refusing uncertified PTP family pair on port %s",
+                    port_number,
+                )
+                return
 
         logger.info(
             f"Applying {mode} to port {port_number} ({device_type}): "
@@ -3030,7 +3391,16 @@ async def _run_apply_mode(
             model=device_model,
             profile=profile,
             link_profile=ptp_link_id,
+            firmware=device_firmware,
+            require_firmware_match=True,
         )
+        if req.mode == "ptp" and capabilities.get("ptp_settings_required") and not template:
+            logger.error(
+                "Required PTP settings profile disappeared before applying mode "
+                "on port %s",
+                port_number,
+            )
+            return
 
         # Create handler and connect
         interface = port_manager.get_interface_for_port(port_number)
@@ -3052,10 +3422,27 @@ async def _run_apply_mode(
             return
 
         try:
-            # Apply config: template + naming injection, or just naming if no template
+            # Apply config: template + generated identity/radio settings, or
+            # just naming for handlers that explicitly allow the fallback.
             if template:
-                rendered = mcm.render_template(template, naming, device_type)
+                if req.mode == "ptp":
+                    rendered = mcm.generate_ptp_settings(
+                        template,
+                        naming,
+                        device_type,
+                        ptp_side,
+                        device_model,
+                    )
+                else:
+                    rendered = mcm.render_template(template, naming, device_type)
                 success = await handler.apply_mode_config(rendered)
+            elif req.mode == "ptp" and capabilities.get("ptp_settings_required"):
+                logger.error(
+                    "Cannot apply PTP mode without the required settings profile "
+                    "on port %s",
+                    port_number,
+                )
+                return
             else:
                 # No template — just apply hostname/SSID via apply_ap_naming
                 success = await handler.apply_ap_naming(
@@ -3063,10 +3450,17 @@ async def _run_apply_mode(
                 )
 
             if success:
+                success = await handler.apply_antenna_gain(
+                    req.antenna_gain_db,
+                    model=device_model or fingerprint.model,
+                )
+
+            if success:
                 logger.info(f"Mode {mode} applied successfully on port {port_number}")
                 port_manager.set_device_mode(
                     port_number, mode, naming, ptp_link_id,
                 )
+                ptp_reservation_active = False
             else:
                 logger.error(f"Failed to apply {mode} config on port {port_number}")
         finally:
@@ -3078,6 +3472,11 @@ async def _run_apply_mode(
 
     except Exception as e:
         logger.exception(f"Error applying mode on port {port_number}: {e}")
+    finally:
+        if ptp_reservation_active and ptp_link_id and ptp_side:
+            release = getattr(port_manager, "release_ptp_side", None)
+            if callable(release):
+                release(ptp_link_id, port_number, ptp_side)
 
 
 # ============================================================================

@@ -90,7 +90,8 @@ curl -s -k --interface eth0.104 \
   tables, and hardware information) rather than rejecting the entire upload
 - The `image` field name is required — this is the same field used for TAR uploads
 - Works for both JSON config files and TAR backup archives
-- The JSON file uses flat `device_props` key names directly (no wrapper needed)
+- A native full export uses the `device_props` and `template_props` wrapper
+- A small partial template may use flat `device_props` keys
 
 ---
 
@@ -183,6 +184,55 @@ curl -s -k --interface eth0.104 \
 
 ---
 
+## Field deployment exports
+
+Use the `/files` upload type **Field deployment export** for a complete
+Cambium export. Select the role explicitly. The selected role is authoritative;
+the provisioner does not infer AP or SM from an SSID or model string.
+
+The shared SM runtime path is:
+
+`/var/lib/provisioner/repo/configs/templates/cambium/shared/5.11.1/SM/default.json`
+
+The upload stores the exact original in private runtime storage. It activates a
+normalized copy with an atomic rename. The original is not committed, listed as
+content, or written to logs. The API returns only export type, firmware version,
+property count, secret presence, and field names.
+
+Protected active profiles are omitted from setup-bundle exports. Keep the
+private source export and any exported bundle on a trusted host.
+
+The shared SM baseline is portable:
+
+| Policy | Value |
+|---|---|
+| Management VLAN | Enabled, VLAN 12 |
+| Management address | DHCP |
+| DNS | From DHCP |
+| Syslog | 100.126.15.28, UDP 514, mask 31 |
+| cnMaestro | `cnmaestro.infra.treehouse.mn` |
+| SNMP | Read-only SNMPv2c profile from the export |
+| SSH / Telnet | SSH on, Telnet off |
+| Scan mask | `51` in the shared profile |
+| Initial antenna gain | `17` dBi |
+
+The shared SM profile removes captured SSID, center frequency, identity, and
+static address fields. This prevents one device export from configuring every
+SM with one site's values. AP, PTP-A, and PTP-B exports stay separate and keep
+their role-specific RF and operational settings.
+
+Full exports always use native `config_import` with `skipIllegal=1`. They never
+use `set_param`. Known 5 GHz models receive a model-specific scan mask of `19`
+before import. Known AX and 6 GHz models keep `51`. An unknown model keeps the
+profile mask and the device skips unsupported fields through `skipIllegal=1`.
+
+The Cambium mask `51` combines 20, 40, 80, and 160 MHz scanning. See the
+[Cambium configuration guidance](https://community.cambiumnetworks.com/t/adding-160-mhz-channels-to-existing-4625-subscribers/108286).
+
+Initial SM provisioning does not ask for antenna gain. During later AP, PTP, or
+custom setup, connectorized radios use `23` dBi by default. A supplied
+per-device value overrides `23` dBi. Integrated radios receive no gain write.
+
 ## When to Use Which Endpoint
 
 | Scenario | Endpoint | Notes |
@@ -199,11 +249,11 @@ curl -s -k --interface eth0.104 \
 
 ### Full config file (config_import path)
 1. Template is loaded from `configs/templates/cambium/`
-2. Model alias is resolved (e.g., `ePMP 4518` → `f4518-sm-defaultconfig`)
-3. Files starting with `ap` are excluded (AP config is post-provisioning only)
-4. JSON file is uploaded to `/admin/config_import` with `skipIllegal=1`
-5. Poll `get_param` with `act=status&applyStatusNeeded=true` until `applyFinished=1`
-6. Applied keys stored for verification
+2. The shared SM profile is selected before a model-family fallback.
+3. Model-specific scan fields are prepared when the model is known.
+4. A native full export is uploaded to `/admin/config_import` with `skipIllegal=1`.
+5. Poll `get_param` with `act=status&applyStatusNeeded=true` until `applyFinished=1`.
+6. Safe applied fields are stored for verification.
 
 ### Individual fields (set_param path)
 1. Used by `apply_ap_naming()` and `apply_config()` (dict input)
@@ -211,8 +261,61 @@ curl -s -k --interface eth0.104 \
 3. URL-encoded and POSTed to `/admin/set_param`
 4. Response checked for `"success": 1`
 
-**SM config is always used for provisioning. AP config is only applied
-post-provisioning via `apply_ap_naming()`.**
+**The shared SM config is used for initial provisioning. AP and PTP exports are
+separate role profiles. The later mode workflow applies the selected AP or PTP
+profile, then injects the generated site identity.**
+
+## Certified ePMP PTP family link profiles
+
+The PTP workflow certifies ePMP 3K and ePMP 4K family pairings. This includes
+links between two 46xx models and links between an ePMP 3K model and an ePMP
+4K model. Each endpoint still needs a PTP settings profile for its own family.
+The API rejects the link when the family pairing is not certified or either
+profile is missing.
+
+The supplied 46xx native exports are the ePMP 4K `tw32-tw18` link profile.
+Upload each export from the `/files` page. Use these values:
+
+| Field | PTP-A export | PTP-B export |
+|---|---|---|
+| Type | Field deployment export | Field deployment export |
+| Family | `ePMP-4K` | `ePMP-4K` |
+| Firmware | `5.11.1` | `5.11.1` |
+| Role | `PTP` | `PTP` |
+| Mode | `ptp-a` | `ptp-b` |
+| Scope | `family` | `family` |
+| Link profile | `tw32-tw18` | `tw32-tw18` |
+| Side profile | `Main` | `SM` |
+
+The firmware field must match the native export version in `template_props`.
+The service rejects an upload when the versions do not match.
+
+The service stores link IDs in ascending tower order. The generated SSID uses
+this same order. Reversing the two tower values does not change the link ID or
+SSID. For this pair the runtime ID is `tw18-tw32`; the resolver also accepts
+the reverse order shown in the field export names.
+
+The upload stores the active profiles under the protected runtime path:
+
+```text
+configs/templates/cambium/ePMP-4K/5.11.1/PTP/tw32-tw18/Main/default.json
+configs/templates/cambium/ePMP-4K/5.11.1/PTP/tw32-tw18/SM/default.json
+```
+
+The source exports and active PTP profiles contain secrets and site identity.
+They are host-only. Do not commit them or include them in a setup bundle.
+The protected profile must retain the native PTP radio settings, including the
+radio mode, PTP role, protocol mode, TDD frame size, TDD ratio, and center
+frequency. The handler generates the link identity (hostname and SSID) from
+the two tower numbers and leaves these hardware-specific settings from the
+profile unchanged.
+
+The PTP action appears only after the device has completed and verified SM
+provisioning. The operator enters the two tower numbers. The backend reserves
+one side before it starts the background task, checks the peer family, matches
+the device firmware to the profile version, and injects the generated link
+identity. A PTP-A upload must use the `Main` profile. A PTP-B upload must use
+the `SM` profile.
 
 ---
 
@@ -282,9 +385,9 @@ endpoint with multipart upload. This is separate from config.
 ## Debugging Tips
 
 - Always check `journalctl -u provisioner -f` during provisioning
-- `config_import` logs the full response including `filepath` and `err`
+- `config_import` logs success state and error presence, not response secrets
 - The apply-status poll logs progress and final `applyFinished` state
-- `set_param` failures log the full response body (up to 2000 chars)
+- `set_param` failures log error presence, not response values
 - Use `curl` directly on the provisioner to test endpoints in isolation
 - To capture new endpoint behavior, export a HAR file from browser dev tools
 

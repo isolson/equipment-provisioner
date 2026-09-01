@@ -97,7 +97,9 @@ def curl_config_data(stdin: bytes):
     for line in stdin.decode("utf-8").splitlines():
         if line.startswith("data-binary = "):
             encoded_value = line.split(" = ", 1)[1]
-            return json.loads(json.loads(encoded_value))
+            request_body = json.loads(json.loads(encoded_value))
+            assert set(request_body) == {"data"}
+            return request_body["data"]
     raise AssertionError("curl config did not include a data-binary value")
 
 
@@ -124,6 +126,61 @@ async def test_apply_config_false_when_readback_curl_fails(fake_curl, fast_sleep
 
     fake_curl.set_handler(route)
     assert await h.apply_config(config) is False
+
+
+async def test_apply_config_retries_readback_after_config_reload(fake_curl, fast_sleep):
+    """A temporary web-service restart must not turn a successful apply into a failure."""
+    h = _curl_handler()
+    config = {"system": {"hostname": "AP-1"}}
+    get_count = 0
+
+    def route(argv):
+        nonlocal get_count
+        method = argv[argv.index("-X") + 1]
+        if method == "POST":
+            return (0, json.dumps({"reboot_required": False}))
+        get_count += 1
+        if get_count < 3:
+            return (1, "", "curl: (7) Failed to connect")
+        return (0, json.dumps(config))
+
+    fake_curl.set_handler(route)
+    assert await h.apply_config(config) is True
+    assert get_count == 3
+
+
+async def test_apply_config_refreshes_session_after_repeated_readback_failures(
+    monkeypatch, fast_sleep
+):
+    """Repeated readback failures refresh the session before the final attempts."""
+    h = _curl_handler()
+    config = {"system": {"hostname": "AP-1"}}
+    events = []
+    get_count = 0
+
+    async def apply_config(_config):
+        return True
+
+    async def readback():
+        nonlocal get_count
+        get_count += 1
+        return {} if get_count < 3 else config
+
+    async def disconnect():
+        events.append("disconnect")
+
+    async def connect():
+        events.append("connect")
+        return True
+
+    monkeypatch.setattr(h, "_apply_config_curl", apply_config)
+    monkeypatch.setattr(h, "_get_config_curl", readback)
+    monkeypatch.setattr(h, "disconnect", disconnect)
+    monkeypatch.setattr(h, "connect", connect)
+
+    assert await h.apply_config(config) is True
+    assert get_count == 3
+    assert events == ["disconnect", "connect"]
 
 
 async def test_apply_config_false_on_hostname_mismatch(fake_curl, fast_sleep):
@@ -251,6 +308,43 @@ async def test_apply_config_adds_missing_full_export_schema_defaults(fake_curl):
     assert posted["ethernet"]["ports"]["eth0"]["network"]["mgmt_vlan_enabled"] is True
 
 
+async def test_apply_config_moves_legacy_network_ethernet_to_top_level(
+    fake_curl, fast_sleep
+):
+    """Older bench exports put ethernet below network; Tachyon requires a top-level section."""
+    h = _curl_handler()
+    config = {
+        "version": 3,
+        "network": {
+            "ethernet": {
+                "ports": {
+                    "eth0": {"enabled": True, "network": {"zone": "wan"}}
+                }
+            },
+            "zones": {"wan": {"enabled": True}},
+        },
+        "services": {},
+        "system": {},
+        "wireless": {"radios": {}},
+    }
+    posted = {}
+
+    def route(argv, stdin):
+        method = argv[argv.index("-X") + 1]
+        if method == "POST":
+            posted.update(curl_config_data(stdin))
+            return (0, json.dumps({}))
+        if method == "GET":
+            return (0, json.dumps(posted))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_input_handler(route)
+
+    assert await h.apply_config(config) is True
+    assert posted["ethernet"]["ports"]["eth0"]["enabled"] is True
+    assert "ethernet" not in posted["network"]
+
+
 async def test_apply_config_file_tar_posts_authoritative_export_without_deep_merge(
     tmp_path, fake_curl, fast_sleep
 ):
@@ -275,6 +369,97 @@ async def test_apply_config_file_tar_posts_authoritative_export_without_deep_mer
     assert fake_curl.methods == ["POST", "GET"]
     assert sorted(posted["ethernet"]["ports"].keys()) == ["eth0", "eth1"]
     assert "vlans" not in posted["network"]["zones"]["wan"]
+
+
+async def test_apply_config_file_legacy_tar_merges_live_config(
+    tmp_path, fake_curl, fast_sleep
+):
+    """Legacy Tachyon archives merge with live fields instead of replacing them."""
+    h = _curl_handler()
+    legacy_config = {
+        "version": 3,
+        "network": {
+            "ethernet": {
+                "ports": {
+                    "eth0": {"enabled": True, "network": {"zone": "wan"}}
+                }
+            },
+            "zones": {"wan": {"enabled": True}},
+        },
+        "services": {},
+        "system": {},
+        "wireless": {"radios": {}},
+    }
+    tar_path = _write_config_tar(tmp_path, legacy_config)
+    live_config = _full_export_config()
+    live_config["ethernet"]["ports"]["eth2"] = {"enabled": True}
+    posted = {}
+    get_count = 0
+
+    def route(argv, stdin):
+        nonlocal get_count
+        method = argv[argv.index("-X") + 1]
+        if method == "GET":
+            get_count += 1
+            return (0, json.dumps(live_config if get_count == 1 else posted))
+        if method == "POST":
+            posted.update(curl_config_data(stdin))
+            return (0, json.dumps({}))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_input_handler(route)
+
+    assert await h.apply_config_file(str(tar_path)) is True
+    assert posted["ethernet"]["ports"]["eth0"]["enabled"] is True
+    assert posted["ethernet"]["ports"]["eth2"]["enabled"] is True
+    assert "ethernet" not in posted["network"]
+    assert fake_curl.methods == ["GET", "POST", "GET"]
+
+
+async def test_apply_config_file_legacy_tar_preserves_vap_fields(
+    tmp_path, fake_curl, fast_sleep
+):
+    """Legacy VAP entries merge by index and keep fields omitted by the archive."""
+    h = _curl_handler()
+    legacy_config = {
+        "version": 3,
+        "network": {"zones": {"wan": {"enabled": True}}},
+        "services": {},
+        "system": {},
+        "wireless": {
+            "radios": {
+                "wlan0": {
+                    "enabled": True,
+                    "vaps": [
+                        {"enabled": True, "mode": "sta", "network": {"zone": "wan"}}
+                    ],
+                }
+            }
+        },
+    }
+    tar_path = _write_config_tar(tmp_path, legacy_config)
+    live_config = _full_export_config()
+    posted = {}
+    get_count = 0
+
+    def route(argv, stdin):
+        nonlocal get_count
+        method = argv[argv.index("-X") + 1]
+        if method == "GET":
+            get_count += 1
+            return (0, json.dumps(live_config if get_count == 1 else posted))
+        if method == "POST":
+            posted.update(curl_config_data(stdin))
+            return (0, json.dumps({}))
+        raise AssertionError("unexpected method: %s" % method)
+
+    fake_curl.set_input_handler(route)
+
+    assert await h.apply_config_file(str(tar_path)) is True
+    vap = posted["wireless"]["radios"]["wlan0"]["vaps"][0]
+    assert vap["ssid"] == "WEST"
+    assert "sta_profiles" in vap
+    assert fake_curl.methods == ["GET", "POST", "GET"]
 
 
 async def test_apply_config_file_partial_json_still_merges_live_config(

@@ -502,7 +502,7 @@ The deploy script:
 
 ### Add a New Device Type
 
-Follow the complete checklist in [HANDLER_DEVELOPMENT.md](docs/HANDLER_DEVELOPMENT.md). The checklist covers the handler, detection, registration, firmware, templates, and tests.
+Follow the complete checklist in [HANDLER_DEVELOPMENT.md](docs/HANDLER_DEVELOPMENT.md). The checklist covers the handler, detection, registration, firmware, templates, and tests. Use the [new hardware provisioning SOP](docs/hardware-provisioning-sop.md) for the audit, bench setup, hardware validation, and rollback procedure.
 
 ---
 

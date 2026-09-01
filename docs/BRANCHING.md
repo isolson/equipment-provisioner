@@ -2,6 +2,9 @@
 
 `main` is the integration branch — all PRs (including the vendor-isolation refactor stories) merge there. The **`production` branch is the deploy pin**: it marks the commit running on the production host, and it is the only branch `scripts/deploy.sh` will deploy without a flag.
 
+Use the [Live Deployment and Hardware Test SOP](live-testing-sop.md) for a
+feature-branch deploy, hardware test, and rollback.
+
 The host records what's deployed in `/opt/provisioner/.deployed-rev` (`<sha>[-dirty] <branch> <utc-timestamp>`, written by deploy.sh):
 
 ```bash
@@ -55,6 +58,9 @@ Phase-specific additions:
 
    (The git-based rollback below is still the way to reach an *older* revision than the immediately-previous one.)
 4. **Post-deploy health check.** After the restart the script verifies the service is `active`, has no traceback/import error in the last 60s of logs, and serves `/health` and `/api/ports`. A failure exits non-zero and prints the `--rollback` command — the deploy is not reported as successful.
+
+On kiosk hosts, the script also restarts `kiosk-watchdog.service` after the
+web service restart. The health check requires that watchdog to be active.
 
 ## Rollback
 
