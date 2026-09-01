@@ -43,6 +43,18 @@ def test_registry_maps_approved_models_to_families():
     assert config_family_for_model("tachyon", "TNS-100") is None
 
 
+def test_cambium_4k_sm_profile_resets_ptp_radio_roles():
+    path = (
+        Path(__file__).parents[1]
+        / "configs/templates/cambium/ePMP-4K/5.11.1/SM/default.json"
+    )
+    props = json.loads(path.read_text())["device_props"]
+
+    assert props["wirelessInterfaceMode"] == "1"
+    assert props["wirelessInterfacePTPMode"] == "0"
+    assert props["wirelessInterface2PTPMode"] == "0"
+
+
 def test_registry_certifies_cross_family_ptp_pairs():
     assert ptp_families_compatible(
         "cambium", "ePMP 3000", "cambium", "ePMP 4616"

@@ -119,8 +119,8 @@ class NetinstallRequest(BaseModel):
 
 
 class ApplyModeRequest(BaseModel):
-    """Request to apply a device mode (AP or PTP) after provisioning."""
-    mode: str  # "ap" or "ptp"
+    """Request to apply a device mode after provisioning."""
+    mode: str  # "sm", "ap", or "ptp"
     # AP fields
     tower: Optional[int] = None
     direction: Optional[str] = None
@@ -3068,7 +3068,7 @@ async def get_display_status(request: Request):
 
 
 # ============================================================================
-# Device Mode Endpoints (AP / PTP)
+# Device Mode Endpoints (SM / AP / PTP)
 # ============================================================================
 
 
@@ -3183,6 +3183,38 @@ def _reserve_ptp_side(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+
+def _resolve_sm_template(
+    request: Request,
+    provisioner: Any,
+    device_type: str,
+    device_model: Optional[str],
+):
+    """Resolve the same standard SM template used by provisioning."""
+    from ..config_resolver import ConfigResolver, JobContext, effective_role
+    from ..config_store import ConfigStore
+
+    resolver = getattr(provisioner, "config_resolver", None)
+    if resolver is None:
+        store = ConfigStore(str(_get_data_path(request)))
+        handler_manager = getattr(provisioner, "handler_manager", None)
+        resolver = ConfigResolver(store, handler_manager)
+
+    config = getattr(provisioner, "config", None)
+    provisioning_config = getattr(config, "provisioning", None)
+    default_role = getattr(provisioning_config, "default_role", None)
+    resolved = resolver.resolve(
+        device_type,
+        device_model,
+        JobContext(role=effective_role(None, default_role)),
+    )
+    _, config_path = resolved.as_provision_args()
+    if config_path is None:
+        resolved.cleanup()
+        return None, None
+    return config_path, resolved
+
+
 @router.post("/ports/{port_number}/apply-mode")
 async def apply_device_mode(
     port_number: int,
@@ -3190,10 +3222,11 @@ async def apply_device_mode(
     request: Request,
     background_tasks: BackgroundTasks,
 ):
-    """Apply a device mode (AP or PTP) to a provisioned device.
+    """Apply a device mode (SM, AP, or PTP) to a provisioned device.
 
     After standard SM provisioning completes, this endpoint lets the user
-    reconfigure the device as an AP or PTP endpoint.
+    reconfigure the device as an AP or PTP endpoint. A device in AP or PTP
+    mode can use this endpoint to restore its standard SM configuration.
     """
     from ..config import get_config
     if not get_config().features.mode_config:
@@ -3219,29 +3252,43 @@ async def apply_device_mode(
     device_type = status["device_type"]
     device_ip = status["device_ip"]
 
-    if req.mode not in ("ap", "ptp"):
+    if req.mode not in ("sm", "ap", "ptp"):
         raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
 
     capabilities = HandlerManager.operator_capabilities_for(
         device_type, status.get("device_model")
     )
-    if req.mode not in capabilities["post_provision_modes"]:
+    is_sm_restore = req.mode == "sm"
+    if not is_sm_restore and req.mode not in capabilities["post_provision_modes"]:
         raise HTTPException(
             status_code=400,
             detail=f"Mode configuration not supported for {device_type}",
         )
 
-    # AP/PTP are post-provision conversions. They must never become a way to
-    # bypass a missing or unverified standard SM configuration.
+    sm_config_path = None
+    resolved_sm_config = None
+    if is_sm_restore:
+        if capabilities.get("required_baseline_mode") != "sm":
+            raise HTTPException(
+                status_code=400,
+                detail=f"SM configuration restore not supported for {device_type}",
+            )
+        current_mode = str(status.get("device_mode") or "")
+        if current_mode != "ap" and not current_mode.startswith("ptp"):
+            raise HTTPException(
+                status_code=409,
+                detail="The device is not in AP or PTP mode",
+            )
+
+    # Mode actions must never bypass a missing or unverified standard SM
+    # configuration.
     baseline_mode = capabilities.get("required_baseline_mode") or ""
     baseline_label = baseline_mode.upper() if baseline_mode else "Standard"
+    operation_label = "SM restore" if is_sm_restore else "AP/PTP conversion"
     if status.get("last_result") not in ("success", "complete"):
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"{baseline_label} provisioning must complete before "
-                "AP/PTP conversion"
-            ),
+            detail=f"{baseline_label} provisioning must complete before {operation_label}",
         )
     if baseline_mode:
         checklist = status.get("checklist") or {}
@@ -3253,8 +3300,21 @@ async def apply_device_mode(
                 status_code=409,
                 detail=(
                     f"Verified {baseline_mode.upper()} configuration is required "
-                    "before AP/PTP conversion"
+                    f"before {operation_label}"
                 ),
+            )
+
+    if is_sm_restore:
+        sm_config_path, resolved_sm_config = _resolve_sm_template(
+            request,
+            provisioner,
+            device_type,
+            status.get("device_model"),
+        )
+        if sm_config_path is None:
+            raise HTTPException(
+                status_code=409,
+                detail="A standard SM configuration template is required for restore",
             )
 
     # Validate mode-specific parameters
@@ -3279,14 +3339,26 @@ async def apply_device_mode(
             capabilities,
         )
     # Run config application in background
-    background_tasks.add_task(
-        _run_apply_mode,
-        provisioner,
-        port_number,
-        device_type,
-        device_ip,
-        req,
-    )
+    if is_sm_restore:
+        background_tasks.add_task(
+            _run_apply_mode,
+            provisioner,
+            port_number,
+            device_type,
+            device_ip,
+            req,
+            sm_config_path,
+            resolved_sm_config,
+        )
+    else:
+        background_tasks.add_task(
+            _run_apply_mode,
+            provisioner,
+            port_number,
+            device_type,
+            device_ip,
+            req,
+        )
 
     return {"success": True, "message": f"Applying {req.mode} mode on port {port_number}"}
 
@@ -3312,6 +3384,8 @@ async def _run_apply_mode(
     device_type: str,
     device_ip: str,
     req: ApplyModeRequest,
+    sm_config_path: Optional[str] = None,
+    resolved_sm_config: Any = None,
 ):
     """Apply device mode in a background task."""
     from ..fingerprint import DeviceType, identify_device
@@ -3319,7 +3393,7 @@ async def _run_apply_mode(
     from .websocket import notify_port_change
 
     port_manager = provisioner.port_manager
-    mcm = get_mode_config_manager()
+    mcm = get_mode_config_manager() if req.mode != "sm" else None
     device_model = (port_manager.get_port_status().get(port_number) or {}).get("device_model")
     device_firmware = (port_manager.get_port_status().get(port_number) or {}).get(
         "firmware_version"
@@ -3333,7 +3407,11 @@ async def _run_apply_mode(
             device_type, device_model
         )
         # Determine mode and naming
-        if req.mode == "ap":
+        if req.mode == "sm":
+            mode = "sm"
+            naming = {}
+            ptp_link_id = None
+        elif req.mode == "ap":
             mode = "ap"
             naming = mcm.generate_ap_naming(req.tower, req.direction, device_type)
             ptp_link_id = None
@@ -3376,24 +3454,31 @@ async def _run_apply_mode(
                 )
                 return
 
-        logger.info(
-            f"Applying {mode} to port {port_number} ({device_type}): "
-            f"hostname={naming['hostname']}, ssid={naming['ssid']}"
-        )
+        if req.mode == "sm":
+            logger.info(
+                f"Applying standard SM config to port {port_number} ({device_type})"
+            )
+        else:
+            logger.info(
+                f"Applying {mode} to port {port_number} ({device_type}): "
+                f"hostname={naming['hostname']}, ssid={naming['ssid']}"
+            )
 
         # Load the model family profile.  AP directions map directly to the
         # standard library's North/East/South/West directories.  PTP side A
         # resolves Main and side B resolves SM inside ModeConfigManager.
         profile = req.direction.title() if req.mode == "ap" and req.direction else None
-        template = mcm.load_template(
-            device_type,
-            mode,
-            model=device_model,
-            profile=profile,
-            link_profile=ptp_link_id,
-            firmware=device_firmware,
-            require_firmware_match=True,
-        )
+        template = None
+        if req.mode != "sm":
+            template = mcm.load_template(
+                device_type,
+                mode,
+                model=device_model,
+                profile=profile,
+                link_profile=ptp_link_id,
+                firmware=device_firmware,
+                require_firmware_match=True,
+            )
         if req.mode == "ptp" and capabilities.get("ptp_settings_required") and not template:
             logger.error(
                 "Required PTP settings profile disappeared before applying mode "
@@ -3422,9 +3507,20 @@ async def _run_apply_mode(
             return
 
         try:
+            if req.mode == "sm":
+                if not sm_config_path:
+                    logger.error(
+                        "Cannot restore SM config without a resolved template "
+                        "on port %s",
+                        port_number,
+                    )
+                    return
+                success = await handler.apply_config_file(sm_config_path)
+                if success:
+                    success = await handler.verify_config() is True
             # Apply config: template + generated identity/radio settings, or
             # just naming for handlers that explicitly allow the fallback.
-            if template:
+            elif template:
                 if req.mode == "ptp":
                     rendered = mcm.generate_ptp_settings(
                         template,
@@ -3449,7 +3545,7 @@ async def _run_apply_mode(
                     naming["hostname"], naming["ssid"],
                 )
 
-            if success:
+            if success and req.mode != "sm":
                 success = await handler.apply_antenna_gain(
                     req.antenna_gain_db,
                     model=device_model or fingerprint.model,
@@ -3457,9 +3553,12 @@ async def _run_apply_mode(
 
             if success:
                 logger.info(f"Mode {mode} applied successfully on port {port_number}")
-                port_manager.set_device_mode(
-                    port_number, mode, naming, ptp_link_id,
-                )
+                if req.mode == "sm":
+                    port_manager.clear_device_mode(port_number)
+                else:
+                    port_manager.set_device_mode(
+                        port_number, mode, naming, ptp_link_id,
+                    )
                 ptp_reservation_active = False
             else:
                 logger.error(f"Failed to apply {mode} config on port {port_number}")
@@ -3477,6 +3576,8 @@ async def _run_apply_mode(
             release = getattr(port_manager, "release_ptp_side", None)
             if callable(release):
                 release(ptp_link_id, port_number, ptp_side)
+        if resolved_sm_config is not None:
+            resolved_sm_config.cleanup()
 
 
 # ============================================================================

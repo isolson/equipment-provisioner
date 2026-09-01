@@ -204,7 +204,13 @@ After a device is provisioned, you can set its operational mode:
 - **Access Point (AP)**: Enter tower number, system sets hostname + SSID
 - **Point-to-Point (PTP)**: Enter tower numbers for both ends, system names them `tw05-tw12-a` / `tw05-tw12-b`
 
-The mode configuration applies immediately. No need to unplug and re-provision.
+The AP and PTP mode configuration applies immediately. You do not need to
+unplug the device or run full provisioning again.
+
+If a device is already in AP or PTP mode, select **Restore SM config** in the
+port modal. The system applies the standard SM config, verifies it, and clears
+the PTP link state for that port. You do not need to run full provisioning
+again for an SM restore. The device can reboot during the config import.
 
 ---
 

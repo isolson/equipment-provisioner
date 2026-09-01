@@ -1163,6 +1163,7 @@
         function runPortWorkflowAction(actionId, portNum) {
             if (actionId === 'configure_ap') return openAPModal(portNum);
             if (actionId === 'configure_ptp') return openPTPModal(portNum);
+            if (actionId === 'configure_sm') return openSMModal(portNum);
             if (actionId === 'retry_credentials') return openCredentialModal(portNum);
             if (actionId === 'retry_provisioning') return openProvisionModal(portNum);
             if (actionId === 'manual_netinstall') return startNetinstall(portNum);
@@ -1177,7 +1178,7 @@
         function renderWorkflowActionPanel(portNum, port) {
             const workflow = workflowForPort(port);
             const modeActions = workflow.available_actions.filter(action =>
-                action.id === 'configure_ap' || action.id === 'configure_ptp'
+                action.id === 'configure_ap' || action.id === 'configure_ptp' || action.id === 'configure_sm'
             );
             const serviceActions = Array.isArray(workflow.service_actions)
                 ? workflow.service_actions : [];
@@ -1185,11 +1186,14 @@
 
             if (modeActions.length) {
                 const required = workflow.required_action === 'choose_device_mode';
+                const restoringSM = modeActions.some(action => action.id === 'configure_sm');
                 html += `<div class="workflow-actions">
-                    <div class="workflow-actions-title">${required ? 'Next step' : 'Deployment options'}</div>
-                    <div class="workflow-actions-help">${required
-                        ? 'Choose how this infrastructure radio will be deployed.'
-                        : 'Use these only when this radio is being deployed at a tower.'}</div>
+                    <div class="workflow-actions-title">${restoringSM ? 'Restore standard SM config' : (required ? 'Next step' : 'Deployment options')}</div>
+                    <div class="workflow-actions-help">${restoringSM
+                        ? 'Return this radio to standard SM operation. PTP settings and link tracking will be cleared.'
+                        : (required
+                            ? 'Choose how this infrastructure radio will be deployed.'
+                            : 'Use these only when this radio is being deployed at a tower.')}</div>
                     <div class="workflow-actions-grid">
                         ${modeActions.map(action => renderWorkflowActionButton(action, portNum)).join('')}
                     </div>
@@ -1543,8 +1547,60 @@
         }
 
         // ================================================================
-        // AP / PTP Mode Modals
+        // SM / AP / PTP Mode Modals
         // ================================================================
+
+        function openSMModal(portNum) {
+            selectedPort = portNum;
+            const port = ports[portNum];
+            const vendor = deviceVendors[port.device_type] || deviceVendors.unknown;
+
+            document.getElementById('modal-title').textContent = `Restore SM Config \u2014 Port ${portNum}`;
+            document.getElementById('modal-content').innerHTML = `
+                <div class="space-y-4">
+                    <div class="p-3 bg-gray-50 rounded-lg border border-gray-200">
+                        <div class="font-bold text-lg flex items-center gap-2" style="color: ${vendor.color}">${vendor.icon ? `<img src="${vendor.icon}" class="w-5 h-5 rounded object-contain" alt="">` : ''}<span>${vendor.name}</span></div>
+                        <div class="text-sm text-gray-600">${port.device_ip || ''}</div>
+                    </div>
+                    <div class="p-3 bg-amber-50 border border-amber-300 rounded-lg text-sm text-amber-800">
+                        <div class="font-medium mb-1">Confirm SM restore</div>
+                        <div>This applies the standard SM config. It clears the PTP settings and link tracking for this port. It does not update firmware.</div>
+                    </div>
+                </div>
+            `;
+            setPortModalFooter(`
+                <button id="sm-apply-btn" onclick="applySMMode(${portNum})" class="modal-action modal-action-primary">
+                    Restore SM Config
+                </button>
+                <button onclick="openPortModal(${portNum})" class="modal-action modal-action-secondary">
+                    Back
+                </button>
+            `);
+            document.getElementById('port-modal').classList.remove('hidden');
+        }
+
+        async function applySMMode(portNum) {
+            const btn = document.getElementById('sm-apply-btn');
+            if (btn) { btn.disabled = true; btn.textContent = 'Restoring...'; }
+
+            try {
+                const res = await fetch(`/api/ports/${portNum}/apply-mode`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: 'sm' }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    closeModal();
+                } else {
+                    alert(data.detail || 'Failed to restore SM config');
+                    if (btn) { btn.disabled = false; btn.textContent = 'Restore SM Config'; }
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+                if (btn) { btn.disabled = false; btn.textContent = 'Restore SM Config'; }
+            }
+        }
 
         function openAPModal(portNum) {
             selectedPort = portNum;

@@ -139,8 +139,8 @@ Use one transition row for each supported path:
 
 | From | To | Trigger or input | Operation | Asset or request | Changes | Preserves | Reboot or reconnect | Result |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Initial |  |  |  |  |  |  |  |  |
-|  | Initial |  |  |  |  |  |  |  |
+| SM | AP or PTP | Select the qualified AP or PTP action. | Apply the selected mode profile and verify the result. | The AP or PTP action request. | Mode fields and generated site identity. | The approved device identity and baseline policy. | Follow the handler result. | A verified AP or PTP mode. |
+| AP or PTP | SM | Select **Restore SM config** in the port modal. | Apply the standard SM config and verify the result. | The resolved standard SM template. | SM policy fields and PTP state. | Device identity fields excluded by the template. | Follow the handler result. | A verified SM config with cleared PTP link state. |
 |  |  |  |  |  |  |  |  |  |
 
 Require separate hardware evidence for each advertised path. Use separate

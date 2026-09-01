@@ -22,6 +22,11 @@ _MODE_ACTIONS = {
         "label": "Set up PTP link",
         "kind": "primary",
     },
+    "sm": {
+        "id": "configure_sm",
+        "label": "Restore SM config",
+        "kind": "primary",
+    },
 }
 
 
@@ -84,7 +89,14 @@ def workflow_for_port(state: Any, mode_config_enabled: bool) -> Dict[str, Any]:
             })
     elif is_success:
         workflow_state = "ready"
-        has_configured_mode = bool(getattr(state, "device_mode", None))
+        device_mode = getattr(state, "device_mode", None)
+        has_configured_mode = bool(device_mode)
+        is_converted_mode = device_mode == "ap" or str(device_mode).startswith("ptp")
+        baseline_verified = (
+            baseline_mode
+            and _checklist_value(state, "config_upload") is True
+            and _checklist_value(state, "config_verify") is True
+        )
         if (
             baseline_mode
             and not has_configured_mode
@@ -101,10 +113,15 @@ def workflow_for_port(state: Any, mode_config_enabled: bool) -> Dict[str, Any]:
             required_action = "verify_baseline_config"
         else:
             mode_actions = []
-            if mode_config_enabled and not has_configured_mode:
-                mode_actions = _mode_actions(capabilities["post_provision_modes"])
+            if mode_config_enabled:
+                if is_converted_mode and baseline_verified:
+                    mode_actions = [dict(_MODE_ACTIONS["sm"])]
+                elif not has_configured_mode:
+                    mode_actions = _mode_actions(capabilities["post_provision_modes"])
                 actions.extend(mode_actions)
-            if mode_actions and getattr(state, "mode_selection_required", False):
+            if mode_actions and not is_converted_mode and getattr(
+                state, "mode_selection_required", False
+            ):
                 workflow_state = "action_required"
                 required_action = "choose_device_mode"
     elif getattr(state, "device_detected", False):
