@@ -1,0 +1,19 @@
+vendor: tachyon
+model: TNA-303L-65
+firmware: 1.12.4
+config_role: SM
+artifact_purpose: process-evidence
+reusable_template: false
+canonical_template_status: not-included
+unit: production-unit-a
+captured_utc: 2026-09-02T20:58:00Z
+operations:
+  - config-export
+result: success
+no_config_backup: missing
+fixture_witness: role
+raw_files:
+  known-good.device-backup.tar: "20260902.155827.TNA-303L-65.tar, production SM backup on 1.12.4 (secure bench directory only)"
+transitions: []
+evidence_scope: "Pre-migration schema witness. A working production SM on 1.12.4 with 4 SM profiles and 3 users. Source for the 1.12.4 to 1.15.1 migration test: apply this export on a 1.15.1 unit and export the result."
+notes: "Compared with the 1.15 populated export of the same model: 1.12.4 carries ethernet.ports.eth1, zone STP flags, wan failover, prometheus, telnet, wireguard, antenna.kit, and profile trackingId; 1.15 adds mgmt_vlan_enabled on ports and VAPs, wan carrier_drop and lldp_forward, DHCP snooping option 82, remote_syslog target fields, SNMPv3 encryption_mode, snmp_traps.port, system description/latitude/longitude, and VAP isolate. The handler injects the 1.15 required fields at apply time. This backup is not a fleet baseline witness (role and device defaults only)."

@@ -1,0 +1,29 @@
+{
+  "fixture_version": 1,
+  "source": "not captured; the supplied HAR contains process request shapes only",
+  "config_role": "SM",
+  "artifact_purpose": "process-evidence",
+  "reusable_template": false,
+  "identity_status": "secure HAR may contain device, site, credential, and wireless identity",
+  "baseline_status": "missing exact pre-first-apply no-config backup",
+  "root_type": "object",
+  "top_level_keys": [
+    "network",
+    "services",
+    "system",
+    "wireless"
+  ],
+  "required_paths": {
+    "network.interfaces.data.mgmtVLAN": "null in supplied process capture",
+    "network.interfaces.data.vlan": "null in supplied process capture",
+    "network.interfaces.data.ipv4": "object",
+    "system": "object",
+    "wireless.interfaces": "array",
+    "services": "object",
+    "services.snmpAgent": "object",
+    "services.systemLog": "object",
+    "services.ntpClient": "object",
+    "services.discoveryResponder": "object",
+    "services.lldp": "object"
+  }
+}

@@ -1,0 +1,37 @@
+vendor: tachyon
+model: TNA-303L-65
+firmware: 1.15.1-rev-8541
+config_role: SM
+artifact_purpose: process-evidence
+reusable_template: false
+unit: bench-unit
+captured_utc: 2026-08-31T15:00:00Z
+operations:
+  - downgrade
+  - upgrade
+  - config-apply
+result: success
+evidence_scope: "The HAR spans a firmware transition. The final bench unit firmware was 1.15.1 rev 8541."
+baseline_status: "exact post-reset no-config backup captured 2026-09-02 (after-reset-restore.device-backup.tar, taken seven seconds before the restore)"
+no_config_backup: captured
+no_config_firmware: 1.15.1-rev-8541
+no_config_unit: bench-unit
+fixture_witness: baseline
+canonical_template_status: rebuilt-from-known-good-2026-09-02
+raw_files:
+  workflow.har: "tachyon-303l-downgrade-upgrade-config.har (2026-08-31), firmware transition and config apply"
+  reset-restore.har: "303L-resetconfigprovision1.15.har (2026-09-02): config restore, factory reset, first-boot, export, config restore"
+  known-good.device-backup.json: "post-apply backup from the 2026-08-31 transition run (superseded as the fixture source)"
+  known-good.device-backup.tar: "20260902.152619 export: the hand-built 1.15.1 configuration that works in the field (4 profiles, full management VLAN set). Source of known-good.structure.json and of the tracked SM baseline (configs/templates/tachyon/TNA-303L-65/SM/default.tar via scripts/build_baseline.py)"
+  before-reset.device-backup.tar: "20260902.152619 export, populated post-migration configuration (4 profiles, 3 users, syslog target)"
+  after-reset-restore.device-backup.tar: "20260902.154432 export, exact post-reset no-config backup on 1.15.1 (0 profiles, 1 user); source of no-config.structure.json"
+endpoint_evidence:
+  factory_reset: "POST /cgi.lua/reset"
+  first_boot: "POST /cgi.lua/config with loginUpdate"
+  export: "POST /cgi.lua/snapshot (cfg form)"
+  config_apply: "POST /cgi.lua/config with data (full document)"
+  bank_state: "GET /cgi.lua/bootbank, GET /cgi.lua/firmwares"
+transitions: []
+open_question: "The restore after the reset posted 4 profiles, 3 users, and the syslog target, but no export was taken after it. Whether 1.15.1 keeps them is unproven until one more export."
+migration_source: "bench-evidence/tachyon/TNA-303L-65/1.12.4/ holds a production SM backup on 1.12.4 (pre-migration schema). Never import it onto 1.15: the missing port and VAP mgmt_vlan_enabled flags leave the unit without a management address (Tachyon ticket open). Migration = upgrade the unit, then apply the tracked 1.15 baseline, then export to prove it."
+notes: "The secure bench directory contains process HAR evidence and a known-good post-apply backup. Do not treat the pre-recovery backup as a factory baseline or promote raw backups to templates. The separate bundled SM asset is sanitized and remains subject to hardware verification."
