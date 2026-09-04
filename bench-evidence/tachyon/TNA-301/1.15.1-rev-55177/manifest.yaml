@@ -1,0 +1,18 @@
+vendor: tachyon
+model: TNA-301
+firmware: 1.15.1-rev-55177
+config_role: AP
+artifact_purpose: process-evidence
+reusable_template: false
+canonical_template_status: not-included
+unit: bench-unit
+captured_utc: 2026-08-31T15:51:51Z
+operations:
+  - downgrade
+  - upgrade
+  - config-apply
+result: success
+evidence_scope: "The HAR spans a downgrade and upgrade. The final bench unit firmware was 1.15.1 rev 55177."
+baseline_status: "missing exact pre-first-apply no-config backup"
+known_good_status: "The supplied TNA-301 TAR documents the accepted UI config shape. It is a tower/customer-specific AP process capture, not a post-apply device backup or reusable template."
+notes: "The secure bench directory contains the transition HAR and the supplied with-config TAR. Do not treat the pre-apply config read as a factory baseline or promote the supplied TAR to a canonical asset."
