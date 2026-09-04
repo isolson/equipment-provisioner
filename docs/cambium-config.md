@@ -1,5 +1,10 @@
 # Cambium ePMP Config API Reference
 
+Store and review new Cambium captures by following the
+[Bench Evidence SOP](BENCH_EVIDENCE.md). The endpoint notes below are derived
+from hardware captures; raw files belong in the secure bench evidence
+directory.
+
 > **WARNING TO AI AGENTS AND DEVELOPERS**: Do NOT guess or assume Cambium API
 > behavior. Every endpoint in this document is labeled CONFIRMED or UNCONFIRMED.
 > If an endpoint is UNCONFIRMED, do NOT write code that uses it until it has been
@@ -187,60 +192,84 @@ curl -s -k --interface eth0.104 \
 ## Field deployment exports
 
 Use the `/files` upload type **Field deployment export** for a complete
-Cambium export. Select the role explicitly. The selected role is authoritative;
-the provisioner does not infer AP or SM from an SSID or model string.
+Cambium export. Select the model family, firmware, and role. The selected role
+is authoritative; the provisioner does not infer AP or SM from an SSID or
+model string. An export whose radio role fields do not match the selected
+role is refused, so an AP export can never become an SM baseline.
 
-The shared SM runtime path is:
+The upload stores the exact original in private runtime storage. It activates
+a reduced copy in the family tree, for example
+`configs/templates/cambium/ePMP-4K/5.11.1/SM/default.json`. The runtime-only
+shared profile is retired: git and CI could not lint it.
 
-`/var/lib/provisioner/repo/configs/templates/cambium/shared/5.11.1/SM/default.json`
+The reduced copy keeps only the fields the field ownership contract lets a
+profile own (`docs/PROVISIONING_NORTH_STAR.md`). Secrets, device defaults,
+unit identity, and captured addresses are dropped. The API refuses an upload
+that still breaks the contract and names the fields, never the values.
 
-The upload stores the exact original in private runtime storage. It activates a
-normalized copy with an atomic rename. The original is not committed, listed as
-content, or written to logs. The API returns only export type, firmware version,
-property count, secret presence, and field names.
-
-Protected active profiles are omitted from setup-bundle exports. Keep the
-private source export and any exported bundle on a trusted host.
-
-The shared SM baseline is portable:
+The SM baseline (fleet policy, verified exact on read-back):
 
 | Policy | Value |
 |---|---|
 | Management VLAN | Enabled, VLAN 12 |
 | Management address | DHCP |
 | DNS | From DHCP |
+| NTP | `time.google.com`, `time.cloudflare.com` |
 | Syslog | 100.126.15.28, UDP 514, mask 31 |
-| cnMaestro | `cnmaestro.infra.treehouse.mn` |
-| SNMP | Read-only SNMPv2c profile from the export |
+| cnMaestro | `cnmaestro.infra.treehouse.mn`, agent on, zero touch on |
+| SNMP | Protocol version 1, remote access on; community via the secret path |
 | SSH / Telnet | SSH on, Telnet off |
-| Scan mask | `51` in the shared profile |
-| Initial antenna gain | `17` dBi |
+| Country | US |
+| Scan mask (per family) | Bits: 1 = 20 MHz, 2 = 40, 16 = 80, 32 = 160. ePMP-4K `51` (20/40/80/160), ePMP-3K `19` (20/40/80). Factory is `3` (20 and 40 only), which cannot follow an 80 MHz access point. |
 
-The shared SM profile removes captured SSID, center frequency, identity, and
-static address fields. This prevents one device export from configuring every
-SM with one site's values. AP, PTP-A, and PTP-B exports stay separate and keep
-their role-specific RF and operational settings.
+The SM radio role (verified exact on read-back):
 
-The ePMP-4K SM baseline also sets the radio role fields required to leave PTP:
-`wirelessInterfaceMode` is `1`, and both PTP mode fields are `0`. It does not
-copy PTP SSIDs, frequencies, or link identity fields.
+| Field | SM | AP | PTP-A | PTP-B |
+|---|---|---|---|---|
+| `wirelessInterfaceMode` | `2` | `1` | `1` | `2` |
+| `wirelessInterfacePTPMode` | `1` | `0` | `1` | `1` |
+| `wirelessInterfaceProtocolMode` | `1` | `1` | `3` | `3` |
 
-Full exports always use native `config_import` with `skipIllegal=1`. They never
-use `set_param`. Known 5 GHz models receive a model-specific scan mask of `19`
-before import. Known AX and 6 GHz models keep `51`. An unknown model keeps the
-profile mask and the device skips unsupported fields through `skipIllegal=1`.
+Every value traces to a known-good export fixture under
+`bench-evidence/cambium/` (`tests/test_cambium_evidence.py`). A change starts
+with a new fixture. The handler holds the same values in `SM_FLEET_POLICY` and
+`SM_ROLE_VALUES`.
 
-The Cambium mask `51` combines 20, 40, 80, and 160 MHz scanning. See the
-[Cambium configuration guidance](https://community.cambiumnetworks.com/t/adding-160-mhz-channels-to-existing-4625-subscribers/108286).
+Device defaults are never written and never verified as exact values:
+`wirelessInterfaceTDDAntennaGain` (integrated radios), `systemConfigMinAntGain`,
+`cambiumGPSConfigPrioritizeUSB`, and `wirelessInterface2PTPMode`. The
+fixtures show these vary per unit (gain 18 on 4518, 16 on 4616, 25 on 4625;
+GPS USB 1 or 0).
 
-Initial SM provisioning does not ask for antenna gain. During later AP, PTP, or
-custom setup, connectorized radios use `23` dBi by default. A supplied
-per-device value overrides `23` dBi. Integrated radios receive no gain write.
+Site identity and RF (SSID, hostname, device name, center frequency, TX power,
+TDD frame and ratio, preferred AP list) belong to the AP and PTP workflow.
+They never appear in the SM baseline.
+
+Secrets (admin password, `wirelessInterfaceEncryptionKey`, SNMP community,
+RADIUS) never appear in a template. The handler writes them through
+`apply_secrets()` from the host credentials after the config step. Presence
+is verified, never the value.
+
+Full exports always use native `config_import` with `skipIllegal=1`. They
+never use `set_param`. The export is imported as-is; there is no per-model
+projection of device defaults.
+
+Antenna gain: standard SM provisioning never writes gain. Integrated radios
+are never written. During AP or PTP setup a connectorized radio (ePMP 4600C)
+requires an explicit operator value; there is no default.
 
 ## When to Use Which Endpoint
 
+Every row below traces to a capture summary under `bench-evidence/cambium/`
+(`capture-summary.md`, `reset-capture-summary.md`, `upgrade-capture-summary.md`).
+Read the summary before changing a row. The raw HAR stays on the bench host.
+
+
 | Scenario | Endpoint | Notes |
 |---|---|---|
+| Firmware upload, running 5.11 or newer | `upload_sw_image_local` then `upgrade_sw_image_local` (`type=device`) then poll `get_upgrade_status` | Force 300-25 captures at 5.11.1 |
+| Firmware upload, running older than 5.11 | `local_upload_image` then poll `get_upload_status` | ePMP 4518 workflow HAR at 5.10.4; `upload_sw_image_local` answered 404 |
+| Factory reset | `reset_to_def` (`mask=1`) then `reboot` | ePMP 4518 and Force 300-25 HARs |
 | Apply full JSON config file | `config_import` | Multipart upload, skipIllegal=1, poll for applyFinished |
 | Apply full TAR backup archive | `config_import` | Same endpoint, same flow |
 | Change a few fields (SSID, hostname) | `set_param` | Form-encoded, immediate, no polling needed |
@@ -254,11 +283,11 @@ per-device value overrides `23` dBi. Integrated radios receive no gain write.
 
 ### Full config file (config_import path)
 1. Template is loaded from `configs/templates/cambium/`
-2. The shared SM profile is selected before a model-family fallback.
-3. Model-specific scan fields are prepared when the model is known.
-4. A native full export is uploaded to `/admin/config_import` with `skipIllegal=1`.
-5. Poll `get_param` with `act=status&applyStatusNeeded=true` until `applyFinished=1`.
-6. Safe applied fields are stored for verification.
+2. The model family SM baseline is selected (`ePMP-3K` or `ePMP-4K`). There
+   is no shared profile and no cross-family fallback.
+3. A native full export is uploaded to `/admin/config_import` with `skipIllegal=1`.
+4. Poll `get_param` with `act=status&applyStatusNeeded=true` until `applyFinished=1`.
+5. The contract-owned applied fields (fleet policy and role) are stored for verification.
 
 ### Individual fields (set_param path)
 1. Used by `apply_ap_naming()` and `apply_config()` (dict input)
@@ -266,9 +295,11 @@ per-device value overrides `23` dBi. Integrated radios receive no gain write.
 3. URL-encoded and POSTed to `/admin/set_param`
 4. Response checked for `"success": 1`
 
-**The shared SM config is used for initial provisioning and for SM restore. AP
-and PTP exports are separate role profiles. The later mode workflow applies the
-selected AP or PTP profile, then injects the generated site identity.**
+**The family SM baseline is used for initial provisioning and for SM restore.
+AP and PTP exports are separate role profiles. The later mode workflow applies
+the selected AP or PTP profile, then injects the generated site identity. A
+mode is offered only after the bench recorded both transition directions
+(`provisioner/qualification.py`).**
 
 ## Certified ePMP PTP family link profiles
 
@@ -326,13 +357,17 @@ the `SM` profile.
 
 ## How Config Verify Works
 
-1. POST to `/admin/get_param` with `act=config_regular&debug=true`
-2. Parse `device_props` from JSON response
-3. Compare values against what was applied:
-   - `wirelessInterfaceSSID` → expected `ssid`
-   - `snmpSystemName` → expected `hostname`
-   - `systemConfigDeviceName` → expected `devicename`
-4. Log pass/fail for each field
+1. POST to `/admin/get_param` with `act=config_regular&debug=true`.
+2. Parse `device_props` from the JSON response.
+3. Compare the expectation set from the field ownership contract
+   (`field_ownership.expected_values`): fleet policy and role fields as exact
+   values, plus identity fields when the mode workflow applied them. Secrets
+   and device defaults are never compared.
+4. The result is tri-state: `True` when every field matched, `False` on a
+   mismatch, `UNVERIFIED` when the read-back was incomplete.
+5. Mismatched field names (never values) are recorded on
+   `handler.last_verify_mismatches`, shown in the failure message and the port
+   timeline.
 
 ---
 
