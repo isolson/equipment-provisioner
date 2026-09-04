@@ -62,8 +62,8 @@ class _Handler:
         return True
 
 
-def test_sm_restore_resolves_the_standard_shared_template(tmp_path):
-    template = tmp_path / "configs" / "templates" / "cambium" / "shared" / "SM"
+def test_sm_restore_resolves_the_standard_family_template(tmp_path):
+    template = tmp_path / "configs" / "templates" / "cambium" / "ePMP-4K" / "SM"
     template.mkdir(parents=True)
     expected = template / "default.json"
     expected.write_text('{"device_props": {"networkMode": "2"}}')

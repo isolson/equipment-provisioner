@@ -22,6 +22,7 @@ from typing import Callable, List, Tuple
 
 import pytest
 
+from provisioner.handlers.base import ConnectionFailureKind
 from provisioner.handlers.tachyon import TachyonHandler
 
 # ---------------------------------------------------------------------------------------
@@ -117,6 +118,55 @@ def make_handler(interface: str = "eth0") -> TachyonHandler:
     h._use_curl = True
     h._api_token = "tok-123"
     return h
+
+
+# ---------------------------------------------------------------------------------------
+# Login/session failure classification
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_login_curl_timeout_is_transport_failure(monkeypatch):
+    install_fake_exec(monkeypatch, lambda cmd: (28, "", "operation timed out"))
+    handler = make_handler()
+    handler._connected = False
+
+    assert await handler._connect_curl() is False
+    assert handler.connection_failure_kind == ConnectionFailureKind.TRANSPORT
+    assert "curl code 28" in handler.login_error
+    assert handler.credentials["password"] not in handler.login_error
+
+
+@pytest.mark.asyncio
+async def test_login_curl_http_auth_failure_is_not_transport(monkeypatch):
+    install_fake_exec(
+        monkeypatch,
+        lambda cmd: (0, mk_stdout('{"auth":false}', 401), ""),
+    )
+    handler = make_handler()
+    handler._connected = False
+
+    assert await handler._connect_curl() is False
+    assert handler.connection_failure_kind == ConnectionFailureKind.AUTHENTICATION
+
+
+@pytest.mark.asyncio
+async def test_login_curl_busy_response_is_retryable(monkeypatch, caplog):
+    response_secret = "fixture-response-must-not-be-logged"
+    install_fake_exec(
+        monkeypatch,
+        lambda cmd: (
+            0,
+            mk_stdout('{"error":"%s"}' % response_secret, 503),
+            "",
+        ),
+    )
+    handler = make_handler()
+    handler._connected = False
+
+    assert await handler._connect_curl() is False
+    assert handler.connection_failure_kind == ConnectionFailureKind.DEVICE_BUSY
+    assert response_secret not in caplog.text
 
 
 # A config that carries a hostname so apply_config()'s read-back verification runs.

@@ -14,6 +14,7 @@ Architecture:
 """
 
 import asyncio
+import json
 import collections
 import logging
 import subprocess
@@ -178,6 +179,31 @@ class PortConfig:
 
 
 @dataclass
+class PortEvent:
+    """One persisted timeline entry for a port. Never carries a secret value."""
+    seq: int
+    ts: float
+    kind: str
+    label: str
+    key: Optional[str] = None
+    status: Optional[Union[bool, str]] = None
+    detail: Optional[str] = None
+    run_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "seq": self.seq,
+            "ts": self.ts,
+            "kind": self.kind,
+            "key": self.key,
+            "label": self.label,
+            "status": self.status,
+            "detail": self.detail,
+            "run_id": self.run_id,
+        }
+
+
+@dataclass
 class PortState:
     """Current state of a port."""
     port_number: int
@@ -233,6 +259,16 @@ class PortState:
         default_factory=lambda: collections.deque(maxlen=50)
     )
 
+    # Server-owned timeline (survives kiosk reload and Chromium respawn).
+    events: Deque["PortEvent"] = field(default_factory=lambda: collections.deque(maxlen=200))
+    event_seq: int = 0
+    run_id: Optional[str] = None  # Current provisioning run id
+    boot_wait_started: Optional[float] = None  # When the current boot wait began
+    # Active post-provision mode change: {id, mode, started, steps, status}
+    mode_job: Optional[Dict[str, Any]] = None
+    # Seconds until auto-provisioning may run again for the same unit.
+    reprovision_wait: int = 0
+
 
 @dataclass
 class ManagementConfig:
@@ -275,6 +311,7 @@ class PortManager:
         management: Optional[ManagementConfig] = None,
         setup_vlans: bool = True,
         mode_config_enabled: bool = False,
+        events_path: Optional[str] = None,
     ):
         """Initialize port manager.
 
@@ -323,6 +360,9 @@ class PortManager:
         self._initialized = False
         self._ptp_reservations: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._ptp_reservation_lock = threading.RLock()
+        # Per-port event log persistence (JSONL, one file per port).
+        self.events_path = Path(events_path) if events_path else None
+        self._events_loaded = False
 
     def _generate_port_configs(self) -> None:
         """Generate port configurations."""
@@ -1168,6 +1208,7 @@ class PortManager:
                     state.device_detected = True
                     state.device_type = device_type
                     state.device_ip = device_ip
+                    self.record_event(port_num, "device_detected", "Device detected", detail=str(device_type))
                     if current_mac:
                         state.device_mac = current_mac
                     state.last_seen = asyncio.get_event_loop().time()
@@ -1241,6 +1282,7 @@ class PortManager:
                 state.device_detected = True
                 state.device_type = device_type
                 state.device_ip = device_ip
+                self.record_event(port_num, "device_detected", "Device detected", detail=str(device_type))
                 if current_mac:
                     state.device_mac = current_mac
                 state.last_seen = asyncio.get_event_loop().time()
@@ -1321,6 +1363,7 @@ class PortManager:
             state.device_detected = True
             state.device_type = device_type
             state.device_ip = device_ip
+            self.record_event(port_num, "device_detected", "Device detected", detail=str(device_type))
             state.device_mac = device_mac
             state.last_seen = asyncio.get_event_loop().time()
             logger.info(
@@ -1414,6 +1457,7 @@ class PortManager:
         device_type = DeviceType.EVOLUTION_DIGITAL.value
         state.device_detected = True
         state.device_type = device_type
+        self.record_event(port_num, "device_detected", "Device detected", detail=device_type)
         state.device_ip = None
         state.device_mac = mac
         state.checklist.mac_address = mac
@@ -1667,6 +1711,8 @@ class PortManager:
             state.provisioning = provisioning
             if provisioning:
                 state.needs_credentials = False
+                state.run_id = "%d-%d" % (port_num, int(time.time()))
+                self.record_event(port_num, "run_started", "Provisioning started", detail=state.device_type)
             if not provisioning:
                 # Only start grace period for successful provisioning (firmware updates need reboot time)
                 if success:
@@ -1676,10 +1722,12 @@ class PortManager:
                     state.last_result = "success"
                     state.last_error = None
                     state.needs_credentials = False
+                    self.record_event(port_num, "run_finished", "Provisioning complete", status="success")
                 else:
                     state.provisioning_ended = None  # No grace period for failures
                     state.last_result = "failed"
                     state.last_error = error
+                    self.record_event(port_num, "run_finished", "Provisioning failed", status="failed", detail=error)
                 state.ping_failures = 0  # Reset ping failures
 
     def set_needs_credentials(self, port_num: int, required: bool) -> None:
@@ -1687,6 +1735,8 @@ class PortManager:
         state = self.port_states.get(port_num)
         if state:
             state.needs_credentials = required
+            if required:
+                self.record_event(port_num, "credentials_required", "Credentials required")
 
     def set_expecting_reboot(self, port_num: int, expecting: bool) -> None:
         """Set whether a port is expecting a planned reboot (firmware update).
@@ -1720,9 +1770,13 @@ class PortManager:
         if state.link_down_grace_task and not state.link_down_grace_task.done():
             state.link_down_grace_task.cancel()
         state.link_down_grace_task = None
+        if state.link_up or state.device_detected:
+            self.record_event(port_num, "link_down", "Link down", detail=state.device_type)
         state.link_up = False
         state.device_detected = False
         state.device_type = None
+        state.boot_wait_started = None
+        state.mode_job = None
         state.device_ip = None
         state.device_mac = None
         state.device_serial = None
@@ -1828,6 +1882,159 @@ class PortManager:
             if firmware_version:
                 state.firmware_version = firmware_version
 
+    # ------------------------------------------------------------------
+    # Event log
+    # ------------------------------------------------------------------
+
+    def _events_file(self, port_num: int) -> Optional[Path]:
+        if self.events_path is None:
+            return None
+        return self.events_path / ("port%d.jsonl" % port_num)
+
+    def _ensure_events_loaded(self) -> None:
+        """Load persisted events once, lazily, so tests and boot stay cheap."""
+        if self._events_loaded:
+            return
+        self._events_loaded = True
+        if self.events_path is None:
+            return
+        for port_num, state in self.port_states.items():
+            path = self._events_file(port_num)
+            if path is None or not path.is_file():
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines[-state.events.maxlen:]:
+                try:
+                    data = json.loads(line)
+                    event = PortEvent(**{k: data.get(k) for k in ("seq", "ts", "kind", "label", "key", "status", "detail", "run_id")})
+                except (ValueError, TypeError):
+                    continue
+                state.events.append(event)
+                state.event_seq = max(state.event_seq, int(event.seq or 0))
+
+    def _persist_event(self, port_num: int, event: PortEvent) -> None:
+        path = self._events_file(port_num)
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event.to_dict()) + "\n")
+            # Rewrite when the file grows past twice the ring size.
+            if path.stat().st_size > 400 * 240:
+                state = self.port_states.get(port_num)
+                if state is not None:
+                    path.write_text(
+                        "".join(json.dumps(e.to_dict()) + "\n" for e in state.events),
+                        encoding="utf-8",
+                    )
+        except OSError as exc:
+            logger.debug("Could not persist port %s event: %s", port_num, exc)
+
+    def record_event(
+        self,
+        port_num: int,
+        kind: str,
+        label: str = "",
+        key: Optional[str] = None,
+        status: Optional[Union[bool, str]] = None,
+        detail: Optional[str] = None,
+        run_id: Optional[str] = None,
+        broadcast: bool = True,
+    ) -> Optional[PortEvent]:
+        """Append one timeline entry. ``detail`` must never carry a secret."""
+        state = self.port_states.get(port_num)
+        if state is None:
+            return None
+        self._ensure_events_loaded()
+        state.event_seq += 1
+        if detail is not None:
+            detail = str(detail)
+            if len(detail) > 160:
+                detail = detail[:157] + "..."
+        event = PortEvent(
+            seq=state.event_seq,
+            ts=time.time(),
+            kind=kind,
+            label=label or kind.replace("_", " ").title(),
+            key=key,
+            status=status,
+            detail=detail,
+            run_id=run_id if run_id is not None else state.run_id,
+        )
+        state.events.append(event)
+        self._persist_event(port_num, event)
+        if broadcast:
+            try:
+                from provisioner.web.websocket import notify_port_event
+                loop = asyncio.get_running_loop()
+                loop.create_task(notify_port_event(port_num, event.to_dict()))
+            except RuntimeError:
+                pass
+            except Exception as exc:  # pragma: no cover - broadcast is best effort
+                logger.debug("Failed to broadcast port event: %s", exc)
+        return event
+
+    def get_events(self, port_num: int, since: int = 0, limit: int = 200) -> Dict[str, Any]:
+        """Return events after ``since`` (by seq), oldest first."""
+        state = self.port_states.get(port_num)
+        if state is None:
+            return {"port_number": port_num, "latest_seq": 0, "events": []}
+        self._ensure_events_loaded()
+        events = [e.to_dict() for e in state.events if e.seq > since]
+        return {
+            "port_number": port_num,
+            "latest_seq": state.event_seq,
+            "events": events[-max(1, limit):],
+        }
+
+    # ------------------------------------------------------------------
+    # Mode job (post-provision mode change progress)
+    # ------------------------------------------------------------------
+
+    def begin_mode_job(self, port_num: int, mode: str, steps: List[Dict[str, str]]) -> Optional[str]:
+        state = self.port_states.get(port_num)
+        if state is None:
+            return None
+        job_id = "%d-%d" % (port_num, int(time.time()))
+        state.mode_job = {
+            "id": job_id,
+            "mode": mode,
+            "started": time.time(),
+            "steps": [dict(step) for step in steps],
+            "status": {},
+        }
+        self.record_event(port_num, "mode_change_requested", "Mode change requested", detail=mode, run_id=job_id)
+        return job_id
+
+    def update_mode_job(self, port_num: int, key: str, status: Union[bool, str], detail: Optional[str] = None) -> None:
+        state = self.port_states.get(port_num)
+        if state is None or not state.mode_job:
+            return
+        state.mode_job["status"][key] = status
+        label = next((s["label"] for s in state.mode_job["steps"] if s.get("key") == key), key)
+        kind = "step_started" if status == "loading" else "step_finished"
+        self.record_event(port_num, kind, label, key=key, status=status, detail=detail, run_id=state.mode_job["id"])
+
+    def finish_mode_job(self, port_num: int, success: bool, error: Optional[str] = None) -> None:
+        state = self.port_states.get(port_num)
+        if state is None or not state.mode_job:
+            return
+        job_id = state.mode_job["id"]
+        mode = state.mode_job.get("mode")
+        state.mode_job = None
+        self.record_event(
+            port_num,
+            "mode_change_applied" if success else "mode_change_failed",
+            "Mode change applied" if success else "Mode change failed",
+            status="success" if success else "failed",
+            detail=mode if success else (error or mode),
+            run_id=job_id,
+        )
+
     def update_checklist(
         self,
         port_num: int,
@@ -1848,6 +2055,19 @@ class PortManager:
                 state.step_status[step] = status
             if detail:
                 state.step_details[step] = detail
+            if status is not None:
+                label = next(
+                    (item["label"] for item in state.step_plan if item.get("key") == step),
+                    step.replace("_", " ").title(),
+                )
+                self.record_event(
+                    port_num,
+                    "step_started" if status == "loading" else "step_finished",
+                    label,
+                    key=step,
+                    status=status,
+                    detail=detail if status != "loading" else None,
+                )
             if hasattr(state.checklist, step):
                 if step == "firmware_banks" and isinstance(status, str):
                     if not state.checklist.firmware_banks_initial:
@@ -1877,6 +2097,15 @@ class PortManager:
             normalized.append({"key": key, "label": label or key})
             seen.add(key)
         self.port_states[port_num].step_plan = normalized
+        state = self.port_states[port_num]
+        if not state.run_id:
+            state.run_id = "%d-%d" % (port_num, int(time.time()))
+        self.record_event(
+            port_num,
+            "plan",
+            "Validation plan",
+            detail=", ".join(item["label"] for item in normalized),
+        )
 
     def reset_checklist(self, port_num: int) -> None:
         """Reset the checklist for a port (for new device or re-provisioning).
@@ -1925,8 +2154,11 @@ class PortManager:
         current_time: float,
     ) -> Dict[str, Any]:
         """Serialize one port, including its server-owned workflow contract."""
-        from .workflow_actions import workflow_for_port
+        from .workflow_actions import presentation_for_port, workflow_for_port
 
+        self._ensure_events_loaded()
+        state.reprovision_wait = self._reprovision_wait(state, current_time)
+        workflow = workflow_for_port(state, self.mode_config_enabled)
         return {
             "vlan_id": state.vlan_id,
             "link_up": state.link_up,
@@ -1954,8 +2186,24 @@ class PortManager:
             "device_mode": state.device_mode,
             "mode_config": state.mode_config,
             "ptp_link_id": state.ptp_link_id,
-            "workflow": workflow_for_port(state, self.mode_config_enabled),
+            "workflow": workflow,
+            "presentation": presentation_for_port(
+                state, self.mode_config_enabled, now=current_time, workflow=workflow
+            ),
+            "event_seq": state.event_seq,
+            "run_id": state.run_id,
+            "mode_job": state.mode_job,
+            "reprovision_wait": state.reprovision_wait,
         }
+
+    def _reprovision_wait(self, state: PortState, current_time: float) -> int:
+        """Seconds until auto-provisioning may run again for the same unit."""
+        if not state.last_provisioned_at or state.provisioning or state.last_result:
+            return 0
+        if state.device_mac and state.last_provisioned_mac and state.device_mac != state.last_provisioned_mac:
+            return 0
+        remaining = self.REPROVISION_COOLDOWN - (current_time - state.last_provisioned_at)
+        return int(remaining) if remaining > 0 else 0
 
     def _get_single_port_status(self, port_num: int) -> Dict:
         """Get status of a single port for WebSocket notifications."""
@@ -2060,6 +2308,8 @@ class PortManager:
                 state.waiting_for_boot = True
                 state.boot_ping_responded = False
                 state.boot_wait_until = time.time() + self.BOOT_WAIT_MAX_SECONDS
+                state.boot_wait_started = time.time()
+                self.record_event(port_num, "link_up", "Link up", detail=speed or None)
                 logger.info(f"Port {port_num} link up, waiting for device to boot (max {self.BOOT_WAIT_MAX_SECONDS}s)")
             elif state.waiting_for_boot:
                 logger.debug(f"Port {port_num} link flap during boot wait, ignoring")
@@ -2490,6 +2740,7 @@ def init_port_manager(
     setup_vlans: bool = True,
     simple_subnet: Optional[str] = None,
     mode_config_enabled: bool = False,
+    events_path: Optional[str] = None,
 ) -> PortManager:
     """Initialize the global port manager.
 
@@ -2512,6 +2763,7 @@ def init_port_manager(
         local_ip_base=local_ip_base,
         management=management,
         setup_vlans=setup_vlans,
+        events_path=events_path,
         mode_config_enabled=mode_config_enabled,
     )
     if not setup_vlans and simple_subnet:

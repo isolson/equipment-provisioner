@@ -48,6 +48,11 @@ deploy_key.pub
 *.sqlite
 *.sqlite3
 
+# Hardware captures and raw device backups can contain credentials and tokens.
+*.har
+bench-evidence/raw/
+bench-evidence/**/*.device-backup.json
+
 # OS files
 .DS_Store
 Thumbs.db

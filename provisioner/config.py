@@ -121,9 +121,14 @@ class DeviceCredentials(BaseModel):
     # `$onboardingPass`). Defaults to bootstrap_password when unset, matching
     # the canonical bench tool's WIFI_ONBOARDING_PASS fallback.
     onboarding_password: str = ""
+    # Secret-owned device fields (docs/PROVISIONING_NORTH_STAR.md). These are
+    # written by the handler's secret path after config, never by a template.
+    wpa_key: str = ""  # Wireless encryption key (WPA2 PSK)
+    snmp_community: str = ""  # SNMP read-only community
 
     @field_validator(
         "password", "backup_password", "bootstrap_password", "onboarding_password",
+        "wpa_key", "snmp_community",
         mode="before",
     )
     @classmethod

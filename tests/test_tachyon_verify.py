@@ -168,9 +168,11 @@ async def test_apply_config_refreshes_session_after_repeated_readback_failures(
 
     async def disconnect():
         events.append("disconnect")
+        h._connected = False
 
     async def connect():
         events.append("connect")
+        h._connected = True
         return True
 
     monkeypatch.setattr(h, "_apply_config_curl", apply_config)
@@ -217,7 +219,7 @@ async def test_apply_config_true_on_full_match(fake_curl, fast_sleep):
 
 
 async def test_apply_config_adds_missing_radio_isolation_default(fake_curl):
-    """Older Tachyon exports omit fields current firmware requires on enabled radios."""
+    """Current firmware requires isolation fields on enabled radios."""
     h = _curl_handler()
     config = {
         "wireless": {
@@ -383,7 +385,7 @@ async def test_apply_config_moves_legacy_network_ethernet_to_top_level(
 async def test_apply_config_file_tar_posts_authoritative_export_without_deep_merge(
     tmp_path, fake_curl, fast_sleep
 ):
-    """Full Tachyon exports must not inherit stale live keys like eth2-eth5."""
+    """Full Tachyon exports must not inherit stale live keys."""
     h = _curl_handler()
     export_config = _full_export_config()
     tar_path = _write_config_tar(tmp_path, export_config)
