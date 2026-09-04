@@ -853,22 +853,12 @@ def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch
 def test_setup_readiness_counts_recursive_family_assets(tmp_path, monkeypatch):
     client, _config, data_path = make_client(tmp_path)
 
-    shared_baseline = (
-        data_path
-        / "configs"
-        / "templates"
-        / "cambium"
-        / "shared"
-        / "5.11.1"
-        / "SM"
-        / "default.json"
-    )
-    shared_baseline.parent.mkdir(parents=True)
-    shared_baseline.write_bytes(b"asset")
-
     for vendor, family, extension in (
         ("cambium", "ePMP-4K/5.11.1", ".json"),
+        ("cambium", "ePMP-3K/5.11.1", ".json"),
         ("tachyon", "TNA-303X", ".tar"),
+        ("tachyon", "TNA-301-302", ".tar"),
+        ("tachyon", "TNA-303L-65", ".tar"),
     ):
         base = data_path / "configs" / "templates" / vendor / family
         (base / "SM").mkdir(parents=True)
@@ -899,9 +889,27 @@ def test_setup_readiness_counts_recursive_family_assets(tmp_path, monkeypatch):
     assert details["tachyon"]["status"] == "ready"
     assert details["cambium"]["missing_modes"] == []
     assert details["tachyon"]["missing_modes"] == []
+    assert details["cambium"]["missing_sm_families"] == []
 
 
-def test_setup_readiness_warns_when_cambium_shared_baseline_is_missing(tmp_path, monkeypatch):
+def test_setup_readiness_warns_when_one_family_lacks_its_sm_baseline(tmp_path, monkeypatch):
+    client, _config, data_path = make_client(tmp_path)
+    base = data_path / "configs" / "templates" / "cambium" / "ePMP-4K" / "5.11.1"
+    (base / "SM").mkdir(parents=True)
+    (base / "SM" / "default.json").write_bytes(b"{}")
+    monkeypatch.setattr("provisioner.setup_tools._interface_exists", lambda _: True)
+    monkeypatch.setattr(
+        "provisioner.setup_tools.probe_mikrotik_switch",
+        lambda _cfg: {"reachable": True, "mode": "configured", "status": "ready", "summary": "configured", "actions": [], "checks": []},
+    )
+    checks = {item["id"]: item for item in client.get("/api/setup/readiness").json()["checks"]}
+    cambium = next(item for item in checks["config_templates"]["details"] if item["device_type"] == "cambium")
+    assert cambium["status"] == "warning"
+    assert cambium["missing_sm_families"] == ["ePMP-3K"]
+    assert "ePMP-3K" in cambium["summary"]
+
+
+def test_setup_readiness_warns_when_cambium_family_sm_baseline_is_missing(tmp_path, monkeypatch):
     client, _config, data_path = make_client(tmp_path)
 
     family = (
@@ -913,7 +921,6 @@ def test_setup_readiness_warns_when_cambium_shared_baseline_is_missing(tmp_path,
         / "5.11.1"
     )
     for relative_path in (
-        "SM/default.json",
         "AP/North/default.json",
         "PTP/twXX-twXX/Main/default.json",
         "PTP/twXX-twXX/SM/default.json",
@@ -944,9 +951,11 @@ def test_setup_readiness_warns_when_cambium_shared_baseline_is_missing(tmp_path,
         item for item in template_check["details"] if item["device_type"] == "cambium"
     )
 
-    assert cambium["status"] == "warning"
-    assert cambium["shared_baseline"] is False
-    assert "shared SM baseline" in cambium["summary"]
+    # The SM baseline is the default template. Without it the vendor is not
+    # ready, and the detail names the missing family baseline.
+    assert cambium["status"] == "missing"
+    assert cambium["family_sm_baseline"] is False
+    assert "default" in cambium["missing_modes"]
 
 
 def test_setup_bundle_import_copies_repo_and_optional_system_files(tmp_path, monkeypatch):
@@ -1229,7 +1238,8 @@ def test_read_primary_credentials_reads_the_dict_table():
 
     # Factory-default passwords still warn; empty ones still read as missing.
     assert rows["cambium"]["status"] == "warning"
-    assert rows["cambium"]["summary"] == "Still using factory default"
+    assert rows["cambium"]["summary"].startswith("Still using factory default")
+    assert "wpa_key" in rows["cambium"]["summary"]
     assert rows["tarana"]["status"] == "warning"
     assert rows["tarana"]["summary"] == "Missing or placeholder"
 
@@ -1258,3 +1268,24 @@ def test_builtin_credentials_derive_from_the_defaults_table():
         assert BUILTIN_CREDENTIALS[device_type] == [
             {"username": creds.username, "password": creds.password}
         ]
+
+
+def test_setup_readiness_warns_when_a_required_secret_is_missing(tmp_path, monkeypatch):
+    client, config, _data_path = make_client(tmp_path)
+    config.credentials["cambium"].password = "not-a-placeholder-1"
+    config.credentials["cambium"].wpa_key = ""
+    monkeypatch.setattr("provisioner.setup_tools._interface_exists", lambda _: True)
+    monkeypatch.setattr(
+        "provisioner.setup_tools.probe_mikrotik_switch",
+        lambda _cfg: {"reachable": True, "mode": "configured", "status": "ready", "summary": "configured", "actions": [], "checks": []},
+    )
+    checks = {item["id"]: item for item in client.get("/api/setup/readiness").json()["checks"]}
+    cambium = next(d for d in checks["credentials"]["details"] if d["device_type"] == "cambium")
+    assert cambium["status"] == "warning"
+    assert cambium["missing_secrets"] == ["wpa_key"]
+    assert cambium["summary"] == "Missing required secret: wpa_key"
+
+    config.credentials["cambium"].wpa_key = "set-on-the-host"
+    checks = {item["id"]: item for item in client.get("/api/setup/readiness").json()["checks"]}
+    cambium = next(d for d in checks["credentials"]["details"] if d["device_type"] == "cambium")
+    assert cambium["missing_secrets"] == []

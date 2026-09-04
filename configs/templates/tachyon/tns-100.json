@@ -50,7 +50,9 @@
           "management": true,
           "vlans": {
             "mgmt_vlan_policy": "trunk",
-            "trunk": [101],
+            "trunk": [
+              101
+            ],
             "access": [],
             "native_vlan_policy": "trunk"
           },
@@ -69,15 +71,26 @@
           "vlans": {
             "mgmt_vlan_policy": "trunk",
             "trunk": [],
-            "access": [101],
+            "access": [
+              101
+            ],
             "native_vlan_policy": "trunk"
           },
           "zone": "wan"
         },
         "isolation_rules": [
-          {"action": "block", "port": "eth2"},
-          {"action": "block", "port": "eth3"},
-          {"action": "block", "port": "eth4"}
+          {
+            "action": "block",
+            "port": "eth2"
+          },
+          {
+            "action": "block",
+            "port": "eth3"
+          },
+          {
+            "action": "block",
+            "port": "eth4"
+          }
         ],
         "duplex": "full",
         "autoneg": true,
@@ -91,15 +104,26 @@
           "vlans": {
             "mgmt_vlan_policy": "trunk",
             "trunk": [],
-            "access": [101],
+            "access": [
+              101
+            ],
             "native_vlan_policy": "trunk"
           },
           "zone": "wan"
         },
         "isolation_rules": [
-          {"action": "block", "port": "eth1"},
-          {"action": "block", "port": "eth3"},
-          {"action": "block", "port": "eth4"}
+          {
+            "action": "block",
+            "port": "eth1"
+          },
+          {
+            "action": "block",
+            "port": "eth3"
+          },
+          {
+            "action": "block",
+            "port": "eth4"
+          }
         ],
         "duplex": "full",
         "autoneg": true,
@@ -113,15 +137,26 @@
           "vlans": {
             "mgmt_vlan_policy": "trunk",
             "trunk": [],
-            "access": [101],
+            "access": [
+              101
+            ],
             "native_vlan_policy": "trunk"
           },
           "zone": "wan"
         },
         "isolation_rules": [
-          {"action": "block", "port": "eth1"},
-          {"action": "block", "port": "eth2"},
-          {"action": "block", "port": "eth4"}
+          {
+            "action": "block",
+            "port": "eth1"
+          },
+          {
+            "action": "block",
+            "port": "eth2"
+          },
+          {
+            "action": "block",
+            "port": "eth4"
+          }
         ],
         "duplex": "full",
         "autoneg": true,
@@ -135,15 +170,26 @@
           "vlans": {
             "mgmt_vlan_policy": "trunk",
             "trunk": [],
-            "access": [101],
+            "access": [
+              101
+            ],
             "native_vlan_policy": "trunk"
           },
           "zone": "wan"
         },
         "isolation_rules": [
-          {"action": "block", "port": "eth1"},
-          {"action": "block", "port": "eth2"},
-          {"action": "block", "port": "eth3"}
+          {
+            "action": "block",
+            "port": "eth1"
+          },
+          {
+            "action": "block",
+            "port": "eth2"
+          },
+          {
+            "action": "block",
+            "port": "eth3"
+          }
         ],
         "duplex": "full",
         "autoneg": true,
@@ -156,7 +202,9 @@
           "management": true,
           "vlans": {
             "mgmt_vlan_policy": "trunk",
-            "trunk": [101],
+            "trunk": [
+              101
+            ],
             "access": [],
             "native_vlan_policy": "trunk"
           },
@@ -177,12 +225,10 @@
       "enabled": true,
       "v2": {
         "ro": {
-          "enabled": true,
-          "community": "public"
+          "enabled": true
         },
         "rw": {
-          "enabled": false,
-          "community": "private"
+          "enabled": false
         }
       }
     },

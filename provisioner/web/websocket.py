@@ -278,6 +278,16 @@ def _get_mock_status() -> dict:
 
 
 # Helper functions to be called from provisioner code
+async def notify_port_event(port_number: int, event: dict):
+    """Broadcast one appended port timeline event."""
+    await manager.broadcast({
+        "type": "port_event",
+        "port_number": port_number,
+        "event": event,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+
 async def notify_port_change(port_number: int, status: dict):
     """Notify all clients of a port status change."""
     await manager.broadcast_port_update(port_number, status)

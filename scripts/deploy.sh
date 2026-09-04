@@ -1,6 +1,9 @@
 #!/bin/bash
 # Deploy provisioner code to the running provisioner host.
-# Usage: ./scripts/deploy.sh [--allow-branch] [--skip-tests] [--rollback]
+# Usage: ./scripts/deploy.sh [--host <name-or-ip>] [--allow-branch] [--skip-tests] [--rollback]
+#
+# --host selects a non-production target (the dev bench laptop). The branch
+# guard applies only to the production host; a dev host accepts any branch.
 #
 # Production deploys run from a checkout of the 'production' branch (the
 # deploy pin — see docs/BRANCHING.md). Use --allow-branch to deploy a
@@ -44,14 +47,30 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ALLOW_BRANCH=0
 SKIP_TESTS=0
 ROLLBACK=0
+EXPECT_HOST=0
+DEV_HOST=0
 for arg in "$@"; do
+  if [[ "$EXPECT_HOST" == "1" ]]; then
+    TARGET_HOST="$arg"; DEV_HOST=1; EXPECT_HOST=0; continue
+  fi
   case "$arg" in
     --allow-branch) ALLOW_BRANCH=1 ;;
+    --host) EXPECT_HOST=1 ;;
+    --host=*) TARGET_HOST="${arg#--host=}"; DEV_HOST=1 ;;
     --skip-tests)   SKIP_TESTS=1 ;;
     --rollback)     ROLLBACK=1 ;;
-    *) echo "Unknown argument: $arg"; echo "Usage: $0 [--allow-branch] [--skip-tests] [--rollback]"; exit 2 ;;
+    *) echo "Unknown argument: $arg"; echo "Usage: $0 [--host <name-or-ip>] [--allow-branch] [--skip-tests] [--rollback]"; exit 2 ;;
   esac
 done
+if [[ "$EXPECT_HOST" == "1" ]]; then
+  echo "REFUSING: --host needs a value (name or IP of the dev bench host)."; exit 2
+fi
+if [[ "$DEV_HOST" == "1" && ( -z "$TARGET_HOST" || "$TARGET_HOST" == --* ) ]]; then
+  echo "REFUSING: invalid --host value '${TARGET_HOST}'."; exit 2
+fi
+if [[ "$DEV_HOST" == "1" && "$TARGET_HOST" == "${PROVISIONER_HOST:-192.168.10.50}" ]]; then
+  echo "REFUSING: --host names the production host; drop --host for a production deploy."; exit 2
+fi
 
 health_check() {
   # Returns 0 if the freshly-restarted service is healthy, 1 otherwise.
@@ -145,6 +164,12 @@ if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
   DIRTY="-dirty"
 fi
 
+if [[ "$DEV_HOST" == "1" ]]; then
+  # A dev bench host takes any branch: hardware qualification runs there
+  # before promotion to the production pin.
+  ALLOW_BRANCH=1
+  echo "Dev bench host ${TARGET_HOST}: branch guard relaxed for '${BRANCH}'."
+fi
 if [[ "$BRANCH" != "production" && "$ALLOW_BRANCH" != "1" ]]; then
   echo "REFUSING: on branch '$BRANCH', not 'production'."
   echo "Production deploys: run from a 'production' checkout (see docs/BRANCHING.md)."

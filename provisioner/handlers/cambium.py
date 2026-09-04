@@ -9,10 +9,17 @@ import re
 import tempfile
 import urllib.parse
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import List, Any, Dict, Optional, Tuple
 
 import aiohttp
 
+from ..field_ownership import (
+    MODE_ROLES,
+    Owner,
+    OwnershipContract,
+    classify,
+    expected_values as ownership_expected_values,
+)
 from .base import UNVERIFIED, BaseHandler, DeviceInfo
 
 logger = logging.getLogger(__name__)
@@ -28,87 +35,156 @@ class CambiumHandler(BaseHandler):
 
     required_baseline_mode = "sm"
     requires_ptp_settings = True
+    #: Every supported Cambium model maps to a family tree. A model with no
+    #: family baseline fails closed instead of picking an arbitrary file
+    #: (the vendor root holds AP/PTP mode templates, never an SM baseline).
+    allows_arbitrary_template_fallback = False
 
-    _SECRET_CONFIG_KEY_RE = re.compile(
-        r"(?:password|passphrase|psk|secret|token|community|private[_-]?key|encryption[_-]?key)",
-        re.IGNORECASE,
+    #: Fleet policy that the SM baseline writes and verifies. Every value
+    #: traces to the known-good fixtures under ``bench-evidence/cambium``
+    #: (see ``tests/test_cambium_evidence.py``). Change a value there first.
+    SM_FLEET_POLICY = {
+        "networkMode": "2",
+        "mgmtVLANEnable": "1",
+        "mgmtVLANVID": "12",
+        "mgmtIFEnable": "0",
+        "networkBridgeIPAddressMode": "2",
+        "mgmtIFIPAddressMode": "2",
+        "systemNtpServerIPMode": "1",
+        "systemNtpServerPrimaryIP": "time.google.com",
+        "systemNtpServerSecondaryIP": "time.cloudflare.com",
+        "syslogServerIPFirst": "100.126.15.28",
+        "syslogServerPortFirst": "514",
+        "syslogServerTypeFirst": "1",
+        "syslogServerLogCLISH": "1",
+        "syslogServerLogDA": "1",
+        "syslogServerLogMask": "31",
+        "syslogServerLogToWeb": "0",
+        "cambiumDeviceAgentCNSURL": "cnmaestro.infra.treehouse.mn",
+        "cambiumDeviceAgentEnable": "1",
+        "cambiumDeviceAgentMGMTRoutingEnable": "0",
+        "cambiumDeviceAgentZeroTouchEnable": "1",
+        "snmpProtocolVersion": "1",
+        "snmpRemoteAccess": "1",
+        "cambiumSSHServerEnable": "1",
+        "cambiumTelnetServerEnable": "0",
+        "wirelessDeviceCountryCode": "US",
+    }
+
+    #: The three fields that define the SM radio role. Every verified SM
+    #: export (4518, 4616, 4625, Force 300-25) carries these values; every AP
+    #: export carries 1 / 0 / 1 and PTP carries protocol mode 3.
+    SM_ROLE_VALUES = {
+        "wirelessInterfaceMode": "2",
+        "wirelessInterfacePTPMode": "1",
+        "wirelessInterfaceProtocolMode": "1",
+    }
+
+    #: Field ownership contract (``docs/PROVISIONING_NORTH_STAR.md``).
+    #: Anything not listed is a device default: never written, never verified
+    #: as an exact value. Secret-shaped keys are secrets by regex.
+    #: Fleet policy whose value differs per family and lives in the family
+    #: SM template, not in ``SM_FLEET_POLICY``. Scan mask bits: 1 = 20 MHz,
+    #: 2 = 40, 16 = 80, 32 = 160. Factory is 3 (20 and 40 only), which cannot
+    #: follow an 80 MHz access point. Every 4K known-good fixture carries 51
+    #: (20/40/80/160); the 3K fixture carries 19 (20/40/80, no 160 MHz on
+    #: 5 GHz radios).
+    FAMILY_FLEET_POLICY_FIELDS = ("wirelessInterfaceScanFrequencyBandwidth",)
+
+    FIELD_OWNERSHIP = OwnershipContract.from_dotted(
+        dict(
+            [(key, Owner.FLEET_POLICY) for key in SM_FLEET_POLICY]
+            + [(key, Owner.FLEET_POLICY) for key in FAMILY_FLEET_POLICY_FIELDS]
+            + [(key, Owner.ROLE) for key in SM_ROLE_VALUES]
+            + [
+                (key, Owner.DEVICE_DEFAULT)
+                for key in (
+                    # Hardware and radio defaults the device owns.
+                    "cambiumGPSConfigPrioritizeUSB",
+                    "cambiumGPSConfigResetTimeout",
+                    "systemConfigMinAntGain",
+                    "wirelessInterfaceTDDAntennaGain",
+                    "wirelessInterface2PTPMode",
+                    "systemConfigPreheatStopTemp",
+                    "systemConfigPreheatStopTimeout",
+                    # Unit identity and captured addresses. Never copied.
+                    "systemConfigSerialNumber",
+                    "systemConfigMacAddress",
+                    "cambiumDeviceSerialNumber",
+                    "cambiumDeviceMacAddress",
+                    "cambiumCNSDeviceAgentID",
+                    "networkBridgeIPAddr",
+                    "networkBridgeGatewayIP",
+                    "networkBridgeDNSIPAddrPrimary",
+                    "networkBridgeDNSIPAddrSecondary",
+                    "networkBridgeIPv6Addr",
+                    "networkBridgeIPv6Gateway",
+                    "networkBridgeIPv6AddressMode",
+                    "networkBridgeNetmask",
+                    "mgmtIFGateway",
+                    "mgmtIFNetmask",
+                    "mgmtIFIPv6AddressMode",
+                    "mgmtIFVLAN",
+                    "networkLanDefaultIP",
+                    "networkLanIPAddr",
+                    "networkLanIPAddressMode",
+                    "networkLanIPv6Addr",
+                    "networkLanIPv6AddressMode",
+                    "networkWanGatewayIP",
+                    "networkWanIPAddr",
+                    "networkWanIPAddressMode",
+                    "networkWanIPv6Addr",
+                    "networkWanIPv6AddressMode",
+                    "networkWanIPv6LocalInterfaceId",
+                    "networkWanNetmask",
+                    "networkLanNetmask",
+                    "watchdogTargetIPAddress",
+                )
+            ]
+            + [
+                (key, Owner.MODE_ACTION)
+                for key in (
+                    # Site identity written by the AP/PTP workflow only.
+                    "wirelessInterfaceSSID",
+                    "snmpSystemName",
+                    "systemConfigDeviceName",
+                    "cambiumDeviceNameLoginDisplay",
+                    "snmpSystemDescription",
+                    "snmpSystemLocation",
+                    "snmpSystemContact",
+                    "sysLocation",
+                    # RF and link settings selected per deployment.
+                    "centerFrequency",
+                    "centerFrequency2",
+                    "asymBwPrimaryFreq",
+                    "wirelessInterfaceTXPower",
+                    "wirelessInterfaceTDDFrameSize",
+                    "wirelessInterfaceTDDRatio",
+                    "wirelessInterfaceRateMaxMCS",
+                    "prefferedAPTable",
+                )
+            ]
+            + [
+                (key, Owner.SECRET)
+                for key in (
+                    "admin_password",
+                    "wirelessInterfaceEncryptionKey",
+                    "cambiumSysAccountsTable",
+                    "snmpv3UsersTable",
+                    "wirelessRadiusServerTable",
+                )
+            ]
+        ),
+        role_fields={
+            "ePMP-4K": {"SM": tuple(SM_ROLE_VALUES)},
+            "ePMP-3K": {"SM": tuple(SM_ROLE_VALUES)},
+        },
+        root="device_props",
     )
     _DYNAMIC_FIELD_RE = re.compile(
         r"(?:ip|addr|gateway|hostname|name|ssid|frequency|serial|mac|identity|location)",
         re.IGNORECASE,
     )
-    _PORTABLE_DROP_KEYS = frozenset({
-        # Device identity.  These values belong to the unit or the later
-        # naming workflow, not to a shared deployment export.
-        "systemConfigDeviceName",
-        "snmpSystemName",
-        "cambiumDeviceNameLoginDisplay",
-        "systemConfigSerialNumber",
-        "systemConfigMacAddress",
-        "cambiumDeviceSerialNumber",
-        "cambiumDeviceMacAddress",
-        "cambiumCNSDeviceAgentID",
-        # Captured management addresses and gateways must never be copied to
-        # another unit.  DHCP remains enabled by the explicit mode fields.
-        "networkBridgeIPAddr",
-        "networkBridgeGatewayIP",
-        "networkBridgeDNSIPAddrPrimary",
-        "networkBridgeDNSIPAddrSecondary",
-        "networkBridgeIPv6Addr",
-        "networkBridgeIPv6Gateway",
-        "networkBridgeIPv6AddressMode",
-        "networkBridgeNetmask",
-        "mgmtIFGateway",
-        "mgmtIFNetmask",
-        "mgmtIFIPv6AddressMode",
-        "mgmtIFVLAN",
-        "networkLanDefaultIP",
-        "networkLanIPAddr",
-        "networkLanIPAddressMode",
-        "networkLanIPv6Addr",
-        "networkLanIPv6AddressMode",
-        "networkWanGatewayIP",
-        "networkWanIPAddr",
-        "networkWanIPAddressMode",
-        "networkWanIPv6Addr",
-        "networkWanIPv6AddressMode",
-        "networkWanIPv6LocalInterfaceId",
-        "networkWanNetmask",
-        "networkLanNetmask",
-        "watchdogTargetIPAddress",
-    })
-    _SM_ONLY_DROP_KEYS = frozenset({
-        # A captured SM SSID is site-specific.  AP and PTP exports retain
-        # their selected SSID because those profiles are organization/site
-        # assets, not the universal SM baseline.
-        "wirelessInterfaceSSID",
-    })
-    _SM_RF_DROP_KEYS = frozenset({
-        # Keep the channel lists from the working field export.  The mask
-        # selects supported widths; removing these lists loses 80 MHz scan
-        # channels on some ePMP firmware.
-        "centerFrequency",
-        "centerFrequency2",
-    })
-    _FIELD_EXPORT_VERIFY_KEYS = frozenset({
-        "mgmtVLANEnable",
-        "mgmtVLANVID",
-        "networkBridgeIPAddressMode",
-        "mgmtIFIPAddressMode",
-        "wirelessInterfaceScanFrequencyBandwidth",
-        "syslogServerIPFirst",
-        "syslogServerPortFirst",
-        "syslogServerTypeFirst",
-        "syslogServerLogMask",
-        "cambiumDeviceAgentCNSURL",
-        "cambiumDeviceAgentEnable",
-        "cambiumDeviceAgentZeroTouchEnable",
-        "snmpProtocolVersion",
-        "wirelessInterfaceTDDAntennaGain",
-        "wirelessInterfaceSSID",
-        "snmpSystemName",
-        "systemConfigDeviceName",
-    })
 
     @classmethod
     def is_full_config_export(cls, config: Any) -> bool:
@@ -123,7 +199,7 @@ class CambiumHandler(BaseHandler):
     def _contains_secret_value(cls, value: Any) -> bool:
         if isinstance(value, dict):
             for key, child in value.items():
-                if cls._SECRET_CONFIG_KEY_RE.search(str(key)) and child not in (
+                if cls.FIELD_OWNERSHIP.secret_re.search(str(key)) and child not in (
                     None, "", [], {}
                 ):
                     return True
@@ -175,74 +251,37 @@ class CambiumHandler(BaseHandler):
 
     @classmethod
     def normalize_field_export(cls, config: Dict[str, Any], role: str) -> Dict[str, Any]:
-        """Make a native export safe to use as a portable runtime profile.
+        """Reduce a native export to the fields the contract lets a profile own.
 
-        The complete upload is retained separately.  This copy removes
-        captured identity, management-address, and RF-location values while
-        retaining operational settings and secrets required by the field
-        deployment.  The selected upload role is the only role input used.
+        Only ``fleet_policy`` and ``role`` fields survive (``mode_action``
+        fields too for AP and PTP roles). Secrets, device defaults, captured
+        identity, and addresses are dropped. The fleet policy values are then
+        asserted. An export whose radio role does not match *role* is
+        refused, so an AP export can never become an SM baseline.
         """
         if not cls.is_full_config_export(config):
             raise ValueError("Cambium field export must contain device_props and template_props")
-        normalized = copy.deepcopy(config)
-        props = normalized["device_props"]
-        for key in cls._PORTABLE_DROP_KEYS:
-            props.pop(key, None)
-        if role.lower() == "sm":
-            for key in cls._SM_ONLY_DROP_KEYS | cls._SM_RF_DROP_KEYS:
-                props.pop(key, None)
-
-        # Universal first-boot management policy.  These fields are present
-        # in the confirmed 5.10/5.11 exports and are ignored by older units
-        # through skipIllegal=1 during the native import.
-        props.update({
-            "networkMode": "2",
-            "mgmtVLANEnable": "1",
-            "mgmtVLANVID": "12",
-            "mgmtIFEnable": "0",
-            "networkBridgeIPAddressMode": "2",
-            "mgmtIFIPAddressMode": "2",
-            "systemNtpServerIPMode": "1",
-            "systemNtpServerPrimaryIP": "time.google.com",
-            "systemNtpServerSecondaryIP": "time.cloudflare.com",
-            "syslogServerIPFirst": "100.126.15.28",
-            "syslogServerPortFirst": "514",
-            "syslogServerTypeFirst": "1",
-            "syslogServerLogCLISH": "1",
-            "syslogServerLogDA": "1",
-            "syslogServerLogMask": "31",
-            "syslogServerLogToWeb": "0",
-            "cambiumDeviceAgentCNSURL": "cnmaestro.infra.treehouse.mn",
-            "cambiumDeviceAgentEnable": "1",
-            "cambiumDeviceAgentMGMTRoutingEnable": "0",
-            "cambiumDeviceAgentZeroTouchEnable": "1",
-            "snmpProtocolVersion": props.get("snmpProtocolVersion", "1"),
-            "snmpRemoteAccess": props.get("snmpRemoteAccess", "1"),
-            "cambiumSSHServerEnable": "1",
-            "cambiumTelnetServerEnable": "0",
-        })
-        if role.lower() == "sm":
-            # 51 is the Cambium mask for 20/40/80/160 MHz.  The apply step
-            # projects this to 19 for known 5 GHz models, because 160 MHz is
-            # not a legal field on those devices.
-            props["wirelessInterfaceScanFrequencyBandwidth"] = "51"
-            props["wirelessInterfaceTDDAntennaGain"] = "17"
-        return normalized
-
-    @classmethod
-    def _scan_mask_for_model(cls, model: Optional[str], current: Any) -> Any:
-        """Project the shared scan mask only when the model is known."""
-        model_key = (
-            (model or "").lower()
-            .replace("cambium ", "")
-            .replace("-", " ")
-            .strip()
-        )
-        if any(marker in model_key for marker in ("force 300", "epmp 3000", "epmp 3k")):
-            return "19"
-        if cls._is_ax_model(model):
-            return "51"
-        return current
+        props = config["device_props"]
+        role_key = role.upper()
+        if role_key == "SM":
+            for key, value in cls.SM_ROLE_VALUES.items():
+                if str(props.get(key, "")).strip() != value:
+                    raise ValueError(
+                        "Cambium export is not an SM export: %s does not match the SM role" % key
+                    )
+        wanted = {Owner.FLEET_POLICY, Owner.ROLE}
+        if role_key in MODE_ROLES:
+            wanted.add(Owner.MODE_ACTION)
+        kept = {
+            key: copy.deepcopy(value)
+            for key, value in props.items()
+            if classify(cls.FIELD_OWNERSHIP, (key,)) in wanted
+        }
+        kept.update(cls.SM_FLEET_POLICY)
+        return {
+            "template_props": copy.deepcopy(config["template_props"]),
+            "device_props": kept,
+        }
 
     @classmethod
     def is_connectorized_model(cls, model: Optional[str]) -> bool:
@@ -250,19 +289,38 @@ class CambiumHandler(BaseHandler):
         model_key = (model or "").lower().replace("cambium ", "").strip()
         return "4600c" in model_key or "connectorized" in model_key
 
+    #: Running firmware from which the explicit upload/upgrade/status
+    #: endpoints (``upload_sw_image_local``, ``upgrade_sw_image_local``,
+    #: ``get_upgrade_status``) are known to exist. Older firmware answered 404
+    #: and uses ``local_upload_image``.
+    EXPLICIT_UPGRADE_MIN_FIRMWARE = (5, 11)
+
+    def _running_firmware_uses_explicit_upgrade(self) -> bool:
+        version = self._device_info.firmware_version if self._device_info else None
+        match = re.match(r"\s*v?(\d+)\.(\d+)", str(version or ""))
+        if not match:
+            # Unknown firmware: the second pass runs on freshly flashed
+            # firmware, which is current; the first pass is unknown.
+            return False
+        return (int(match.group(1)), int(match.group(2))) >= self.EXPLICIT_UPGRADE_MIN_FIRMWARE
+
     async def apply_antenna_gain(
         self, gain_db: Optional[int] = None, model: Optional[str] = None
     ) -> bool:
         """Apply connectorized gain during explicit AP/PTP/custom setup.
 
-        Initial SM provisioning uses the portable 17 dBi baseline.  This hook
-        runs only after an operator selects a post-provisioning mode.  It does
-        not write integrated radios, even when a value is supplied.
+        Standard SM provisioning never writes gain.  This hook runs only after
+        an operator selects a post-provisioning mode, and only a connectorized
+        radio accepts a value.  Integrated radios are never written.
         """
         selected_model = model or (self._device_info.model if self._device_info else None)
         if not self.is_connectorized_model(selected_model):
+            # Integrated radios: the hardware owns the gain (device default).
             return True
-        effective_gain = 23 if gain_db is None else gain_db
+        if gain_db is None:
+            logger.error("Connectorized Cambium radio requires an explicit antenna gain")
+            return False
+        effective_gain = gain_db
         try:
             effective_gain = int(effective_gain)
         except (TypeError, ValueError):
@@ -274,22 +332,6 @@ class CambiumHandler(BaseHandler):
         return await self._apply_config_settings_curl({
             "wirelessInterfaceTDDAntennaGain": str(effective_gain),
         })
-
-    @classmethod
-    def prepare_field_export_for_model(
-        cls, config: Dict[str, Any], model: Optional[str]
-    ) -> Dict[str, Any]:
-        """Prepare a full export for one known radio before native import."""
-        if not cls.is_full_config_export(config):
-            return config
-        prepared = copy.deepcopy(config)
-        props = prepared["device_props"]
-        if "wirelessInterfaceScanFrequencyBandwidth" in props:
-            props["wirelessInterfaceScanFrequencyBandwidth"] = cls._scan_mask_for_model(
-                model,
-                props["wirelessInterfaceScanFrequencyBandwidth"],
-            )
-        return prepared
 
     @classmethod
     def qualified_post_provision_modes_for_model(
@@ -886,6 +928,35 @@ class CambiumHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Error changing default password: {e}")
             return False
+
+    def required_secrets(self) -> List[str]:
+        # An SM cannot associate without the WPA2 key, and the template never
+        # carries it. Fail before config when the host does not provide it.
+        return ["wpa_key"]
+
+    async def apply_secrets(self, secrets: Dict[str, str]) -> bool:
+        """Write secret-owned fields through set_param. Never logs a value.
+
+        Secrets are not part of any template. They arrive from the host
+        configuration (``credentials.cambium``) and are verified by
+        presence only, never by value.
+        """
+        props = {}
+        if secrets.get("wpa_key"):
+            props["wirelessInterfaceEncryptionKey"] = secrets["wpa_key"]
+        if secrets.get("snmp_community"):
+            props["snmpReadOnlyCommunity"] = secrets["snmp_community"]
+        if not props:
+            return True
+        # set_param bookkeeping must not replace the verification basis.
+        previous = self._last_applied_config
+        try:
+            applied = await self._apply_config_settings_curl(props)
+        finally:
+            self._last_applied_config = previous
+        if applied:
+            logger.info("Applied %d secret field(s) on %s", len(props), self.ip)
+        return bool(applied)
 
     def _get_custom_credential(self) -> Optional[Dict[str, str]]:
         """Get ONE custom credential for Cambium devices.
@@ -1754,12 +1825,8 @@ class CambiumHandler(BaseHandler):
     def _field_export_verification_values(
         cls, props: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Select stable policy fields for a full-export read-back."""
-        return {
-            key: value
-            for key, value in cls._verification_values(props).items()
-            if key in cls._FIELD_EXPORT_VERIFY_KEYS
-        }
+        """Select fleet-policy and role fields for a full-export read-back."""
+        return ownership_expected_values(cls.FIELD_OWNERSHIP, cls._scalar_props(props))
 
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from JSON file.
@@ -1850,13 +1917,10 @@ class CambiumHandler(BaseHandler):
                             "Cambium native field exports require an interface-bound config_import"
                         )
                         return False
-                    model = self._device_info.model if self._device_info else None
-                    prepared = self.prepare_field_export_for_model(config_data, model)
-                    config_data = prepared
                     with tempfile.NamedTemporaryFile(
                         mode="w", suffix=".json", prefix="cambium_field_export_", delete=False
                     ) as prepared_file:
-                        json.dump(prepared, prepared_file)
+                        json.dump(config_data, prepared_file)
                         prepared_file.flush()
                         temporary_path = prepared_file.name
                     try:
@@ -2387,8 +2451,10 @@ class CambiumHandler(BaseHandler):
           a prior bank-swap reboot — the first-pass endpoint silently no-ops
           in that state.
 
-        - ePMP AX: use the explicit upload/upgrade/status sequence for both
-          passes. Its web UI does not expose the legacy first-pass endpoints.
+        The endpoint that exists depends on the running firmware, not the
+        model or the pass: 5.11.1 units used upload_sw_image_local in two
+        captures, and an ePMP 4518 at 5.10.4 answered 404 on it. The handler
+        picks the endpoint for the running firmware, then tries the other.
 
         Endpoint sets are hardware-confirmed; see docs/cambium-config.md.
         """
@@ -2402,11 +2468,29 @@ class CambiumHandler(BaseHandler):
 
             # Use curl when interface binding is needed (VLAN mode)
             if self.interface:
-                model = self._device_info.model if self._device_info else None
-                is_ax = self._is_ax_model(model)
-                if bank == 2 or is_ax:
-                    return await self._upload_firmware_curl_alt_bank(firmware_path)
-                return await self._upload_firmware_curl(firmware_path)
+                # The radio always flashes its inactive bank; the pass number
+                # only exists to fill both banks. Which upload endpoint exists
+                # depends on the running firmware (bench evidence):
+                #   5.11.1 (Force 300-25, two captures): upload_sw_image_local
+                #   5.10.4 (ePMP 4518 workflow.har, 2026-09-02): the UI used
+                #   local_upload_image + get_upload_status; the provisioner's
+                #   upload_sw_image_local attempt answered 404 the same day.
+                # Try the endpoint the running firmware should have, then the
+                # other one.
+                if self._running_firmware_uses_explicit_upgrade():
+                    order = (self._upload_firmware_curl_alt_bank, self._upload_firmware_curl)
+                else:
+                    order = (self._upload_firmware_curl, self._upload_firmware_curl_alt_bank)
+                for index, uploader in enumerate(order):
+                    if await uploader(firmware_path):
+                        return True
+                    if index == 0:
+                        logger.warning(
+                            "Firmware upload via %s failed on %s; trying the other endpoint",
+                            "explicit upgrade" if uploader is self._upload_firmware_curl_alt_bank else "legacy first-pass",
+                            self.ip,
+                        )
+                return False
 
             # Use aiohttp when no interface binding needed
             if not self._session:
@@ -3822,22 +3906,29 @@ class CambiumHandler(BaseHandler):
         "hostname": "snmpSystemName",
         "devicename": "systemConfigDeviceName",
     }
-    @classmethod
-    def _verification_values(cls, props: Dict[str, Any]) -> Dict[str, Any]:
-        """Return safe scalar properties suitable for read-back verification.
-
-        Cambium's native JSON exports use a flat ``device_props`` mapping.
-        Identity fields are optional, so verification must use the applied
-        operational properties when present. Secret-shaped fields are excluded
-        even though the current approved templates do not contain them.
-        """
+    @staticmethod
+    def _scalar_props(props: Dict[str, Any]) -> Dict[str, Any]:
         return {
             key: value
-            for key, value in props.items()
-            if not key.startswith("_")
-            and not cls._SECRET_CONFIG_KEY_RE.search(key)
-            and isinstance(value, (str, int, float, bool))
+            for key, value in (props or {}).items()
+            if not str(key).startswith("_") and isinstance(value, (str, int, float, bool))
         }
+
+    @classmethod
+    def _verification_values(cls, props: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the contract's read-back expectations for applied props.
+
+        Fleet-policy, role, and mode-action fields are verified as exact
+        values. Secrets and device defaults are never part of the set.
+        """
+        return ownership_expected_values(
+            cls.FIELD_OWNERSHIP, cls._scalar_props(props), include_mode_action=True
+        )
+
+    def applied_config_expectations(self) -> Optional[Dict[str, Any]]:
+        if not self._last_applied_config:
+            return None
+        return self._verification_values(self._last_applied_config) or None
 
     @staticmethod
     def _verification_value(value: Any) -> str:
@@ -3871,6 +3962,7 @@ class CambiumHandler(BaseHandler):
 
         missing = False
         checked = 0
+        self.last_verify_mismatches = []
         for field, expected in expected_values.items():
             property_name = self._VERIFY_FIELD_ALIASES.get(field, field)
             if property_name not in config:
@@ -3882,7 +3974,9 @@ class CambiumHandler(BaseHandler):
             checked += 1
             if not self._config_values_match(expected, config[property_name]):
                 logger.error(f"[CONFIG VERIFY] Property mismatch: {property_name}")
-                return False
+                self.last_verify_mismatches.append(property_name)
+        if self.last_verify_mismatches:
+            return False
 
         if not checked or missing:
             logger.info(
