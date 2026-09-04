@@ -1,10 +1,21 @@
-# Ubiquiti Wave Device Credentials Configuration
+# Ubiquiti Wave Device Configuration
 
-This document describes how to configure username, password, SNMP, and other credentials on Ubiquiti Wave devices.
+This document describes how to configure users, SNMP, syslog, and other
+services on Ubiquiti Wave devices.
 
 ## Overview
 
 Wave devices use a REST API at `/api/v1.0/system/airos/configuration` for configuration management. This is different from traditional airOS devices which use SSH and text-based `system.cfg` files.
+
+The Wave Nano process capture is indexed in
+[`bench-evidence/ubiquiti/Wave-Nano/unknown/`](../bench-evidence/ubiquiti/Wave-Nano/unknown/).
+It confirms the configuration endpoint and body shape. It does not confirm a
+management-VLAN transition. Wave Nano requires management VLAN 12 in the
+standard deployment. Do not make a technician remember this setting. After the
+bench switch, host VLAN interface, and reconnect path pass a hardware test,
+include `network.interfaces.data.mgmtVLAN: 12` in the sanitized Wave Nano
+baseline and make the workflow check it. A device that receives `mgmtVLAN: 12`
+can stop answering the untagged provisioning VLAN.
 
 ## Authentication
 
@@ -71,9 +82,23 @@ Note: The response does NOT include the password - it's stored internally as a h
 - **No reboot required** - Password takes effect immediately
 - **Separate from config** - Users are managed via `/system/users`, not `/system/airos/configuration`
 
-## SNMP Configuration (HAR Verified)
+## Services Configuration (HAR Verified)
 
-SNMP is configured via the `/services` endpoint using the `snmpAgent` field.
+The Wave setup flow sends the full services object to `/services`. The supplied
+Wave Nano capture contains these service sections:
+
+- `snmpAgent`
+- `systemLog`
+- `pingWatchdog`
+- `discoveryResponder`
+- `bluetoothManagement`
+- `sshServer`
+- `unms`
+- `lldp`
+- `webServer`
+- `ntpClient`
+
+SNMP uses the `snmpAgent` field. Syslog uses the `systemLog` field.
 
 ### API Endpoint
 ```
@@ -95,7 +120,8 @@ Content-Type: application/json
 ```
 
 ### Full Services Object
-When updating SNMP, you must PUT the entire services object (GET first, modify snmpAgent, PUT back):
+When updating one service, GET the full services object, modify one section, and
+PUT the full object back:
 
 ```json
 {
@@ -104,6 +130,13 @@ When updating SNMP, you must PUT the entire services object (GET first, modify s
     "community": "mycommunity",
     "location": "Site Name",
     "contact": "admin@example.com"
+  },
+  "systemLog": {
+    "enabled": true,
+    "server": "<site syslog server>",
+    "port": 514,
+    "level": "info",
+    "klogLevel": "info"
   },
   "sshServer": {
     "enabled": false,
@@ -144,26 +177,21 @@ When updating SNMP, you must PUT the entire services object (GET first, modify s
 - [x] `set_password()` - Password change (NEW)
 - [x] `configure_snmp()` - SNMP configuration (NEW)
 - [x] `_get_config()` - Get current config helper (NEW)
+- [x] Wave service fields identified from the Wave Nano HAR
 
 ### Not Implemented
 - [ ] `backup_config()` - Config export (needs HAR analysis)
+- [ ] Complete `/services` apply path, including syslog
+- [ ] Post-apply verification for service fields
 
 ## HAR Analysis Required
 
-To complete the implementation, HAR (HTTP Archive) analysis is needed to discover:
+To complete the implementation, bench evidence is needed to confirm:
 
-1. **Password change endpoint/structure:**
-   - Is there a dedicated `/api/v1.0/user/password` endpoint?
-   - What is the exact JSON structure for users in the config?
-   - Is a reboot required after password change?
-
-2. **SNMP configuration:**
-   - What is the config key for SNMP settings?
-   - What fields are available (community, v3 settings, trap hosts)?
-
-3. **Other credentials:**
-   - Are there separate APIs for SSH keys?
-   - WiFi/SSID password configuration structure?
+1. The complete `/services` response and apply response.
+2. The safe canonical fields for syslog, watchdog, SSH, UNMS, LLDP, web, and NTP.
+3. The Wave Nano VLAN 12 transition and reconnect path.
+4. A no-config backup and a known-good post-apply backup.
 
 ### How to Capture HAR
 

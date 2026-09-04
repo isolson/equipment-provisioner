@@ -2,6 +2,25 @@
 
 Common issues and how to debug them.
 
+For device API, firmware, configuration, and verification faults, first follow
+the [Bench Evidence SOP](BENCH_EVIDENCE.md). Read the exact model and firmware
+manifest before you change handler code.
+
+## Hardware API or Configuration Failure
+
+**Symptom:** The device rejects an upgrade or configuration request, or
+read-back verification reports a mismatch.
+
+Read the model and firmware evidence before you change code. Compare the
+captured method, endpoint, fields, body shape, response status, and live
+configuration structure with the handler.
+
+Keep raw HAR files and device backups in the secure evidence root. Do not put
+them in git or chat. Add only redacted endpoint facts to the vendor document.
+
+Add a regression test for each confirmed device behavior. Run the full test
+gate before you deploy to the bench.
+
 ## Device Not Detected
 
 **Symptom:** Port stays on "NO LINK" or "DETECTING" and never identifies a device.
@@ -78,6 +97,13 @@ journalctl -u provisioner-web -f | grep -i "login\|auth\|credential"
 - A full export uses top-level `ethernet`, `network`, `services`, `system`, `version`, and `wireless` keys.
 - An old export with `network.ethernet` is migrated by the handler before apply.
 - Check [Vendor Hardware Notes](VENDOR_HARDWARE_NOTES.md) before you capture or replace a template.
+
+**Tachyon login times out after config verification:**
+- A successful verification must leave a usable session for firmware bank 2.
+- The flow reuses that session. It does not force another login.
+- A transport or busy-service failure uses the Tachyon bounded retry policy.
+- An authentication failure stops immediately and requests credentials.
+- Check the log `kind` value. Do not treat a transport timeout as bad credentials.
 
 **Device rebooted unexpectedly:**
 - Some devices (Tachyon) auto-reboot after firmware flash without explicit reboot command

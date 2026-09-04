@@ -9,13 +9,23 @@ A network equipment auto-provisioner running on a Linux host (currently a Lenovo
 - **Handler properties control flow, not if/else in base.py.** The `provision()` method in `base.py` reads handler properties such as `supports_dual_bank`, `config_after_all_firmware`, and `fw2_skips_reboot`. To change behavior for a device, override a property in the handler. Do not add vendor-specific branching to `base.py`. The same rule applies before instantiation: `config_store.py` and `main.py` read class-level traits through `HandlerManager.handler_class_for()` instead of `if device_type == "..."`. See `docs/HANDLER_DEVELOPMENT.md`.
 - **Properties can be conditional on model.** `self._device_info` is populated before properties are checked in `provision()`. A single handler can serve APs and switches with different behavior by checking the model in the property getter.
 - **Vendor *behavior* stays in vendor handlers.** No provisioning logic in `base.py`, `port_manager.py`, or `fingerprint.py`; `base.py` must contain **zero** vendor brand strings (true since Story 1 / #122 replaced the last stray `mikrotik` branch with the `firmware_lookup_key()` handler override — keep it at zero). Vendor *enumeration* is consolidated into the `VendorSpec` registry (`provisioner/vendor_registry.py`, Story 6 / #76): one `register(VendorSpec(...))` per vendor, from which the handler map, firmware `SOURCE_MAP`, firmware patterns, credentials, IPs, UI metadata, and the CLI/API/setup lists all derive. Fingerprint signatures/probes are the remaining hand-kept vendor knowledge (Story 7 / #77). **Standard: never add a *new* source of truth that lists vendors — derive from the registry.** See `AGENTS.md` for the full standard and `docs/ARCHITECTURE_ISOLATION_REVIEW.md` for the touchpoint map (`docs/epic-vendor-isolation-refactor.md` is the epic).
-- **Config templates use deep merge, with an explicit mode-template exception.** Standard provisioning templates are merged into the device's current config as-is (shared merge semantics live in `provisioner/config_merge.py`). They do not support `{{variable}}` substitution. AP and PTP mode-change templates are rendered by `provisioner/mode_config.py`; limit placeholders to those templates. Full-export templates (for example, Tachyon `.tar` or exported JSON files) are applied authoritatively (replace, not merge); the vendor handler decides via the class-level `is_full_config_export()` hook (Tachyon overrides it).
+- **Config templates use deep merge, with an explicit mode-template exception.** Standard provisioning templates are merged into the device's current config as-is (shared merge semantics live in `provisioner/config_merge.py`). They do not support `{{variable}}` substitution. AP and PTP mode-change templates are rendered by `provisioner/mode_config.py`; limit placeholders to those templates. Full-export templates are classified by the handler's `is_full_config_export()` hook. Tachyon exports remain non-composable resolver inputs, but current 30x firmware requires a complete current-schema document at the POST boundary, so `TachyonHandler` completes the export from the live config before applying the export values. Do not generalize that vendor-specific compatibility behavior into shared flow.
 - **Template lookup goes through the config resolver.** `main.py` resolves templates via `provisioner/config_resolver.py` (R1 / #114), not by calling `store.get_config_template()` directly. With no role selected the resolver is a byte-identical passthrough of the plain lookup; with a role it composes site-role overlays from `configs/templates/{vendor}/roles/{role}/`, gated by the `supports_config_overlays` handler trait (off fleet-wide until bench-verified). See `docs/HANDLER_DEVELOPMENT.md` → "Site-Role Config Overlays".
 - **Two config/firmware paths exist.** Code deploys to `/opt/provisioner/` via `scripts/deploy.sh`. The active data repo is at `/var/lib/provisioner/repo/`. Config templates need to exist in the repo dir on the Pi to take effect. Deploy script syncs code but not the repo data dir.
 
 ## Provisioning Flow
 
-Default order: Login -> Info -> FW1 -> Reboot -> Verify -> **Config -> Config Verify** -> FW2 -> Reboot -> Verify
+Default order: Login -> Info -> FW1 -> Reboot -> Verify -> **Config -> Config Verify -> Secrets** -> FW2 -> Reboot -> Verify
+
+Config verify compares the field ownership contract's expectation set
+(`provisioner/field_ownership.py`). Secrets are written by `apply_secrets()`
+from the host credentials, never by a template.
+
+Provisioning North Star: start every supported radio with the verified SM
+baseline. Elevate to AP or PTP only through an explicit post-provision mode
+workflow with its approved profile. A model's AP capture is evidence for that
+role; it must not change the standard SM default or cross-apply to another
+model in the same firmware family. See `docs/PROVISIONING_NORTH_STAR.md`.
 
 When `config_after_all_firmware=True`: Login -> Info -> FW1 -> Reboot -> Verify -> FW2 -> Reboot -> Verify -> **Config (no verify)**
 
@@ -30,6 +40,19 @@ The default order is preferred for most devices. Only use `config_after_all_firm
 - Read `docs/HOST_SETUP.md` before touching deploy scripts or systemd units — it covers the SSH-agent issue, the `/etc` versus `/opt` config split, and the required `CAP_SETUID`/`CAP_SETGID` capabilities for the display wake path
 - Read `docs/KIOSK_ARCHITECTURE.md` before touching `provisioner/display.py`, the openbox autostart, `restart-kiosk.sh`, or `auto-rotate.*` — covers the startx-based session, same-uid X access, and the native-DPMS-vs-JS-sleep split
 - Read `docs/cambium-config.md` before touching Cambium code — endpoints must be confirmed on hardware
+- Read `docs/PROVISIONING_NORTH_STAR.md` for field ownership (one owner per
+  field) and qualification (evidence decides which modes are offered). A
+  template or handler value must trace to a fixture under `bench-evidence/`.
+- Read `docs/EVIDENCE_RUNBOOK.md` to capture evidence and
+  `docs/EVIDENCE_CONTRIBUTING.md` to turn it into an issue and PR;
+  `bench-evidence/INVENTORY.md` lists what is missing per record.
+- Read `docs/BENCH_EVIDENCE.md` before hardware-related handler changes. Each
+  capture has a `capture-summary.md` next to it (repo record and bench host);
+  read it before inferring an endpoint. Raw HARs live only on the host under
+  `/var/lib/provisioner/bench-evidence/`. Check
+  the exact model and firmware evidence before inferring an API endpoint or
+  configuration shape. Keep raw HAR files and device backups outside git;
+  record redacted facts and regression tests in the repository.
 - Read `docs/mikrotik-netinstall.md` before touching MikroTik Netinstall / BOOTP auto-trigger code — covers the RouterOS 7.20+ quirks (device-mode, `-s` replacing default-config, admin first-login lockout) that took multiple iterations to discover
 - The host runs **Python 3.9** — do not use 3.10+ features (match/case, `X | Y` union types, `datetime.UTC`, `str.removeprefix`)
 - Test on real hardware when possible. There is no simulator for most vendors.

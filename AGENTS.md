@@ -18,6 +18,13 @@ A device plugged into a VLAN-isolated port is detected by `port_manager`, classi
 
 The standards below exist to protect the first and shrink the second.
 
+The provisioning north star is separate from vendor enumeration: every
+supported radio starts with the verified SM baseline, then may be explicitly
+elevated to AP or PTP with a role-specific profile. A model's AP capture is
+process evidence for that role, not a canonical template. It must not become
+the default config for another model in the same firmware family. See
+`docs/PROVISIONING_NORTH_STAR.md`.
+
 ---
 
 ## Standards (must-follow)
@@ -38,6 +45,11 @@ Always finish with `grep -rin <vendor> provisioner/ configs/` and a green test s
 ### 4. Config templates: deep-merge, with an explicit mode-template exception
 Standard provisioning templates are deep-merged into the device's live config as-is (shared semantics in `provisioner/config_merge.py`). They do not support `{{variable}}` substitution. The AP and PTP mode-change templates are an explicit exception: `provisioner/mode_config.py` renders their allowlisted variables before it applies them. Do not use placeholders in standard provisioning templates or in unrelated documentation. Model aliasing lives in `config_store.py` `CONFIG_MODEL_ALIASES`. Template lookup runs through the vendor-neutral resolver seam (`provisioner/config_resolver.py` — R1 / #114), which can compose site-role overlays from `configs/templates/{vendor}/roles/{role}/`; see `docs/HANDLER_DEVELOPMENT.md` → "Site-Role Config Overlays". Role overlays must never contain secrets or identity fields.
 
+Required model network settings belong in the sanitized model baseline and its
+workflow checks. Do not make a technician remember a required setting or enter
+it as an optional site value. Keep customer, tower, IP, and credential values
+outside the baseline.
+
 ### 5. Python 3.9 target
 No `match`/`case`, no `X | Y` unions (use `Optional[...]` / `Dict[...]`), no `str.removeprefix`, no `datetime.UTC`. CI runs on 3.9; there is no transpile step.
 
@@ -56,12 +68,35 @@ There is **no hardware simulator** for most vendors, so:
 - Detection / handler-behavior changes carry real risk → lean on existing fixtures (`test_fingerprint.py`, `test_mikrotik_*detection*`, `test_handler_properties.py`, `test_provision_flow.py`) and assert **identical** outcomes.
 - New registries should ship with a consistency test that fails if the duplicated vendor lists drift apart (see epic Story 0).
 
+For hardware API, firmware, configuration, and verification changes, follow
+`docs/BENCH_EVIDENCE.md`. Check the exact model and firmware evidence before
+you infer an endpoint or payload. Keep raw HAR files and device backups in the
+secure bench evidence directory, and commit only redacted structure fixtures
+and confirmed facts.
+
 ### 9. Never leak secrets or private data
 Credentials, keys, tokens, and PSKs (device passwords, `MIKROTIK_ZTP_API_KEY`, the fleet `bootstrap_password` / onboarding passphrase, RADIUS secrets) must never be echoed, logged, or passed as CLI arguments — they land in `ps`, shell history, and the **un-scrubbable** chat transcript. Inject via env (`SSHPASS=… sshpass -e`) or stdin; extract only the field you need from a credential response; confirm presence by length/mask, not value. A secret the user shares — or that you fetch — may be stored in a **gitignored** local file (`.context/*.env`, `chmod 600`) or auto-memory and referenced from there, never re-printed and never committed. If something leaks, scrub reachable artifacts (task outputs, `/tmp`, history) and report exactly what and where; never rotate fleet-wide MikroTik bootstrap/onboarding secrets unilaterally (the onboarding PSK means a whole-fleet reflash).
 
 ---
 
+### 10. Field ownership and evidence decide values
+
+Every config field has one owner (`fleet_policy`, `role`, `secret`,
+`device_default`, `mode_action`); see `docs/PROVISIONING_NORTH_STAR.md`. A
+handler declares one `FIELD_OWNERSHIP` table. `scripts/check_templates.py`
+refuses a template that carries a secret, a device default, a site identity,
+or an unclassified field. Every value in a template or handler table must
+trace to a `values` path in a redacted bench fixture; a change starts with a
+new fixture. A post-provision mode is offered only after both transition
+directions are recorded in a bench manifest (`provisioner/qualification.py`).
+Never write a device default. Never put a secret in a template. Before
+changing a device endpoint or request shape, read the capture summary next to
+the HAR (`bench-evidence/<vendor>/<model>/<firmware>/capture-summary.md`) and
+cite it.
+
 ## Anti-patterns (do not do)
+
+- Taking a config value from a chat, a screenshot, or a single field export instead of a committed fixture; or writing a field the contract classifies as a device default
 
 - Vendor branching in `base.py` / shared modules instead of a handler property.
 - Introducing another place that enumerates vendors instead of deriving from an existing registry.
