@@ -73,7 +73,7 @@ The requested role matrix is:
 | Hardware | Requested roles | Current bench qualification |
 | --- | --- | --- |
 | hEX S (E60iUGS ARM) | Business router; Business switch | Configuration transitions verified on 7.23.5 |
-| hEX PoE | Business router; Business switch; Infrastructure switch | Pending model-specific profiles and bench validation |
+| hEX PoE | Business router; Business switch; Infrastructure switch | Upstream port profile validated; role integration and end-to-end checks pending |
 | RB5009 | Business router; Business switch; Infrastructure switch | Pending model-specific profiles and bench validation |
 
 Infrastructure switch is a separate role. Its management, VLAN, uplink and
@@ -87,3 +87,12 @@ must be checked for each exact model and firmware. Do not copy the E60iUGS
 six-port/ARM layout assumptions to hEX PoE or RB5009 or mark either validated
 from this hEX S result. Their role implementations belong in the MikroTik
 handler, with no model branches in the shared engine or UI.
+
+## Ops contract reconciliation
+
+[Ops configuration handoff](ops-config-handoff.md) records the existing upstream
+contract, API gaps and hardware-profile status. The business labels above name
+the requested roles; this capture validates only the simple routing/bridging
+mechanics, not the complete business VLAN/security policy. Ops owns those
+profiles and the infrastructure lifecycle. Its `hEX S` alias currently points
+to the older RB760iGS and must be disambiguated before rendering for E60iUGS.
