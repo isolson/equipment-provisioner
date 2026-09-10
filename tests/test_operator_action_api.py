@@ -341,7 +341,7 @@ def test_mode_endpoint_accepts_cambium_family_ptp(tmp_path, monkeypatch):
     assert calls == [(4, "cambium", "ptp", 32, 18)]
 
 
-def test_mode_endpoint_requires_cambium_ptp_profile(tmp_path, monkeypatch):
+def test_mode_endpoint_rejects_cambium_ptp_profile_without_frequency(tmp_path, monkeypatch):
     _qualify(tmp_path, monkeypatch, "cambium", "ePMP 4518", "5.11.1")
     client = _client(
         monkeypatch,
@@ -356,7 +356,7 @@ def test_mode_endpoint_requires_cambium_ptp_profile(tmp_path, monkeypatch):
 
     assert response.status_code == 409
     assert response.json()["detail"] == (
-        "A certified PTP settings profile is required for this family and link"
+        "Cambium PTP settings profile is missing: centerFrequency"
     )
 
 

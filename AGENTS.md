@@ -4,7 +4,7 @@ This file is the **tool-agnostic** statement of how this codebase is structured 
 
 - For **host/deploy/kiosk operational details** and Claude-specific workflow, see `CLAUDE.md` (which points here for these standards).
 - For the **current isolation state** and the exhaustive vendor-touchpoint map, see `docs/ARCHITECTURE_ISOLATION_REVIEW.md`.
-- For the **remediation plan** (consolidating the registries), see `docs/epic-vendor-isolation-refactor.md`.
+- For the **refactor status and remaining work**, see `docs/epic-vendor-isolation-refactor.md`.
 - For the **handler property reference**, see `docs/HANDLER_DEVELOPMENT.md`; for interface binding / VLAN / UI, see `STANDARDS.md`.
 
 ---
@@ -14,9 +14,9 @@ This file is the **tool-agnostic** statement of how this codebase is structured 
 A device plugged into a VLAN-isolated port is detected by `port_manager`, classified by `fingerprint`, routed by `handler_manager` (`HANDLER_MAP`), and provisioned by `base.py`'s property-driven `provision()` flow calling into a vendor handler. The system has **two layers with very different isolation quality**:
 
 - **Behavior layer (well isolated, keep it that way):** each vendor's logic lives entirely in `handlers/{vendor}.py` (+ `firmware_sources/{vendor}.py` + `configs/templates/{vendor}/`). No handler imports another. The provisioning *order* is decided by handler **properties**, never by `if vendor ==` in the engine.
-- **Registration layer (currently leaky, being consolidated):** the list of which vendors exist was duplicated across ~10 registries; Phase 1 of the isolation epic (Stories 1–4, merged 2026-08) collapsed the handler-derived lists, credentials, and link-local IPs, with the kiosk UI map in flight (Story 5 / PR #128). There is still not a single add/remove point.
+- **Registration layer:** `provisioner/vendor_registry.py` owns vendor metadata in `VendorSpec` entries. Handler/firmware maps, defaults, IPs and UI/API/CLI lists derive from it. `DeviceType` remains explicit and is checked against the registry. Detection signatures and probes remain shared code.
 
-The standards below exist to protect the first and shrink the second.
+The standards below preserve this isolation and its regression coverage.
 
 The provisioning north star is separate from vendor enumeration: every
 supported radio starts with the verified SM baseline, then may be explicitly
@@ -32,18 +32,25 @@ the default config for another model in the same firmware family. See
 ### 1. Vendor *behavior* belongs in handlers; flow is property-driven
 Change device behavior by overriding a handler **property** (`supports_dual_bank`, `config_after_all_firmware`, `update_triggers_reboot`, `verify_active_bank`, `fw2_skips_reboot`, `supports_password_change`, …). Properties may be conditional on `self._device_info.model`. **Never** add vendor branching to `base.py`, `port_manager.py`, or `fingerprint`'s flow. `base.py` must contain **zero** vendor brand strings — and does, since Story 1 / #122 replaced the last stray `mikrotik` branch with the `firmware_lookup_key()` handler override. Keep it at zero.
 
-### 2. Never add a *new* source of truth for vendor enumeration
-The vendor list already exists in: `DeviceType` enum, `HANDLER_MAP`, `handlers/__init__.py`, `index.html` vendor map (being derived via in-flight Story 5 / PR #128), `config.py` (`_default_credentials()`, firmware sources, feature flags), `vendor_ips.py` `VENDOR_LINK_LOCAL_IPS` (from which `port_manager.py`'s `DeviceLinkLocalIP`/boot-ping lists and `DeviceIPsConfig` derive — Story 4 / #74), `firmware_checker.py` `SOURCE_MAP` (+ `firmware_sources/__init__.py` imports), and `setup_tools.py`'s readiness/hint/mode dicts. (The CLI, API device-type validation, and setup device-type list derive from `HANDLER_MAP` via `handler_manager.provisionable_device_types()` — Story 2 / #72. Config-level credentials are one table — `config.py` `_default_credentials()` — and `main.py`'s handler dict, `BUILTIN_CREDENTIALS`, and the setup credential hints derive from it — Story 3 / #73; handler-internal `DEFAULT_CREDENTIALS` fallbacks stay vendor-local by design.) When you need "the list of vendors," **derive it from an existing registry** (prefer `HANDLER_MAP`/`DeviceType`) — do not hardcode a new list, dict, or `if device_type == "..."`. The target end-state is a single `VendorSpec` registry (see the epic); move toward it, never away.
+### 2. Derive vendor enumeration from VendorSpec
+`provisioner/vendor_registry.py` is the registration source. Do not add a vendor
+list, sibling handler import, or parallel credential/IP/firmware registry.
+`DeviceType` is an intentional explicit enum; consistency tests enforce its
+agreement with specs. Detection signatures/probes are the remaining shared
+vendor knowledge and require ordering/behavior tests.
 
-### 3. Adding/removing a vendor is a checklist, not a guess
-Until the registry is consolidated, adding or removing a vendor means editing **all** of the sites in `CLAUDE.md` → "Adding New Vendors or Hardware" (15 numbered sites; several are now derive-automatically no-ops and marked as such). Failure modes differ:
-- **S1 / crash at boot** if you miss handler or firmware-source imports (`handler_manager.py`, `handlers/__init__.py`, `firmware_sources/__init__.py`, `firmware_checker.py` `SOURCE_MAP`). (The old `config.py ↔ main.py` credentials pair is gone — Story 3 / #73 made `main.py` iterate the `config.credentials` table.)
-- **S2 / silently undetectable device or dead code** if you miss a fingerprint signature, a `vendor_ips.py` entry, a firmware pattern, the setup-tools per-vendor dicts, or the UI vendor map (the CLI/API lists derive from `HANDLER_MAP` — Story 2 / #72).
-
-Always finish with `grep -rin <vendor> provisioner/ configs/` and a green test suite.
+### 3. Add vendors and models through their actual registration and resolver paths
+Follow `docs/HANDLER_DEVELOPMENT.md`. A vendor needs its handler, optional
+firmware source, reviewed templates/evidence, a `DeviceType` member, one
+`VendorSpec` entry and detection support. Derived views need no manual entries.
+A model uses its existing vendor's firmware patterns and registered
+`ConfigFamilySpec`; test `ConfigStore` resolution before assuming an arbitrary
+model directory will be used. Keep conditional model behavior in its handler.
+Cover existing siblings as well as the new model. Finish with registry/golden,
+detection, handler and full-suite checks plus the static/evidence gates.
 
 ### 4. Config templates: deep-merge, with an explicit mode-template exception
-Standard provisioning templates are deep-merged into the device's live config as-is (shared semantics in `provisioner/config_merge.py`). They do not support `{{variable}}` substitution. The AP and PTP mode-change templates are an explicit exception: `provisioner/mode_config.py` renders their allowlisted variables before it applies them. Do not use placeholders in standard provisioning templates or in unrelated documentation. Model aliasing lives in `config_store.py` `CONFIG_MODEL_ALIASES`. Template lookup runs through the vendor-neutral resolver seam (`provisioner/config_resolver.py` — R1 / #114), which can compose site-role overlays from `configs/templates/{vendor}/roles/{role}/`; see `docs/HANDLER_DEVELOPMENT.md` → "Site-Role Config Overlays". Role overlays must never contain secrets or identity fields.
+Standard provisioning templates are deep-merged into the device's live config as-is (shared semantics in `provisioner/config_merge.py`). They do not support `{{variable}}` substitution. The AP and PTP mode-change templates are an explicit exception: `provisioner/mode_config.py` renders their allowlisted variables before it applies them. Do not use placeholders in standard provisioning templates or in unrelated documentation. Registered model families take precedence; legacy aliasing lives in `config_store.py` `CONFIG_MODEL_ALIASES`. Template lookup runs through the vendor-neutral resolver seam (`provisioner/config_resolver.py` — R1 / #114), which can compose site-role overlays from `configs/templates/{vendor}/roles/{role}/`; see `docs/HANDLER_DEVELOPMENT.md` → "Site-Role Config Overlays". Role overlays must never contain secrets or identity fields.
 
 Required model network settings belong in the sanitized model baseline and its
 workflow checks. Do not make a technician remember a required setting or enter
@@ -66,7 +73,7 @@ These are intentional and must survive any refactor:
 There is **no hardware simulator** for most vendors, so:
 - Pure-enumeration / registry changes are fully unit-testable → they must be covered, and CI (`.github/workflows/test.yml`) must stay green.
 - Detection / handler-behavior changes carry real risk → lean on existing fixtures (`test_fingerprint.py`, `test_mikrotik_*detection*`, `test_handler_properties.py`, `test_provision_flow.py`) and assert **identical** outcomes.
-- New registries should ship with a consistency test that fails if the duplicated vendor lists drift apart (see epic Story 0).
+- Keep `test_vendor_registry.py` and `test_vendor_golden.py` green; they guard derived views, add/remove behavior, imports and ordering.
 
 For hardware API, firmware, configuration, and verification changes, follow
 `docs/BENCH_EVIDENCE.md`. Check the exact model and firmware evidence before
@@ -111,4 +118,8 @@ cite it.
 
 ## Definition of a clean vendor change
 
-A vendor addition or removal is "done" when: the `CLAUDE.md` vendor checklist is fully applied (or, post-consolidation, the single `VendorSpec` registry edited), `grep -rin <vendor>` shows no stragglers outside intended locations, the registry-consistency test passes, and the full suite is green on the Python 3.9 target.
+The spec and enum agree, derived consumers update without manual vendor lists,
+resolver and detection tests cover the new hardware and existing siblings, and
+the full suite plus docs/Python 3.9/template/evidence gates pass. Record actual
+hardware qualification separately. Adding a model never automatically validates
+its family or authorizes copying captured secrets into a template.

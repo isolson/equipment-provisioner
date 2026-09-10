@@ -127,17 +127,10 @@ class Provisioner:
 
         # Initialize handler manager with credentials. The per-vendor table
         # comes straight from config.credentials (Story 3 / #73) — adding or
-        # removing a vendor is a config.py defaults-factory change; nothing
+        # removing a vendor is a VendorSpec registry change; nothing
         # to edit here.
         credentials = {
-            device_type: {
-                "username": creds.username,
-                "password": creds.password,
-                # Secret-owned device fields; written by the handler's secret
-                # path after config, never by a template.
-                "wpa_key": creds.wpa_key,
-                "snmp_community": creds.snmp_community,
-            }
+            device_type: creds.model_dump()
             for device_type, creds in self.config.credentials.items()
         }
 

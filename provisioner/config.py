@@ -125,10 +125,11 @@ class DeviceCredentials(BaseModel):
     # written by the handler's secret path after config, never by a template.
     wpa_key: str = ""  # Wireless encryption key (WPA2 PSK)
     snmp_community: str = ""  # SNMP read-only community
+    snmp_write_community: str = ""  # Separate SNMP read-write community
 
     @field_validator(
         "password", "backup_password", "bootstrap_password", "onboarding_password",
-        "wpa_key", "snmp_community",
+        "wpa_key", "snmp_community", "snmp_write_community",
         mode="before",
     )
     @classmethod

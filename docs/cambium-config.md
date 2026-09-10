@@ -504,3 +504,69 @@ both passes.
 *Last updated: 2026-08-24*
 *This document is the source of truth for Cambium API behavior. Update it
 when new endpoints or behaviors are confirmed on actual hardware.*
+
+## Secret and account acceptance — confirmed 2026-09-10
+
+Provisioning must verify Wi-Fi, SNMP read-only, SNMP read-write, and a fresh
+standard-admin login separately. A config-import pass is insufficient.
+
+- `snmpReadOnlyCommunity` and `snmpReadWriteCommunity` are separate host-managed
+  secrets. The 4518 rejected a partial secret update because its factory RW
+  community was shorter than eight characters. Supply the intended RW value;
+  do not reuse the RO value or weaken validation. The new host credential field
+  is `credentials.cambium.snmp_write_community`.
+- Read current values first. When all secrets and standard login already match,
+  skip the write. The Force 300-25 already had correct values when the old
+  unconditional write reported failure.
+- Account changes after initial setup use confirmed
+  `POST /cgi-bin/luci/;stok=…/admin/set_account_params`, with form fields
+  `changed_elements` (JSON containing `device_props.admin_password`) and
+  `debug=true`. Unlike the regular settings request, this captured account
+  request has no `template_props` section. Require successful application and
+  fresh authenticated config access before reporting success.
+- Evidence: entry 289 of `cambium4518.upgraderesetconfig.har`, plus a successful
+  live 4518 request and fresh-login check. The supplied 300-25 HAR also records
+  this endpoint. `admin_password` in ordinary `set_param` did not change the
+  live 4518's login during this investigation.
+- Confirmed reset sequence: `reset_to_def` with `mask=1&debug=true`, then `reboot`
+  with `debug=true`. Capture the resulting baseline before automatic apply.
+  Both uploaded Cambium HARs record `reset_to_def` with mask 1. Allow for a long
+  boot; check known addresses and protocols before diagnosing a lockout.
+- Keep authenticated URLs and form secrets out of process arguments and logs.
+  The corrected secret-write, readback, and logout paths use curl stdin config.
+
+If session exhaustion is confirmed, power-cycle only the verified device PoE
+port after excluding an active firmware write. Preserve and restore its exact
+prior PoE mode; never cycle the trunk or unrelated ports.
+
+## SM scan-width policy (2026-09-10)
+
+Standard SM provisioning must select scan widths by model:
+
+| Hardware | Enabled widths (MHz) | `wirelessInterfaceScanFrequencyBandwidth` |
+| --- | --- | --- |
+| Force 300 family, ePMP 4518 | 20 / 40 / 80 | `19` |
+| ePMP 46xx, including 4600C | 20 / 40 / 80 / 160 | `51` |
+
+The captured Cambium UI defines a bitmask: 20=1, 40=2, 80=16,
+160=32. `3` enables only 20/40; it does not mean three widths.
+The uploaded Force 300-25 HAR sets `19` (entry 140), and the 4616 HAR
+sets `51` (entry 189). Its captured UI explains that an empty per-width
+frequency list scans all channels permitted by the device's country settings.
+Operating channel width and scan-width selection are separate settings.
+
+The deployed Cambium handler selects the mask when applying the standard SM
+role (mode 2, PTP mode 1, protocol 1), on both JSON import and set_param paths.
+This belongs in the handler because 4518 and 46xx share the ePMP-4K template
+family. A shared template value alone cannot express this policy. The original
+template remains intact; the prepared device payload contains the selected
+mask. AP/PTP mode operations and partial naming updates retain their settings.
+Unknown models do not receive a guessed mask.
+
+Scan bandwidth is fleet policy and must be included in exact readback
+acceptance. Earlier checks classified it as a device default and missed this
+gap. After apply, log out, authenticate afresh with the standard credential,
+read the mask, and inspect the frequency lists. Then confirm association to an
+AP at the intended width, management VLAN DHCP/reachability, traffic, and
+persistence after a cold power cycle. A correct mask alone does not prove RF
+connectivity at every width. See the dated validation record for live results.

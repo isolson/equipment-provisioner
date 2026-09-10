@@ -128,9 +128,7 @@ def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
             try:
                 probe = handler_class(
                     ip="0.0.0.0",
-                    credentials={
-                        key: getattr(creds, key, "") for key in ("username", "password", "wpa_key", "snmp_community")
-                    },
+                    credentials=creds.model_dump(),
                 )
                 missing_secrets = list(probe.missing_required_secrets())
             except Exception:  # pragma: no cover - a handler that cannot probe is reported as unknown

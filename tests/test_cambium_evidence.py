@@ -135,24 +135,19 @@ def test_4518_device_defaults_are_unchanged_by_provisioning():
     for key in ("wirelessInterfaceTDDAntennaGain", "systemConfigMinAntGain", "cambiumGPSConfigPrioritizeUSB"):
         assert key in expectations, key
         assert str(known_good[key]) == str(expectations[key]), key
-    # The scan mask is family fleet policy: factory 3 (20 and 40 MHz) cannot
-    # follow an 80 MHz access point, so the template sets it and the fixture
-    # witnesses it.
-    assert "wirelessInterfaceScanFrequencyBandwidth" in CambiumHandler.FAMILY_FLEET_POLICY_FIELDS
+    # Historical captures retain their original values. Current scan policy is
+    # model-specific because 4518 and 46xx share a template family.
+    from provisioner.field_ownership import classify, Owner
+    assert classify(CambiumHandler.FIELD_OWNERSHIP, ("wirelessInterfaceScanFrequencyBandwidth",)) is Owner.FLEET_POLICY
     assert str(factory["wirelessInterfaceScanFrequencyBandwidth"]) == "3"
-    assert str(known_good["wirelessInterfaceScanFrequencyBandwidth"]) == "51"
 
 
-@pytest.mark.parametrize("family,mask", [("ePMP-4K", "51"), ("ePMP-3K", "19")])
-def test_family_scan_mask_traces_to_that_family_fixtures(family, mask):
-    from provisioner.vendor_registry import config_family_for_model
-
-    props = json.loads(Path("configs/templates/cambium/%s/5.11.1/SM/default.json" % family).read_text())["device_props"]
-    assert props["wirelessInterfaceScanFrequencyBandwidth"] == mask
-    witnesses = [
-        str(values["wirelessInterfaceScanFrequencyBandwidth"])
-        for manifest, values in _records()
-        if config_family_for_model("cambium", manifest["model"]).directory == family
-        and "wirelessInterfaceScanFrequencyBandwidth" in values
-    ]
-    assert witnesses and all(w == mask for w in witnesses), (family, witnesses)
+@pytest.mark.parametrize("record", sorted(EVIDENCE.glob("*/*/scan-policy-2026-09-10.json")))
+def test_scan_policy_matches_dated_readback(record):
+    from provisioner.handlers.base import DeviceInfo
+    observation = json.loads(record.read_text())
+    handler = CambiumHandler(ip="192.0.2.1", credentials={})
+    handler._device_info = DeviceInfo(device_type="cambium", model=observation["model"])
+    props = handler._with_sm_scan_policy(dict(handler.SM_ROLE_VALUES))
+    assert props["wirelessInterfaceScanFrequencyBandwidth"] == observation["scan_mask"]
+    assert handler._verification_values(props)["wirelessInterfaceScanFrequencyBandwidth"] == observation["scan_mask"]

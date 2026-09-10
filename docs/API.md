@@ -112,14 +112,14 @@ config store, overwriting. This is the "Install from repo" action.
 ### GET /host-credentials
 
 Per vendor: the username, which credential keys are set (`password`,
-`backup_password`, `wpa_key`, `snmp_community`), the secrets the handler
+`backup_password`, `wpa_key`, `snmp_community`, `snmp_write_community`), the secrets the handler
 requires, and which of those are missing. Values are never returned.
 `restart_required` is true after a change until the service restarts.
 
 ### PUT /host-credentials/{device_type}
 
 Body with any of `username`, `password`, `backup_password`, `wpa_key`,
-`snmp_community`. Edits the host `config.yaml` in place (a dated backup is
+`snmp_community`, `snmp_write_community`. Edits the host `config.yaml` in place (a dated backup is
 written first, the file stays root-only). Returns the keys changed and
 `restart_required`. Restart with `POST /setup/restart-service`.
 

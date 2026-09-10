@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from provisioner.config_store import ConfigStore
 
 
@@ -134,3 +136,26 @@ def test_force_300_models_belong_to_the_epmp_3k_family():
 
     for model in ("Force 300-25", "Force 300-16", "Force 300-19", "Force 300 CSM", "ePMP 3000"):
         assert config_family_for_model("cambium", model).directory == "ePMP-3K", model
+
+
+@pytest.mark.parametrize("model,family", [
+    ("TNA-301", "TNA-301-302"),
+    ("TNA-302", "TNA-301-302"),
+    ("TNA-303X", "TNA-303X"),
+])
+def test_registered_tachyon_sm_templates_include_fleet_profiles(model, family):
+    """The real resolver must select the corrected family asset on a fresh unit.
+
+    A model-named directory that the registry never selects previously left
+    the 302 without profiles. Family coverage here is not hardware qualification.
+    """
+    from provisioner.config_templates import load_config_template
+
+    repo = Path(__file__).resolve().parents[1]
+    path = ConfigStore(str(repo)).get_config_template("tachyon", model)
+    assert path == repo / "configs" / "templates" / "tachyon" / family / "SM" / "default.tar"
+    config = load_config_template(str(path)).config
+    profiles = config["wireless"]["radios"]["wlan0"]["vaps"][0]["sta_profiles"]["profiles"]
+    assert len(profiles) == 4
+    assert all(profile["security"]["mode"] == "wpapsk" for profile in profiles)
+    assert all(not profile["security"].get("wpapsk", {}).get("passphrase") for profile in profiles)

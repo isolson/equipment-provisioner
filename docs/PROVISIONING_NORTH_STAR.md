@@ -67,7 +67,10 @@ ends with no management address (Tachyon ticket open, no fixed firmware).
 The provisioner therefore never imports a 1.12 export onto 1.15. A 1.12 unit
 is upgraded first and then receives the tracked 1.15 baseline. The SM
 profile list is fleet policy (the same SSID set on every SM in the fleet);
-its shared passphrase is a secret delivered by `apply_secrets`.
+its shared passphrase is prepared from host credentials before the first
+secured-profile POST, then checked by `apply_secrets`. Firmware 1.15 rejects
+new secured profiles without a passphrase. Standard root credentials are
+applied separately and checked with a fresh login.
 
 ## Field ownership
 

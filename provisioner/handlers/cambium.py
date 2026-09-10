@@ -9,7 +9,7 @@ import re
 import tempfile
 import urllib.parse
 from pathlib import Path
-from typing import List, Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
 
@@ -83,19 +83,11 @@ class CambiumHandler(BaseHandler):
     #: Field ownership contract (``docs/PROVISIONING_NORTH_STAR.md``).
     #: Anything not listed is a device default: never written, never verified
     #: as an exact value. Secret-shaped keys are secrets by regex.
-    #: Fleet policy whose value differs per family and lives in the family
-    #: SM template, not in ``SM_FLEET_POLICY``. Scan mask bits: 1 = 20 MHz,
-    #: 2 = 40, 16 = 80, 32 = 160. Factory is 3 (20 and 40 only), which cannot
-    #: follow an 80 MHz access point. Every 4K known-good fixture carries 51
-    #: (20/40/80/160); the 3K fixture carries 19 (20/40/80, no 160 MHz on
-    #: 5 GHz radios).
-    FAMILY_FLEET_POLICY_FIELDS = ("wirelessInterfaceScanFrequencyBandwidth",)
-
     FIELD_OWNERSHIP = OwnershipContract.from_dotted(
         dict(
             [(key, Owner.FLEET_POLICY) for key in SM_FLEET_POLICY]
-            + [(key, Owner.FLEET_POLICY) for key in FAMILY_FLEET_POLICY_FIELDS]
             + [(key, Owner.ROLE) for key in SM_ROLE_VALUES]
+            + [("wirelessInterfaceScanFrequencyBandwidth", Owner.FLEET_POLICY)]
             + [
                 (key, Owner.DEVICE_DEFAULT)
                 for key in (
@@ -168,6 +160,8 @@ class CambiumHandler(BaseHandler):
                 (key, Owner.SECRET)
                 for key in (
                     "admin_password",
+                    "snmpReadOnlyCommunity",
+                    "snmpReadWriteCommunity",
                     "wirelessInterfaceEncryptionKey",
                     "cambiumSysAccountsTable",
                     "snmpv3UsersTable",
@@ -282,6 +276,28 @@ class CambiumHandler(BaseHandler):
             "template_props": copy.deepcopy(config["template_props"]),
             "device_props": kept,
         }
+
+    def _with_sm_scan_policy(self, props: Dict[str, Any]) -> Dict[str, Any]:
+        """Select standard SM scan widths by hardware, independently of AP width.
+
+        Captured Cambium UI bit values: 20=1, 40=2, 80=16, 160=32.
+        The 4518 and 46xx share a template family but require different masks.
+        Explicit AP/PTP mode operations retain their chosen radio settings.
+        """
+        result = copy.deepcopy(props)
+        if any(str(props.get(key, "")).strip() != value
+               for key, value in self.SM_ROLE_VALUES.items()):
+            return result
+        model = self._device_info.model if self._device_info else ""
+        model = str(model or "").lower()
+        if re.search(r"\b46\d{2}[a-z]?(?:\b|[- ])", model):
+            mask = "51"
+        elif re.search(r"\b4518\b|\b(?:force|epmp)[ -]+300(?:\b|-)", model):
+            mask = "19"
+        else:
+            return result
+        result["wirelessInterfaceScanFrequencyBandwidth"] = mask
+        return result
 
     @classmethod
     def is_connectorized_model(cls, model: Optional[str]) -> bool:
@@ -505,6 +521,9 @@ class CambiumHandler(BaseHandler):
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None,
                  alternate_credentials: list = None):
         super().__init__(ip, credentials, interface)
+        self._deployment_password = credentials.get("password", "")
+        if credentials.get("snmp_write_community"):
+            self._secret_values["snmp_write_community"] = credentials["snmp_write_community"]
         self._alternate_credentials = alternate_credentials or []
         self._session: Optional[aiohttp.ClientSession] = None
         self._auth_token: Optional[str] = None
@@ -929,34 +948,102 @@ class CambiumHandler(BaseHandler):
             logger.error(f"Error changing default password: {e}")
             return False
 
-    def required_secrets(self) -> List[str]:
-        # An SM cannot associate without the WPA2 key, and the template never
-        # carries it. Fail before config when the host does not provide it.
-        return ["wpa_key"]
+    def required_secrets(self) -> list:
+        """Require secured SM access and a deployment login before config apply."""
+        return ["wpa_key", "management_password"]
+
+    def pending_secrets(self) -> Dict[str, str]:
+        values = super().pending_secrets()
+        password = self._deployment_password
+        if not password or password == self.DEFAULT_CREDENTIALS["password"]:
+            tagged = self._get_custom_credential() or {}
+            password = tagged.get("password", "") if tagged.get("username", "admin") == "admin" else ""
+        values["management_password"] = password
+        return values
+
+    async def _verify_management_password(self, password: str) -> bool:
+        probe = CambiumHandler(ip=self.ip, credentials={"username": "admin", "password": password}, interface=self.interface)
+        probe._base_url = self._base_url
+        try:
+            ok, _ = await probe._try_cgi_login_curl("admin", password)
+            return bool(ok and await probe._get_config_curl())
+        except Exception:
+            return False
+        finally:
+            await probe.disconnect()
+
+    async def _apply_management_password(self, password: str) -> bool:
+        """Use set_account_params, confirmed by the 4518 HAR and live readback."""
+        if not password or password == self.DEFAULT_CREDENTIALS["password"] or not self._stok:
+            return False
+        form = "changed_elements=" + urllib.parse.quote(json.dumps({
+            "device_props": {"admin_password": password},
+        })) + "&debug=true"
+        try:
+            proc, stdout, _ = await self._run_curl_with_stdin_config(
+                ["curl", "-s", "-k", "-m", "30", "--interface", self.interface,
+                 "-b", self._cookie_file, "-X", "POST", "-H",
+                 "Content-Type: application/x-www-form-urlencoded"],
+                self._base_url + "/cgi-bin/luci/;stok=" + self._stok + "/admin/set_account_params",
+                form_data=form,
+            )
+            result = json.loads(stdout)
+            if proc.returncode != 0 or result.get("success") not in (1, "1") or result.get("err"):
+                return False
+            self.credentials.update({"username": "admin", "password": password})
+            self._credentials_confirmed = True
+            await asyncio.sleep(3)
+            return await self._verify_management_password(password)
+        except Exception:
+            logger.error("Cambium management password apply or verification failed")
+            return False
 
     async def apply_secrets(self, secrets: Dict[str, str]) -> bool:
-        """Write secret-owned fields through set_param. Never logs a value.
-
-        Secrets are not part of any template. They arrive from the host
-        configuration (``credentials.cambium``) and are verified by
-        presence only, never by value.
-        """
+        """Require exact secret readback and fresh standard-admin access."""
+        password = secrets.get("management_password", "")
+        if not password or password == self.DEFAULT_CREDENTIALS["password"]:
+            logger.error("A non-default Cambium admin deployment credential is required")
+            return False
         props = {}
-        if secrets.get("wpa_key"):
-            props["wirelessInterfaceEncryptionKey"] = secrets["wpa_key"]
-        if secrets.get("snmp_community"):
-            props["snmpReadOnlyCommunity"] = secrets["snmp_community"]
-        if not props:
-            return True
-        # set_param bookkeeping must not replace the verification basis.
+        for key, field in (("wpa_key", "wirelessInterfaceEncryptionKey"),
+                           ("snmp_community", "snmpReadOnlyCommunity"),
+                           ("snmp_write_community", "snmpReadWriteCommunity")):
+            if secrets.get(key):
+                props[field] = secrets[key]
+        live = await self._get_config_curl()
+        if not live:
+            return False
+        password_ok = await self._verify_management_password(password)
+        if all(str(live.get(k, "")) == str(v) for k, v in props.items()):
+            return password_ok or await self._apply_management_password(password)
+        # The 4518 rejects changes while its factory RW community remains
+        # shorter than eight characters. Never replace it with the RO secret.
+        if len(str(live.get("snmpReadWriteCommunity", ""))) < 8 and not secrets.get("snmp_write_community"):
+            logger.error("A Cambium SNMP read-write deployment community is required")
+            return False
         previous = self._last_applied_config
         try:
-            applied = await self._apply_config_settings_curl(props)
+            applied = await self._send_set_param(props)
         finally:
             self._last_applied_config = previous
-        if applied:
-            logger.info("Applied %d secret field(s) on %s", len(props), self.ip)
-        return bool(applied)
+        if not applied:
+            return False
+        # Config commits and authentication reload are asynchronous.
+        for attempt in range(5):
+            await asyncio.sleep(3)
+            readback = await self._get_config_curl()
+            if not readback:
+                ok, rejected = await self._try_cgi_login_curl(self.credentials.get("username", "admin"), self.credentials.get("password", ""))
+                if rejected or self._account_locked_until:
+                    return False
+                if ok:
+                    readback = await self._get_config_curl()
+            expected = {k: v for k, v in props.items() if k != "admin_password"}
+            if readback and all(str(readback.get(k, "")) == str(v) for k, v in expected.items()):
+                if not password_ok:
+                    return await self._apply_management_password(password)
+                return await self._verify_management_password(password)
+        return False
 
     def _get_custom_credential(self) -> Optional[Dict[str, str]]:
         """Get ONE custom credential for Cambium devices.
@@ -1244,7 +1331,7 @@ class CambiumHandler(BaseHandler):
                             if "stok" in data:
                                 self._stok = data["stok"]
                                 self._connected = True
-                                logger.info(f"Connected to Cambium at {self.ip} via {self.interface} (CGI mode, stok={self._stok[:8]}...)")
+                                logger.info("Connected to Cambium via CGI (session token present)")
                                 return True, False
                 except json.JSONDecodeError:
                     pass
@@ -1292,14 +1379,7 @@ class CambiumHandler(BaseHandler):
                 ]
                 if self._cookie_file:
                     cmd.extend(["-b", self._cookie_file])
-                cmd.append(logout_url)
-
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, _ = await proc.communicate()
+                proc, stdout, _ = await self._run_curl_with_stdin_config(cmd, logout_url)
                 status = stdout.decode("ascii", errors="ignore").strip()
                 if status == "200":
                     logger.info(f"CGI logout OK for {self.ip}")
@@ -1741,7 +1821,7 @@ class CambiumHandler(BaseHandler):
                 logger.warning(f"No config properties to apply on {self.ip}")
                 return True
 
-            return await self._apply_config_settings_curl(props)
+            return await self._apply_config_settings_curl(self._with_sm_scan_policy(props))
 
         except Exception as e:
             logger.error(f"Failed to apply config: {e}")
@@ -1911,7 +1991,12 @@ class CambiumHandler(BaseHandler):
             if Path(config_path).suffix.lower() == ".json":
                 with open(config_path, "r", encoding="utf-8") as config_file:
                     config_data = json.load(config_file)
-                if self.is_full_config_export(config_data):
+                original_config = copy.deepcopy(config_data)
+                if isinstance(config_data.get("device_props"), dict):
+                    config_data["device_props"] = self._with_sm_scan_policy(config_data["device_props"])
+                else:
+                    config_data = self._with_sm_scan_policy(config_data)
+                if self.is_full_config_export(config_data) or config_data != original_config:
                     if not self.interface:
                         logger.error(
                             "Cambium native field exports require an interface-bound config_import"
@@ -2220,37 +2305,12 @@ class CambiumHandler(BaseHandler):
         set_param_url = f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/set_param"
         logger.info(f"POST set_param to {self.ip} ({len(props)} keys, {len(form_data)} bytes)")
 
-        # Write form data to temp file to avoid command-line length issues
-        data_file = None
-        try:
-            data_file = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False, prefix="cambium_setparam_"
-            )
-            data_file.write(form_data)
-            data_file.close()
-
-            cmd = [
-                "curl", "-s", "-k", "-m", "30",
-                "--interface", self.interface,
-                "-b", self._cookie_file,
-                "-X", "POST",
-                "-H", "Content-Type: application/x-www-form-urlencoded",
-                "--data-binary", f"@{data_file.name}",
-                set_param_url,
-            ]
-
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-        finally:
-            if data_file:
-                try:
-                    os.unlink(data_file.name)
-                except OSError:
-                    pass
+        proc, stdout, stderr = await self._run_curl_with_stdin_config(
+            ["curl", "-s", "-k", "-m", "30", "--interface", self.interface,
+             "-b", self._cookie_file, "-X", "POST", "-H",
+             "Content-Type: application/x-www-form-urlencoded"],
+            set_param_url, form_data=form_data,
+        )
 
         if proc.returncode != 0:
             logger.error(
@@ -4009,17 +4069,12 @@ class CambiumHandler(BaseHandler):
             "-b", self._cookie_file,
             "-X", "POST",
             "-H", "Content-Type: application/x-www-form-urlencoded",
-            "-d", "act=config_regular&debug=true",
-            url
         ]
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                cmd, url, form_data="act=config_regular&debug=true",
             )
-            stdout, stderr = await proc.communicate()
 
             if proc.returncode == 0 and stdout:
                 text = stdout.decode("utf-8", errors="ignore")
