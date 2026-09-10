@@ -23,9 +23,9 @@ identity and firmware, verifies the supported layout, applies through the
 vendor handler, and reads the state back. An unknown layout, changed device,
 busy port, unqualified model/firmware, or failed readback is refused.
 
-- **Router:** ether1 WAN; ether2–ether5 and SFP bridged as LAN; IPv4/IPv6
+- **Business router** (`router`): ether1 WAN; ether2–ether5 and SFP bridged as LAN; IPv4/IPv6
   forwarding, the existing NAT rule, and DHCP client/server enabled.
-- **Switch:** all six Ethernet/SFP interfaces bridged; forwarding, NAT, and
+- **Business switch** (`switch`): all six Ethernet/SFP interfaces bridged; forwarding, NAT, and
   DHCP client/server disabled. The existing management address and credentials
   are retained, so the management address must suit the deployment network.
 
@@ -64,3 +64,26 @@ This validates package installation and role configuration/readback. WAN/LAN
 traffic, DHCP service delivery to a client, and role persistence across a power
 cycle are separate acceptance checks. No fresh-factory baseline, fleet
 registration, or deployment qualification is claimed by the mode check.
+
+## Role scope across MikroTik hardware
+
+Business router and Business switch are deployment roles, not model names.
+The requested role matrix is:
+
+| Hardware | Requested roles | Current bench qualification |
+| --- | --- | --- |
+| hEX S (E60iUGS ARM) | Business router; Business switch | Configuration transitions verified on 7.23.5 |
+| hEX PoE | Business router; Business switch; Infrastructure switch | Pending model-specific profiles and bench validation |
+| RB5009 | Business router; Business switch; Infrastructure switch | Pending model-specific profiles and bench validation |
+
+Infrastructure switch is a separate role. Its management, VLAN, uplink and
+fleet-enrollment policy must be defined in its own profile; the flat bridge
+used by Business switch is not an infrastructure profile. The existing
+Netinstall/ZTP pipeline remains separate until that integration is specified.
+
+Keep the existing `router` and `switch` API/evidence identifiers for the
+business roles. Port layout, package architecture and supported transitions
+must be checked for each exact model and firmware. Do not copy the E60iUGS
+six-port/ARM layout assumptions to hEX PoE or RB5009 or mark either validated
+from this hEX S result. Their role implementations belong in the MikroTik
+handler, with no model branches in the shared engine or UI.

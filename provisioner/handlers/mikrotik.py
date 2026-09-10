@@ -33,7 +33,7 @@ class MikrotikHandler(BaseHandler):
     def network_mode_labels_for_model(cls, model: Optional[str]) -> Dict[str, str]:
         """Wired role choices; exact hardware is checked again before writing."""
         if (model or "").strip().lower() == "hex s":
-            return {"router": "Router", "switch": "Switch"}
+            return {"router": "Business router", "switch": "Business switch"}
         return {}
 
     async def network_mode_state(self) -> Dict[str, Any]:
