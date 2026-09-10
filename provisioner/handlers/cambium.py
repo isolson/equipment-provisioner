@@ -2610,7 +2610,7 @@ class CambiumHandler(BaseHandler):
             # Reuse existing stok from connect() if available
             stok = self._stok
             if stok:
-                logger.debug(f"Reusing existing stok for firmware upload: {stok[:16]}...")
+                logger.debug("Reusing firmware upload session")
                 cookie_path = self._cookie_file  # Use cookie file from connect()
             else:
                 # No existing session, need to login via curl
@@ -2657,7 +2657,8 @@ class CambiumHandler(BaseHandler):
                     logger.error(f"Failed to get stok token for firmware upload")
                     return False
 
-                logger.debug(f"Got new stok: {stok[:16]}...")
+                logger.debug("Firmware upload session established")
+                self._cookie_file = cookie_path
 
             # Upload firmware to local_upload_image endpoint (confirmed from Cambium web UI)
             # Field name is "image", not "file"
@@ -2673,14 +2674,9 @@ class CambiumHandler(BaseHandler):
             ]
             if cookie_path:
                 curl_args.extend(["-b", cookie_path])
-            curl_args.append(url)
-
-            proc = await asyncio.create_subprocess_exec(
-                *curl_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                curl_args, url,
             )
-            stdout, stderr = await proc.communicate()
 
             if proc.returncode == 0:
                 response_body, http_status = self._split_curl_http_response(stdout)
@@ -2718,13 +2714,13 @@ class CambiumHandler(BaseHandler):
                 )
                 return False
             else:
-                # Clean up cookie file on error
-                try:
-                    import os
-                    os.unlink(cookie_path)
-                except Exception:
-                    pass
-                logger.error(f"Firmware upload curl failed: {stderr.decode()}")
+                # The fallback uploader and final logout share this session.
+                # A transfer failure must not delete their authentication cookie.
+                # disconnect() owns cleanup after the whole operation ends.
+                logger.error(
+                    "Firmware upload curl failed: exit=%s, stderr_present=%s",
+                    proc.returncode, bool(stderr),
+                )
                 return False
 
         except Exception as e:

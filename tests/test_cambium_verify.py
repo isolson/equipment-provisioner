@@ -712,3 +712,27 @@ def test_scan_policy_preserves_explicit_modes_and_partial_updates(props):
     h = _handler()
     h._device_info = DeviceInfo(device_type="cambium", model="ePMP 4616")
     assert h._with_sm_scan_policy(props) == props
+
+
+async def test_failed_legacy_upload_preserves_cookie_for_fallback(monkeypatch, tmp_path):
+    h = _handler()
+    h.interface = "eth0.1995"
+    h._device_info = DeviceInfo(device_type="cambium", model="ePMP 4625", firmware_version="5.9.0")
+    cookie = tmp_path / "session.txt"
+    cookie.write_text("test-session")
+    h._cookie_file = str(cookie)
+    firmware = tmp_path / "image.img"
+    firmware.write_bytes(b"test-image")
+    from types import SimpleNamespace
+    async def transfer_fails(args, url, form_data=None):
+        assert url.endswith("/admin/local_upload_image")
+        assert all(";stok=" not in arg for arg in args)
+        return SimpleNamespace(returncode=52), b"", b""
+    async def fallback(path):
+        assert cookie.read_text() == "test-session"
+        assert h._cookie_file == str(cookie)
+        return True
+    monkeypatch.setattr(h, "_run_curl_with_stdin_config", transfer_fails)
+    monkeypatch.setattr(h, "_upload_firmware_curl_alt_bank", fallback)
+    assert await h.upload_firmware(str(firmware), bank=1)
+    assert cookie.exists()
