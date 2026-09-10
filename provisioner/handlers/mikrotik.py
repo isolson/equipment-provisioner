@@ -22,6 +22,131 @@ class MikrotikHandler(BaseHandler):
 
     supports_manual_netinstall = True
     manual_netinstall_label = "MikroTik recovery (Netinstall)"
+    supports_network_modes = True
+    network_mode_descriptions = {
+        "router": "ether1 is WAN. Remaining Ethernet and SFP ports are LAN. Routing, NAT and the existing LAN DHCP server are enabled.",
+        "switch": "All Ethernet and SFP ports share one bridge. Routing, NAT and DHCP client/server functions are disabled.",
+    }
+    network_mode_management_note = "The existing management address and login are retained."
+
+    @classmethod
+    def network_mode_labels_for_model(cls, model: Optional[str]) -> Dict[str, str]:
+        """Wired role choices; exact hardware is checked again before writing."""
+        if (model or "").strip().lower() == "hex s":
+            return {"router": "Router", "switch": "Switch"}
+        return {}
+
+    async def network_mode_state(self) -> Dict[str, Any]:
+        """Read the factory-layout contract without exposing configuration secrets."""
+        queries = {
+            "model": "/system resource get board-name",
+            "architecture": "/system resource get architecture-name",
+            "firmware": "/system resource get version",
+            "forward_ipv4": "/ip settings get ip-forward",
+            "forward_ipv6": "/ipv6 settings get forward",
+        }
+        state = {}
+        for key, query in queries.items():
+            state[key] = (await self._run_command(":put [%s]" % query)).strip()
+        for key in ("forward_ipv4", "forward_ipv6"):
+            state[key] = {"true": "yes", "false": "no"}.get(state[key], state[key])
+        counts = {
+            "bridges": "/interface bridge find",
+            "standard_bridge": '/interface bridge find where name="bridge"',
+            "ethernet_ports": "/interface ethernet find",
+            "wan_bridged": '/interface bridge port find where interface="ether1" and bridge="bridge"',
+            "lan_bridged": '/interface bridge port find where bridge="bridge" and interface!="ether1"',
+            "nat_rules": "/ip firewall nat find",
+            "standard_nat": '/ip firewall nat find where comment="defconf: masquerade" and action="masquerade"',
+            "nat_enabled": "/ip firewall nat find where disabled=no",
+            "dhcp_servers": "/ip dhcp-server find",
+            "standard_dhcp_server": '/ip dhcp-server find where name="defconf" and interface="bridge"',
+            "dhcp_servers_enabled": "/ip dhcp-server find where disabled=no",
+            "dhcp_clients": "/ip dhcp-client find",
+            "wan_dhcp_client": '/ip dhcp-client find where interface="ether1"',
+            "dhcp_clients_enabled": "/ip dhcp-client find where disabled=no",
+            "management_address": '/ip address find where address="192.168.88.1/24" and interface="bridge" and disabled=no',
+            "fleet_scripts": '/system script find where name="phone-home"',
+        }
+        for key, query in counts.items():
+            state[key] = int((await self._run_command(":put [:len [%s]]" % query)).strip())
+        state["mode"] = self._network_mode_from_state(state)
+        return state
+
+    @staticmethod
+    def _network_mode_from_state(state: Dict[str, Any]) -> str:
+        flags = tuple(state.get(k) for k in (
+            "wan_bridged", "nat_enabled", "dhcp_servers_enabled", "dhcp_clients_enabled",
+        ))
+        forwarding = (state.get("forward_ipv4"), state.get("forward_ipv6"))
+        if flags == (0, 1, 1, 1) and forwarding == ("yes", "yes"):
+            return "router"
+        if flags == (1, 0, 0, 0) and forwarding == ("no", "no"):
+            return "switch"
+        return "custom"
+
+    @staticmethod
+    def _validate_network_mode_layout(state: Dict[str, Any]) -> None:
+        """Refuse to repurpose an unknown model or overwrite a custom layout."""
+        expected = {
+            "model": "hEX S", "architecture": "arm", "bridges": 1,
+            "standard_bridge": 1, "ethernet_ports": 6, "lan_bridged": 5,
+            "nat_rules": 1, "standard_nat": 1, "dhcp_servers": 1,
+            "standard_dhcp_server": 1, "dhcp_clients": 1, "wan_dhcp_client": 1,
+            "management_address": 1, "fleet_scripts": 0,
+        }
+        if any(state.get(key) != value for key, value in expected.items()):
+            raise ValueError("The device does not match the supported hEX S factory port layout")
+        if any(state.get(key) not in (0, 1) for key in (
+            "wan_bridged", "nat_enabled", "dhcp_servers_enabled", "dhcp_clients_enabled",
+        )) or any(state.get(key) not in ("yes", "no") for key in (
+            "forward_ipv4", "forward_ipv6",
+        )):
+            raise ValueError("Unrecognized network-mode state requires review")
+
+    def validate_network_mode_layout(self, state: Dict[str, Any]) -> None:
+        self._validate_network_mode_layout(state)
+
+    async def apply_network_mode(self, mode: str) -> Dict[str, Any]:
+        """Toggle the verified wired layout, preserving bridge management access.
+
+        This path deliberately does not reset/import a configuration or alter
+        credentials, firewall filters, addressing, or backend-owned ZTP scripts.
+        The caller serializes this operation against provisioning on the port.
+        """
+        if mode not in ("router", "switch"):
+            raise ValueError("Unknown network mode")
+        before = await self.network_mode_state()
+        self._validate_network_mode_layout(before)
+        if before["mode"] == mode:
+            return before
+        if mode == "switch":
+            commands = (
+                "/ip settings set ip-forward=no",
+                "/ipv6 settings set forward=no",
+                "/ip dhcp-server disable [find]",
+                "/ip dhcp-client disable [find]",
+                "/ip firewall nat disable [find]",
+                ':if ([:len [/interface bridge port find where interface="ether1"]] = 0) do={/interface bridge port add bridge=bridge interface=ether1 comment="provisioner: switch uplink"}',
+            )
+        else:
+            commands = (
+                '/interface bridge port remove [find where interface="ether1" and bridge="bridge"]',
+                "/ip firewall nat enable [find]",
+                "/ip dhcp-server enable [find]",
+                "/ip dhcp-client enable [find]",
+                "/ip settings set ip-forward=yes",
+                "/ipv6 settings set forward=yes",
+            )
+        for command in commands:
+            output = await self._run_command(command)
+            if re.search(r"failure:|syntax error|expected end|not allowed", output, re.I):
+                raise RuntimeError("Device rejected a network-mode command; review its current state")
+        after = await self.network_mode_state()
+        self._validate_network_mode_layout(after)
+        if after["mode"] != mode:
+            raise RuntimeError("Network-mode readback did not match the requested mode")
+        return after
 
     # Try common MikroTik defaults before failing to UI prompt
     DEFAULT_CREDENTIALS = [

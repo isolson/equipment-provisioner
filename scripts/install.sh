@@ -60,6 +60,7 @@ install_system_deps() {
             build-essential \
             net-tools \
             iproute2 \
+            iputils-arping \
             vlan \
             arp-scan \
             sshpass
