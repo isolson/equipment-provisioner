@@ -17,10 +17,7 @@ import yaml
 
 from .firmware import FirmwareManager
 from .firmware_sources.base import BaseFirmwareSource, RemoteFirmwareInfo
-from .firmware_sources.tachyon import TachyonFirmwareSource
-from .firmware_sources.ubiquiti import UbiquitiFirmwareSource
-from .firmware_sources.cambium import CambiumFirmwareSource
-from .firmware_sources.mikrotik import MikrotikFirmwareSource
+from .vendor_registry import firmware_source_map
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +28,10 @@ class FirmwareChecker:
     Follows the same singleton pattern as Notifier and telemetry.
     """
 
-    # Registry of vendor source classes
-    SOURCE_MAP: Dict[str, Type[BaseFirmwareSource]] = {
-        "tachyon": TachyonFirmwareSource,
-        "ubiquiti": UbiquitiFirmwareSource,
-        "cambium": CambiumFirmwareSource,
-        "mikrotik": MikrotikFirmwareSource,
-    }
+    # vendor -> source class, derived from the VendorSpec registry
+    # (Story 6 / #76). Lookup-only (.get); Tarana has no source
+    # (documented exception: manual firmware upload).
+    SOURCE_MAP: Dict[str, Type[BaseFirmwareSource]] = firmware_source_map()
 
     # Cleanup constants
     MAX_UPDATE_ENTRIES = 100  # Maximum entries in _available_updates

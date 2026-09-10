@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 class MikrotikHandler(BaseHandler):
     """Handler for MikroTik RouterOS devices."""
 
+    supports_manual_netinstall = True
+    manual_netinstall_label = "MikroTik recovery (Netinstall)"
+
     # Try common MikroTik defaults before failing to UI prompt
     DEFAULT_CREDENTIALS = [
         {"username": "admin", "password": "admin"},
@@ -52,6 +55,42 @@ class MikrotikHandler(BaseHandler):
     def supports_dual_bank(self) -> bool:
         # RouterOS is single-bank from provisioning perspective.
         return False
+
+    def firmware_lookup_key(self, device_info: Optional[DeviceInfo]) -> Optional[str]:
+        """Prefer the RouterOS architecture over the model name.
+
+        RouterOS packages are per-architecture (mipsbe, arm, arm64, ...), not
+        per-model, and ``get_info()`` stores the architecture in
+        ``hardware_version``. Fall back to the base behavior (model) when the
+        architecture is unknown.
+        """
+        if device_info and device_info.hardware_version:
+            return device_info.hardware_version
+        return super().firmware_lookup_key(device_info)
+
+    def provisioning_step_plan(
+        self,
+        has_config: bool,
+        dual_bank: bool,
+        need_fw1: bool,
+        need_fw2: bool,
+    ) -> list[Dict[str, str]]:
+        """Use RouterOS terminology for the standard (non-Netinstall) flow."""
+        plan = super().provisioning_step_plan(
+            has_config=has_config,
+            dual_bank=dual_bank,
+            need_fw1=need_fw1,
+            need_fw2=need_fw2,
+        )
+        labels = {
+            "firmware_banks": "Software check",
+            "firmware_update_1": "RouterOS software",
+            "verify": "Software verify",
+        }
+        for item in plan:
+            if item["key"] in labels:
+                item["label"] = labels[item["key"]]
+        return plan
 
     def validate_firmware_for_model(self, firmware_path: str, model: str) -> tuple[bool, str]:
         """Validate RouterOS package before upload."""

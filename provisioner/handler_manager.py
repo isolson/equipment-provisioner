@@ -1,15 +1,11 @@
 """Handler manager for routing devices to appropriate handlers."""
 
 import logging
-from typing import Dict, Optional, Type, Callable, Awaitable
+from typing import Any, Dict, List, Optional, Type, Callable, Awaitable
 
 from .fingerprint import DeviceType, DeviceFingerprint
 from .handlers.base import BaseHandler, ProvisioningResult
-from .handlers.mikrotik import MikrotikHandler
-from .handlers.cambium import CambiumHandler
-from .handlers.tachyon import TachyonHandler
-from .handlers.tarana import TaranaHandler
-from .handlers.ubiquiti import UbiquitiHandler
+from .vendor_registry import handler_map
 
 logger = logging.getLogger(__name__)
 
@@ -17,17 +13,15 @@ logger = logging.getLogger(__name__)
 class HandlerManager:
     """Manages device handlers and routes provisioning requests."""
 
-    # Map device types to handler classes.
-    # NOTE: Evolution Digital is intentionally absent — it runs a passive
-    # qualification flow that needs port_manager cross-port access and is
-    # dispatched directly from main.py._provision_evolution_digital.
-    HANDLER_MAP: Dict[DeviceType, Type[BaseHandler]] = {
-        DeviceType.MIKROTIK: MikrotikHandler,
-        DeviceType.CAMBIUM: CambiumHandler,
-        DeviceType.TACHYON: TachyonHandler,
-        DeviceType.TARANA: TaranaHandler,
-        DeviceType.UBIQUITI: UbiquitiHandler,
-    }
+    # Map device types to handler classes — derived from the VendorSpec
+    # registry (vendor_registry.py, Story 6 / #76), bound once at import.
+    # NOTE: Evolution Digital is intentionally absent — its spec registers
+    # with provisionable=False because its passive qualification flow needs
+    # port_manager cross-port access and is dispatched directly from
+    # main.py._provision_evolution_digital.
+    # Derive vendor lists via provisionable_device_types() (below), never
+    # by hand-copying these keys.
+    HANDLER_MAP: Dict[DeviceType, Type[BaseHandler]] = handler_map()
 
     def __init__(self, credentials: Dict[str, Dict[str, str]],
                  alternate_credentials: Dict[str, list] = None):
@@ -108,6 +102,86 @@ class HandlerManager:
         except ValueError:
             return None
 
+    @classmethod
+    def operator_capabilities_for(
+        cls,
+        device_type: Optional[str],
+        model: Optional[str] = None,
+        firmware: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return handler-owned capabilities used by operator workflows.
+
+        The handler advertises the modes a model could support. The bench
+        evidence matrix (``provisioner/qualification.py``) decides which of
+        those are offered for this exact model and firmware. The kiosk and
+        API must not maintain their own vendor allowlists. Unknown and
+        non-provisionable side-door device types return the empty set.
+        """
+        from . import qualification
+
+        empty = {
+            "post_provision_modes": [],
+            "advertised_modes": [],
+            "unqualified": {},
+            "baseline_qualified": False,
+            "transitions": {},
+            "required_baseline_mode": "",
+            "ptp_settings_required": False,
+            "manual_netinstall": False,
+            "manual_netinstall_label": "",
+        }
+        if not device_type:
+            return dict(empty)
+        handler_class = cls.handler_class_for(device_type)
+        if handler_class is None:
+            return dict(empty)
+        advertised = tuple(handler_class.qualified_post_provision_modes_for_model(model))
+        qualified = qualification.qualified_modes(device_type, model, firmware, advertised)
+        return {
+            "post_provision_modes": list(qualified),
+            "advertised_modes": list(advertised),
+            "unqualified": {
+                mode: qualification.unqualified_reason(device_type, model, firmware, mode)
+                for mode in advertised
+                if mode not in qualified
+            },
+            "baseline_qualified": qualification.baseline_qualified(device_type, model, firmware),
+            "transitions": qualification.transition_report(device_type, model, firmware),
+            "required_baseline_mode": str(
+                getattr(handler_class, "required_baseline_mode", "") or ""
+            ),
+            "ptp_settings_required": bool(
+                handler_class.requires_ptp_settings_for_model(model)
+            ),
+            "manual_netinstall": bool(
+                getattr(handler_class, "supports_manual_netinstall", False)
+            ),
+            "manual_netinstall_label": str(
+                getattr(handler_class, "manual_netinstall_label", "")
+            ),
+        }
+
+    @classmethod
+    def upload_role_for_model(
+        cls, device_type: Optional[str], model: Optional[str] = None
+    ) -> Optional[str]:
+        """Return a handler-owned role for a structured upload.
+
+        Shared asset code asks the handler instead of keeping a vendor or
+        model table of its own. ``None`` means the operator must specify the
+        role/mode because the model alone is ambiguous.
+        """
+        if not device_type:
+            return None
+        handler_class = cls.handler_class_for(device_type)
+        if handler_class is None:
+            return None
+        role = handler_class.upload_role_for_model(model)
+        if role is None:
+            return None
+        role = str(role).upper()
+        return role if role in ("AP", "SM", "PTP") else None
+
     async def provision_device(
         self,
         fingerprint: DeviceFingerprint,
@@ -119,7 +193,7 @@ class HandlerManager:
         dual_bank: bool = True,
         interface: Optional[str] = None,
         firmware_current: bool = False,
-        on_progress: Optional[Callable[[str, bool, Optional[str]], Awaitable[None]]] = None,
+        on_progress: Optional[Callable[[str, Any, Optional[Any]], Awaitable[None]]] = None,
         firmware_lookup_callback: Optional[Callable[[str, str], tuple]] = None,
         custom_credentials: Optional[Dict[str, str]] = None,
         config_backup: bool = False,
@@ -255,3 +329,21 @@ class HandlerManager:
             await handler.disconnect()
 
         return result
+
+
+def provisionable_device_types() -> List[str]:
+    """Sorted device-type strings for every vendor in ``HANDLER_MAP``.
+
+    The single derivation point for vendor enumeration (vendor-isolation
+    epic, Story 2 / #72): the CLI handler lookup and ``choices``, the web
+    API device-type validation, and the first-run setup tooling all call
+    this instead of keeping hardcoded copies of the vendor list.
+
+    Evaluated on each call so the result always tracks ``HANDLER_MAP``
+    (tests monkeypatch the map to prove propagation). Sorted because the
+    order is user-visible: setup-UI row order and argparse choices display.
+
+    Evolution Digital is intentionally excluded — it is a ``DeviceType``
+    but has no handler here (side-door dispatch from ``main.py``).
+    """
+    return sorted(dt.value for dt in HandlerManager.HANDLER_MAP)

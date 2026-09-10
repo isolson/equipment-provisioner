@@ -990,6 +990,7 @@ class DeviceFingerprinter:
             "53545": "ePMP 4525",
             "53264": "ePMP 4600",
             "53520": "ePMP 4600C",
+            "53560": "ePMP 4616",
             "53561": "ePMP 4625",
         }
 

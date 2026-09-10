@@ -1,0 +1,29 @@
+vendor: cambium
+model: ePMP 4616
+firmware: 5.11.1
+config_role: SM
+artifact_purpose: process-evidence
+reusable_template: false
+canonical_template_status: tracked-family-baseline
+unit: unit-4616-a
+captured_utc: 2026-09-01T18:57:00Z
+operations:
+  - upgrade
+  - config-export
+result: success
+no_config_backup: captured
+no_config_firmware: 5.11.1
+no_config_unit: unit-4616-b
+raw_files:
+  known-good.device-backup.json: "ePMP-Backup-tw32a-tw18-BC_A9_93_B8_58_49.json, unit-4616-a after the bench SM restore (secure bench directory only)"
+  no-config.device-backup.json: "ePMP-Backup-F4616_b8586e-*.json, unit-4616-b after the 5.11.1 upgrade with configuration still at factory values; a non-default admin password was already set and no reset_to_def is in the capture (secure bench directory only)"
+  hand-configured.device-backup.json: "ePMP-Backup-F4616-provisioned-*.json, unit-4616-b configured by hand in the UI; process evidence, not a baseline witness (secure bench directory only)"
+  workflow.har: "cambium4616.upgraderesetconfig.har, captured 2026-09-02 from a laptop at 169.254.1.1 (secure bench directory only)"
+endpoint_evidence:
+  running_5_11_0_upgrade: "POST /admin/upload_sw_image_local (multipart), POST /admin/upgrade_sw_image_local (type=device), POST /admin/get_upgrade_status polling, then /admin/reboot"
+  hand_configuration: "set_account_params (installer user, admin password), set_param (management VLAN, cnMaestro, SNMP communities, syslog, device name, SNR threshold, WPA key), set_param (scan mask 51), reboot"
+  after_upgrade: "banks read 5.11.1 / 5.11.0"
+transitions: []
+fixture_witness: baseline
+evidence_scope: "Known-good SM export of one unit on 5.11.1. Values in known-good.structure.json are the only source for the family SM baseline and the handler role table."
+notes: "The known-good export is the verified SM configuration read after the unit returned from a PTP link to SM. GPS USB priority reads 0 on this unit and 1 on the 4518 unit; the field is a device default and is never written. The no-config export (unit-4616-b) shows factory values with gain 16 = MinAntGain 16, GPS USB 1, scan mask 3, and nine fleet-policy fields at factory values; the hand-configured export from the same unit (the post-hand-configuration export) shows a technician raising the scan mask from 3 (20/40 MHz) to 51 (20/40/80/160) and leaving NTP and the syslog mask at factory, which the provisioner baseline does not. No bench transition is recorded yet."

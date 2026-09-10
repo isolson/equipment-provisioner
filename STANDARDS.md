@@ -109,20 +109,38 @@ Implementation notes:
 - Use high contrast colors for readability
 - Progress indicators must be clearly visible
 
+### Theme
+The kiosk uses a light, high-contrast operations-console theme for the outdoor
+7-inch panel: page `#eef1f6`, white panels with `#cfd6e2` borders, dark ink
+`#0f172a`, and one tone per status phase (idle `#94a3b8`, active `#0369a1`,
+success `#15803d`, warning `#b45309`, error `#b91c1c`) on pale tints. Status is
+never color alone; each tone pairs with an icon and a word. The
+header shows the deployed git version and a live-updates dot. A stale banner
+appears when no update arrived for three broadcast intervals; the page
+reconnects forever with capped backoff.
+
 ### Port Card Design
-Each port card (250px height) has two zones:
-- **Identity line** — compact top bar with vendor color tag, model name, port number, link speed. Hidden when no device is detected.
-- **Status center** — large area filling the card with a state icon (36px circle), bold status text, and optional subtitle (e.g. "Step 4 of 7"). Background color matches state (blue=active, green=complete, red=error, gray=idle, amber=booting).
+Each port card (250px, 200px in portrait) has a left status rail and three zones:
+- **Identity strip** — vendor pill in the registry color, model, port badge, link speed.
+- **Status center** — 56px icon, uppercase headline, one-line detail, and a progress bar when a run or mode change is active. All of it comes from the server presentation state (`workflow_actions.presentation_for_port`), so the card can never disagree with the modal.
+- **Footer strip** — mode chip (`SM VERIFIED`, `AP tw05-north`, `PTP-A`) or a hint.
 
-Cards are clickable when a device is detected, opening the activity log modal.
+Cards are built once and patched only when their state changes; no full re-render.
 
-### Activity Log Modal
-Tapping a port card opens a modal with:
-- **Device summary grid** — labeled rows for MAC, Serial, IP, Link Speed, FW Bank 1, FW Bank 2 (with active indicator).
-- **Activity log** — timestamped entries in canonical provisioning order: Login → Model → FW Check → FW Bank 1 → Config → FW Bank 2 → Reboot → Verify. Each entry shows state (✓/✗/●/○), step name, and detail text such as firmware version or model name. Active steps have a blue highlight. Steps not yet in the log but visible in the checklist appear without timestamps.
-- **Footer** — "Close" during provisioning; "Retry" + "Close" after completion or failure.
+### Port Sheet
+Tapping a card opens a full-height sheet with fixed regions and a fixed action bar:
+- **Summary** — MAC, serial, IP, link, firmware, hostname and link id when deployed.
+- **Notice** — one in-sheet panel for the current phase, failure, or confirmation. Native `alert()` and `confirm()` are not used.
+- **Timeline** — the server-owned event log (`GET /api/ports/{n}/events`, WebSocket `port_event`). It survives page reloads and Chromium respawns. Verify failures show mismatch field names, never values.
+- **Actions** — server-provided workflow actions only. Unqualified modes are listed with the reason (`PTP not qualified for ePMP 4518 on 5.11.1: no bench evidence`). Service actions (Netinstall) stay behind a collapsed section.
+- **Action bar** — one contextual retry on failure, `Done` otherwise. Every touch target is at least 48px high with 12px gaps.
 
-The modal live-updates during active provisioning via WebSocket re-renders.
+### Mode Change Flow
+One flow for AP, PTP, and Restore SM: parameters, live preview from
+`POST /api/ports/{n}/mode-preview` (current and target mode, the identity
+fields that change, PTP side and peer, profile), an explicit confirm screen,
+then progress from the mode job and the timeline. The preview never reserves
+a PTP side; the apply reserves it once.
 
 ### Responsive Behavior
 - UI must work at 800x480 minimum

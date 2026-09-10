@@ -189,6 +189,42 @@ class TestDeviceDetailsExtraction:
 
         assert fingerprint.firmware_version == "4.8.1"
 
+    async def test_fetch_cambium_sku_maps_epmp_4616(self, monkeypatch):
+        """The 4616 SKU must resolve to the ePMP-4K family."""
+        fingerprinter = DeviceFingerprinter()
+        fingerprint = DeviceFingerprint(device_type=DeviceType.CAMBIUM)
+
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def text(self):
+                return "window.sku = 53560; window.cambiumFWVersion = 'Version 5.11.1';"
+
+        class Session:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            def get(self, *args, **kwargs):
+                return Response()
+
+        monkeypatch.setattr("provisioner.fingerprint.aiohttp.ClientSession", Session)
+        await fingerprinter._fetch_cambium_sku("192.0.2.1", fingerprint)
+
+        assert fingerprint.model == "ePMP 4616"
+        assert fingerprint.firmware_version == "5.11.1"
+
     def test_extract_ubiquiti_wave_model(self):
         """Test extraction of Ubiquiti Wave model names."""
         fingerprint = DeviceFingerprint(device_type=DeviceType.UBIQUITI)

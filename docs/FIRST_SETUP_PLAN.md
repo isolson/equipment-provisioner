@@ -61,6 +61,7 @@ Store layout:
 - `/var/lib/provisioner/repo/configs/templates/<device_type>/ap.*`
 - `/var/lib/provisioner/repo/configs/templates/<device_type>/ptp-a.*`
 - `/var/lib/provisioner/repo/configs/templates/<device_type>/ptp-b.*`
+- `/var/lib/provisioner/repo/configs/templates/cambium/<family>/5.11.1/SM/default.json`
 - `/var/lib/provisioner/repo/configs/overrides/<device_type>/<MAC>.*`
 
 Current repo state:
@@ -68,6 +69,26 @@ Current repo state:
 - Mode templates exist in `configs/templates/cambium/` and `configs/templates/tachyon/`.
 - Those templates are not seeded automatically into `/var/lib/provisioner/repo`.
 - The repo does not currently ship seeded `default.*` templates for base auto-provisioning.
+
+SM baselines are not uploaded. On the `/files` page, open the vendor tab and
+tap **Install from repo**. That copies the tracked, linted family baselines
+(for example `ePMP-3K` and `ePMP-4K`) into the host config store and shows
+each family's install state, fixture witnesses, and bench proof. AP and PTP
+profiles are uploaded on the same page with only a family, a role, and a
+direction or link and side. Under **Host login and secrets**, set the login
+and the required secrets (WPA2 key, SNMP community) and restart the service;
+a missing required secret stops provisioning by design.
+
+The family SM baseline carries only fleet policy and the SM role fields
+(management VLAN 12, DHCP management address, DNS from DHCP, NTP, the internal
+cnMaestro hostname, the treehouse syslog collector, SSH on, Telnet off, radio
+role SM). Antenna gain, GPS priority, and scan mask are device defaults and
+are never written. Secrets come from the host credentials, never from the
+export. A site SSID, static address, or device identity is refused.
+
+The field export may contain operational secrets. The provisioner stores the
+original in protected runtime storage. It does not commit, display, or log the
+secret values.
 
 Implication:
 
@@ -138,6 +159,7 @@ This should be the recommended operator path.
 - Add a first-run checklist in the UI that explicitly reports:
   - missing fleet passwords
   - missing default template per enabled vendor
+  - missing Cambium family SM baseline
   - missing MikroTik firmware for Netinstall
   - switch unreachable
   - WAN unavailable for auto-download workflows

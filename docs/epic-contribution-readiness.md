@@ -27,9 +27,9 @@ This epic is a **sibling**, not an overlap, of `docs/epic-vendor-isolation-refac
 
 | Concern | Owned by | This epic's role |
 |---|---|---|
-| Collapse ~10 vendor registries → one `VendorSpec` | isolation epic (S2–S6) | none |
-| Remove the `base.py` MikroTik brand string | isolation epic (S1) | add the **gate** that prevents reintroduction (C3) |
-| **Registry-consistency test** (`tests/test_vendor_registry.py`) | isolation epic (**S0**) | **consume** it — promote it to a required check (C5); do **not** rebuild it |
+| Collapse ~10 vendor registries → one `VendorSpec` | isolation epic (S2–S6; Phase 1 merged 2026-08) | none |
+| Remove the `base.py` MikroTik brand string | isolation epic (S1 — **landed**, PR #122) | add the **gate** that prevents reintroduction (C3) |
+| **Registry-consistency test** (`tests/test_vendor_registry.py`) | isolation epic (**S0** — **landed**, PR #84) | **consume** it — promote it to a required check (C5); do **not** rebuild it |
 | Architecture standards prose | `AGENTS.md` (exists) | link it from `CONTRIBUTING.md`; do **not** restate it |
 | Public-OSS governance files | **this epic** (A1–A2) | — |
 | Contribution workflow + templates | **this epic** (B1–B2) | — |
@@ -83,9 +83,9 @@ Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M �
 **Scope:** the single entry point. Contains:
 - PR workflow (branch from `main`, one logical change/PR, link the issue, commit/PR style matching history).
 - **"Run before you open a PR"** block, identical to the current CI gates: `python scripts/check_docs.py` · `python scripts/check_py39.py` · `python scripts/check_templates.py` · `pytest`. Add `ruff`, `black`, and `mypy` when C1 lands.
-- **Four contribution recipes**, each a thin checklist that **links** the authoritative "Adding New Vendors or Hardware" checklist in `CLAUDE.md` (**15 sites today** — `docs/HANDLER_DEVELOPMENT.md` has the conceptual walkthrough) and never restates it. The count shrinks to a single `VendorSpec` edit once the isolation epic lands:
+- **Four contribution recipes**, each a thin checklist that **links** the authoritative "Adding New Vendors or Hardware" checklist in `CLAUDE.md` (**15 numbered sites today**, several now derive-automatically no-ops after isolation Phase 1 — `docs/HANDLER_DEVELOPMENT.md` has the conceptual walkthrough) and never restates it. The count shrinks to a single `VendorSpec` edit once the isolation epic lands:
   1. **Add functionality** — handler-property pattern; no vendor branching in shared code; tests required.
-  2. **Add a vendor** — all 15 checklist sites, calling out the **S1 boot-crash** sites (`handler_manager.py`, `handlers/__init__.py`, the `config.py`↔`main.py` credentials pair, `firmware_sources/__init__.py`, `firmware_checker.py` `SOURCE_MAP`) and the **S2 silent-break** sites (fingerprint signature, boot-ping IP, firmware pattern, `setup_tools.py` `SUPPORTED_DEVICE_TYPES` + its readiness/hint/mode dicts, CLI/API/UI lists) + `grep -rin <vendor> provisioner/ configs/` + hardware-verification report.
+  2. **Add a vendor** — the full checklist, calling out the **S1 boot-crash** sites (`handler_manager.py`, `handlers/__init__.py`, `firmware_sources/__init__.py`, `firmware_checker.py` `SOURCE_MAP`; the former `config.py`↔`main.py` credentials pair was resolved by isolation Story 3 / PR #127) and the **S2 silent-break** sites (fingerprint signature, `vendor_ips.py` IP entry, firmware pattern, `setup_tools.py` readiness/hint/mode dicts, the UI vendor map — the CLI/API device-type lists derive from `HANDLER_MAP` since Story 2 / PR #125) + `grep -rin <vendor> provisioner/ configs/` + hardware-verification report.
   3. **Add a model to an existing vendor** — model-conditional properties, firmware patterns, template, alias.
   4. **Pin a config to a specific model** — `configs/templates/{vendor}/{model}.json` + `CONFIG_MODEL_ALIASES`, deep-merge semantics, **no `{{placeholders}}`**, and the repo-dir deploy note.
 - **Test bar policy** (pure-logic ⇒ tests via `SpyHandler`/HTTP-stub; hardware ⇒ verification report).
@@ -110,8 +110,8 @@ Implement each as a separate required check; each is a `scripts/` entrypoint run
 **Acceptance:** a deliberate `match` in any module (incl. an unimported one) fails the gate locally and in CI.
 
 **C3 — Vendor-isolation gate · M · risk: low**
-**Scope:** `scripts/check_vendor_isolation.py` (or pytest) fails if shared modules — `base.py`, `port_manager.py`, `fingerprint.py`'s flow, `config_store.py` — contain vendor brand strings / concrete-handler references in flow logic, beyond the sanctioned surface. **Complements** isolation-epic S1: until S1 removes the known `base.py:395-403` MikroTik stray, the gate carries a single, commented allowlist entry that S1's PR deletes.
-**Acceptance:** adding `if device_type == "cambium"` to `base.py` fails the gate; the allowlist shrinks to empty once S1 lands.
+**Scope:** `scripts/check_vendor_isolation.py` (or pytest) fails if shared modules — `base.py`, `port_manager.py`, `fingerprint.py`'s flow, `config_store.py` — contain vendor brand strings / concrete-handler references in flow logic, beyond the sanctioned surface. **Complements** isolation-epic S1, which landed first (PR #122, 2026-08): `base.py` is already vendor-string-free, so the gate ships with an **empty allowlist** and simply prevents reintroduction.
+**Acceptance:** adding `if device_type == "cambium"` to `base.py` fails the gate; the allowlist starts and stays empty.
 
 **C4 — Config-template validation gate (incl. remediating existing placeholders) · M · risk: low-med**
 **Prereq finding — the current tree has an explicit mode-template exception.** The six AP/PTP templates under `configs/templates/{cambium,tachyon}/` use `{{ssid}}` and `{{hostname}}`. These templates are consumed by `provisioner/mode_config.py`, which renders the allowlisted variables before application. Standard provisioning templates still must not contain placeholders because deep merge writes their values as-is.
@@ -123,7 +123,7 @@ Implement each as a separate required check; each is a `scripts/` entrypoint run
 
 **C5 — Make all checks required on `main` (capstone) · S · risk: low**
 **Scope:** after C1–C4 **and** the isolation epic's S0 registry-consistency test are green on `main`, configure branch protection / required status checks so none can merge without every gate passing. This is what turns "configured" into "hard block."
-**Dependency:** isolation-epic **S0** must exist. The mode-template placeholder allowlist must remain limited to templates rendered by `mode_config.py`.
+**Dependency:** isolation-epic **S0** (landed — `tests/test_vendor_registry.py`, PR #84). The mode-template placeholder allowlist must remain limited to templates rendered by `mode_config.py`.
 **Acceptance:** a PR failing any single gate cannot be merged.
 
 ---
@@ -139,7 +139,7 @@ Phase C:  C1   C2   C3   C4                (parallel; C3 coordinates with isolat
 
 - **Phase A** is pure governance — zero risk, immediate public-repo hygiene win.
 - **Phase B** makes the rules discoverable; B1 is the keystone everything links to.
-- **Phase C** makes them mechanical; C1/C2/C4 are independent, C3 coordinates with isolation-S1, C5 is the capstone that requires the isolation epic's S0 to have landed.
+- **Phase C** makes them mechanical; C1/C2/C4 are independent, C3 no longer waits on isolation-S1 (landed — PR #122), C5 is the capstone that requires the isolation epic's S0 (landed — PR #84) to be promoted to a required check.
 
 ## Risks & mitigations
 
@@ -148,7 +148,7 @@ Phase C:  C1   C2   C3   C4                (parallel; C3 coordinates with isolat
 | C1 surfaces a wave of pre-existing lint/type debt | Fix in C1's own PR or a tracked narrow cleanup; never bundle into feature PRs (non-goal #4) |
 | C4 can't go green — 6 existing templates carry dead `{{placeholders}}` | C4 explicitly includes remediating them; residual cases use a tracked allowlist that must empty before C5 |
 | Isolation refactor moves registries, breaking C3's assumptions | C3 targets stable `base.py`/shared *flow*, not the registries; consistency stays owned by isolation-S0 |
-| Promoting required checks before isolation-S0 exists | C5 explicitly depends on S0; sequence it last |
+| Promoting required checks before isolation-S0 exists | Resolved — S0 landed (PR #84); C5 promotes the real `tests/test_vendor_registry.py` |
 | Hard-block gates frustrate contributors | `CONTRIBUTING.md` pre-PR block reproduces CI exactly, so failures are caught locally first |
 | Python 3.10+ syntax slips into unimported code | C2 AST-scans the whole tree, not just executed paths |
 | Duplicating the isolation epic's work | Ownership table above; this epic consumes, never rebuilds, S0/S1/`AGENTS.md`/`VendorSpec` |

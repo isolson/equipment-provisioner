@@ -2,16 +2,27 @@
 
 This document outlines the standards and flow for building device handlers in the network provisioner.
 
+Before you develop a new model or change a hardware API, follow the
+[Bench Evidence SOP](BENCH_EVIDENCE.md). A device capture is required for
+model-specific endpoints, payloads, and configuration shapes.
+
+The current Tachyon scope covers the TNA-301, TNA-302, TNA-303X, and TNA-303L
+families. TNA-305X, TNA-305A, and TNS-100 are out of scope until their bench
+evidence is available.
+
 ## Handler Architecture
 
 Each vendor handler inherits from `BaseHandler` and implements vendor-specific API communication.
+
+See [Vendor Hardware Notes](VENDOR_HARDWARE_NOTES.md) for verified vendor API shapes,
+firmware behavior, and bench recovery notes.
 
 ```
 provisioner/handlers/
 ├── base.py          # Base class with provisioning orchestration + property defaults
 ├── cambium.py       # Cambium Networks (ePMP, Force)
 ├── mikrotik.py      # MikroTik RouterOS (SSH-based)
-├── tachyon.py       # Tachyon Networks (TNA APs, TNS switches)
+├── tachyon.py       # Tachyon Networks (TNA APs)
 ├── tarana.py        # Tarana Wireless (gRPC-web)
 ├── ubiquiti.py      # Ubiquiti (Wave + AirOS)
 └── mock.py          # Mock handler for testing
@@ -44,6 +55,30 @@ Never branch on vendor names in shared modules; add/override a trait instead.
 | `allows_arbitrary_template_fallback` | `True` | `False`: when no model/alias/default template matches, do NOT fall back to an arbitrary file in the vendor's template dir. Disable for vendors with product-family templates where cross-applying configs is dangerous. Tachyon: `False` |
 | `config_alias_prefix_matching` | `False` | `True`: `CONFIG_MODEL_ALIASES` keys also match as model-name prefixes (`tna-305` covers `tna-305-xyz`). Tachyon: `True` |
 | `requires_model_preflight` | `False` | `True`: when fingerprinting identifies the vendor but not the model, run a read-only login/get-info preflight (`HandlerManager.login_and_get_info`) before firmware/config asset lookup. Enable for vendors with model-specific assets. Tachyon: `True` |
+| `upload_role_for_model(model)` | `None` | Supplies a handler-owned role while packaging a structured upload when the model determines one. Return `None` for a model that needs an explicit role. This does not change the standard SM provisioning baseline. Tachyon: TNA-301 → AP, TNA-302 → SM, TNA-303X → explicit |
+| `supports_config_overlays` | `False` | `True`: the config resolver (`config_resolver.py`) may compose site-role overlays over this vendor's base template. `False` refuses overlays with an operator-visible note (base-only resolution). Enable per vendor **only after bench verification** — no vendor sets it yet. See "Site-Role Config Overlays" below |
+| `qualified_post_provision_modes` | `()` | Declares deployment modes the handler *advertises* after standard provisioning. The evidence matrix (`provisioner/qualification.py`) decides which advertised modes are *offered* for the exact model and firmware: both transition directions must be recorded as `success` in a bench manifest. Family membership advertises PTP for Cambium ePMP 3K/4K and Tachyon TNA radios; nothing is offered without evidence. Shared code must not maintain a vendor allowlist. |
+| `FIELD_OWNERSHIP` | `None` | The vendor's field ownership contract (`provisioner/field_ownership.py`, `docs/PROVISIONING_NORTH_STAR.md`). One table maps each field path to one owner: `fleet_policy`, `role`, `secret`, `device_default`, or `mode_action`. Anything unlisted is a device default. `scripts/check_templates.py` lints every template against it and the upload API refuses violations. Cambium, Tachyon, Ubiquiti declare one; MikroTik and Tarana are `None`. |
+| `applied_config_expectations()` | `None` | Instance hook. Returns the read-back expectation set for the config just applied, normally `field_ownership.expected_values(FIELD_OWNERSHIP, applied)`. `provision()` passes it to `verify_config()`. Mismatched field names land in `last_verify_mismatches` (never values). |
+| `pending_secrets()` / `apply_secrets()` | host `wpa_key`, `snmp_community` / no-op | Secrets never live in a template. After config verify, `provision()` writes `pending_secrets()` through `apply_secrets()` and records a `secrets` step. Cambium writes `wirelessInterfaceEncryptionKey` and `snmpReadOnlyCommunity` via `set_param`; Tachyon merges `services.snmp.v2.ro.community` into the live config. Presence only, never verified by value. |
+| `requires_ptp_settings` | `False` | `True`: PTP mode must load a vendor settings profile and pass the handler's `generate_ptp_settings()` contract. Naming-only fallback is rejected. Cambium and Tachyon set this to `True`. |
+| `supports_manual_netinstall` | `False` | Exposes the guarded manual recovery action for this handler. MikroTik: `True`. The Netinstall API still requires a detected MikroTik OUI before it starts the destructive operation. |
+| `manual_netinstall_label` | `"Recovery (Netinstall)"` | Operator-facing label for the manual recovery action. Override it when the recovery mechanism needs vendor-specific context. |
+| `is_full_config_export(config)` | `False` (staticmethod) | Returns `True` when a loaded JSON config is a full device export, so the resolver refuses to compose partial overlays over it. The handler still owns the final apply semantics: Tachyon uses the export as the value overlay on a live current-schema document because its 30x API rejects sparse exports. Method-shaped because the answer depends on the config's content, not the vendor alone — still callable before instantiation. Tachyon: key-set heuristic |
+
+### PTP family certification
+
+The vendor registry stores the certified PTP family matrix. Both endpoint
+families must list the other family, and both must support the `PTP` role.
+The API checks this matrix when the second device joins a link. Cambium ePMP
+3K and 4K families are cross-compatible. Tachyon TNA radio families are
+cross-compatible. Switch families are not PTP families.
+
+The handler contract is also required for these vendors. `requires_ptp_settings`
+prevents the generic naming-only fallback. `generate_ptp_settings()` must
+validate or create the vendor radio-role settings from the protected host
+profile before the handler applies the rendered configuration. Do not add RF
+values to shared mode code.
 
 ### Property Combinations by Vendor
 
@@ -52,12 +87,19 @@ Never branch on vendor names in shared modules; add/override a trait instead.
 | Cambium | Yes | No | No | No | No | Yes |
 | MikroTik | No | No | No | No | No | No |
 | Tachyon (APs) | Yes | Yes | Yes | No | No | Yes |
-| Tachyon (TNS switches) | Yes | Yes | Yes | No | **Yes** | Yes |
+| Tachyon (TNS switches, future scope) | Yes | Yes | Yes | No | **Yes** | Yes |
 | Tarana | Yes | No | Yes | **Yes** | No | No |
 | Ubiquiti (Wave) | Yes | No | No | No | No | Yes |
 | Ubiquiti (AirOS) | No | No | No | No | No | No |
 
+Wave Nano has a required model setting: management VLAN 12. Do not make this
+an optional operator field. After the bench path is verified, carry the value
+in the sanitized model baseline and expose a handler-owned readiness check.
+
 ### When `config_after_all_firmware` Is True
+
+The TNS switch path is retained for future work. TNS-100 is not in the
+current support scope.
 
 The provisioning order changes from the default:
 
@@ -100,16 +142,48 @@ Bank 2 firmware is written but NOT activated. The device stays on its current ba
 Every handler MUST implement these methods:
 
 ### 1. `connect() -> bool`
-Authenticate with the device.
+Make one bounded authentication pass against the device.
 
-**Flow:**
-1. Try default credentials first
-2. Try custom credentials from UI (alternate_credentials)
-3. If all fail, set `self.login_error` and return `False`
+The method can try the approved credential candidates. It must not contain an
+unbounded transport retry loop. The shared session contract owns those
+retries.
 
-**Must set:**
-- `self._connected = True` on success
-- `self.login_error` on failure (for UI display)
+The method must set these values:
+
+- On success, set `self._connected = True` and return `True`.
+- On failure, set `self._connected = False` and set `self.login_error`.
+- When the transport gives an exact result, call `set_connection_failure()`.
+
+Use one of these failure kinds: `AUTHENTICATION`, `TRANSPORT`, `DEVICE_BUSY`,
+or `INVALID_RESPONSE`. Do not put a password, token, cookie, or response body
+in `login_error` or a log message.
+
+### Connection and session contract
+
+Shared flow code must use `ensure_connected()` before an in-band operation.
+This method keeps a usable session. It does not log in again when
+`is_connected` is true.
+
+Use `refresh_connection()` only after a known reboot or a confirmed stale
+session. This method disconnects first. It then uses the bounded retry policy.
+
+Authentication failures stop after the first failed connection pass.
+Transport, busy-service, and invalid-response failures can use the handler's
+retry limit. The default limit is one attempt. Increase the limit only after
+bench evidence confirms that the device service needs more time.
+
+`verify_config()` has a session postcondition. A result of `True` or
+`UNVERIFIED` must leave `is_connected` true. The provisioning flow reuses that
+session for firmware bank 2. It must not force a logout and login between
+configuration verification and the firmware upload.
+
+Add tests for these cases:
+
+- A usable session causes no new login.
+- A transient failure uses the bounded retry limit.
+- An authentication failure does not retry.
+- Configuration verification and firmware bank 2 use the same session.
+- Logs and errors do not contain credentials or session data.
 
 ### 2. `get_info() -> DeviceInfo`
 Retrieve device information after successful login.
@@ -158,21 +232,12 @@ Wait for device to come back online after reboot.
 ## Authentication Flow
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    connect()                         │
-├─────────────────────────────────────────────────────┤
-│  1. Try DEFAULT_CREDENTIALS (e.g., root/admin)      │
-│     └─ Success? Return True                         │
-│                                                     │
-│  2. Try alternate_credentials from web UI           │
-│     └─ Success? Return True                         │
-│                                                     │
-│  3. All failed                                      │
-│     └─ Set login_error = "Invalid credentials"      │
-│     └─ Return False                                 │
-│                                                     │
-│  UI will prompt user for credentials if needed      │
-└─────────────────────────────────────────────────────┘
+ensure_connected()
+  ├─ session is usable → reuse it
+  └─ no usable session → connect()
+       ├─ success → continue
+       ├─ authentication failure → stop and prompt
+       └─ transient failure → retry within handler limit
 ```
 
 ## Provisioning Flow (called by base.py)
@@ -183,7 +248,7 @@ The `provision()` method in `base.py` orchestrates the full flow. The order of c
 ┌─────────────────────────────────────────────────────┐
 │              provision() in base.py                  │
 ├─────────────────────────────────────────────────────┤
-│  1. connect()                                       │
+│  1. ensure_connected()                              │
 │     └─ notify("login", success, error)              │
 │                                                     │
 │  2. get_info()                                      │
@@ -197,7 +262,7 @@ The `provision()` method in `base.py` orchestrates the full flow. The order of c
 │                                                     │
 │  4. upload_firmware() → update_firmware(bank=1)     │
 │     └─ reboot() (or auto-reboot if update_triggers_reboot) │
-│     └─ wait_for_reboot() → connect() → verify      │
+│     └─ wait_for_reboot() → refresh session → verify│
 │     └─ notify("firmware_update_1", success, version)│
 │                                                     │
 │  ══════════════ CONFIG vs FW2 ORDERING ════════════ │
@@ -205,7 +270,7 @@ The `provision()` method in `base.py` orchestrates the full flow. The order of c
 │  IF config_after_all_firmware = False (DEFAULT):    │
 │  ┌──────────────────────────────────────────────┐   │
 │  │  5. Config Apply → Config Verify             │   │
-│  │  6. Bank 2 FW → Reboot → Verify             │   │
+│  │  6. Reuse session → Bank 2 FW → Verify       │   │
 │  └──────────────────────────────────────────────┘   │
 │                                                     │
 │  IF config_after_all_firmware = True:               │
@@ -258,7 +323,7 @@ BANK 1 → reboot → verify → BANK 2 → reboot → verify → CONFIG (no ver
 │  │ update_firmware(bank=1)                          │
 │  │ reboot() [or auto-reboot]                        │
 │  │ wait_for_reboot() ◄── Port may go offline here   │
-│  │ connect()                                        │
+│  │ refresh_connection()                             │
 │  │ verify: get_firmware_version() == expected       │
 │  └──────────────┘                                   │
 │         │                                           │
@@ -275,7 +340,7 @@ BANK 1 → reboot → verify → BANK 2 → reboot → verify → CONFIG (no ver
 │  │ update_firmware(bank=2)                          │
 │  │ reboot() [unless fw2_skips_reboot]               │
 │  │ wait_for_reboot()                                │
-│  │ connect()                                        │
+│  │ refresh_connection()                             │
 │  │ verify: both banks now have same version         │
 │  └──────────────┘                                   │
 │         │                                           │
@@ -328,7 +393,7 @@ Each port card shows two zones:
    - `NO LINK` (gray) — no cable / no device
    - `DETECTING` (amber spinner) — waiting for device
    - `READY` (green check) — device detected, tap to provision
-   - `LOGGING IN`, `CHECKING FIRMWARE`, or `APPLYING CONFIG` (blue spinner) — active provisioning step with a "Step N of 7" subtitle
+   - `LOGGING IN`, `CHECKING FIRMWARE`, or `APPLYING CONFIG` (blue spinner) — active step with a `Step N of M` subtitle
    - `COMPLETE` (green check) — all steps passed
    - `FAILED` (red X) — error with truncated message
    - `NEEDS CREDENTIALS` (red alert) — tap to enter password
@@ -341,7 +406,13 @@ Opens an activity log view with:
 - MAC Address, Serial, IP, Link Speed
 - FW Bank 1 and FW Bank 2 with version and active indicator
 
-**Activity log** — timestamped step-by-step entries in provisioning order:
+**Activity log** — timestamped entries from the validation plan for the run.
+
+The backend derives the standard plan from handler capabilities and the selected work. It omits validations that do not apply.
+
+Vendor-specific flows can publish additional validations. For example, MikroTik Netinstall publishes ZTP, WiFi, phone-home, registration, and ship-ready validations.
+
+Standard provisioning uses these validation keys:
 
 | Step | Checklist Key | Detail Shown |
 |------|---------------|--------------|
@@ -384,6 +455,70 @@ configs/
 1. `templates/{device_type}/{model}.json` - Model-specific
 2. `templates/{device_type}/default.json` - Default for type
 3. `templates/{device_type}/*.json` - First file found
+
+## Site-Role Config Overlays
+
+Provisioning jobs can carry a **site role** (e.g. a tower deployment vs a
+business/home install). The config resolver (`provisioner/config_resolver.py`,
+the seam `main.py` calls instead of `store.get_config_template()` directly —
+design: `docs/design-config-resolution.md`) composes an optional role overlay
+over the base template:
+
+```
+configs/templates/{vendor}/roles/{role}/{model|alias|default}.json
+```
+
+Rules:
+
+- **Roles are opaque strings derived from the template tree** — adding a role
+  is a data change (create the directory), never a code change. No module may
+  grow a role enum or role list.
+- **Lookup reuses the base chain**: model → `CONFIG_MODEL_ALIASES` alias →
+  `default.json`, honoring the same class traits
+  (`allows_prefixed_config_exports`, `config_alias_prefix_matching`). There is
+  **no** arbitrary-file fallback for overlays, and overlays are `.json` only —
+  they are dict deltas, deep-merged over the base (dicts merge recursively,
+  overlay wins per key; **lists and scalars replace wholesale**).
+- **Overlays that touch a list must carry the complete list value** — and
+  therefore **role overlays must never contain secrets or identity fields**
+  (PSKs, passwords, SNMP communities, static IPs, SSIDs). Those belong to
+  snapshots/replacement flows, never to git-committed files under
+  `configs/templates/**`. `tests/test_role_overlay_lint.py` enforces the
+  secret-shaped-key check on every shipped overlay.
+- **Refusals soft-proceed**: if the vendor's handler has
+  `supports_config_overlays = False` (the default), the base is a `.tar`
+  full export, or `is_full_config_export()` fires on the JSON base, the
+  resolver resolves base-only and records an operator-visible note. A missing
+  overlay for a selected role also soft-proceeds with a note (roles roll out
+  vendor-by-vendor).
+- **No role selected ⇒ byte-identical passthrough** of the plain template
+  lookup — the template file is not even opened. When an overlay does apply,
+  the merged result is materialized as a job-scoped `0600` artifact under
+  `/var/lib/provisioner/run/resolved/` and handed to the handler as a normal
+  config file; the artifact is deleted after the job.
+
+Tachyon export note: a `.tar` or full-export-shaped JSON file remains a
+non-composable base for resolver purposes. During `apply_config_file`, the
+Tachyon handler reads the live `/cgi.lua/config` document and deep-merges the
+export over it before posting `{"data": ...}`. This supplies fields omitted by
+older sparse exports while keeping exported values authoritative, except for
+the captured live-owned remote-syslog enabled state. The
+behavior is covered by `tests/test_tachyon_verify.py` and must not move into
+`base.py` or the resolver.
+
+Role selection: per-job via the API (`ProvisionRequest.role`; kiosk UI
+exposure is a follow-up story) with a fallback default in `config.yaml`:
+
+```yaml
+provisioning:
+  default_role: tower    # optional; omit for role-less resolution
+```
+
+**Host note:** like all template content, role overlay files must exist in the
+data repo on the host (`/var/lib/provisioner/repo/configs/templates/...`) —
+`deploy.sh` syncs code only. The `provisioning:` config section is likewise a
+`/etc/provisioner/config.yaml` edit on the host (deploy does not touch it);
+existing configs without the section keep working — the default is no role.
 
 ## Firmware File Locations
 
@@ -484,6 +619,14 @@ print(f"Success: {result.success}, Error: {result.error_message}")
 4. **Not URL-encoding tokens** - Some tokens contain special characters
 5. **Not clearing state between credential attempts** - Old tokens interfere
 
+## Evidence before endpoints
+
+Do not infer a vendor endpoint, form field, or apply sequence. Read the
+capture summary for the exact model and firmware first
+(`bench-evidence/<vendor>/<model>/<firmware>/capture-summary.md`). If no
+summary exists, capture one on the bench (`docs/BENCH_EVIDENCE.md`) and run
+`scripts/summarize_har.py`. Cite the record path in the handler comment.
+
 ## Adding a New Vendor
 
 ### 1. Handler (`provisioner/handlers/{vendor}.py`)
@@ -501,30 +644,42 @@ print(f"Success: {result.success}, Error: {result.error_message}")
 - Add API probe if the device has a distinctive REST endpoint
 - Detection must work on factory-default devices at their default IP
 
-### 3. Boot-Ping Discovery (`provisioner/port_manager.py`)
+### 3. Firmware Source (`provisioner/firmware_sources/{vendor}.py`, optional)
 
-- Add the vendor's default IP(s) to `DeviceLinkLocalIP` class
-- Add to `DeviceLinkLocalIP.ALL` with vendor tag
-- Add to the boot-ping `ips_to_try` list in `_boot_ping_detect()`
+- Subclass `BaseFirmwareSource` and implement `check_for_updates()` — only if the vendor has an unauthenticated download endpoint (Tarana doesn't; its firmware is uploaded manually)
+- Do **not** add it to `firmware_sources/__init__.py` — that package deliberately no longer imports vendor modules; the class is referenced only from the vendor's spec (step 4)
+- Add firmware version extraction regex in `firmware.py` if the vendor uses non-standard naming, and create the `firmware/{vendor}/` directory in the data repo
 
-### 4. Handler Registration (`provisioner/handler_manager.py`)
+### 4. VendorSpec Registration (`provisioner/vendor_registry.py`)
 
-- Add `DeviceType.{VENDOR}: {Vendor}Handler` to `HANDLER_MAP`
+One `register(VendorSpec(...))` call per vendor — together with the `DeviceType` enum member (step 2), this is the whole shared-registration budget (Story 6 / #76). Every other vendor enumeration derives from the spec:
 
-### 5. Firmware Matching (`provisioner/firmware.py`)
+| Spec field | Derived views |
+|---|---|
+| `handler_cls` | `HandlerManager.HANDLER_MAP`, and via `provisionable_device_types()` the CLI choices, API device-type validation, and setup rows |
+| `firmware_source_cls` + `firmware_source_defaults` | `FirmwareChecker.SOURCE_MAP`, `config._default_firmware_sources()` |
+| `default_credentials` (+ `builtin_ui_credentials` if the shipped login differs) | `config._default_credentials()`, `BUILTIN_CREDENTIALS`, setup credential hints |
+| `link_local_ips` | `vendor_ips.VENDOR_LINK_LOCAL_IPS`, the `.ALL` probe list, the boot-ping list, `DeviceIPsConfig` defaults. The first IP is the vendor's primary/default address. New vendors append to the probe order; existing vendors' probe positions are pinned by the historical order tuples in `vendor_ips.py`/`config.py` — don't touch those when adding |
+| `model_firmware_patterns` | `FirmwareManager.MODEL_FIRMWARE_PATTERNS` (firmware-file lookup; distinct from any handler-local validation dict, which is a class trait) |
+| `config_template_dir` | consistency-tested against `configs/templates/` |
+| `ui_style` (`name`, `color`) | kiosk vendor cards via `vendor_ui_metadata()`; drop an icon at `web/static/vendor-icons/{vendor}.png` |
 
-- Add model-to-filename patterns in `MODEL_FIRMWARE_PATTERNS`
-- Add firmware version extraction regex if the vendor uses non-standard naming
-- Create `firmware/{vendor}/` directory
+Rules:
 
-### 6. Config Templates (`configs/templates/{vendor}/`)
+- Register in `DeviceType` declaration order (a test asserts it) — registration is explicit and deterministic, never filesystem discovery
+- Specs hold enumeration **data** only; behavior and class-level traits stay on the handler class (the spec points at the class)
+- Documented exceptions: Evolution Digital registers with `provisionable=False` (dispatched via the `main.py` side-door, no `HANDLER_MAP` entry); `MockHandler` stays outside the registry
+- `tests/test_vendor_registry.py` enforces spec↔enum↔view consistency; `tests/test_vendor_golden.py` locks the derived values — update both in the same commit as an intentional vendor change
+- Single-vendor builds: set `PROVISIONER_VENDORS=<vendor>[,<vendor>...]` in the service environment to filter every derived view (excluded vendors vanish from detection, CLI, API, setup, and UI with no ImportError)
+
+### 5. Config Templates (`configs/templates/{vendor}/`)
 
 - Create vendor subdirectory
 - Add model-specific templates as `{model}.json` (or `.rsc`, `.yaml`, `.tar`)
 - Add model aliases to `CONFIG_MODEL_ALIASES` in `config_store.py` if needed
 - Template format is vendor-specific — match what the handler's `apply_config_file()` expects
 
-### 7. Testing
+### 6. Testing
 
 - [ ] Device detection works (factory-default state)
 - [ ] Boot-ping finds the device after power-on
@@ -542,7 +697,7 @@ print(f"Success: {result.success}, Error: {result.error_message}")
 
 If the new model has different provisioning behavior than existing models (e.g., a switch vs AP from the same vendor):
 
-1. Add firmware patterns to `MODEL_FIRMWARE_PATTERNS`
+1. Add firmware patterns to the vendor's `model_firmware_patterns` in its `VendorSpec` (`provisioner/vendor_registry.py`)
 2. Add config template as `configs/templates/{vendor}/{model}.json`
 3. If the model needs different flow (e.g., `config_after_all_firmware`), make the handler property conditional on model name
 4. Add model alias to `CONFIG_MODEL_ALIASES` if the API-reported model name differs from the template filename

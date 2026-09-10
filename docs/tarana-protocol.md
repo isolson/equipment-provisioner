@@ -1,5 +1,9 @@
 # Tarana G1 gRPC-Web / gNOI Protocol Reference
 
+Store new Tarana captures by following the
+[Bench Evidence SOP](BENCH_EVIDENCE.md). Keep raw HAR and device backup files
+in the secure bench evidence directory.
+
 > **Source**: HAR captures from the Tarana G1 web UI during a firmware update
 > session on 2026-01-30. Device IP `169.254.100.1`, firmware upgraded from
 > `SYS.A3.R10.XXX.3.611.002.00` to `SYS.A3.R10.XXX.3.622.005.00`.

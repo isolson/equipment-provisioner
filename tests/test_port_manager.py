@@ -4,7 +4,104 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from provisioner import vendor_ips
 from provisioner.port_manager import DeviceLinkLocalIP, PortManager
+
+
+def test_ptp_side_reapply_preserves_existing_port_side():
+    """A corrective reapply must not swap Main and SM on the same port."""
+    manager = PortManager(num_ports=2)
+    manager._ptp_links = {
+        "tw33-tw35": ({
+            "side_a_port": 1,
+            "side_b_port": 2,
+        }, 0.0)
+    }
+
+    assert manager.get_available_ptp_side(33, 35, port_num=1) == "a"
+    assert manager.get_available_ptp_side(33, 35, port_num=2) == "b"
+    assert manager.get_available_ptp_side(33, 35, port_num=3) == "b"
+
+
+def test_ptp_side_reapply_uses_port_state_after_registry_reset():
+    """Persisted port state remains authoritative if the link registry is empty."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+    state = manager.port_states[1]
+    state.ptp_link_id = "tw33-tw35"
+    state.device_mode = "ptp-a"
+    manager._ptp_links = {}
+
+    assert manager.get_available_ptp_side(33, 35, port_num=1) == "a"
+def test_ptp_link_tracks_model_and_family_for_peer_checks():
+    manager = PortManager(num_ports=2)
+    manager._generate_port_configs()
+    manager._ptp_links.clear()
+    try:
+        first = manager.port_states[1]
+        first.device_type = "cambium"
+        first.device_model = "ePMP 3000"
+        manager.set_device_mode(
+            1,
+            "ptp-a",
+            {"my_tower": "32", "remote_tower": "18"},
+            "tw18-tw32",
+        )
+
+        second = manager.port_states[2]
+        second.device_type = "cambium"
+        second.device_model = "ePMP 4616"
+        assert manager.get_available_ptp_side(32, 18, port_num=2) == "b"
+        assert manager.get_ptp_peer("tw18-tw32", 2) == {
+            "port": 1,
+            "device_type": "cambium",
+            "device_model": "ePMP 3000",
+            "family": "ePMP-3K",
+        }
+    finally:
+        manager._ptp_links.clear()
+
+
+def test_ptp_side_reservation_prevents_two_async_masters():
+    manager = PortManager(num_ports=3)
+    manager._generate_port_configs()
+    manager._ptp_links.clear()
+    manager._ptp_reservations.clear()
+    try:
+        assert manager.reserve_ptp_side(32, 18, 1) == "a"
+        assert manager.reserve_ptp_side(32, 18, 2) == "b"
+        with pytest.raises(ValueError, match="Both PTP sides"):
+            manager.reserve_ptp_side(32, 18, 3)
+        assert manager.get_reserved_ptp_side("tw18-tw32", 1) == "a"
+        assert manager.get_reserved_ptp_side("tw18-tw32", 2) == "b"
+    finally:
+        manager._ptp_links.clear()
+        manager._ptp_reservations.clear()
+
+
+def test_ptp_peer_includes_pending_reservation_identity():
+    manager = PortManager(num_ports=2)
+    manager._generate_port_configs()
+    manager._ptp_links.clear()
+    manager._ptp_reservations.clear()
+    try:
+        manager.reserve_ptp_side(
+            32,
+            18,
+            1,
+            device_type="cambium",
+            device_model="ePMP 3000",
+        )
+
+        assert manager.get_ptp_peer("tw18-tw32", 2) == {
+            "port": 1,
+            "device_type": "cambium",
+            "device_model": "ePMP 3000",
+            "family": "ePMP-3K",
+        }
+    finally:
+        manager._ptp_links.clear()
+        manager._ptp_reservations.clear()
 
 
 @pytest.mark.asyncio
@@ -216,6 +313,115 @@ async def test_post_grace_sweep_leaves_connected_complete_port_alone():
     assert state.checklist.login is True
 
 
+def test_replacement_mac_clears_preserved_run_but_keeps_cooldown_identity():
+    """A rapid equipment swap must not inherit the previous COMPLETE card.
+
+    Keep the old success identity only so cooldown logic can prove that the
+    newly observed MAC is a different unit and bypass the old unit's cooldown.
+    """
+    import time
+
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    old_mac = "00:11:22:33:44:55"
+    completed_at = time.time()
+    state.last_result = "success"
+    state.last_error = "stale error"
+    state.provisioning_ended = completed_at
+    state.last_provisioned_at = completed_at
+    state.last_provisioned_mac = old_mac
+    state.provision_attempted = True
+    state.last_bootp_fired_at = completed_at
+    state.last_bootp_fired_mac = old_mac
+    state.device_model = "Old model"
+    state.device_serial = "OLD123"
+    state.checklist.login = True
+    manager.set_step_plan(1, [{"key": "login", "label": "Login"}])
+    manager.update_checklist(1, "login", True, "Old run")
+    state.device_mode = "ap"
+    state.mode_config = {"tower": 1}
+
+    changed = manager._reset_run_state_if_replaced(1, "AA:BB:CC:DD:EE:FF")
+
+    assert changed is True
+    assert state.last_result is None
+    assert state.last_error is None
+    assert state.provisioning_ended is None
+    assert state.provision_attempted is False
+    assert state.last_bootp_fired_at is None
+    assert state.last_bootp_fired_mac is None
+    assert state.device_model is None
+    assert state.device_serial is None
+    assert state.checklist.login is None
+    assert state.step_plan == []
+    assert state.step_status == {}
+    assert state.step_details == {}
+    assert state.device_mode is None
+    assert state.mode_config is None
+    assert state.last_provisioned_at == completed_at
+    assert state.last_provisioned_mac == old_mac
+
+
+def test_same_mac_keeps_completed_run_during_reboot_grace():
+    """A rebooting unit must retain COMPLETE even if MAC case differs."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.last_result = "success"
+    state.last_provisioned_mac = "AA:BB:CC:DD:EE:FF"
+    state.provision_attempted = True
+    state.checklist.login = True
+
+    changed = manager._reset_run_state_if_replaced(1, "aa:bb:cc:dd:ee:ff")
+
+    assert changed is False
+    assert state.last_result == "success"
+    assert state.provision_attempted is True
+    assert state.checklist.login is True
+
+
+@pytest.mark.asyncio
+async def test_rapid_ip_device_swap_clears_complete_and_provisions_new_mac(monkeypatch):
+    """IP detection must inspect MAC before the old attempted flag can block it."""
+    import time
+
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    state = manager.port_states[1]
+    state.link_up = True
+    state.last_result = "success"
+    state.provisioning_ended = time.time()
+    state.last_provisioned_at = time.time()
+    state.last_provisioned_mac = "00:11:22:33:44:55"
+    state.provision_attempted = True
+    state.checklist.login = True
+
+    target_ip = "169.254.1.1"
+    monkeypatch.setattr(DeviceLinkLocalIP, "ALL", [(target_ip, ["cambium"])])
+    manager._try_passive_detection = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    manager._ping_device = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._identify_device_type = AsyncMock(return_value="cambium")  # type: ignore[method-assign]
+    manager._lookup_neighbor_mac = AsyncMock(  # type: ignore[method-assign]
+        return_value="AA:BB:CC:DD:EE:FF"
+    )
+    detected = AsyncMock()
+    manager.on_device_detected(detected)
+
+    await manager._detect_device_on_port(1)
+
+    detected.assert_awaited_once_with(1, "cambium", target_ip)
+    assert state.device_mac == "AA:BB:CC:DD:EE:FF"
+    assert state.last_result is None
+    assert state.checklist.login is None
+    assert state.provision_attempted is True
+    # The old identity remains solely for cooldown comparison/audit.
+    assert state.last_provisioned_mac == "00:11:22:33:44:55"
+
+
 @pytest.mark.asyncio
 async def test_link_down_during_expected_reboot_does_not_cancel_provisioning():
     """While expecting_reboot is set, a link-down must be ignored.
@@ -284,6 +490,36 @@ def test_firmware_banks_initial_is_preserved_across_updates():
     checklist = manager.port_states[1].checklist
     assert checklist.firmware_banks_initial == "bank1:7.19|bank2:7.19|active:1"
     assert checklist.firmware_banks == "bank1:7.20.8|bank2:7.20.8|active:1"
+
+
+def test_dynamic_validation_plan_serializes_vendor_specific_steps():
+    """Run-specific checks must not require fixed checklist dataclass fields."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+
+    plan = [
+        {"key": "netinstall", "label": "Netinstall"},
+        {"key": "ztp_ready", "label": "ZTP readiness"},
+        {"key": "ship_ready", "label": "Ship-ready state"},
+    ]
+    manager.set_step_plan(1, plan)
+    manager.update_checklist(1, "netinstall", True, "Firmware flashed")
+    manager.update_checklist(1, "ztp_ready", "loading", "Checking contract")
+
+    status = manager._get_single_port_status(1)
+    assert status["step_plan"] == plan
+    assert status["step_status"] == {
+        "netinstall": True,
+        "ztp_ready": "loading",
+    }
+    assert status["step_details"]["netinstall"] == "Firmware flashed"
+    assert status["step_details"]["ztp_ready"] == "Checking contract"
+
+    manager.reset_checklist(1)
+    status = manager._get_single_port_status(1)
+    assert status["step_plan"] == []
+    assert status["step_status"] == {}
+    assert status["step_details"] == {}
 
 
 def test_port_configs_include_mikrotik_secondary_source_ip():
@@ -551,3 +787,169 @@ async def test_passive_detection_marks_detected_when_link_up_and_match():
     assert state.device_detected is True
     assert state.device_type == "evolution_digital"
     assert state.device_mac == "84:01:12:42:95:fe"
+
+
+@pytest.mark.asyncio
+async def test_passive_detection_provisions_replacement_during_complete_grace():
+    """A new passive-only device must not inherit the old unit's COMPLETE."""
+    import time
+
+    manager = PortManager(num_ports=6)
+    manager._generate_port_configs()
+
+    config = manager.ports[5]
+    state = manager.port_states[5]
+    state.link_up = True
+    state.last_result = "success"
+    state.provisioning_ended = time.time()
+    state.last_provisioned_at = time.time()
+    state.last_provisioned_mac = "84:01:12:00:00:01"
+    state.provision_attempted = True
+    state.checklist.link_qualification = "PASS"
+    detected = AsyncMock()
+    manager.on_device_detected(detected)
+
+    async def fake_sniff(self, interface, timeout_sec, pi_mac=None):
+        return "84:01:12:42:95:fe"
+
+    with patch(
+        "provisioner.fingerprint.DeviceFingerprinter.sniff_for_known_mac",
+        new=fake_sniff,
+    ):
+        await manager._try_passive_detection(5, config, state, timeout_sec=10)
+
+    detected.assert_awaited_once_with(5, "evolution_digital", None)
+    assert state.last_result is None
+    assert state.checklist.link_qualification is None
+    assert state.device_mac == "84:01:12:42:95:fe"
+
+
+# ============================================================================
+# Vendor IP registry derivation (Story 4 / #74)
+# ============================================================================
+#
+# DeviceLinkLocalIP.ALL, DeviceLinkLocalIP.BOOT_PING, and DeviceIPsConfig
+# defaults all derive from vendor_ips.VENDOR_LINK_LOCAL_IPS. The literals
+# below are golden values locking the pre-registry behavior byte-for-byte:
+# probe order and shared-IP candidate order affect which IP answers first
+# when devices share subnets, and which vendor is the fingerprint fallback.
+
+
+def test_probe_list_derivation_matches_historical_all():
+    """DeviceLinkLocalIP.ALL must equal the pre-registry literal exactly."""
+    assert DeviceLinkLocalIP.ALL == [
+        ("169.254.1.1", ["cambium", "tachyon"]),
+        ("192.168.1.1", ["tachyon"]),
+        ("192.168.1.20", ["ubiquiti"]),
+        ("169.254.100.1", ["tarana"]),
+        ("192.168.88.1", ["mikrotik"]),
+    ]
+
+
+def test_boot_ping_derivation_matches_historical_order():
+    """BOOT_PING must equal the old inline ips_to_try literal exactly.
+
+    Note the order differs from ALL: the boot-ping list has always tried
+    the MikroTik default before Tarana.
+    """
+    assert DeviceLinkLocalIP.BOOT_PING == [
+        "169.254.1.1",    # was DeviceLinkLocalIP.CAMBIUM
+        "192.168.1.1",    # was DeviceLinkLocalIP.TACHYON_ALT
+        "192.168.1.20",   # was DeviceLinkLocalIP.UBIQUITI
+        "192.168.88.1",   # was DeviceLinkLocalIP.MIKROTIK
+        "169.254.100.1",  # was DeviceLinkLocalIP.TARANA
+    ]
+
+
+def test_link_local_constants_match_historical_values():
+    """Per-vendor constants (derived from the registry) keep their values."""
+    assert DeviceLinkLocalIP.CAMBIUM == "169.254.1.1"
+    assert DeviceLinkLocalIP.TACHYON == "169.254.1.1"
+    assert DeviceLinkLocalIP.TACHYON_ALT == "192.168.1.1"
+    assert DeviceLinkLocalIP.TARANA == "169.254.100.1"
+    assert DeviceLinkLocalIP.MIKROTIK == "192.168.88.1"
+    assert DeviceLinkLocalIP.UBIQUITI == "192.168.1.20"
+
+
+def test_registry_probe_and_boot_ping_views_agree():
+    """Registry -> ALL -> BOOT_PING must cover the identical IP set."""
+    probe_ips = [ip for ip, _vendors in DeviceLinkLocalIP.ALL]
+    registry_ips = {
+        ip for ips in vendor_ips.VENDOR_LINK_LOCAL_IPS.values() for ip in ips
+    }
+    assert registry_ips == set(probe_ips)
+    assert set(DeviceLinkLocalIP.BOOT_PING) == set(probe_ips)
+    # Both derived lists are duplicate-free.
+    assert len(probe_ips) == len(set(probe_ips))
+    assert len(DeviceLinkLocalIP.BOOT_PING) == len(set(DeviceLinkLocalIP.BOOT_PING))
+
+
+def test_boot_ping_vendor_order_has_no_stale_vendors():
+    """The boot-order metadata must not list vendors absent from the
+    registry (vendors missing from the order tuple are fine — they are
+    appended in registry order, so a new vendor needs only a
+    VENDOR_LINK_LOCAL_IPS edit)."""
+    assert set(vendor_ips._BOOT_PING_VENDOR_ORDER) <= set(
+        vendor_ips.VENDOR_LINK_LOCAL_IPS
+    )
+
+
+def test_boot_ping_appends_registry_vendors_missing_from_order_tuple():
+    """A vendor added to the registry but not the frozen boot-order tuple
+    still gets boot-pinged (appended in registry order)."""
+    original = vendor_ips.VENDOR_LINK_LOCAL_IPS
+    patched = dict(original)
+    patched["newvendor"] = ["203.0.113.7"]
+    with patch.object(vendor_ips, "VENDOR_LINK_LOCAL_IPS", patched):
+        ips = vendor_ips.boot_ping_ips()
+    assert ips[:-1] == vendor_ips.boot_ping_ips()
+    assert ips[-1] == "203.0.113.7"
+
+
+def test_mikrotik_fallbacks_stay_out_of_the_derived_lists():
+    """Fallback subnets are conditional behavior, not standard probes."""
+    probe_ips = {ip for ip, _vendors in DeviceLinkLocalIP.ALL}
+    for fallback_ip in DeviceLinkLocalIP.MIKROTIK_FALLBACKS:
+        assert fallback_ip not in probe_ips
+        assert fallback_ip not in DeviceLinkLocalIP.BOOT_PING
+
+
+@pytest.mark.asyncio
+async def test_simple_and_multiport_modes_probe_identical_ip_sequences():
+    """Simple mode (no-switch) and multi-port VLAN mode must probe the same
+    vendor link-local IPs, in the same order, during device detection.
+
+    Both paths share _detect_device_on_port; this locks the contract that a
+    refactor of either path keeps probing the full derived registry set
+    (probe list + MikroTik fallbacks once every standard probe misses).
+    """
+    sequences = {}
+
+    for mode, kwargs in (
+        ("multi", {"num_ports": 6, "setup_vlans": True}),
+        ("simple", {"num_ports": 1, "setup_vlans": False}),
+    ):
+        manager = PortManager(**kwargs)
+        manager._generate_port_configs()
+
+        probed = []
+
+        async def fake_ping(_iface, ip, arp_fallback=True, _probed=probed):
+            _probed.append(ip)
+            return False
+
+        async def fake_passive(_port_num, _config, _state, timeout_sec):
+            return None
+
+        manager._ping_device = fake_ping  # type: ignore[method-assign]
+        manager._try_passive_detection = fake_passive  # type: ignore[method-assign]
+
+        await manager._detect_device_on_port(1)
+        sequences[mode] = probed
+
+    expected = [ip for ip, _vendors in DeviceLinkLocalIP.ALL] + list(
+        DeviceLinkLocalIP.MIKROTIK_FALLBACKS
+    )
+    assert sequences["multi"] == expected
+    assert sequences["simple"] == expected
+    assert sequences["multi"] == sequences["simple"]

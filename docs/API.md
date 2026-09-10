@@ -16,6 +16,7 @@ This report covers:
 - management VLAN interface presence
 - primary and custom credentials
 - default config templates
+- shared Cambium SM baseline
 - local firmware inventory
 - MikroTik provisioning switch state for the six provisioning ports, WAN uplink, and host trunk
 
@@ -53,6 +54,74 @@ Export the current bench state as a portable `.zip` bundle.
 Query parameters:
 
 - `include_system_files=true` to include `/etc/provisioner/config.yaml` and `/etc/provisioner/provisioner.env`
+
+Protected runtime config assets, including Cambium field deployment exports,
+are omitted from the bundle. The bundle can still contain
+`credentials.json` and optional system files. Export only to a trusted host.
+
+### GET /config-assets
+
+List installed configuration assets. Use `device_type`, `family`, `firmware`,
+`role`, `mode`, `scope`, and `config_type` as optional filters.
+
+Protected assets return metadata only. Their content is not returned by the
+list endpoint or by `GET /config-assets/content`.
+
+### GET /config-assets/metadata
+
+Return the registry-derived family, role, mode, scope, and asset-kind choices
+for the upload form. This endpoint works on a new install with no assets.
+
+### POST /config-assets/upload
+
+Multipart form. The page sends `device_type`, `family`, `role` (`AP` or
+`PTP`), and either `profile` (AP direction: `North`, `East`, `South`,
+`West`) or `link_profile` (`twXX-twYY`) plus `ptp_side` (`a` or `b`). The
+mode follows from the role and side. The file kind is inferred: a complete
+Cambium device export becomes a protected field export and its firmware is
+read from the export; anything else is a standard profile. The upload is
+reduced by the field ownership contract and refused, naming the fields, when
+it still carries a secret, a device default, or an identity field. SM
+baselines are never uploaded; they come from git (`/config-baselines/sync`).
+The legacy fields `mode`, `asset_kind`, `firmware`, and `scope` are still
+accepted; `scope=shared` is refused.
+
+### GET /config-baselines?device_type=cambium
+
+Per model family: the SM baseline tracked in git, whether it is installed on
+the host and identical to the repo copy, contract lint problems (field names),
+the fixture witnesses, whether `fresh->sm` is proven, and the AP and PTP
+profiles installed for the family.
+
+```json
+{"device_type": "cambium", "families": [{"family": "ePMP-4K", "name": "ePMP 4K",
+  "sm_baseline": {"status": "installed", "repo_path": "configs/templates/cambium/ePMP-4K/5.11.1/SM/default.json",
+                  "runtime_path": "configs/templates/cambium/ePMP-4K/5.11.1/SM/default.json", "in_sync": true,
+                  "lint": [], "witnesses": ["ePMP 4518 5.11.1", "ePMP 4616 5.11.1"], "fresh_sm_proven": false},
+  "profiles": []}]}
+```
+
+`status` is one of `installed`, `out_of_date`, `lint_problem`, `not_installed`, `no_repo_baseline`.
+
+### POST /config-baselines/sync
+
+Body `{"device_type": "cambium", "family": "ePMP-4K"}` (`family` optional).
+Copies the tracked repo templates for that vendor (or family) into the host
+config store, overwriting. This is the "Install from repo" action.
+
+### GET /host-credentials
+
+Per vendor: the username, which credential keys are set (`password`,
+`backup_password`, `wpa_key`, `snmp_community`), the secrets the handler
+requires, and which of those are missing. Values are never returned.
+`restart_required` is true after a change until the service restarts.
+
+### PUT /host-credentials/{device_type}
+
+Body with any of `username`, `password`, `backup_password`, `wpa_key`,
+`snmp_community`. Edits the host `config.yaml` in place (a dated backup is
+written first, the file stays root-only). Returns the keys changed and
+`restart_required`. Restart with `POST /setup/restart-service`.
 
 ### POST /setup/switch/configure
 
@@ -118,6 +187,22 @@ Returns the status of one port.
 
 **Response:** Same shape as one element of the `/ports` array.
 
+### GET /ports/{port_number}/events
+
+Return the server-owned timeline for one port, oldest first. Query
+`since=<seq>` returns only newer entries; `limit` caps the count (max 500).
+Entries carry step names, results, mode changes, link events, and verify
+mismatch field names. They never carry a credential or a device secret.
+
+```json
+{"port_number": 4, "latest_seq": 12, "events": [
+  {"seq": 11, "ts": 1756760000.1, "kind": "step_finished", "key": "config_verify",
+   "label": "Config verify", "status": false, "detail": "mismatch: mgmtVLANVID", "run_id": "4-1756759900"}
+]}
+```
+
+The WebSocket broadcasts each new entry as `{"type": "port_event", "port_number": 4, "event": {...}}`.
+
 ### POST /ports/{port_number}/identify
 
 Runs device fingerprinting again on a port. The port must have link-up status.
@@ -145,11 +230,18 @@ Starts manual provisioning for a port.
   "custom_username": "admin",
   "skip_firmware": false,
   "skip_config": false,
-  "config_override": null
+  "config_override": null,
+  "role": null
 }
 ```
 
 Only `port_number` is required. All other fields are optional.
+
+`role` selects a site-role config overlay for this job (an opaque string, for
+example `tower`). When omitted or `null`, the server falls back to
+`provisioning.default_role` in `config.yaml`; when neither is set, the job runs
+role-less resolution. See
+[HANDLER_DEVELOPMENT.md](HANDLER_DEVELOPMENT.md) "Site-Role Config Overlays".
 
 **Response:**
 ```json
@@ -206,6 +298,68 @@ checklist and WebSocket events used by other provisioning operations.
 - `404` — Port not found
 - `409` — Port already provisioning
 - `503` — Provisioner not available
+
+### POST /ports/{port_number}/mode-preview
+
+Same body as `apply-mode`. Validates the request with the same rules and
+returns what the change would do, without changing anything and without
+reserving a PTP side.
+
+```json
+{"ok": true, "current_mode": "sm", "target_mode": "ptp", "ptp_link_id": "tw33-tw35",
+ "ptp_side": "a", "peer": null, "template_found": true, "template_label": "PTP-A / ePMP 4616 / 5.11.1",
+ "naming": {"hostname": "tw33a-tw35", "ssid": "tw33-tw35"},
+ "changes": [{"field": "radio role", "from": "sm", "to": "ptp-a"},
+             {"field": "hostname", "from": "standard SM", "to": "tw33a-tw35"}],
+ "warnings": []}
+```
+
+A mode that the bench has not qualified returns `400` with the reason, for
+example `PTP not qualified for ePMP 4518 on 5.11.1: no bench evidence`. A
+port with a running mode change returns `409`.
+
+### POST /ports/{port_number}/apply-mode
+
+Applies a qualified AP or PTP mode after standard SM provisioning is complete
+and verified. It also restores the standard SM config for a device that is
+already in AP or PTP mode.
+
+To restore SM, send only the mode value:
+
+```json
+{
+  "mode": "sm"
+}
+```
+
+The server resolves the same standard SM template used by provisioning. It
+applies and verifies that template before it clears the selected device mode
+and PTP link state. If the link has a peer, the peer side remains registered.
+If the apply or verification fails, the existing PTP state stays in place. The
+request does not update firmware or antenna gain.
+
+For PTP, send `my_tower` and `remote_tower` (both 1-99). The server assigns
+side A or B, reserves that side before the background task starts, and checks
+the peer family against the certified family matrix. The server uses the
+ascending tower order for the link ID and SSID. Reversing the two tower values
+does not change the SSID. Cambium and Tachyon PTP handlers require a
+protected vendor settings profile that matches the device firmware. The request
+returns `409` when the peer family is not certified, a side is in use, or the
+required profile is missing or incomplete.
+
+```json
+{
+  "mode": "ptp",
+  "my_tower": 32,
+  "remote_tower": 18
+}
+```
+
+PTP profiles contain radio settings and can contain secrets. Keep them in the
+host-only runtime template store. Do not commit them or include them in setup
+bundles. See [HANDLER_DEVELOPMENT.md](HANDLER_DEVELOPMENT.md) for the handler
+contract and [cambium-config.md](cambium-config.md) for the Cambium profile
+workflow.
 
 ## Credentials
 
@@ -367,6 +521,43 @@ Update a config file's content in place.
 ### DELETE /configs/{config_type}/{device_type}/{filename}
 
 Delete a config file.
+
+## Snapshots
+
+Config snapshots captured from devices (R3 of the config-resolution epic).
+Every response is **redacted** at a single choke point on the server: secrets
+never leave the service. `identity.wireless.psk` is replaced by
+`psk_present`/`psk_length`, the raw vendor blob is replaced by a
+`content_present` marker, and any identity field not explicitly classified
+public is omitted and listed in `redacted_fields`. There is **no** HTTP write
+endpoint — snapshots are written in-process by the capture path.
+
+### GET /snapshots
+
+List snapshots, newest first.
+
+**Query parameters** (all optional): `vendor`, `serial_number`, `mac_address`
+filters; `limit` (default 50, maximum 200); `offset` (default 0).
+
+Corrupt or newer-schema files on disk are skipped and counted in
+`skipped_unreadable`.
+
+### GET /snapshots/{id}
+
+Get one snapshot, masked per the redaction map.
+
+**Errors:**
+- `404` — Unknown or invalid snapshot id
+- `409` — Snapshot has a newer schema version than this service reads
+- `422` — Snapshot file is corrupt or unreadable (it can still be deleted)
+
+### DELETE /snapshots/{id}
+
+Delete a snapshot. Allowed even for corrupt or newer-schema files, so manual
+cleanup always works regardless of retention.
+
+**Errors:**
+- `404` — Unknown snapshot id
 
 ## System
 

@@ -372,24 +372,20 @@ async def cmd_reboot(args):
 
 async def get_handler(ip: str, device_type: str, username: str, password: str, mock: bool = False):
     """Get the appropriate handler for a device type."""
-    from .handlers import MikrotikHandler, CambiumHandler, TachyonHandler, TaranaHandler, MockHandler
+    from .handler_manager import HandlerManager, provisionable_device_types
+    from .handlers import MockHandler
 
     if mock:
         # Use mock handler with the specified device type for simulation
         credentials = {"username": username, "password": password}
         return MockHandler(ip=ip, credentials=credentials, device_type=device_type)
 
-    handlers = {
-        "mikrotik": MikrotikHandler,
-        "cambium": CambiumHandler,
-        "tachyon": TachyonHandler,
-        "tarana": TaranaHandler,
-    }
-
-    handler_class = handlers.get(device_type.lower())
+    # Resolve via HANDLER_MAP so the CLI vendor list can never drift from
+    # the registry (vendor-isolation epic, Story 2 / #72).
+    handler_class = HandlerManager.handler_class_for(device_type.lower())
     if not handler_class:
         console.print(f"[red]Unknown device type: {device_type}[/red]")
-        console.print(f"[dim]Supported types: {', '.join(handlers.keys())}[/dim]")
+        console.print(f"[dim]Supported types: {', '.join(provisionable_device_types())}[/dim]")
         return None
 
     credentials = {"username": username, "password": password}
@@ -496,8 +492,17 @@ async def cmd_test(args):
         await handler.disconnect()
 
 
-def main():
-    """Main CLI entry point."""
+def build_parser():
+    """Build the CLI argument parser.
+
+    Device-type choices and help text derive from HANDLER_MAP (via
+    provisionable_device_types), so the CLI tracks the handler registry.
+    Extracted from main() so tests can assert the derived choices.
+    """
+    from .handler_manager import provisionable_device_types
+
+    device_types = provisionable_device_types()
+
     parser = argparse.ArgumentParser(
         description="Network Device Provisioner CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -519,7 +524,8 @@ def main():
     # Common device arguments
     def add_device_args(p):
         p.add_argument("ip", help="Device IP address")
-        p.add_argument("--type", "-t", required=True, help="Device type (cambium, mikrotik, tachyon, tarana)")
+        p.add_argument("--type", "-t", required=True,
+                       help="Device type ({})".format(", ".join(device_types)))
         p.add_argument("--username", "-u", default="admin", help="Device username")
         p.add_argument("--password", "-p", default="", help="Device password")
 
@@ -566,13 +572,19 @@ def main():
     # Test command (mock device)
     test_parser = subparsers.add_parser("test", help="Test provisioning with mock device")
     test_parser.add_argument("--device-type", "-t", default="cambium",
-                            choices=["cambium", "mikrotik", "tachyon", "tarana"],
+                            choices=device_types,
                             help="Device type to simulate")
     test_parser.add_argument("--firmware", "-f", action="store_true",
                             help="Include firmware update in test")
     test_parser.add_argument("--failures", action="store_true",
                             help="Simulate random failures")
 
+    return parser
+
+
+def main():
+    """Main CLI entry point."""
+    parser = build_parser()
     args = parser.parse_args()
 
     if not args.command:

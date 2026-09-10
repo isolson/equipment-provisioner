@@ -17,12 +17,13 @@ against the original handler and GREEN after the fix.
 Python 3.9 — no 3.10+ syntax.
 """
 
+import json
 from typing import Callable, List, Tuple
 
 import pytest
 
+from provisioner.handlers.base import ConnectionFailureKind
 from provisioner.handlers.tachyon import TachyonHandler
-
 
 # ---------------------------------------------------------------------------------------
 # Mock plumbing: a fake asyncio.create_subprocess_exec driven by a per-test "responder".
@@ -47,9 +48,38 @@ class DummyProc:
         self.returncode = returncode
         self._stdout = stdout.encode("utf-8")
         self._stderr = stderr.encode("utf-8")
+        self.stdin = None
 
-    async def communicate(self):
+    async def communicate(self, stdin=None):
+        self.stdin = stdin
         return (self._stdout, self._stderr)
+
+
+class DummyResponse:
+    status = 200
+    request_info = None
+    history = ()
+
+    def __init__(self, body: str):
+        self.body = body
+
+    async def text(self):
+        return self.body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class DummySession:
+    def __init__(self):
+        self.request_kwargs = None
+
+    def request(self, *args, **kwargs):
+        self.request_kwargs = kwargs
+        return DummyResponse("{}")
 
 
 def method_of(cmd: List[str]) -> str:
@@ -88,6 +118,55 @@ def make_handler(interface: str = "eth0") -> TachyonHandler:
     h._use_curl = True
     h._api_token = "tok-123"
     return h
+
+
+# ---------------------------------------------------------------------------------------
+# Login/session failure classification
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_login_curl_timeout_is_transport_failure(monkeypatch):
+    install_fake_exec(monkeypatch, lambda cmd: (28, "", "operation timed out"))
+    handler = make_handler()
+    handler._connected = False
+
+    assert await handler._connect_curl() is False
+    assert handler.connection_failure_kind == ConnectionFailureKind.TRANSPORT
+    assert "curl code 28" in handler.login_error
+    assert handler.credentials["password"] not in handler.login_error
+
+
+@pytest.mark.asyncio
+async def test_login_curl_http_auth_failure_is_not_transport(monkeypatch):
+    install_fake_exec(
+        monkeypatch,
+        lambda cmd: (0, mk_stdout('{"auth":false}', 401), ""),
+    )
+    handler = make_handler()
+    handler._connected = False
+
+    assert await handler._connect_curl() is False
+    assert handler.connection_failure_kind == ConnectionFailureKind.AUTHENTICATION
+
+
+@pytest.mark.asyncio
+async def test_login_curl_busy_response_is_retryable(monkeypatch, caplog):
+    response_secret = "fixture-response-must-not-be-logged"
+    install_fake_exec(
+        monkeypatch,
+        lambda cmd: (
+            0,
+            mk_stdout('{"error":"%s"}' % response_secret, 503),
+            "",
+        ),
+    )
+    handler = make_handler()
+    handler._connected = False
+
+    assert await handler._connect_curl() is False
+    assert handler.connection_failure_kind == ConnectionFailureKind.DEVICE_BUSY
+    assert response_secret not in caplog.text
 
 
 # A config that carries a hostname so apply_config()'s read-back verification runs.
@@ -215,6 +294,45 @@ async def test_config_apply_clean_json_is_true(monkeypatch):
     assert method_of(captured[-1]) == "POST"
 
 
+@pytest.mark.asyncio
+async def test_config_apply_wraps_document_in_data(monkeypatch):
+    """Tachyon accepts config POSTs only when the document is under ``data``."""
+    processes = []
+
+    async def fake_exec(*cmd, **kwargs):
+        process = DummyProc(0, mk_stdout("{}", 200), "")
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    handler = make_handler()
+
+    assert await handler._apply_config_curl(CONFIG_WITH_HOSTNAME) is True
+
+    config_input = processes[0].stdin.decode("utf-8")
+    data_line = next(
+        line for line in config_input.splitlines() if line.startswith("data-binary = ")
+    )
+    request_body = json.loads(json.loads(data_line.split(" = ", 1)[1]))
+    assert request_body == {"data": CONFIG_WITH_HOSTNAME}
+
+
+@pytest.mark.asyncio
+async def test_api_request_aiohttp_wraps_config_document():
+    """The non-curl transport uses the same Tachyon config request shape."""
+    handler = make_handler()
+    handler._use_curl = False
+    handler._session = DummySession()
+
+    await handler._api_request(
+        "POST",
+        handler.API_CONFIG,
+        data=CONFIG_WITH_HOSTNAME,
+    )
+
+    assert handler._session.request_kwargs["json"] == {"data": CONFIG_WITH_HOSTNAME}
+
+
 # ---------------------------------------------------------------------------------------
 # Low-level API request — _api_request_curl() must surface HTTP errors
 # ---------------------------------------------------------------------------------------
@@ -233,6 +351,40 @@ async def test_api_request_curl_returns_parsed_json_on_200(monkeypatch):
     handler = make_handler()
     result = await handler._api_request_curl("GET", handler.API_CONFIG)
     assert result["system"]["hostname"] == "x"
+
+
+@pytest.mark.asyncio
+async def test_api_request_curl_keeps_token_and_body_out_of_argv(monkeypatch):
+    captured = []
+    processes = []
+
+    async def fake_exec(*cmd, **kwargs):
+        captured.append(list(cmd))
+        process = DummyProc(0, mk_stdout("{}", 200), "")
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    handler = make_handler()
+    await handler._api_request_curl(
+        "POST",
+        handler.API_CONFIG,
+        data={"password": "unit-password"},
+    )
+
+    argv = captured[0]
+    assert "--config" in argv
+    assert all("tok-123" not in arg for arg in argv)
+    assert all("unit-password" not in arg for arg in argv)
+    config_input = processes[0].stdin.decode("utf-8")
+    assert "Cookie: token=tok-123" in config_input
+    assert "unit-password" in config_input
+    data_line = next(
+        line for line in config_input.splitlines() if line.startswith("data-binary = ")
+    )
+    assert json.loads(json.loads(data_line.split(" = ", 1)[1])) == {
+        "data": {"password": "unit-password"}
+    }
 
 
 # ---------------------------------------------------------------------------------------

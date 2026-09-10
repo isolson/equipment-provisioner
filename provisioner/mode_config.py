@@ -17,6 +17,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .config_assets import MODE_TO_PTP_SIDE
+from .vendor_registry import config_family_for_model
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,13 +84,25 @@ class ModeConfigManager:
         device_type: str,
         mode: str,
         model: Optional[str] = None,
+        profile: Optional[str] = None,
+        link_profile: Optional[str] = None,
+        firmware: Optional[str] = None,
+        require_firmware_match: bool = False,
     ) -> Optional[Path]:
         """Get path to a mode config template.
 
-        Search order:
-        1. ``{templates}/{device_type}/{model}-{mode}.json``
-        2. ``{templates}/{device_type}/{mode}.json``
-        3. ``{templates}/{device_type}_{mode}.json`` (legacy)
+        Family assets are resolved as:
+
+        ``{vendor}/{family}/{firmware}/{role}/{profile}/default``
+
+        AP ``profile`` is a direction.  PTP ``link_profile`` is an exact link
+        directory when present, otherwise the approved ``twXX-twXX`` generic
+        directory is used.  ``ptp-a`` is always the Main archive and
+        ``ptp-b`` is always the SM archive.  Versioned family assets match the
+        requested device firmware when ``firmware`` is supplied.
+
+        Legacy flat templates remain available for models without an approved
+        family tree.
         """
         base_name = self._MODE_TEMPLATE_NAMES.get(mode)
         if base_name is None:
@@ -95,6 +110,134 @@ class ModeConfigManager:
             return None
 
         device_dir = self.templates_path / device_type
+
+        family = config_family_for_model(device_type, model)
+        if family is not None:
+            family_dir = device_dir / family.directory
+            if family_dir.is_dir():
+                role = "AP" if mode == "ap" else "PTP"
+                version_dirs = sorted(
+                    (entry for entry in family_dir.iterdir() if entry.is_dir()),
+                    key=lambda entry: entry.name.lower(),
+                    reverse=True,
+                )
+                role_names = {"ap", "sm", "ptp"}
+                version_containers = [
+                    entry for entry in version_dirs
+                    if entry.name.lower() not in role_names
+                ]
+                matched_version_only = False
+                if version_containers and firmware:
+                    firmware_key = str(firmware).strip().lower()
+                    firmware_key = re.sub(r"^v", "", firmware_key)
+                    version_dirs = [
+                        entry for entry in version_containers
+                        if re.sub(r"^v", "", entry.name.lower()) == firmware_key
+                    ]
+                    if not version_dirs:
+                        logger.warning(
+                            "No config asset version %s for %s/%s",
+                            firmware,
+                            device_type,
+                            model,
+                        )
+                        return None
+                    matched_version_only = True
+                elif version_containers and require_firmware_match:
+                    logger.warning(
+                        "Device firmware is required for versioned %s/%s assets",
+                        device_type,
+                        model,
+                    )
+                    return None
+                # Cambium includes a firmware directory; Tachyon's approved
+                # exports are version-independent and place AP/SM directly
+                # below the family directory.
+                containers = version_dirs if matched_version_only else [family_dir] + version_dirs
+                family_profile = profile or "default"
+                if mode in MODE_TO_PTP_SIDE:
+                    side = MODE_TO_PTP_SIDE[mode]
+                    link_names = []
+                    if link_profile:
+                        link_names.append(link_profile)
+                        reverse_link_profile = self._reverse_ptp_link_profile(
+                            link_profile
+                        )
+                        if reverse_link_profile:
+                            link_names.append(reverse_link_profile)
+                    link_names.append("twXX-twXX")
+                elif mode == "ap":
+                    if family_profile.lower() == "default":
+                        # The family default is AP/default.json, while
+                        # directional profiles are AP/North/default.json.
+                        for version_dir in containers:
+                            role_dir = next(
+                                (
+                                    entry for entry in version_dir.iterdir()
+                                    if entry.is_dir() and entry.name.lower() == role.lower()
+                                ),
+                                None,
+                            )
+                            if role_dir is None:
+                                continue
+                            for extension in (".json", ".tar", ".tar.gz"):
+                                candidate = role_dir / ("default" + extension)
+                                if candidate.is_file():
+                                    return candidate
+                        return None
+                    link_names = [family_profile]
+                else:
+                    link_names = [family_profile]
+
+                for version_dir in containers:
+                    role_dir = next(
+                        (
+                            entry for entry in version_dir.iterdir()
+                            if entry.is_dir() and entry.name.lower() == role.lower()
+                        ),
+                        None,
+                    )
+                    if role_dir is None:
+                        continue
+                    for link_name in link_names:
+                        profile_dir = next(
+                            (
+                                entry for entry in role_dir.iterdir()
+                                if entry.is_dir() and entry.name.lower() == link_name.lower()
+                            ),
+                            None,
+                        )
+                        if profile_dir is None:
+                            continue
+                        if mode in MODE_TO_PTP_SIDE:
+                            profile_dir = next(
+                                (
+                                    entry for entry in profile_dir.iterdir()
+                                    if entry.is_dir() and entry.name.lower() == side.lower()
+                                ),
+                                None,
+                            )
+                            if profile_dir is None:
+                                continue
+                        for extension in (".json", ".tar", ".tar.gz"):
+                            candidate = profile_dir / ("default" + extension)
+                            if candidate.is_file():
+                                return candidate
+                # An installed family tree is authoritative.  Do not fall
+                # back to a vendor-wide AP/PTP file for a family that lacks
+                # the requested role/profile.
+                return None
+            # Preserve legacy flat templates only for installations that have
+            # no structured family tree yet.  Once the library is present,
+            # missing family assets fail closed instead of crossing families.
+            from .vendor_registry import spec_for
+
+            spec = spec_for(device_type)
+            if spec is not None and any(
+                (device_dir / candidate.directory).is_dir()
+                for candidate in spec.config_families
+            ):
+                return None
 
         if device_dir.is_dir():
             # Model-specific template
@@ -124,9 +267,21 @@ class ModeConfigManager:
         device_type: str,
         mode: str,
         model: Optional[str] = None,
+        profile: Optional[str] = None,
+        link_profile: Optional[str] = None,
+        firmware: Optional[str] = None,
+        require_firmware_match: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Load a mode config template as a dictionary."""
-        template_path = self.get_template_path(device_type, mode, model)
+        template_path = self.get_template_path(
+            device_type,
+            mode,
+            model,
+            profile=profile,
+            link_profile=link_profile,
+            firmware=firmware,
+            require_firmware_match=require_firmware_match,
+        )
         if not template_path:
             return None
 
@@ -135,7 +290,7 @@ class ModeConfigManager:
                 import tarfile
                 with tarfile.open(template_path, "r:*") as tar:
                     for member in tar.getmembers():
-                        if member.name.endswith("config.json") or member.name == "config.json":
+                        if Path(member.name).name == "config.json":
                             f = tar.extractfile(member)
                             if f:
                                 return json.load(f)
@@ -253,8 +408,9 @@ class ModeConfigManager:
         my_padded = f"{my_tower:02d}"
         remote_padded = f"{remote_tower:02d}"
 
-        # SSID is the same for both sides
-        ptp_ssid = f"tw{my_padded}-tw{remote_padded}"
+        # SSID is the same for both sides and follows the canonical link ID.
+        link_low, link_high = sorted((my_tower, remote_tower))
+        ptp_ssid = f"tw{link_low:02d}-tw{link_high:02d}"
 
         # Hostname: side letter goes on *this* device's tower number
         if side == "a":
@@ -328,6 +484,28 @@ class ModeConfigManager:
 
         return rendered
 
+    def generate_ptp_settings(
+        self,
+        template: Dict[str, Any],
+        variables: Dict[str, str],
+        device_type: str,
+        side: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Render identity and require the handler's PTP settings contract.
+
+        PTP radio-role settings are vendor-specific.  The mode manager
+        renders the shared link identity, then delegates profile validation or
+        generation to the handler.  This keeps RF values out of shared code.
+        """
+        rendered = self.render_template(template, variables, device_type)
+        from .handler_manager import HandlerManager
+
+        handler_class = HandlerManager.handler_class_for(device_type)
+        if handler_class is None:
+            return rendered
+        return handler_class.generate_ptp_settings(rendered, side, model)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -339,11 +517,20 @@ class ModeConfigManager:
         device_type: str,
     ) -> Dict[str, Any]:
         fields = self.INJECT_FIELDS.get(device_type, [])
+        # Cambium exports wrap the flat device properties in ``device_props``;
+        # mode injection must update that payload so CambiumHandler.apply_config
+        # does not discard the generated hostname/SSID.
+        target = config
+        if (
+            device_type == "cambium"
+            and isinstance(config.get("device_props"), dict)
+        ):
+            target = config["device_props"]
         for field_path, var_name in fields:
             if var_name not in variables:
                 continue
             try:
-                self._set_nested_value(config, field_path, variables[var_name])
+                self._set_nested_value(target, field_path, variables[var_name])
                 logger.debug(f"Injected {field_path} = {variables[var_name]}")
             except (KeyError, IndexError, TypeError) as e:
                 logger.warning(f"Failed to inject {field_path}: {e}")
@@ -380,6 +567,14 @@ class ModeConfigManager:
         elif isinstance(obj, str):
             return self._render_string(obj, variables)
         return obj
+
+    @staticmethod
+    def _reverse_ptp_link_profile(link_profile: str) -> Optional[str]:
+        """Return the opposite tower order used by some field exports."""
+        match = re.fullmatch(r"tw(\d{2})-tw(\d{2})", link_profile.lower())
+        if not match or match.group(1) == match.group(2):
+            return None
+        return "tw{}-tw{}".format(match.group(2), match.group(1))
 
     def _render_string(self, text: str, variables: Dict[str, str]) -> str:
         def replace_var(match):

@@ -1,18 +1,26 @@
 """Cambium ePMP device handler."""
 
 import asyncio
+import copy
 import json
 import logging
 import os
 import re
 import tempfile
-from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
 import urllib.parse
+from pathlib import Path
+from typing import List, Any, Dict, Optional, Tuple
 
 import aiohttp
 
-from .base import BaseHandler, DeviceInfo, UNVERIFIED
+from ..field_ownership import (
+    MODE_ROLES,
+    Owner,
+    OwnershipContract,
+    classify,
+    expected_values as ownership_expected_values,
+)
+from .base import UNVERIFIED, BaseHandler, DeviceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +33,429 @@ class CambiumHandler(BaseHandler):
     JSON API calls depending on firmware version.
     """
 
+    required_baseline_mode = "sm"
+    requires_ptp_settings = True
+    #: Every supported Cambium model maps to a family tree. A model with no
+    #: family baseline fails closed instead of picking an arbitrary file
+    #: (the vendor root holds AP/PTP mode templates, never an SM baseline).
+    allows_arbitrary_template_fallback = False
+
+    #: Fleet policy that the SM baseline writes and verifies. Every value
+    #: traces to the known-good fixtures under ``bench-evidence/cambium``
+    #: (see ``tests/test_cambium_evidence.py``). Change a value there first.
+    SM_FLEET_POLICY = {
+        "networkMode": "2",
+        "mgmtVLANEnable": "1",
+        "mgmtVLANVID": "12",
+        "mgmtIFEnable": "0",
+        "networkBridgeIPAddressMode": "2",
+        "mgmtIFIPAddressMode": "2",
+        "systemNtpServerIPMode": "1",
+        "systemNtpServerPrimaryIP": "time.google.com",
+        "systemNtpServerSecondaryIP": "time.cloudflare.com",
+        "syslogServerIPFirst": "100.126.15.28",
+        "syslogServerPortFirst": "514",
+        "syslogServerTypeFirst": "1",
+        "syslogServerLogCLISH": "1",
+        "syslogServerLogDA": "1",
+        "syslogServerLogMask": "31",
+        "syslogServerLogToWeb": "0",
+        "cambiumDeviceAgentCNSURL": "cnmaestro.infra.treehouse.mn",
+        "cambiumDeviceAgentEnable": "1",
+        "cambiumDeviceAgentMGMTRoutingEnable": "0",
+        "cambiumDeviceAgentZeroTouchEnable": "1",
+        "snmpProtocolVersion": "1",
+        "snmpRemoteAccess": "1",
+        "cambiumSSHServerEnable": "1",
+        "cambiumTelnetServerEnable": "0",
+        "wirelessDeviceCountryCode": "US",
+    }
+
+    #: The three fields that define the SM radio role. Every verified SM
+    #: export (4518, 4616, 4625, Force 300-25) carries these values; every AP
+    #: export carries 1 / 0 / 1 and PTP carries protocol mode 3.
+    SM_ROLE_VALUES = {
+        "wirelessInterfaceMode": "2",
+        "wirelessInterfacePTPMode": "1",
+        "wirelessInterfaceProtocolMode": "1",
+    }
+
+    #: Field ownership contract (``docs/PROVISIONING_NORTH_STAR.md``).
+    #: Anything not listed is a device default: never written, never verified
+    #: as an exact value. Secret-shaped keys are secrets by regex.
+    #: Fleet policy whose value differs per family and lives in the family
+    #: SM template, not in ``SM_FLEET_POLICY``. Scan mask bits: 1 = 20 MHz,
+    #: 2 = 40, 16 = 80, 32 = 160. Factory is 3 (20 and 40 only), which cannot
+    #: follow an 80 MHz access point. Every 4K known-good fixture carries 51
+    #: (20/40/80/160); the 3K fixture carries 19 (20/40/80, no 160 MHz on
+    #: 5 GHz radios).
+    FAMILY_FLEET_POLICY_FIELDS = ("wirelessInterfaceScanFrequencyBandwidth",)
+
+    FIELD_OWNERSHIP = OwnershipContract.from_dotted(
+        dict(
+            [(key, Owner.FLEET_POLICY) for key in SM_FLEET_POLICY]
+            + [(key, Owner.FLEET_POLICY) for key in FAMILY_FLEET_POLICY_FIELDS]
+            + [(key, Owner.ROLE) for key in SM_ROLE_VALUES]
+            + [
+                (key, Owner.DEVICE_DEFAULT)
+                for key in (
+                    # Hardware and radio defaults the device owns.
+                    "cambiumGPSConfigPrioritizeUSB",
+                    "cambiumGPSConfigResetTimeout",
+                    "systemConfigMinAntGain",
+                    "wirelessInterfaceTDDAntennaGain",
+                    "wirelessInterface2PTPMode",
+                    "systemConfigPreheatStopTemp",
+                    "systemConfigPreheatStopTimeout",
+                    # Unit identity and captured addresses. Never copied.
+                    "systemConfigSerialNumber",
+                    "systemConfigMacAddress",
+                    "cambiumDeviceSerialNumber",
+                    "cambiumDeviceMacAddress",
+                    "cambiumCNSDeviceAgentID",
+                    "networkBridgeIPAddr",
+                    "networkBridgeGatewayIP",
+                    "networkBridgeDNSIPAddrPrimary",
+                    "networkBridgeDNSIPAddrSecondary",
+                    "networkBridgeIPv6Addr",
+                    "networkBridgeIPv6Gateway",
+                    "networkBridgeIPv6AddressMode",
+                    "networkBridgeNetmask",
+                    "mgmtIFGateway",
+                    "mgmtIFNetmask",
+                    "mgmtIFIPv6AddressMode",
+                    "mgmtIFVLAN",
+                    "networkLanDefaultIP",
+                    "networkLanIPAddr",
+                    "networkLanIPAddressMode",
+                    "networkLanIPv6Addr",
+                    "networkLanIPv6AddressMode",
+                    "networkWanGatewayIP",
+                    "networkWanIPAddr",
+                    "networkWanIPAddressMode",
+                    "networkWanIPv6Addr",
+                    "networkWanIPv6AddressMode",
+                    "networkWanIPv6LocalInterfaceId",
+                    "networkWanNetmask",
+                    "networkLanNetmask",
+                    "watchdogTargetIPAddress",
+                )
+            ]
+            + [
+                (key, Owner.MODE_ACTION)
+                for key in (
+                    # Site identity written by the AP/PTP workflow only.
+                    "wirelessInterfaceSSID",
+                    "snmpSystemName",
+                    "systemConfigDeviceName",
+                    "cambiumDeviceNameLoginDisplay",
+                    "snmpSystemDescription",
+                    "snmpSystemLocation",
+                    "snmpSystemContact",
+                    "sysLocation",
+                    # RF and link settings selected per deployment.
+                    "centerFrequency",
+                    "centerFrequency2",
+                    "asymBwPrimaryFreq",
+                    "wirelessInterfaceTXPower",
+                    "wirelessInterfaceTDDFrameSize",
+                    "wirelessInterfaceTDDRatio",
+                    "wirelessInterfaceRateMaxMCS",
+                    "prefferedAPTable",
+                )
+            ]
+            + [
+                (key, Owner.SECRET)
+                for key in (
+                    "admin_password",
+                    "wirelessInterfaceEncryptionKey",
+                    "cambiumSysAccountsTable",
+                    "snmpv3UsersTable",
+                    "wirelessRadiusServerTable",
+                )
+            ]
+        ),
+        role_fields={
+            "ePMP-4K": {"SM": tuple(SM_ROLE_VALUES)},
+            "ePMP-3K": {"SM": tuple(SM_ROLE_VALUES)},
+        },
+        root="device_props",
+    )
+    _DYNAMIC_FIELD_RE = re.compile(
+        r"(?:ip|addr|gateway|hostname|name|ssid|frequency|serial|mac|identity|location)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def is_full_config_export(cls, config: Any) -> bool:
+        """Return whether *config* is a native Cambium field export."""
+        return bool(
+            isinstance(config, dict)
+            and isinstance(config.get("device_props"), dict)
+            and isinstance(config.get("template_props"), dict)
+        )
+
+    @classmethod
+    def _contains_secret_value(cls, value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if cls.FIELD_OWNERSHIP.secret_re.search(str(key)) and child not in (
+                    None, "", [], {}
+                ):
+                    return True
+                if cls._contains_secret_value(child):
+                    return True
+        elif isinstance(value, list):
+            return any(cls._contains_secret_value(child) for child in value)
+        return False
+
+    @classmethod
+    def field_export_metadata(cls, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Return safe metadata for an uploaded native export.
+
+        This method returns field names and counts only.  It never returns a
+        credential, PSK, token, address, or other field value.
+        """
+        props = config.get("device_props", {})
+        template_props = config.get("template_props", {})
+        property_count = len(props) if isinstance(props, dict) else 0
+        if isinstance(template_props, dict):
+            property_count += len(template_props)
+        firmware_version = None
+        for source in (props, template_props):
+            if not isinstance(source, dict):
+                continue
+            for key in (
+                "firmwareVersion",
+                "softwareVersion",
+                "version",
+                "cambiumCurrentuImageVersion",
+                "cambiumCurrentuImageIVersion",
+            ):
+                value = source.get(key)
+                if isinstance(value, (str, int, float)) and str(value).strip():
+                    firmware_version = str(value)
+                    break
+            if firmware_version:
+                break
+        dynamic_fields = tuple(
+            sorted(key for key in props if cls._DYNAMIC_FIELD_RE.search(str(key)))
+        ) if isinstance(props, dict) else ()
+        return {
+            "export_type": "cambium_native_field_export",
+            "firmware_version": firmware_version,
+            "property_count": property_count,
+            "secret_present": cls._contains_secret_value(config),
+            "dynamic_fields": list(dynamic_fields),
+        }
+
+    @classmethod
+    def normalize_field_export(cls, config: Dict[str, Any], role: str) -> Dict[str, Any]:
+        """Reduce a native export to the fields the contract lets a profile own.
+
+        Only ``fleet_policy`` and ``role`` fields survive (``mode_action``
+        fields too for AP and PTP roles). Secrets, device defaults, captured
+        identity, and addresses are dropped. The fleet policy values are then
+        asserted. An export whose radio role does not match *role* is
+        refused, so an AP export can never become an SM baseline.
+        """
+        if not cls.is_full_config_export(config):
+            raise ValueError("Cambium field export must contain device_props and template_props")
+        props = config["device_props"]
+        role_key = role.upper()
+        if role_key == "SM":
+            for key, value in cls.SM_ROLE_VALUES.items():
+                if str(props.get(key, "")).strip() != value:
+                    raise ValueError(
+                        "Cambium export is not an SM export: %s does not match the SM role" % key
+                    )
+        wanted = {Owner.FLEET_POLICY, Owner.ROLE}
+        if role_key in MODE_ROLES:
+            wanted.add(Owner.MODE_ACTION)
+        kept = {
+            key: copy.deepcopy(value)
+            for key, value in props.items()
+            if classify(cls.FIELD_OWNERSHIP, (key,)) in wanted
+        }
+        kept.update(cls.SM_FLEET_POLICY)
+        return {
+            "template_props": copy.deepcopy(config["template_props"]),
+            "device_props": kept,
+        }
+
+    @classmethod
+    def is_connectorized_model(cls, model: Optional[str]) -> bool:
+        """Return whether a model accepts the connectorized gain setting."""
+        model_key = (model or "").lower().replace("cambium ", "").strip()
+        return "4600c" in model_key or "connectorized" in model_key
+
+    #: Running firmware from which the explicit upload/upgrade/status
+    #: endpoints (``upload_sw_image_local``, ``upgrade_sw_image_local``,
+    #: ``get_upgrade_status``) are known to exist. Older firmware answered 404
+    #: and uses ``local_upload_image``.
+    EXPLICIT_UPGRADE_MIN_FIRMWARE = (5, 11)
+
+    def _running_firmware_uses_explicit_upgrade(self) -> bool:
+        version = self._device_info.firmware_version if self._device_info else None
+        match = re.match(r"\s*v?(\d+)\.(\d+)", str(version or ""))
+        if not match:
+            # Unknown firmware: the second pass runs on freshly flashed
+            # firmware, which is current; the first pass is unknown.
+            return False
+        return (int(match.group(1)), int(match.group(2))) >= self.EXPLICIT_UPGRADE_MIN_FIRMWARE
+
+    async def apply_antenna_gain(
+        self, gain_db: Optional[int] = None, model: Optional[str] = None
+    ) -> bool:
+        """Apply connectorized gain during explicit AP/PTP/custom setup.
+
+        Standard SM provisioning never writes gain.  This hook runs only after
+        an operator selects a post-provisioning mode, and only a connectorized
+        radio accepts a value.  Integrated radios are never written.
+        """
+        selected_model = model or (self._device_info.model if self._device_info else None)
+        if not self.is_connectorized_model(selected_model):
+            # Integrated radios: the hardware owns the gain (device default).
+            return True
+        if gain_db is None:
+            logger.error("Connectorized Cambium radio requires an explicit antenna gain")
+            return False
+        effective_gain = gain_db
+        try:
+            effective_gain = int(effective_gain)
+        except (TypeError, ValueError):
+            logger.error("Invalid Cambium antenna gain")
+            return False
+        if effective_gain <= 0 or effective_gain > 100:
+            logger.error("Invalid Cambium antenna gain range")
+            return False
+        return await self._apply_config_settings_curl({
+            "wirelessInterfaceTDDAntennaGain": str(effective_gain),
+        })
+
+    @classmethod
+    def qualified_post_provision_modes_for_model(
+        cls, model: Optional[str] = None
+    ) -> Tuple[str, ...]:
+        """Expose PTP for models in an explicitly certified family."""
+        modes = tuple(cls.qualified_post_provision_modes)
+        from ..vendor_registry import config_family_for_model
+
+        family = config_family_for_model("cambium", model)
+        if (
+            "ptp" not in modes
+            and family is not None
+            and "PTP" in family.roles
+            and family.ptp_compatible_families
+        ):
+            return modes + ("ptp",)
+        return modes
+
+    @classmethod
+    def generate_ptp_settings(
+        cls,
+        config: Dict[str, Any],
+        side: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Require the native radio settings needed for a Cambium PTP link.
+
+        The protected PTP profile supplies the hardware-specific values. The
+        shared mode workflow only injects the generated link identity; it
+        must never invent Cambium RF or master/slave values.
+        """
+        if side not in ("a", "b"):
+            raise ValueError("Cambium PTP settings require side 'a' or 'b'")
+        props = config.get("device_props") if isinstance(config, dict) else None
+        if not isinstance(props, dict):
+            props = config if isinstance(config, dict) else {}
+
+        required = (
+            "wirelessInterfaceMode",
+            "wirelessInterfacePTPMode",
+            "wirelessInterfaceProtocolMode",
+            "wirelessInterfaceTDDFrameSize",
+            "wirelessInterfaceTDDRatio",
+            "centerFrequency",
+        )
+        missing = [
+            key for key in required
+            if props.get(key) in (None, "")
+        ]
+        if missing:
+            raise ValueError(
+                "Cambium PTP settings profile is missing: " + ", ".join(missing)
+            )
+
+        def integer_value(key: str) -> Optional[int]:
+            value = props.get(key)
+            try:
+                if isinstance(value, bool):
+                    return None
+                return int(str(value).strip())
+            except (TypeError, ValueError):
+                return None
+
+        expected_mode = 1 if side == "a" else 2
+        mode = integer_value("wirelessInterfaceMode")
+        if mode != expected_mode:
+            raise ValueError(
+                "Cambium PTP settings profile must use wirelessInterfaceMode "
+                f"{expected_mode} for side {side}"
+            )
+        if integer_value("wirelessInterfacePTPMode") not in (1, 2):
+            raise ValueError(
+                "Cambium PTP settings profile must enable a PTP mode"
+            )
+        if integer_value("wirelessInterfaceProtocolMode") != 3:
+            raise ValueError(
+                "Cambium PTP settings profile must use protocol mode 3"
+            )
+        frame_size = integer_value("wirelessInterfaceTDDFrameSize")
+        if frame_size is None or frame_size <= 0:
+            raise ValueError(
+                "Cambium PTP settings profile must use a positive TDD frame size"
+            )
+        if integer_value("wirelessInterfaceTDDRatio") not in (1, 2, 3, 4):
+            raise ValueError(
+                "Cambium PTP settings profile must use a valid TDD ratio"
+            )
+        center_frequency = integer_value("centerFrequency")
+        if center_frequency is None or center_frequency <= 0:
+            raise ValueError(
+                "Cambium PTP settings profile must use a positive center frequency"
+            )
+
+        # On the SM side, Cambium registers against the SSID in the preferred
+        # AP table. The top-level wirelessInterfaceSSID field is an AP field
+        # and does not update that table. Keep the profile's security key and
+        # other radio settings, but point its first preferred AP entry at the
+        # generated link identity.
+        if side == "b":
+            preferred = props.get("prefferedAPTable")
+            if isinstance(preferred, list):
+                entries = preferred
+            elif isinstance(preferred, dict):
+                entries = list(preferred.values())
+            else:
+                entries = []
+            ssid = props.get("wirelessInterfaceSSID")
+            if not ssid:
+                raise ValueError(
+                    "Cambium PTP settings profile requires an SM SSID"
+                )
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                if "prefferedListTableEntrySSID" in entry:
+                    entry["prefferedListTableEntrySSID"] = ssid
+                    break
+            else:
+                raise ValueError(
+                    "Cambium PTP settings profile requires a preferred AP entry"
+                )
+        return config
+
     # Model to firmware filename pattern mapping
     MODEL_FIRMWARE_PATTERNS = {
         # ePMP AX series (WiFi 6) - uses ePMP-AX firmware
@@ -32,6 +463,7 @@ class CambiumHandler(BaseHandler):
         "epmp 4525": ["epmp-ax", "epmp_ax"],
         "epmp 4600": ["epmp-ax", "epmp_ax"],
         "epmp 4600c": ["epmp-ax", "epmp_ax"],
+        "epmp 4616": ["epmp-ax", "epmp_ax"],
         "epmp 4625": ["epmp-ax", "epmp_ax"],
         # Force 300 series - uses ePMP-AC firmware
         "force 300-25": ["epmp-ac", "epmp_ac", "force300", "force-300"],
@@ -86,7 +518,7 @@ class CambiumHandler(BaseHandler):
         self.login_error: Optional[str] = None  # Human-readable login error for UI
         self._credentials_confirmed: bool = False  # True after successful login (for reconnect)
         self._password_change_required: bool = False  # Device requires password change on first login
-        self._last_applied_config: Optional[Dict[str, str]] = None  # Flat keys applied via set_param
+        self._last_applied_config: Optional[Dict[str, Any]] = None  # Flat keys applied via set_param/import
 
     @property
     def device_type(self) -> str:
@@ -110,7 +542,8 @@ class CambiumHandler(BaseHandler):
         model = self._device_info.model if self._device_info else None
         return 360 if self._is_ax_model(model) else super().firmware_reboot_timeout
 
-    def _is_ax_model(self, model: Optional[str]) -> bool:
+    @classmethod
+    def _is_ax_model(cls, model: Optional[str]) -> bool:
         """Whether ``model`` is an ePMP-AX (WiFi 6) device.
 
         Derives the AX model set from ``MODEL_FIRMWARE_PATTERNS`` (the existing
@@ -123,14 +556,14 @@ class CambiumHandler(BaseHandler):
         if not model:
             return False
         model_key = model.lower().replace("cambium ", "").strip()
-        patterns = self.MODEL_FIRMWARE_PATTERNS.get(model_key)
+        patterns = cls.MODEL_FIRMWARE_PATTERNS.get(model_key)
         if patterns and "epmp-ax" in patterns:
             return True
         if model_key.startswith("epmp ax"):
             return True
         ax_numbers = {
             key.split()[-1]
-            for key, pats in self.MODEL_FIRMWARE_PATTERNS.items()
+            for key, pats in cls.MODEL_FIRMWARE_PATTERNS.items()
             if "epmp-ax" in pats
         }
         tokens = set(model_key.replace("-", " ").split())
@@ -445,22 +878,21 @@ class CambiumHandler(BaseHandler):
 
             form_data = f"changed_elements={urllib.parse.quote(changed_elements)}&debug=true"
 
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-k", "-m", "15",
-                "--interface", self.interface,
-                "-b", self._cookie_file,
-                "-X", "POST",
-                "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", form_data,
+            proc, stdout, _ = await self._run_curl_with_stdin_config(
+                [
+                    "curl", "-s", "-k", "-m", "15",
+                    "--interface", self.interface,
+                    "-b", self._cookie_file,
+                    "-X", "POST",
+                    "-H", "Content-Type: application/x-www-form-urlencoded",
+                ],
                 set_param_url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                form_data=form_data,
             )
-            stdout, _ = await proc.communicate()
 
             if proc.returncode == 0:
                 response = stdout.decode("utf-8", errors="ignore")
-                logger.debug(f"set_param response: {response}")
+                logger.debug("set_param returned a response")
                 # Check for success
                 if "success" in response.lower() or '"err":""' in response or proc.returncode == 0:
                     logger.info(f"First-boot setup completed via set_param on {self.ip}")
@@ -476,17 +908,16 @@ class CambiumHandler(BaseHandler):
                 "oldPassword": old_password,
                 "newPassword": new_password,
             }
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-k", "-m", "10",
-                "--interface", self.interface,
-                "-X", "POST",
-                "-H", "Content-Type: application/json",
-                "-d", json.dumps(payload),
+            proc, stdout, _ = await self._run_curl_with_stdin_config(
+                [
+                    "curl", "-s", "-k", "-m", "10",
+                    "--interface", self.interface,
+                    "-X", "POST",
+                    "-H", "Content-Type: application/json",
+                ],
                 change_url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                form_data=json.dumps(payload),
             )
-            stdout, _ = await proc.communicate()
             if proc.returncode == 0:
                 response = stdout.decode("utf-8", errors="ignore")
                 if "success" in response.lower() or "200" in response:
@@ -497,6 +928,35 @@ class CambiumHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Error changing default password: {e}")
             return False
+
+    def required_secrets(self) -> List[str]:
+        # An SM cannot associate without the WPA2 key, and the template never
+        # carries it. Fail before config when the host does not provide it.
+        return ["wpa_key"]
+
+    async def apply_secrets(self, secrets: Dict[str, str]) -> bool:
+        """Write secret-owned fields through set_param. Never logs a value.
+
+        Secrets are not part of any template. They arrive from the host
+        configuration (``credentials.cambium``) and are verified by
+        presence only, never by value.
+        """
+        props = {}
+        if secrets.get("wpa_key"):
+            props["wirelessInterfaceEncryptionKey"] = secrets["wpa_key"]
+        if secrets.get("snmp_community"):
+            props["snmpReadOnlyCommunity"] = secrets["snmp_community"]
+        if not props:
+            return True
+        # set_param bookkeeping must not replace the verification basis.
+        previous = self._last_applied_config
+        try:
+            applied = await self._apply_config_settings_curl(props)
+        finally:
+            self._last_applied_config = previous
+        if applied:
+            logger.info("Applied %d secret field(s) on %s", len(props), self.ip)
+        return bool(applied)
 
     def _get_custom_credential(self) -> Optional[Dict[str, str]]:
         """Get ONE custom credential for Cambium devices.
@@ -681,19 +1141,23 @@ class CambiumHandler(BaseHandler):
                 self._cookie_file = cookie_fd.name
                 cookie_fd.close()
 
-            # Use curl with interface binding and save cookies
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-k", "-m", "10",
-                "--interface", self.interface,
-                "-c", self._cookie_file, "-b", self._cookie_file,
-                "-X", "POST",
-                "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
-                login_url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            # Keep the login form and URL out of the curl process argv. The
+            # process list is visible to other local users on the provisioner.
+            login_form = (
+                f"username={urllib.parse.quote(username, safe='')}"
+                f"&password={urllib.parse.quote(password, safe='')}"
             )
-            stdout, stderr = await proc.communicate()
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                [
+                    "curl", "-s", "-k", "-m", "10",
+                    "--interface", self.interface,
+                    "-c", self._cookie_file, "-b", self._cookie_file,
+                    "-X", "POST",
+                    "-H", "Content-Type: application/x-www-form-urlencoded",
+                ],
+                login_url,
+                form_data=login_form,
+            )
 
             logger.info(f"CGI login curl returncode: {proc.returncode}, stdout len: {len(stdout) if stdout else 0}")
             if stderr:
@@ -1062,6 +1526,7 @@ class CambiumHandler(BaseHandler):
                         "53545": "ePMP 4525",
                         "53264": "ePMP 4600",
                         "53520": "ePMP 4600C",
+                        "53560": "ePMP 4616",
                         "53561": "ePMP 4625",
                     }
                     if sku_code in sku_to_model:
@@ -1259,6 +1724,11 @@ class CambiumHandler(BaseHandler):
         Strips metadata keys and delegates to _apply_config_settings_curl.
         """
         try:
+            if self.is_full_config_export(config):
+                logger.error(
+                    "Cambium native field exports must use interface-bound config_import"
+                )
+                return False
             # Strip metadata keys
             props = {k: v for k, v in config.items()
                      if not k.startswith("_") and k not in ("device_props", "template_props")}
@@ -1277,6 +1747,87 @@ class CambiumHandler(BaseHandler):
             logger.error(f"Failed to apply config: {e}")
             return False
 
+    async def apply_mode_config(self, config: Dict[str, Any]) -> bool:
+        """Apply a rendered mode config through Cambium's native importer.
+
+        Cambium's exported ``device_props`` payloads are accepted by
+        ``config_import`` but are rejected by the smaller ``set_param`` API on
+        ePMP-AX hardware.  Mode templates are rendered in memory, written to a
+        permission-restricted temporary JSON file, imported, and then read
+        back through the existing fail-closed verifier.
+        """
+        native_import = bool(
+            self.interface and isinstance(config.get("device_props"), dict)
+        )
+        if not native_import:
+            success = await self.apply_config(config)
+        else:
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", prefix="cambium_mode_", delete=False
+                ) as config_file:
+                    json.dump(config, config_file)
+                    config_file.flush()
+                    temp_path = config_file.name
+                success = await self.apply_config_file(temp_path)
+            except Exception as e:
+                logger.error(f"Failed to stage Cambium mode config: {e}")
+                return False
+            finally:
+                if temp_path:
+                    try:
+                        os.unlink(temp_path)
+                    except OSError:
+                        pass
+
+        if not success:
+            return False
+
+        if native_import:
+            # A Cambium native import can restart the management service when
+            # the radio role changes.  Do not read through the old session or
+            # fail while the device is between web-server states.
+            if not await self.wait_for_reboot(timeout=120):
+                logger.error(
+                    f"Cambium device did not become login-ready after mode import on {self.ip}"
+                )
+                return False
+
+        applied_props = self._last_applied_config or {}
+        verification = await self.verify_config(
+            expected_values=self._mode_verification_values(applied_props)
+        )
+        if verification is not True:
+            logger.error(
+                f"Cambium mode config verification did not pass on {self.ip}"
+            )
+            return False
+        return True
+
+    @classmethod
+    def _mode_verification_values(cls, props: Dict[str, Any]) -> Dict[str, Any]:
+        """Select mode fields that must survive a native import.
+
+        Cambium devices can clamp transmit power to the country and hardware
+        limit during an import.  The read-back value is therefore not a stable
+        mode-application assertion.  Keep all other safe scalar properties,
+        including the PTP role and injected identity fields, fail-closed.
+        """
+        normalized_by_device = frozenset(("wirelessInterfaceTXPower",))
+        return {
+            key: value
+            for key, value in cls._verification_values(props).items()
+            if key not in normalized_by_device
+        }
+
+    @classmethod
+    def _field_export_verification_values(
+        cls, props: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Select fleet-policy and role fields for a full-export read-back."""
+        return ownership_expected_values(cls.FIELD_OWNERSHIP, cls._scalar_props(props))
+
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from JSON file.
 
@@ -1287,6 +1838,17 @@ class CambiumHandler(BaseHandler):
             config_file = Path(config_path)
             if not config_file.exists():
                 logger.error(f"Config file not found: {config_path}")
+                return False
+
+            is_full_export = False
+            if config_file.suffix.lower() == ".json":
+                with config_file.open("r", encoding="utf-8") as handle:
+                    is_full_export = self.is_full_config_export(json.load(handle))
+
+            if is_full_export and not self.interface:
+                logger.error(
+                    "Cambium native field exports require an interface-bound config_import"
+                )
                 return False
 
             # Use curl-based restore when interface binding is needed
@@ -1338,10 +1900,34 @@ class CambiumHandler(BaseHandler):
 
         See docs/cambium-config.md for full reference.
         """
+        temporary_path = None
         try:
             if not self._stok:
                 logger.error(f"No stok available for config_import on {self.ip}")
                 return False
+
+            import_path = config_path
+            config_data = None
+            if Path(config_path).suffix.lower() == ".json":
+                with open(config_path, "r", encoding="utf-8") as config_file:
+                    config_data = json.load(config_file)
+                if self.is_full_config_export(config_data):
+                    if not self.interface:
+                        logger.error(
+                            "Cambium native field exports require an interface-bound config_import"
+                        )
+                        return False
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".json", prefix="cambium_field_export_", delete=False
+                    ) as prepared_file:
+                        json.dump(config_data, prepared_file)
+                        prepared_file.flush()
+                        temporary_path = prepared_file.name
+                    try:
+                        os.chmod(temporary_path, 0o600)
+                    except OSError:
+                        pass
+                    import_path = temporary_path
 
             config_import_url = (
                 f"{self._base_url}/cgi-bin/luci/;stok={self._stok}/admin/config_import"
@@ -1356,7 +1942,7 @@ class CambiumHandler(BaseHandler):
                 "-b", self._cookie_file,
                 "-X", "POST",
                 "-F", "skipIllegal=1",
-                "-F", f"image=@{config_path};type=application/json",
+                "-F", f"image=@{import_path};type=application/json",
                 config_import_url,
             ]
 
@@ -1375,7 +1961,7 @@ class CambiumHandler(BaseHandler):
                 return False
 
             response = stdout.decode("utf-8", errors="ignore")
-            logger.info(f"config_import response: {response[:500]}")
+            logger.info("config_import returned a response from the device")
 
             # Check upload success
             try:
@@ -1384,11 +1970,14 @@ class CambiumHandler(BaseHandler):
                 if success_val != 1 and success_val != "1":
                     err = resp_data.get("err", "")
                     logger.error(
-                        f"config_import failed on {self.ip}: success={success_val}, err={err!r}"
+                        "config_import failed on %s: success=%s, error_present=%s",
+                        self.ip,
+                        success_val,
+                        bool(err),
                     )
                     return False
             except json.JSONDecodeError:
-                logger.error(f"config_import returned non-JSON: {response[:500]}")
+                logger.error("config_import returned a non-JSON response")
                 return False
 
             logger.info(f"Config uploaded to {self.ip}, waiting for apply to finish...")
@@ -1399,15 +1988,21 @@ class CambiumHandler(BaseHandler):
                 logger.info(f"Configuration applied successfully on {self.ip}")
                 # Store that we applied a config (for verification)
                 try:
-                    with open(config_path, "r") as f:
-                        config_data = json.load(f)
+                    if config_data is None:
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            config_data = json.load(f)
                     # Extract flat keys for verification
                     if "device_props" in config_data:
                         flat_keys = config_data["device_props"]
                     else:
                         flat_keys = {k: v for k, v in config_data.items()
                                      if not k.startswith("_")}
-                    self._last_applied_config = flat_keys
+                    if self.is_full_config_export(config_data):
+                        self._last_applied_config = self._field_export_verification_values(
+                            flat_keys
+                        )
+                    else:
+                        self._last_applied_config = flat_keys
                 except Exception:
                     pass
             else:
@@ -1418,6 +2013,12 @@ class CambiumHandler(BaseHandler):
         except Exception as e:
             logger.error(f"Failed to apply JSON config via config_import: {e}")
             return False
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
 
     async def _poll_config_apply_status(self, timeout: int = 60, interval: float = 3.0) -> bool:
         """Poll get_param until config apply finishes.
@@ -1652,7 +2253,11 @@ class CambiumHandler(BaseHandler):
                     pass
 
         if proc.returncode != 0:
-            logger.error(f"set_param curl failed: rc={proc.returncode}, stderr={stderr.decode() if stderr else ''}")
+            logger.error(
+                "set_param curl failed: rc=%s, stderr_present=%s",
+                proc.returncode,
+                bool(stderr),
+            )
             return False
 
         response = stdout.decode("utf-8", errors="ignore")
@@ -1668,10 +2273,9 @@ class CambiumHandler(BaseHandler):
                 return True
             else:
                 err = resp_data.get("err", "")
-                # Log full response for debugging
                 logger.error(
-                    f"set_param failed on {self.ip}: success={success_val}, err={err!r}, "
-                    f"full_response={response[:2000]}"
+                    f"set_param failed on {self.ip}: success={success_val}, "
+                    f"error_present={bool(err)}"
                 )
                 return False
         except json.JSONDecodeError:
@@ -1683,7 +2287,7 @@ class CambiumHandler(BaseHandler):
             if "success" in response.lower():
                 self._last_applied_config = dict(props)
                 return True
-            logger.error(f"set_param returned non-JSON: {response[:500]}")
+            logger.error("set_param returned a non-JSON response")
             return False
 
     async def _apply_tar_config_curl(self, config_path: str) -> bool:
@@ -1714,18 +2318,23 @@ class CambiumHandler(BaseHandler):
                 username = self.credentials.get("username", "admin")
                 password = self.credentials.get("password", "admin")
                 login_url = f"{self._base_url}/cgi-bin/luci"
+                login_form = (
+                    f"username={urllib.parse.quote(username, safe='')}"
+                    f"&password={urllib.parse.quote(password, safe='')}"
+                ).encode()
 
                 proc = await asyncio.create_subprocess_exec(
                     "curl", "-s", "-k", "-m", "10",
                     "--interface", self.interface,
                     "-c", cookie_path, "-b", cookie_path,
                     "-X", "POST",
-                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
+                    "--data-binary", "@-",
                     login_url,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await proc.communicate()
+                stdout, stderr = await proc.communicate(login_form)
 
                 if proc.returncode != 0:
                     logger.error(f"Login failed: {stderr.decode()}")
@@ -1741,7 +2350,7 @@ class CambiumHandler(BaseHandler):
                     pass
 
                 if not stok:
-                    logger.error(f"Failed to get stok token: {response[:200]}")
+                    logger.error("Failed to get stok token from the device")
                     return False
 
                 logger.debug(f"Got new stok: {stok[:16]}...")
@@ -1763,7 +2372,7 @@ class CambiumHandler(BaseHandler):
 
             if proc.returncode == 0:
                 response = stdout.decode("utf-8", errors="ignore")
-                logger.debug(f"Config restore response: {response[:500]}")
+                logger.debug("Config restore returned a response")
 
                 # Check for success - LuCI shows "Rebooting" or "Changes applied" on success
                 if "Rebooting" in response or "Changes applied" in response:
@@ -1775,7 +2384,7 @@ class CambiumHandler(BaseHandler):
                     if "session_expired" in response.lower():
                         logger.error(f"Config restore failed: session expired")
                     else:
-                        logger.error(f"Config restore failed: {response[:200]}")
+                        logger.error("Config restore failed: device reported an error")
                     return False
 
                 # Accept HTML response as likely success (page reload)
@@ -1786,7 +2395,11 @@ class CambiumHandler(BaseHandler):
                 logger.info(f"Configuration applied to {self.ip} via {self.interface}")
                 return True
             else:
-                logger.error(f"Config restore curl failed: {stderr.decode()}")
+                logger.error(
+                    "Config restore curl failed: rc=%s, stderr_present=%s",
+                    proc.returncode,
+                    bool(stderr),
+                )
                 return False
 
         except Exception as e:
@@ -1824,8 +2437,8 @@ class CambiumHandler(BaseHandler):
     async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
         """Upload firmware to the device.
 
-        Cambium ePMP uses different endpoint sequences for the first vs.
-        second bank-update pass:
+        Cambium ePMP uses different endpoint sequences by device family and
+        bank-update pass:
 
         - First pass (bank in {None, 1}): POST local_upload_image, then poll
           get_upload_status until status=7. Suitable for the initial flash
@@ -1838,8 +2451,12 @@ class CambiumHandler(BaseHandler):
           a prior bank-swap reboot — the first-pass endpoint silently no-ops
           in that state.
 
-        Endpoint set confirmed via HAR capture on Cambium Force 300-25
-        firmware 5.11.1; see docs/cambium-config.md.
+        The endpoint that exists depends on the running firmware, not the
+        model or the pass: 5.11.1 units used upload_sw_image_local in two
+        captures, and an ePMP 4518 at 5.10.4 answered 404 on it. The handler
+        picks the endpoint for the running firmware, then tries the other.
+
+        Endpoint sets are hardware-confirmed; see docs/cambium-config.md.
         """
         try:
             firmware_file = Path(firmware_path)
@@ -1851,9 +2468,29 @@ class CambiumHandler(BaseHandler):
 
             # Use curl when interface binding is needed (VLAN mode)
             if self.interface:
-                if bank == 2:
-                    return await self._upload_firmware_curl_alt_bank(firmware_path)
-                return await self._upload_firmware_curl(firmware_path)
+                # The radio always flashes its inactive bank; the pass number
+                # only exists to fill both banks. Which upload endpoint exists
+                # depends on the running firmware (bench evidence):
+                #   5.11.1 (Force 300-25, two captures): upload_sw_image_local
+                #   5.10.4 (ePMP 4518 workflow.har, 2026-09-02): the UI used
+                #   local_upload_image + get_upload_status; the provisioner's
+                #   upload_sw_image_local attempt answered 404 the same day.
+                # Try the endpoint the running firmware should have, then the
+                # other one.
+                if self._running_firmware_uses_explicit_upgrade():
+                    order = (self._upload_firmware_curl_alt_bank, self._upload_firmware_curl)
+                else:
+                    order = (self._upload_firmware_curl, self._upload_firmware_curl_alt_bank)
+                for index, uploader in enumerate(order):
+                    if await uploader(firmware_path):
+                        return True
+                    if index == 0:
+                        logger.warning(
+                            "Firmware upload via %s failed on %s; trying the other endpoint",
+                            "explicit upgrade" if uploader is self._upload_firmware_curl_alt_bank else "legacy first-pass",
+                            self.ip,
+                        )
+                return False
 
             # Use aiohttp when no interface binding needed
             if not self._session:
@@ -1925,18 +2562,23 @@ class CambiumHandler(BaseHandler):
                 username = self.credentials.get("username", "admin")
                 password = self.credentials.get("password", "admin")
                 login_url = f"{self._base_url}/cgi-bin/luci"
+                login_form = (
+                    f"username={urllib.parse.quote(username, safe='')}"
+                    f"&password={urllib.parse.quote(password, safe='')}"
+                ).encode()
 
                 proc = await asyncio.create_subprocess_exec(
                     "curl", "-s", "-k", "-m", "10",
                     "--interface", self.interface,
                     "-c", cookie_path, "-b", cookie_path,
                     "-X", "POST",
-                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
+                    "--data-binary", "@-",
                     login_url,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await proc.communicate()
+                stdout, stderr = await proc.communicate(login_form)
 
                 if proc.returncode != 0:
                     logger.error(f"Login failed: {stderr.decode()}")
@@ -1965,6 +2607,7 @@ class CambiumHandler(BaseHandler):
             curl_args = [
                 "curl", "-s", "-k", "-m", "600",  # 10 min timeout for large files
                 "--interface", self.interface,
+                "-w", "\n%{http_code}",
                 "-X", "POST",
                 "-F", f"image=@{firmware_path}",
             ]
@@ -1980,12 +2623,27 @@ class CambiumHandler(BaseHandler):
             stdout, stderr = await proc.communicate()
 
             if proc.returncode == 0:
-                response = stdout.decode("utf-8", errors="ignore")
-                logger.debug(f"Firmware upload response: {response[:500]}")
+                response_body, http_status = self._split_curl_http_response(stdout)
+                if http_status is None or not 200 <= http_status < 300:
+                    logger.error("Firmware upload returned HTTP %r", http_status)
+                    return False
+                response = response_body.decode("utf-8", errors="ignore")
+                logger.info(
+                    "Firmware upload returned HTTP %s (%s-byte body)",
+                    http_status,
+                    len(response_body),
+                )
+                application_success = self._curl_application_success(
+                    "Firmware upload",
+                    response_body,
+                )
+                if application_success is False:
+                    logger.error("Firmware upload was rejected by the device")
+                    return False
 
                 # Check for error indicators
                 if "error" in response.lower() and "success" not in response.lower():
-                    logger.error(f"Firmware upload failed: {response[:200]}")
+                    logger.error("Firmware upload response reported an error")
                     return False
 
                 # Poll upload status until ready
@@ -1995,9 +2653,10 @@ class CambiumHandler(BaseHandler):
                 if ready:
                     logger.info(f"Firmware ready on {self.ip} via {self.interface}")
                     return True
-                else:
-                    logger.warning(f"Firmware upload status unclear, assuming success")
-                    return True
+                logger.error(
+                    "Firmware upload was not confirmed ready; refusing to reboot"
+                )
+                return False
             else:
                 # Clean up cookie file on error
                 try:
@@ -2013,17 +2672,16 @@ class CambiumHandler(BaseHandler):
             return False
 
     async def _upload_firmware_curl_alt_bank(self, firmware_path: str) -> bool:
-        """Upload firmware to the second (alternate) bank via curl.
+        """Upload firmware with the explicit upload-and-upgrade sequence.
 
-        Used for FW2 — see upload_firmware() docstring for why this differs
-        from _upload_firmware_curl. Hits the upload_sw_image_local +
-        upgrade_sw_image_local + get_upgrade_status endpoint set captured
-        from the Cambium web UI HAR on Force 300-25 firmware 5.11.1.
+        Force-series FW2 and ePMP AX both send ``type=device&debug=true``.
+        A 2026-08-24 AX HAR capture confirmed this sequence through status 7.
         """
         import tempfile
 
         try:
             firmware_file = Path(firmware_path)
+            debug_value = "true"
             logger.info(
                 f"Uploading firmware {firmware_file.name} to {self.ip} via {self.interface} "
                 f"(alt-bank path)"
@@ -2032,7 +2690,7 @@ class CambiumHandler(BaseHandler):
             cookie_path = None
             stok = self._stok
             if stok:
-                logger.debug(f"Reusing existing stok for alt-bank upload: {stok[:16]}...")
+                logger.debug("Reusing the existing session for alt-bank upload")
                 cookie_path = self._cookie_file
             else:
                 logger.debug("No existing stok, logging in via curl for alt-bank upload...")
@@ -2044,19 +2702,22 @@ class CambiumHandler(BaseHandler):
                 password = self.credentials.get("password", "admin")
                 login_url = f"{self._base_url}/cgi-bin/luci"
 
-                proc = await asyncio.create_subprocess_exec(
-                    "curl", "-s", "-k", "-m", "10",
-                    "--interface", self.interface,
-                    "-c", cookie_path, "-b", cookie_path,
-                    "-X", "POST",
-                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
-                    login_url,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                login_form = (
+                    f"username={urllib.parse.quote(username, safe='')}"
+                    f"&password={urllib.parse.quote(password, safe='')}"
                 )
-                stdout, stderr = await proc.communicate()
+                proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                    [
+                        "curl", "-s", "-k", "-m", "10",
+                        "--interface", self.interface,
+                        "-c", cookie_path, "-b", cookie_path,
+                        "-X", "POST",
+                    ],
+                    login_url,
+                    form_data=login_form,
+                )
                 if proc.returncode != 0:
-                    logger.error(f"Login failed: {stderr.decode()}")
+                    logger.error("Cambium login curl failed with exit %s", proc.returncode)
                     return False
                 response = stdout.decode("utf-8", errors="ignore")
                 match = re.search(r'"stok":"([^"]+)"', response)
@@ -2072,26 +2733,39 @@ class CambiumHandler(BaseHandler):
             curl_args = [
                 "curl", "-s", "-k", "-m", "600",
                 "--interface", self.interface,
+                "-w", "\n%{http_code}",
                 "-X", "POST",
+                "-H", "cache-control: no-cache",
                 "-F", f"image=@{firmware_path}",
             ]
             if cookie_path:
                 curl_args.extend(["-b", cookie_path])
-            curl_args.append(upload_url)
-
-            proc = await asyncio.create_subprocess_exec(
-                *curl_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                curl_args,
+                upload_url,
             )
-            stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                logger.error(f"Alt-bank upload curl failed: {stderr.decode()}")
+                logger.error("Alt-bank upload curl failed with exit %s", proc.returncode)
                 return False
-            upload_resp = stdout.decode("utf-8", errors="ignore")
-            logger.info(f"Alt-bank upload response: {upload_resp[:300]}")
+            upload_body, upload_status = self._split_curl_http_response(stdout)
+            if upload_status is None or not 200 <= upload_status < 300:
+                logger.error("Alt-bank upload returned HTTP %r", upload_status)
+                return False
+            upload_resp = upload_body.decode("utf-8", errors="ignore")
+            logger.info(
+                "Alt-bank upload returned HTTP %s (%s-byte body)",
+                upload_status,
+                len(upload_body),
+            )
+            application_success = self._curl_application_success(
+                "Alt-bank upload",
+                upload_body,
+            )
+            if application_success is False:
+                logger.error("Alt-bank upload was rejected by the device")
+                return False
             if "error" in upload_resp.lower() and "success" not in upload_resp.lower():
-                logger.error(f"Alt-bank upload failed: {upload_resp[:300]}")
+                logger.error("Alt-bank upload response reported an error")
                 return False
 
             # Step 2: trigger upgrade via upgrade_sw_image_local (form body: type=device&debug=true)
@@ -2099,39 +2773,71 @@ class CambiumHandler(BaseHandler):
             curl_args = [
                 "curl", "-s", "-k", "-m", "30",
                 "--interface", self.interface,
+                "-w", "\n%{http_code}",
                 "-X", "POST",
-                "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", "type=device&debug=true",
+                "-H", "cache-control: no-cache",
+                "-H", "X-Requested-With: XMLHttpRequest",
+                "-H", "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
+                "-d", f"type=device&debug={debug_value}",
             ]
             if cookie_path:
                 curl_args.extend(["-b", cookie_path])
-            curl_args.append(upgrade_url)
-
-            proc = await asyncio.create_subprocess_exec(
-                *curl_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                curl_args,
+                upgrade_url,
             )
-            stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                logger.error(f"upgrade_sw_image_local curl failed: {stderr.decode()}")
+                logger.error(
+                    "upgrade_sw_image_local curl failed with exit %s",
+                    proc.returncode,
+                )
                 return False
-            upgrade_resp = stdout.decode("utf-8", errors="ignore")
-            logger.info(f"upgrade_sw_image_local response: {upgrade_resp[:300]}")
+            upgrade_body, upgrade_status = self._split_curl_http_response(stdout)
+            if upgrade_status is None or not 200 <= upgrade_status < 300:
+                self._curl_application_success(
+                    "upgrade_sw_image_local",
+                    upgrade_body,
+                )
+                logger.error("upgrade_sw_image_local returned HTTP %r", upgrade_status)
+                return False
+            logger.info(
+                "upgrade_sw_image_local returned HTTP %s (%s-byte body)",
+                upgrade_status,
+                len(upgrade_body),
+            )
+            application_success = self._curl_application_success(
+                "upgrade_sw_image_local",
+                upgrade_body,
+            )
+            if application_success is False:
+                logger.error("upgrade_sw_image_local was rejected by the device")
+                return False
 
             # Step 3: poll get_upgrade_status (same form body) until done
-            ready = await self._poll_upgrade_status_curl(stok, cookie_file=cookie_path)
+            ready = await self._poll_upgrade_status_curl(
+                stok,
+                cookie_file=cookie_path,
+                debug_value=debug_value,
+            )
             if ready:
                 logger.info(f"Alt-bank firmware ready on {self.ip}")
                 return True
-            logger.warning("Alt-bank upgrade status unclear, assuming success")
-            return True
+            logger.error(
+                "Alt-bank firmware upgrade was not confirmed ready; refusing to reboot"
+            )
+            return False
 
         except Exception as e:
             logger.error(f"Failed to upload firmware to alt bank via curl: {e}")
             return False
 
-    async def _poll_upgrade_status_curl(self, stok: str, timeout: int = 300, cookie_file: Optional[str] = None) -> bool:
+    async def _poll_upgrade_status_curl(
+        self,
+        stok: str,
+        timeout: int = 300,
+        cookie_file: Optional[str] = None,
+        debug_value: str = "true",
+    ) -> bool:
         """Poll /admin/get_upgrade_status (alt-bank path) until upgrade is ready.
 
         Mirrors _poll_upload_status_curl but uses the get_upgrade_status
@@ -2140,31 +2846,63 @@ class CambiumHandler(BaseHandler):
         import time as _time
         start_time = _time.time()
         url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/get_upgrade_status"
+        last_observation = None
 
         while _time.time() - start_time < timeout:
             try:
                 curl_args = [
                     "curl", "-s", "-k", "-m", "10",
                     "--interface", self.interface,
+                    "-w", "\n%{http_code}",
                     "-X", "POST",
-                    "-H", "Content-Type: application/x-www-form-urlencoded",
-                    "-d", "type=device&debug=true",
+                    "-H", "cache-control: no-cache",
+                    "-H", "X-Requested-With: XMLHttpRequest",
+                    "-H", "Content-Type: application/x-www-form-urlencoded; charset=UTF-8",
+                    "-d", f"type=device&debug={debug_value}",
                 ]
                 if cookie_file:
                     curl_args.extend(["-b", cookie_file])
-                curl_args.append(url)
-
-                proc = await asyncio.create_subprocess_exec(
-                    *curl_args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                proc, stdout, _ = await self._run_curl_with_stdin_config(
+                    curl_args,
+                    url,
                 )
-                stdout, _ = await proc.communicate()
-                if proc.returncode == 0 and stdout:
-                    response = stdout.decode("utf-8", errors="ignore")
-                    logger.debug(f"Upgrade status: {response}")
+                if proc.returncode != 0:
+                    observation = ("curl_exit", proc.returncode)
+                    if observation != last_observation:
+                        logger.info("Cambium alt-bank status poll: curl exit=%s", proc.returncode)
+                        last_observation = observation
+                    await asyncio.sleep(2)
+                    continue
+
+                response_body, http_status = self._split_curl_http_response(stdout)
+                if http_status is None or not 200 <= http_status < 300:
+                    logger.error("Cambium alt-bank status poll returned HTTP %r", http_status)
+                    return False
+
+                if not response_body:
+                    observation = ("empty",)
+                    if observation != last_observation:
+                        logger.info("Cambium alt-bank status poll: empty response")
+                        last_observation = observation
+                else:
+                    response = response_body.decode("utf-8", errors="ignore")
                     try:
                         data = json.loads(response)
+                        summary = (
+                            data.get("status"),
+                            data.get("success"),
+                            data.get("percent"),
+                            data.get("progress"),
+                            data.get("error"),
+                        )
+                        observation = ("json",) + summary
+                        if observation != last_observation:
+                            logger.info(
+                                "Cambium alt-bank status: status=%r success=%r "
+                                "percent=%r progress=%r error=%r",
+                                *summary,
+                            )
+                            last_observation = observation
                         if data.get("status") == 7:
                             logger.info("Alt-bank upgrade complete (status=7)")
                             return True
@@ -2173,11 +2911,18 @@ class CambiumHandler(BaseHandler):
                         if data.get("percent") == 100 or data.get("progress") == 100:
                             return True
                         if data.get("error") and data.get("error") != 0:
-                            logger.error(f"Upgrade status error: {data}")
+                            logger.error("Cambium alt-bank status error: %r", data.get("error"))
                             return False
                         logger.debug(f"Alt-bank upgrade in progress (status={data.get('status', '?')})")
                     except json.JSONDecodeError:
-                        pass
+                        observation = ("non_json", len(response_body))
+                        if observation != last_observation:
+                            logger.info(
+                                "Cambium alt-bank status poll: non-JSON response (%s bytes)",
+                                len(response_body),
+                            )
+                            last_observation = observation
+                        return False
                 await asyncio.sleep(2)
             except Exception as e:
                 logger.debug(f"Upgrade status poll error: {e}")
@@ -2200,6 +2945,7 @@ class CambiumHandler(BaseHandler):
         import time
         start_time = time.time()
         url = f"{self._base_url}/cgi-bin/luci/;stok={stok}/admin/get_upload_status"
+        last_observation = None
 
         while time.time() - start_time < timeout:
             try:
@@ -2207,6 +2953,7 @@ class CambiumHandler(BaseHandler):
                 curl_args = [
                     "curl", "-s", "-k", "-m", "10",
                     "--interface", self.interface,
+                    "-w", "\n%{http_code}",
                     "-X", "POST",
                     "-d", "",
                 ]
@@ -2221,12 +2968,44 @@ class CambiumHandler(BaseHandler):
                 )
                 stdout, _ = await proc.communicate()
 
-                if proc.returncode == 0 and stdout:
-                    response = stdout.decode("utf-8", errors="ignore")
-                    logger.debug(f"Upload status: {response}")
+                if proc.returncode != 0:
+                    observation = ("curl_exit", proc.returncode)
+                    if observation != last_observation:
+                        logger.info("Cambium upload status poll: curl exit=%s", proc.returncode)
+                        last_observation = observation
+                    await asyncio.sleep(2)
+                    continue
+
+                response_body, http_status = self._split_curl_http_response(stdout)
+                if http_status is None or not 200 <= http_status < 300:
+                    logger.error("Cambium upload status poll returned HTTP %r", http_status)
+                    return False
+
+                if not response_body:
+                    observation = ("empty",)
+                    if observation != last_observation:
+                        logger.info("Cambium upload status poll: empty response")
+                        last_observation = observation
+                else:
+                    response = response_body.decode("utf-8", errors="ignore")
 
                     try:
                         data = json.loads(response)
+                        summary = (
+                            data.get("status"),
+                            data.get("success"),
+                            data.get("percent"),
+                            data.get("progress"),
+                            data.get("error"),
+                        )
+                        observation = ("json",) + summary
+                        if observation != last_observation:
+                            logger.info(
+                                "Cambium upload status: status=%r success=%r "
+                                "percent=%r progress=%r error=%r",
+                                *summary,
+                            )
+                            last_observation = observation
                         # Status 7 = firmware unpacked and ready for reboot (confirmed from Cambium web UI)
                         if data.get("status") == 7:
                             logger.info(f"Firmware unpacked and ready (status=7)")
@@ -2238,13 +3017,20 @@ class CambiumHandler(BaseHandler):
                             return True
                         # Check for error (error field > 0 indicates failure)
                         if data.get("error") and data.get("error") != 0:
-                            logger.error(f"Upload status error: {data}")
+                            logger.error("Cambium upload status error: %r", data.get("error"))
                             return False
                         # Log current status while waiting
                         current_status = data.get("status", "unknown")
                         logger.debug(f"Firmware unpack in progress (status={current_status})")
                     except json.JSONDecodeError:
-                        pass
+                        observation = ("non_json", len(response_body))
+                        if observation != last_observation:
+                            logger.info(
+                                "Cambium upload status poll: non-JSON response (%s bytes)",
+                                len(response_body),
+                            )
+                            last_observation = observation
+                        return False
 
                 await asyncio.sleep(2)
 
@@ -2254,6 +3040,68 @@ class CambiumHandler(BaseHandler):
 
         logger.warning(f"Upload status poll timed out after {timeout}s")
         return False
+
+    @staticmethod
+    def _split_curl_http_response(stdout: bytes) -> Tuple[bytes, Optional[int]]:
+        """Split a curl body from the trailing HTTP status written by ``-w``."""
+        body, separator, status_text = stdout.rpartition(b"\n")
+        if separator and re.fullmatch(rb"\d{3}", status_text.strip()):
+            return body, int(status_text.strip())
+        return stdout, None
+
+    @staticmethod
+    async def _run_curl_with_stdin_config(
+        curl_args: list,
+        url: str,
+        form_data: Optional[str] = None,
+    ):
+        """Run curl without putting a session URL or form secret in argv."""
+        def config_value(value: str) -> str:
+            return (
+                value.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+            )
+
+        config_lines = ['url = "{}"'.format(config_value(url))]
+        if form_data is not None:
+            config_lines.append(
+                'data-binary = "{}"'.format(config_value(form_data))
+            )
+        config_input = ("\n".join(config_lines) + "\n").encode("utf-8")
+
+        proc = await asyncio.create_subprocess_exec(
+            *curl_args,
+            "--config", "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate(config_input)
+        return proc, stdout, stderr
+
+    @staticmethod
+    def _curl_application_success(operation: str, body: bytes) -> Optional[bool]:
+        """Return a JSON endpoint's application success without logging its body."""
+        try:
+            data = json.loads(body.decode("utf-8", errors="ignore"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+
+        success = data.get("success")
+        logger.info(
+            "%s application result: success=%r status=%r error=%r",
+            operation,
+            success,
+            data.get("status"),
+            data.get("error"),
+        )
+        if success is None:
+            return None
+        return success in (True, 1, "1")
 
     async def get_firmware_status(self) -> Dict[str, Any]:
         """Get firmware bank status."""
@@ -2458,17 +3306,20 @@ class CambiumHandler(BaseHandler):
                 password = self.credentials.get("password", "admin")
                 login_url = f"{self._base_url}/cgi-bin/luci"
 
-                proc = await asyncio.create_subprocess_exec(
-                    "curl", "-s", "-k", "-m", "10",
-                    "--interface", self.interface,
-                    "-c", cookie_path, "-b", cookie_path,
-                    "-X", "POST",
-                    "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
-                    login_url,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                login_form = (
+                    f"username={urllib.parse.quote(username, safe='')}"
+                    f"&password={urllib.parse.quote(password, safe='')}"
                 )
-                stdout, stderr = await proc.communicate()
+                proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                    [
+                        "curl", "-s", "-k", "-m", "10",
+                        "--interface", self.interface,
+                        "-c", cookie_path, "-b", cookie_path,
+                        "-X", "POST",
+                    ],
+                    login_url,
+                    form_data=login_form,
+                )
 
                 if proc.returncode != 0:
                     logger.error(f"Login failed for reboot: {stderr.decode()}")
@@ -2719,18 +3570,21 @@ class CambiumHandler(BaseHandler):
                 self._cookie_file = cookie_fd.name
                 cookie_fd.close()
 
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-k", "-m", "10",
-                "--interface", self.interface,
-                "-c", self._cookie_file, "-b", self._cookie_file,
-                "-X", "POST",
-                "-H", "Content-Type: application/x-www-form-urlencoded",
-                "-d", f"username={urllib.parse.quote(username, safe='')}&password={urllib.parse.quote(password, safe='')}",
-                login_url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            login_form = (
+                f"username={urllib.parse.quote(username, safe='')}"
+                f"&password={urllib.parse.quote(password, safe='')}"
             )
-            stdout, stderr = await proc.communicate()
+            proc, stdout, stderr = await self._run_curl_with_stdin_config(
+                [
+                    "curl", "-s", "-k", "-m", "10",
+                    "--interface", self.interface,
+                    "-c", self._cookie_file, "-b", self._cookie_file,
+                    "-X", "POST",
+                    "-H", "Content-Type: application/x-www-form-urlencoded",
+                ],
+                login_url,
+                form_data=login_form,
+            )
 
             if proc.returncode != 0 or not stdout:
                 return False, "no_response"
@@ -2989,18 +3843,17 @@ class CambiumHandler(BaseHandler):
 
         # Build expected_values from last applied config if not provided
         if not expected_values and self._last_applied_config:
-            expected_values = {}
-            # Map device_props keys to the field names _check_config_values expects
-            key_map = {
-                "wirelessInterfaceSSID": "ssid",
-                "snmpSystemName": "hostname",
-                "systemConfigDeviceName": "devicename",
-            }
-            for prop_key, verify_key in key_map.items():
-                if prop_key in self._last_applied_config:
-                    expected_values[verify_key] = self._last_applied_config[prop_key]
+            # Native Cambium imports contain operational device_props rather
+            # than the three identity fields used by apply_ap_naming().
+            # Compare the safe scalar properties that were actually applied;
+            # do not silently downgrade a readable config to UNVERIFIED just
+            # because it has no SSID/hostname/device-name fields.
+            expected_values = self._verification_values(self._last_applied_config)
             if expected_values:
-                logger.info(f"[CONFIG VERIFY] Built expected values from last applied config: {expected_values}")
+                logger.info(
+                    f"[CONFIG VERIFY] Built {len(expected_values)} safe expected values "
+                    "from last applied config"
+                )
 
         # Try reading config with the existing session first (no reboot expected)
         if self._stok and self._cookie_file:
@@ -3048,6 +3901,53 @@ class CambiumHandler(BaseHandler):
         logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed for {self.ip}")
         return False
 
+    _VERIFY_FIELD_ALIASES = {
+        "ssid": "wirelessInterfaceSSID",
+        "hostname": "snmpSystemName",
+        "devicename": "systemConfigDeviceName",
+    }
+    @staticmethod
+    def _scalar_props(props: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: value
+            for key, value in (props or {}).items()
+            if not str(key).startswith("_") and isinstance(value, (str, int, float, bool))
+        }
+
+    @classmethod
+    def _verification_values(cls, props: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the contract's read-back expectations for applied props.
+
+        Fleet-policy, role, and mode-action fields are verified as exact
+        values. Secrets and device defaults are never part of the set.
+        """
+        return ownership_expected_values(
+            cls.FIELD_OWNERSHIP, cls._scalar_props(props), include_mode_action=True
+        )
+
+    def applied_config_expectations(self) -> Optional[Dict[str, Any]]:
+        if not self._last_applied_config:
+            return None
+        return self._verification_values(self._last_applied_config) or None
+
+    @staticmethod
+    def _verification_value(value: Any) -> str:
+        """Normalize Cambium scalar representations without logging values."""
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        normalized = str(value).strip().lower()
+        if normalized in ("true", "yes", "on", "enabled"):
+            return "1"
+        if normalized in ("false", "no", "off", "disabled"):
+            return "0"
+        return normalized
+
+    @classmethod
+    def _config_values_match(cls, expected: Any, actual: Any) -> bool:
+        return cls._verification_value(expected) == cls._verification_value(actual)
+
     def _check_config_values(self, config: Dict[str, Any], expected_values: Optional[Dict[str, Any]] = None):
         """Check a read-back config dict against expected values.
 
@@ -3056,26 +3956,34 @@ class CambiumHandler(BaseHandler):
         config was readable but we confirmed no specific value, so we must not
         claim a green success.
         """
-        actual_ssid = config.get("wirelessInterfaceSSID")
-        actual_snmp_name = config.get("snmpSystemName")
-        actual_device_name = config.get("systemConfigDeviceName")
-
-        logger.info(f"[CONFIG VERIFY] Read back: ssid={actual_ssid}, snmpName={actual_snmp_name}, deviceName={actual_device_name}")
-
         if not expected_values:
             logger.info(f"[CONFIG VERIFY] Config readable but no expected values to confirm — UNVERIFIED")
             return UNVERIFIED
 
+        missing = False
+        checked = 0
+        self.last_verify_mismatches = []
         for field, expected in expected_values.items():
-            if field == "ssid" and actual_ssid != expected:
-                logger.error(f"[CONFIG VERIFY] SSID mismatch: expected {expected}, got {actual_ssid}")
-                return False
-            elif field == "hostname" and actual_snmp_name != expected:
-                logger.error(f"[CONFIG VERIFY] snmpSystemName mismatch: expected {expected}, got {actual_snmp_name}")
-                return False
-            elif field == "devicename" and actual_device_name != expected:
-                logger.error(f"[CONFIG VERIFY] deviceName mismatch: expected {expected}, got {actual_device_name}")
-                return False
+            property_name = self._VERIFY_FIELD_ALIASES.get(field, field)
+            if property_name not in config:
+                missing = True
+                logger.warning(
+                    f"[CONFIG VERIFY] Read-back omitted expected property {property_name}"
+                )
+                continue
+            checked += 1
+            if not self._config_values_match(expected, config[property_name]):
+                logger.error(f"[CONFIG VERIFY] Property mismatch: {property_name}")
+                self.last_verify_mismatches.append(property_name)
+        if self.last_verify_mismatches:
+            return False
+
+        if not checked or missing:
+            logger.info(
+                f"[CONFIG VERIFY] Read-back was incomplete ({checked}/{len(expected_values)} "
+                "properties confirmed) — UNVERIFIED"
+            )
+            return UNVERIFIED
 
         logger.info(f"[CONFIG VERIFY] All expected values verified successfully")
         return True
@@ -3133,10 +4041,14 @@ class CambiumHandler(BaseHandler):
                     logger.warning(f"[CONFIG VERIFY] get_param response missing device_props: {list(data.keys())[:10]}")
                     return {}
                 except json.JSONDecodeError:
-                    logger.warning(f"[CONFIG VERIFY] get_param returned non-JSON: {text[:200]}")
+                    logger.warning("[CONFIG VERIFY] get_param returned a non-JSON response")
                     return {}
             else:
-                logger.warning(f"[CONFIG VERIFY] curl get_param failed: rc={proc.returncode}, stderr={stderr.decode() if stderr else ''}")
+                logger.warning(
+                    "[CONFIG VERIFY] curl get_param failed: rc=%s, stderr_present=%s",
+                    proc.returncode,
+                    bool(stderr),
+                )
                 return {}
         except Exception as e:
             logger.error(f"[CONFIG VERIFY] _get_config_curl error: {e}")

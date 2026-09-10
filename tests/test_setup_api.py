@@ -31,6 +31,9 @@ class DummyPortManager:
                 last_error=None,
                 device_mac=None,
                 expecting_reboot=False,
+                step_plan=[],
+                step_status={},
+                step_details={},
             )
         }
         # Ordered log of set_expecting_reboot(bool) calls for bracketing tests.
@@ -44,10 +47,22 @@ class DummyPortManager:
                 "device_detected": False,
                 "device_type": None,
                 "device_ip": None,
+                "device_mac": None,
+                "device_serial": "TEST-SERIAL",
+                "device_model": "Test model",
                 "provisioning": False,
+                "waiting_for_boot": False,
+                "boot_wait_remaining": None,
                 "link_speed": "1Gbps",
                 "last_result": "success",
                 "last_error": None,
+                "checklist": {"login": True},
+                "step_plan": [{"key": "login", "label": "Login"}],
+                "step_status": {"login": True},
+                "step_details": {},
+                "device_mode": None,
+                "mode_config": None,
+                "ptp_link_id": None,
             }
         }
 
@@ -65,8 +80,20 @@ class DummyPortManager:
         self.port_states[port_number].expecting_reboot = expecting
         self.expecting_reboot_calls.append(expecting)
 
-    def update_checklist(self, port_number, step, value):
-        pass
+    def reset_checklist(self, port_number):
+        state = self.port_states[port_number]
+        state.step_plan = []
+        state.step_status = {}
+        state.step_details = {}
+
+    def set_step_plan(self, port_number, steps):
+        self.port_states[port_number].step_plan = list(steps)
+
+    def update_checklist(self, port_number, step, value, detail=None):
+        state = self.port_states[port_number]
+        state.step_status[step] = value
+        if detail:
+            state.step_details[step] = detail
 
     def _get_single_port_status(self, port_number):
         state = self.port_states[port_number]
@@ -75,6 +102,9 @@ class DummyPortManager:
             "last_result": state.last_result,
             "last_error": state.last_error,
             "checklist": {},
+            "step_plan": state.step_plan,
+            "step_status": state.step_status,
+            "step_details": state.step_details,
         }
 
     def update_port_device_info(self, port_number, mac=None, serial=None, model=None):
@@ -111,6 +141,11 @@ def test_ports_api_includes_last_provisioning_result(tmp_path):
     assert port["port_number"] == 5
     assert port["last_result"] == "success"
     assert port["last_error"] is None
+    assert port["device_model"] == "Test model"
+    assert port["device_serial"] == "TEST-SERIAL"
+    assert port["checklist"] == {"login": True}
+    assert port["step_plan"] == [{"key": "login", "label": "Login"}]
+    assert port["step_status"] == {"login": True}
 
 
 # Register response with the ship-ready readback (wifi PR #255) in the state
@@ -202,7 +237,7 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
             pass
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -228,6 +263,24 @@ async def test_netinstall_broadcasts_completion_on_success(tmp_path, monkeypatch
     assert args[:3] == (5, 0, True)
     assert "label" not in args[3]
     assert provisioner.port_manager.port_states[5].last_result == "success"
+    progress_state = provisioner.port_manager.port_states[5]
+    plan_keys = [item["key"] for item in progress_state.step_plan]
+    assert plan_keys == [
+        "script_fetch",
+        "netinstall",
+        "reboot",
+        "login",
+        "model_confirmed",
+        "base_flash",
+        "ztp_ready",
+        "wifi_bind",
+        "phone_home_url",
+        "register",
+        "ship_ready",
+    ]
+    assert progress_state.step_status["ztp_ready"] is True
+    assert progress_state.step_status["wifi_bind"] is True
+    assert progress_state.step_status["ship_ready"] is True
     assert FakeMikrotikHandler.last_netinstall_kwargs["firmware_paths"] == [tmp_path / "routeros-arm64.npk"]
     # Both first-boot scripts are backend-owned: the served Mode script body
     # must reach netinstall-cli's -sm exactly as fetched.
@@ -291,7 +344,7 @@ async def test_netinstall_clears_expecting_reboot_when_step_after_flash_fails(tm
             return False  # device never comes back after the flash
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -377,7 +430,7 @@ async def test_netinstall_ships_wifi_driver_packages_in_flash_payload(tmp_path, 
             pass
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -469,7 +522,7 @@ async def test_netinstall_fails_before_register_when_wifi_radios_not_bound(tmp_p
             pass
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     config.label_printer.enabled = True
@@ -560,7 +613,7 @@ def _ship_ready_fake_handler(phone_home_url="https://wifi.example.test/ztp/mikro
 
 def _netinstall_env(monkeypatch, tmp_path, handler_cls, register):
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     config.device_settings.mikrotik.ztp_api_key = "ztp-api-key"
     provisioner = SimpleNamespace(
@@ -723,7 +776,7 @@ async def test_netinstall_requires_ztp_api_key_before_flash(tmp_path, monkeypatc
             return True
 
     config = Config()
-    config.credentials.mikrotik.bootstrap_password = "bootstrap-pass"
+    config.credentials["mikrotik"].bootstrap_password = "bootstrap-pass"
     config.device_settings.mikrotik.ztp_api_url = "https://wifi.example.test"
     provisioner = SimpleNamespace(
         config=config,
@@ -749,11 +802,11 @@ async def test_netinstall_requires_ztp_api_key_before_flash(tmp_path, monkeypatc
 def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch):
     client, config, data_path = make_client(tmp_path)
 
-    config.credentials.cambium.password = "fleet-pass"
-    config.credentials.mikrotik.password = "switch-pass"
-    config.credentials.tachyon.password = "fleet-pass"
-    config.credentials.tarana.password = "fleet-pass"
-    config.credentials.ubiquiti.password = "fleet-pass"
+    config.credentials["cambium"].password = "fleet-pass"
+    config.credentials["mikrotik"].password = "switch-pass"
+    config.credentials["tachyon"].password = "fleet-pass"
+    config.credentials["tarana"].password = "fleet-pass"
+    config.credentials["ubiquiti"].password = "fleet-pass"
     config.device_settings.tarana.operator_id = 12345
 
     (data_path / "configs" / "templates" / "cambium").mkdir(parents=True)
@@ -795,6 +848,114 @@ def test_setup_readiness_reports_switch_and_missing_assets(tmp_path, monkeypatch
     assert checks["management_network"]["status"] == "ready"
     assert checks["firmware_inventory"]["status"] == "warning"
     assert checks["config_templates"]["status"] == "warning"
+
+
+def test_setup_readiness_counts_recursive_family_assets(tmp_path, monkeypatch):
+    client, _config, data_path = make_client(tmp_path)
+
+    for vendor, family, extension in (
+        ("cambium", "ePMP-4K/5.11.1", ".json"),
+        ("cambium", "ePMP-3K/5.11.1", ".json"),
+        ("tachyon", "TNA-303X", ".tar"),
+        ("tachyon", "TNA-301-302", ".tar"),
+        ("tachyon", "TNA-303L-65", ".tar"),
+    ):
+        base = data_path / "configs" / "templates" / vendor / family
+        (base / "SM").mkdir(parents=True)
+        (base / "SM" / ("default" + extension)).write_bytes(b"asset")
+        (base / "AP" / "North").mkdir(parents=True)
+        (base / "AP" / "North" / ("default" + extension)).write_bytes(b"asset")
+        for side in ("Main", "SM"):
+            (base / "PTP" / "twXX-twXX" / side).mkdir(parents=True)
+            (base / "PTP" / "twXX-twXX" / side / ("default" + extension)).write_bytes(b"asset")
+
+    monkeypatch.setattr("provisioner.setup_tools._interface_exists", lambda _: True)
+    monkeypatch.setattr(
+        "provisioner.setup_tools.probe_mikrotik_switch",
+        lambda _cfg: {
+            "reachable": True,
+            "mode": "configured",
+            "status": "ready",
+            "summary": "configured",
+            "actions": [],
+            "checks": [],
+        },
+    )
+
+    checks = {item["id"]: item for item in client.get("/api/setup/readiness").json()["checks"]}
+    template_check = checks["config_templates"]
+    details = {item["device_type"]: item for item in template_check["details"]}
+    assert details["cambium"]["status"] == "ready"
+    assert details["tachyon"]["status"] == "ready"
+    assert details["cambium"]["missing_modes"] == []
+    assert details["tachyon"]["missing_modes"] == []
+    assert details["cambium"]["missing_sm_families"] == []
+
+
+def test_setup_readiness_warns_when_one_family_lacks_its_sm_baseline(tmp_path, monkeypatch):
+    client, _config, data_path = make_client(tmp_path)
+    base = data_path / "configs" / "templates" / "cambium" / "ePMP-4K" / "5.11.1"
+    (base / "SM").mkdir(parents=True)
+    (base / "SM" / "default.json").write_bytes(b"{}")
+    monkeypatch.setattr("provisioner.setup_tools._interface_exists", lambda _: True)
+    monkeypatch.setattr(
+        "provisioner.setup_tools.probe_mikrotik_switch",
+        lambda _cfg: {"reachable": True, "mode": "configured", "status": "ready", "summary": "configured", "actions": [], "checks": []},
+    )
+    checks = {item["id"]: item for item in client.get("/api/setup/readiness").json()["checks"]}
+    cambium = next(item for item in checks["config_templates"]["details"] if item["device_type"] == "cambium")
+    assert cambium["status"] == "warning"
+    assert cambium["missing_sm_families"] == ["ePMP-3K"]
+    assert "ePMP-3K" in cambium["summary"]
+
+
+def test_setup_readiness_warns_when_cambium_family_sm_baseline_is_missing(tmp_path, monkeypatch):
+    client, _config, data_path = make_client(tmp_path)
+
+    family = (
+        data_path
+        / "configs"
+        / "templates"
+        / "cambium"
+        / "ePMP-4K"
+        / "5.11.1"
+    )
+    for relative_path in (
+        "AP/North/default.json",
+        "PTP/twXX-twXX/Main/default.json",
+        "PTP/twXX-twXX/SM/default.json",
+    ):
+        path = family / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+
+    monkeypatch.setattr("provisioner.setup_tools._interface_exists", lambda _: True)
+    monkeypatch.setattr(
+        "provisioner.setup_tools.probe_mikrotik_switch",
+        lambda _cfg: {
+            "reachable": True,
+            "mode": "configured",
+            "status": "ready",
+            "summary": "configured",
+            "actions": [],
+            "checks": [],
+        },
+    )
+
+    checks = {
+        item["id"]: item
+        for item in client.get("/api/setup/readiness").json()["checks"]
+    }
+    template_check = checks["config_templates"]
+    cambium = next(
+        item for item in template_check["details"] if item["device_type"] == "cambium"
+    )
+
+    # The SM baseline is the default template. Without it the vendor is not
+    # ready, and the detail names the missing family baseline.
+    assert cambium["status"] == "missing"
+    assert cambium["family_sm_baseline"] is False
+    assert "default" in cambium["missing_modes"]
 
 
 def test_setup_bundle_import_copies_repo_and_optional_system_files(tmp_path, monkeypatch):
@@ -881,6 +1042,40 @@ def test_setup_bundle_export_includes_repo_and_optional_system_files(tmp_path, m
         assert "manifest.yaml" in names
         assert "settings/config.yaml" in names
         assert "settings/provisioner.env" in names
+
+
+def test_setup_bundle_export_excludes_protected_config_assets(tmp_path):
+    client, _config, data_path = make_client(tmp_path)
+
+    protected = (
+        data_path
+        / "configs"
+        / "templates"
+        / "cambium"
+        / "shared"
+        / "5.11.1"
+        / "SM"
+        / "default.json"
+    )
+    protected.parent.mkdir(parents=True)
+    protected.write_text(
+        json.dumps(
+            {
+                "device_props": {"cambiumCNSDeviceAgentPassword": "bundle-secret-marker"},
+                "template_props": {"version": "5.11.1"},
+            }
+        )
+    )
+
+    response = client.get("/api/setup/bundle/export")
+    assert response.status_code == 200
+
+    bundle_path = tmp_path / "export.zip"
+    bundle_path.write_bytes(response.content)
+    with zipfile.ZipFile(bundle_path) as archive:
+        names = set(archive.namelist())
+        assert "configs/templates/cambium/shared/5.11.1/SM/default.json" not in names
+        assert not any(b"bundle-secret-marker" in archive.read(name) for name in names)
 
 
 def test_setup_switch_configure_runs_switch_script(tmp_path, monkeypatch):
@@ -1019,3 +1214,78 @@ def test_setup_restart_service_schedules_systemctl_restart(tmp_path, monkeypatch
     assert payload["success"] is True
     assert captured["cmd"][0] == "/bin/sh"
     assert "systemctl restart provisioner-web" in captured["cmd"][2]
+
+
+def test_read_primary_credentials_reads_the_dict_table():
+    """Story 3 (#73): config.credentials is a plain dict. The old
+    getattr(config.credentials, device_type) pattern silently returns None
+    on a dict — every vendor would report factory defaults. Prove the setup
+    readiness rows read the real table, and that the recommended hints
+    survived the derivation from _default_credentials() verbatim."""
+    from provisioner.setup_tools import _read_primary_credentials
+
+    config = Config()
+    config.credentials["mikrotik"].password = "switch-pass"
+
+    rows = {row["device_type"]: row for row in _read_primary_credentials(config)}
+
+    # Usernames come from the table — tachyon would degrade to "admin" if a
+    # getattr-on-dict consumer pattern came back.
+    assert rows["tachyon"]["username"] == "root"
+    assert rows["ubiquiti"]["username"] == "ubnt"
+    assert rows["mikrotik"]["has_password"] is True
+    assert rows["mikrotik"]["status"] == "ready"
+
+    # Factory-default passwords still warn; empty ones still read as missing.
+    assert rows["cambium"]["status"] == "warning"
+    assert rows["cambium"]["summary"].startswith("Still using factory default")
+    assert "wpa_key" in rows["cambium"]["summary"]
+    assert rows["tarana"]["status"] == "warning"
+    assert rows["tarana"]["summary"] == "Missing or placeholder"
+
+    # Recommended hints are preserved exactly (derived values + prose).
+    assert rows["cambium"]["recommended"] == "admin/admin"
+    assert rows["tachyon"]["recommended"] == "root/admin"
+    assert rows["ubiquiti"]["recommended"] == "ubnt/ubnt"
+    assert rows["mikrotik"]["recommended"] == "admin/(empty until switch password is set)"
+    assert rows["tarana"]["recommended"] == "admin/(set your fleet password)"
+
+
+def test_builtin_credentials_derive_from_the_defaults_table():
+    """The credentials-UI hints derive from _default_credentials() (Story 3
+    / #73); tarana keeps its documented shipped-login override (admin123
+    differs from the empty config-level default)."""
+    from provisioner.config import _default_credentials
+    from provisioner.web.api import BUILTIN_CREDENTIALS
+
+    factory = _default_credentials()
+    assert BUILTIN_CREDENTIALS["tarana"] == [
+        {"username": "admin", "password": "admin123"}
+    ]
+    for device_type, creds in factory.items():
+        if device_type == "tarana":
+            continue
+        assert BUILTIN_CREDENTIALS[device_type] == [
+            {"username": creds.username, "password": creds.password}
+        ]
+
+
+def test_setup_readiness_warns_when_a_required_secret_is_missing(tmp_path, monkeypatch):
+    client, config, _data_path = make_client(tmp_path)
+    config.credentials["cambium"].password = "not-a-placeholder-1"
+    config.credentials["cambium"].wpa_key = ""
+    monkeypatch.setattr("provisioner.setup_tools._interface_exists", lambda _: True)
+    monkeypatch.setattr(
+        "provisioner.setup_tools.probe_mikrotik_switch",
+        lambda _cfg: {"reachable": True, "mode": "configured", "status": "ready", "summary": "configured", "actions": [], "checks": []},
+    )
+    checks = {item["id"]: item for item in client.get("/api/setup/readiness").json()["checks"]}
+    cambium = next(d for d in checks["credentials"]["details"] if d["device_type"] == "cambium")
+    assert cambium["status"] == "warning"
+    assert cambium["missing_secrets"] == ["wpa_key"]
+    assert cambium["summary"] == "Missing required secret: wpa_key"
+
+    config.credentials["cambium"].wpa_key = "set-on-the-host"
+    checks = {item["id"]: item for item in client.get("/api/setup/readiness").json()["checks"]}
+    cambium = next(d for d in checks["credentials"]["details"] if d["device_type"] == "cambium")
+    assert cambium["missing_secrets"] == []

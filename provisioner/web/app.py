@@ -9,7 +9,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from ..vendor_registry import config_family_metadata
 from .api import router as api_router
+from .api import vendor_ui_metadata
+from .snapshots import router as snapshots_router
 from .websocket import router as ws_router
 
 logger = logging.getLogger(__name__)
@@ -17,6 +20,29 @@ logger = logging.getLogger(__name__)
 # Template and static file paths
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _deployed_version() -> str:
+    """Return the deployed git short SHA (or an empty string) for the header."""
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent.parent
+    # deploy.sh writes .deployed-rev next to the code (no .git on the host).
+    for marker in (root / ".deployed-rev", root / "VERSION"):
+        try:
+            text = marker.read_text().strip()
+        except OSError:
+            continue
+        if text:
+            return text.split()[0][:20]
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).decode().strip()
+    except Exception:
+        return ""
 
 
 def create_app(
@@ -65,6 +91,7 @@ def create_app(
     
     # Include routers
     app.include_router(api_router, prefix="/api")
+    app.include_router(snapshots_router, prefix="/api")
     app.include_router(ws_router, prefix="/ws")
     
     # Root route serves the dashboard
@@ -79,8 +106,17 @@ def create_app(
             "copies": 1,
         }
         port_manager = getattr(provisioner, "port_manager", None) if provisioner else None
+        initial_ports = {}
         if port_manager is not None:
             num_ports = port_manager.num_ports
+            try:
+                # Seed the first paint so a Chromium respawn never shows an
+                # empty grid while the WebSocket connects.
+                initial_ports = {
+                    str(port): status for port, status in port_manager.get_port_status().items()
+                }
+            except Exception:  # pragma: no cover - presentation must not break boot
+                initial_ports = {}
         config = getattr(provisioner, "config", None) if provisioner else None
         if config is not None:
             printer_config = getattr(config, "label_printer", None)
@@ -91,6 +127,14 @@ def create_app(
             "title": title,
             "num_ports": num_ports,
             "label_printer": label_printer,
+            # Server-injected vendor metadata (Story 5 / #75): the JS
+            # `deviceVendors` map derives from the handler registry instead
+            # of a hardcoded frontend copy. Injection (vs. a runtime fetch)
+            # means the map exists at script-parse time — no async race at
+            # first render, no stale-JS hazard on the long-lived kiosk.
+            "vendor_metadata": vendor_ui_metadata(),
+            "initial_ports": initial_ports,
+            "deployed_version": _deployed_version(),
         })
 
     @app.get("/labels", response_class=HTMLResponse)
@@ -120,6 +164,8 @@ def create_app(
         return templates.TemplateResponse(request, "files.html", {
             "request": request,
             "title": title,
+            "vendor_metadata": vendor_ui_metadata(),
+            "family_metadata": config_family_metadata(),
         })
 
     # Firmware management page

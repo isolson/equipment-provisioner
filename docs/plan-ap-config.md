@@ -1,5 +1,10 @@
 # AP Configuration Selection Feature - Implementation Plan
 
+> **Production qualification:** The repository contains AP/PTP templates and
+> an application path, but no vendor/mode is currently declared qualified.
+> The kiosk and API keep these options disabled until Phase 4 hardware testing
+> verifies the vendor-specific template fields and resulting device behavior.
+
 ## Overview
 
 After standard provisioning completes, allow the operator to change a device to AP mode with custom naming. Standard provisioning applies the SM (subscriber module) configuration by default.

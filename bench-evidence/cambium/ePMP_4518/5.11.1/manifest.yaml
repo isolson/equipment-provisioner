@@ -1,0 +1,34 @@
+vendor: cambium
+model: ePMP 4518
+firmware: 5.11.1
+config_role: SM
+artifact_purpose: process-evidence
+reusable_template: false
+canonical_template_status: tracked-family-baseline
+unit: unit-4518-a
+captured_utc: 2026-09-01T18:45:00Z
+operations:
+  - upgrade
+  - reset
+  - first-boot-setup
+  - config-apply
+  - config-export
+result: success
+no_config_backup: captured
+no_config_firmware: 5.10.4
+no_config_unit: unit-4518-b
+raw_files:
+  no-config.device-backup.json: "ePMP-Backup-F4518_77fe98-*.json, factory export at 5.10.4 after only the forced first-boot admin password and WPA2 key (secure bench directory only)"
+  workflow.har: "cambium4518.upgraderesetconfig.har, captured 2026-09-02 from a laptop at 169.254.1.1 (secure bench directory only)"
+  known-good.device-backup.json: "epmp-backup-goodconfig.json (secure bench directory only)"
+  bad-ap-pattern.device-backup.json: "epmp-backup-BADCONFIG-apBAD.json, the failure witness (secure bench directory only)"
+endpoint_evidence:
+  running_5_10_4_upgrade: "POST /admin/local_upload_image (multipart) then POST /admin/get_upload_status (debug=true) polling, then /admin/reboot"
+  reset: "POST /admin/reset_to_def (mask=1, debug=true) then /admin/reboot"
+  first_boot: "POST /admin/set_param (changed_elements) then POST /admin/set_account_params (changed_elements)"
+  config_apply: "POST /admin/config_import (multipart) then /admin/reboot"
+  after_first_pass: "banks read 5.11.1 / 5.10.4"
+transitions: []
+fixture_witness: baseline
+evidence_scope: "Known-good SM export of one unit on 5.11.1. Values in known-good.structure.json are the only source for the family SM baseline and the handler role table."
+notes: "The known-good export is the verified SM configuration of the unit that earlier carried the bad AP-pattern config (epmp-backup-BADCONFIG-apBAD.json, kept as the failure witness). The reference PTP/AP exports for this family are process evidence only. The no-config export comes from a second 4518 unit at factory 5.10.4 with only the forced first-boot password and WPA2 key set: factory radio role already SM (2/1/1), gain 18 = MinAntGain 18, GPS USB 1, scan mask 3, and nine fleet-policy fields at factory values the provisioner must change. No bench transition is recorded yet, so the qualification matrix offers no post-provision mode for this model."

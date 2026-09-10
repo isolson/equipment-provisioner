@@ -353,7 +353,13 @@ async def test_listener_respects_cooldown_for_same_mac(manager, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_listener_bypasses_cooldown_for_new_mac(manager, monkeypatch):
-    fake = _FakeFingerprinter(manager, ["74:4d:28:99:99:99"])
+    # The replacement keeps advertising BOOTP. It should fire once, then its
+    # own last_bootp gate must survive even though last_provisioned_mac still
+    # belongs to the previous successful unit.
+    fake = _FakeFingerprinter(
+        manager,
+        ["74:4d:28:99:99:99", "74:4d:28:99:99:99"],
+    )
     monkeypatch.setattr("provisioner.fingerprint.DeviceFingerprinter", fake)
 
     fired = []
@@ -366,10 +372,17 @@ async def test_listener_bypasses_cooldown_for_new_mac(manager, monkeypatch):
     state = manager.port_states[1]
     state.last_provisioned_at = time.time() - 60
     state.last_provisioned_mac = "00:00:00:00:00:00"  # different device
+    state.last_result = "success"
+    state.provisioning_ended = time.time() - 60
+    state.provision_attempted = True
+    state.checklist.login = True
 
     await manager._bootp_listener_loop(port_num=1, interface="eno1.1991")
 
     assert fired == [(1, "74:4d:28:99:99:99")]
+    assert state.last_result is None
+    assert state.provisioning_ended is None
+    assert state.checklist.login is None
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,21 @@
+vendor: ubiquiti
+model: Wave-Nano
+firmware: unknown
+config_role: SM
+role_status: "Inferred from apMode:false and ptpMode:false; not independently confirmed"
+artifact_purpose: process-evidence
+reusable_template: false
+canonical_template_status: not-included
+unit: bench-unit
+captured_utc: 2026-08-31T16:48:43Z
+operations:
+  - setup
+  - config-apply
+  - upgrade
+  - reboot
+result: process-captured
+evidence_scope: "The HAR records Wave Nano login, initial setup, configuration PUT, three upgrade requests, and reboot. The capture does not record the firmware version or a VLAN-12 management transition."
+service_surface: "The setup process includes users, SNMP, system log, ping watchdog, discovery responder, SSH, UNMS, LLDP, web, and NTP fields."
+baseline_status: "no-config and known-good device backups not captured"
+mgmt_vlan_status: "The captured configuration sends network.interfaces.data.mgmtVLAN as null. VLAN 12 was applied outside this capture and the reconnect behavior is not yet validated."
+notes: "The HAR contains credentials, wireless passphrases, session data, and device-specific values. Keep it only in the secure bench directory. Do not promote it to a canonical template."

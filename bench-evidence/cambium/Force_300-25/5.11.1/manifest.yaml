@@ -1,0 +1,19 @@
+vendor: cambium
+model: Force 300-25
+firmware: 5.11.1
+config_role: SM
+artifact_purpose: process-evidence
+reusable_template: false
+canonical_template_status: tracked-family-baseline
+unit: unit-f325-a
+captured_utc: 2026-08-31T17:17:00Z
+operations:
+  - config-export
+result: success
+no_config_backup: missing
+raw_files:
+  known-good.device-backup.json: "ePMP-Backup-F300-25_b09f44-58_C1_7A_B0_9F_45.json (secure bench directory only)"
+transitions: []
+fixture_witness: role
+evidence_scope: "Known-good SM export of one unit on 5.11.1. Values in known-good.structure.json are the only source for the family SM baseline and the handler role table."
+notes: "The export shows systemNtpServerIPMode 2 while both 4K baseline units show 1, so it witnesses the SM role fields and device defaults only, not the fleet baseline. Process evidence for the ePMP-3K family: reset.har (cambiumf325-reset-config-upgrade.har) records login, config_export, reset_to_def (mask=1), reboot, set_account_params, config_import, upgrade_sw_image_local, get_upgrade_status. The known-good export is the SM configuration of the same unit. The HAR holds no config read between reset and import, so the no-config backup is still missing. No bench transition is recorded yet."

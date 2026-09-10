@@ -1,4 +1,3 @@
-from pathlib import Path
 import logging
 import sqlite3
 import sys
@@ -11,11 +10,15 @@ from provisioner.config_store import init_store
 from provisioner.fingerprint import DeviceFingerprint, DeviceType
 from provisioner.handlers.base import DeviceInfo, ProvisioningResult
 
-
-if "rich.console" not in sys.modules:
+try:
+    import rich.console  # noqa: F401
+    import rich.logging  # noqa: F401
+except ImportError:
     rich_module = types.ModuleType("rich")
     rich_console_module = types.ModuleType("rich.console")
     rich_logging_module = types.ModuleType("rich.logging")
+    rich_progress_module = types.ModuleType("rich.progress")
+    rich_table_module = types.ModuleType("rich.table")
 
     class _Console:
         def print(self, *args, **kwargs):
@@ -24,11 +27,56 @@ if "rich.console" not in sys.modules:
     class _RichHandler(logging.Handler):
         pass
 
+    class _Table:
+        def __init__(self, *args, **kwargs):
+            self.rows = []
+
+        def add_column(self, *args, **kwargs):
+            return None
+
+        def add_row(self, *args, **kwargs):
+            self.rows.append(args)
+
+    class _Progress:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def add_task(self, *args, **kwargs):
+            return 0
+
+        def update(self, *args, **kwargs):
+            return None
+
+        def advance(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return self
+
+        def stop(self):
+            return None
+
+    class _ProgressColumn:
+        def __init__(self, *args, **kwargs):
+            pass
+
     rich_console_module.Console = _Console
     rich_logging_module.RichHandler = _RichHandler
+    rich_progress_module.Progress = _Progress
+    rich_progress_module.SpinnerColumn = _ProgressColumn
+    rich_progress_module.TextColumn = _ProgressColumn
+    rich_table_module.Table = _Table
     sys.modules["rich"] = rich_module
     sys.modules["rich.console"] = rich_console_module
     sys.modules["rich.logging"] = rich_logging_module
+    sys.modules["rich.progress"] = rich_progress_module
+    sys.modules["rich.table"] = rich_table_module
 
 # Stub aiosqlite only when it is genuinely not installed. Keying on
 # `sys.modules` shadowed the real package on CI (installed but not yet
@@ -84,7 +132,10 @@ class _StubPortManager:
     def update_port_device_info(self, port_num, **kwargs):
         self.device_info_updates.append((port_num, kwargs))
 
-    def update_checklist(self, port_num, step, value):
+    def set_step_plan(self, port_num, steps):
+        return None
+
+    def update_checklist(self, port_num, step, value, detail=None):
         return None
 
     def _get_single_port_status(self, port_num):
@@ -127,13 +178,15 @@ class _StubHandlerManager:
         return ProvisioningResult(
             success=True,
             old_firmware="1.15.0.8503",
-            new_firmware="1.15.0.8503",
+            new_firmware="1.16.0.9000",
             config_applied=kwargs.get("config_path"),
             device_info=DeviceInfo(
                 device_type="tachyon",
                 model="TNA-303L-65",
                 firmware_version="1.15.0.8503",
-                mac_address="78:5E:E8:D1:65:30",
+                # A final handler result can have model/serial without a MAC.
+                # The port summary must still restore the available fields.
+                mac_address=None,
                 serial_number="TNA303L462500013",
             ),
         )
@@ -197,3 +250,12 @@ async def test_tachyon_preflight_model_selects_family_config_not_tns100(tmp_path
     assert provision_call["fingerprint"].model == "TNA-303L-65"
     assert provision_call["config_path"] == str(tna_template)
     assert "tns-100" not in provision_call["config_path"]
+    assert provisioner.port_manager.device_info_updates[-1] == (
+        6,
+        {
+            "mac": None,
+            "serial": "TNA303L462500013",
+            "model": "TNA-303L-65",
+            "firmware_version": "1.16.0.9000",
+        },
+    )

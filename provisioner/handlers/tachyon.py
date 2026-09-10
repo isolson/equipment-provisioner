@@ -15,16 +15,25 @@ API Endpoints (discovered via browser inspection):
 """
 
 import asyncio
+import copy
+from copy import deepcopy
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import List, Any, Dict, Optional, Tuple
 
 import aiohttp
 
+from provisioner.config_merge import deep_merge
 from provisioner.config_templates import ConfigTemplateError, load_config_template
 
-from .base import BaseHandler, DeviceInfo, UNVERIFIED
+from ..field_ownership import Owner, OwnershipContract, classify, parse_path
+from .base import (
+    UNVERIFIED,
+    BaseHandler,
+    ConnectionFailureKind,
+    DeviceInfo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +55,12 @@ class TachyonHandler(BaseHandler):
     API_UPDATE = "/cgi.lua/update"
     API_REBOOT = "/cgi.lua/reboot"
 
+    # A config apply can restart the web service before the API is available
+    # again. Poll readback and refresh the session once before failing closed.
+    CONFIG_READBACK_ATTEMPTS = 5
+    CONFIG_READBACK_DELAYS = (2, 4, 6, 8)
+    CONFIG_READBACK_RECONNECT_AFTER = 2
+
     # Default credentials (factory default)
     DEFAULT_CREDENTIALS = {"username": "root", "password": "admin"}
 
@@ -58,6 +73,154 @@ class TachyonHandler(BaseHandler):
     allows_arbitrary_template_fallback = False
     config_alias_prefix_matching = True
     requires_model_preflight = True
+    required_baseline_mode = "sm"
+    requires_ptp_settings = True
+
+    #: Field ownership contract (``docs/PROVISIONING_NORTH_STAR.md``).
+    #: Paths are structural (``a.b[0].c``). Anything not listed is a device
+    #: default. The read-back comparator stays section-based for now; the
+    #: contract classifies secrets and drives template lint.
+    FIELD_OWNERSHIP = OwnershipContract.from_dotted(
+        {
+            # Radio role: "sta" is the SM baseline, "ap" is the AP mode.
+            "wireless.radios.wlan0.vaps[0].mode": Owner.ROLE,
+            # Fleet policy carried by the sanitized model baseline. Radio
+            # settings that the verified SM baseline carries (antenna kit,
+            # channel policy, power, sensitivity) are baseline policy here.
+            "version": Owner.FLEET_POLICY,
+            "network.zones.wan": Owner.FLEET_POLICY,
+            "network.ethernet.ports": Owner.FLEET_POLICY,
+            "ethernet.ports": Owner.FLEET_POLICY,
+            "wireless.country": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.enabled": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.datarate": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.sensitivity": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.antenna": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.channel": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.txpower": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.filter_arp": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.isolation": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.vaps[0].enabled": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.vaps[0].network": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.vaps[0].isolate": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.vaps[0].cpe": Owner.FLEET_POLICY,
+            "services.remote_syslog": Owner.FLEET_POLICY,
+            "services.snmp.enabled": Owner.FLEET_POLICY,
+            "services.snmp.v2.ro.enabled": Owner.FLEET_POLICY,
+            "services.snmp.v2.rw.enabled": Owner.FLEET_POLICY,
+            "services.snmp_traps.port": Owner.FLEET_POLICY,
+            "services.ssh": Owner.FLEET_POLICY,
+            "services.discovery": Owner.FLEET_POLICY,
+            "services.ntp": Owner.FLEET_POLICY,
+            "services.ping_watchdog": Owner.FLEET_POLICY,
+            "services.http": Owner.FLEET_POLICY,
+            "services.updater": Owner.FLEET_POLICY,
+            "services.cloud.enabled": Owner.FLEET_POLICY,
+            "system.auth.method": Owner.FLEET_POLICY,
+            "system.time.timezone": Owner.FLEET_POLICY,
+            # Site identity and link selection: the AP/PTP workflow writes these.
+            "system.hostname": Owner.MODE_ACTION,
+            "system.name": Owner.MODE_ACTION,
+            "system.description": Owner.MODE_ACTION,
+            "system.latitude": Owner.MODE_ACTION,
+            "system.longitude": Owner.MODE_ACTION,
+            "wireless.radios.wlan0.vaps[0].ssid": Owner.MODE_ACTION,
+            # The SM profile list is fleet policy: every populated SM export
+            # in the fleet carries the same SSID set. The passphrase is one
+            # shared secret delivered by apply_secrets (host ``wpa_key``).
+            "wireless.radios.wlan0.vaps[0].sta_profiles": Owner.FLEET_POLICY,
+            "wireless.radios.wlan0.vaps[0].sta_profiles.profiles[].security.wpapsk.passphrase": Owner.SECRET,
+            "wireless.radios.wlan0.vaps[0].sta_profiles.profiles[].trackingId": Owner.DEVICE_DEFAULT,
+            "wireless.radios.wlan0.vaps[0].ptp": Owner.MODE_ACTION,
+            # Secrets: accounts, keys, and community strings. The ``.enabled``
+            # flags above win over these container entries (longest prefix).
+            "system.users": Owner.SECRET,
+            "services.snmp.v2.ro": Owner.SECRET,
+            "services.snmp.v2.rw": Owner.SECRET,
+            "services.snmp.v3": Owner.SECRET,
+            "wireless.radios.wlan0.vaps[0].security": Owner.SECRET,
+            "services.ssh.keys": Owner.SECRET,
+            "services.radius": Owner.SECRET,
+            "services.wireguard": Owner.SECRET,
+            # Unit identity is never copied.
+            "wireless.radios.wlan0.vaps[0].bssid": Owner.DEVICE_DEFAULT,
+            "network.zones.wan.custom_mac": Owner.DEVICE_DEFAULT,
+            # Management uses the zone address; the disabled static blocks
+            # are device defaults and never enter a baseline.
+            "network.zones.wan.management.ip": Owner.DEVICE_DEFAULT,
+            "network.zones.wan.management.ipv6": Owner.DEVICE_DEFAULT,
+        },
+        role_fields={
+            "TNA-301-302": {"SM": ("wireless.radios.wlan0.vaps[0].mode",)},
+            "TNA-303X": {"SM": ("wireless.radios.wlan0.vaps[0].mode",)},
+            "TNA-303L-65": {"SM": ("wireless.radios.wlan0.vaps[0].mode",)},
+        },
+        # The 1.15 management VLAN is one coherent set: the zone, the wired
+        # port flag, and the VAP flag. A 1.12 export lacks the two flags, and
+        # the device treats a missing flag as off, so the unit gets no
+        # management address (Tachyon ticket open). A baseline must carry all
+        # of them and the SM profile list.
+        # Required for every family whose 1.15 baseline has been rebuilt from
+        # a working 1.15 export. TNA-303X and TNA-301-302 join this table when
+        # their 1.15 SM export exists (bench-evidence/INVENTORY.md).
+        required_fields={
+            "TNA-303L-65": {"SM": (
+                "network.zones.wan.management.enabled",
+                "network.zones.wan.management.vlan",
+                "network.zones.wan.management.proto",
+                "ethernet.ports.eth0.network.mgmt_vlan_enabled",
+                "wireless.radios.wlan0.vaps[0].network.mgmt_vlan_enabled",
+                "wireless.radios.wlan0.vaps[0].sta_profiles.profiles",
+            )},
+        },
+    )
+    connection_retry_attempts = 3
+    connection_retry_delay_seconds = 3.0
+
+    def connection_retry_delay(self, failed_attempt: int) -> float:
+        """Use short progressive delays for the Tachyon login service."""
+        return self.connection_retry_delay_seconds * failed_attempt
+
+    @classmethod
+    def qualified_post_provision_modes_for_model(
+        cls, model: Optional[str] = None
+    ) -> Tuple[str, ...]:
+        """Expose PTP for explicitly certified Tachyon radio families."""
+        modes = tuple(cls.qualified_post_provision_modes)
+        from ..vendor_registry import config_family_for_model
+
+        family = config_family_for_model("tachyon", model)
+        if (
+            "ptp" not in modes
+            and family is not None
+            and "PTP" in family.roles
+            and family.ptp_compatible_families
+        ):
+            return modes + ("ptp",)
+        return modes
+
+    @classmethod
+    def generate_ptp_settings(
+        cls,
+        config: Dict[str, Any],
+        side: str,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Require a Tachyon radio profile before applying PTP identity."""
+        if side not in ("a", "b"):
+            raise ValueError("Tachyon PTP settings require side 'a' or 'b'")
+        try:
+            radio = config["wireless"]["radios"]["wlan0"]
+            vaps = radio["vaps"]
+            if not isinstance(radio, dict) or not isinstance(vaps, list) or not vaps:
+                raise TypeError
+            if not isinstance(vaps[0], dict):
+                raise TypeError
+        except (KeyError, TypeError, IndexError):
+            raise ValueError(
+                "Tachyon PTP settings profile must include wireless.radios.wlan0.vaps"
+            )
+        return config
 
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None,
                  alternate_credentials: list = None):
@@ -97,6 +260,27 @@ class TachyonHandler(BaseHandler):
         """TNS switches change management VLAN/DHCP, making device unreachable."""
         model = getattr(self._device_info, 'model', '') or ''
         return model.lower().startswith('tns-')
+
+    @classmethod
+    def upload_role_for_model(
+        cls, model: Optional[str] = None
+    ) -> Optional[str]:
+        """Return the observed upload role for each TNA model variant.
+
+        TNA-301 evidence is an AP capture. TNA-302 is normally an SM, though
+        both models use the TNA-301-302 family. TNA-303X can use either role,
+        so the caller must select its role. Current TNA-303L evidence is SM.
+        This hint packages evidence. It does not change the SM provisioning
+        baseline.
+        """
+        model_key = " ".join(str(model or "").lower().strip().split())
+        if model_key == "tna-301" or model_key.startswith("tna-301-"):
+            return "AP"
+        if model_key == "tna-302" or model_key.startswith("tna-302-"):
+            return "SM"
+        if model_key.startswith("tna-303l"):
+            return "SM"
+        return None
 
     # Firmware pattern mappings for model validation
     MODEL_FIRMWARE_PATTERNS = {
@@ -158,6 +342,7 @@ class TachyonHandler(BaseHandler):
         Sets self.login_error with details if login fails.
         """
         self.login_error = None
+        self.set_connection_failure(None)
         logger.info(f"[CREDS] ========== TACHYON CONNECT START for {self.ip} ==========")
 
         # Get single custom credential from UI (tagged for Tachyon)
@@ -176,7 +361,7 @@ class TachyonHandler(BaseHandler):
             # Fresh device - try default first, then tagged credential
             # 1. Always try default credentials first (root/admin)
             creds_to_try.append(self.DEFAULT_CREDENTIALS.copy())
-            logger.info(f"[CREDS] Added default credentials (root/admin)")
+            logger.info("[CREDS] Added factory credential candidate")
 
             # 2. Add tagged Tachyon credential from UI if different from default
             if custom_cred and custom_cred.get("password") != self.DEFAULT_CREDENTIALS["password"]:
@@ -206,29 +391,88 @@ class TachyonHandler(BaseHandler):
 
             if success:
                 self._credentials_confirmed = True
+                self.set_connection_failure(None)
                 logger.info(f"[CREDS] SUCCESS! Logged in with {username}")
                 logger.info(f"[CREDS] ========== TACHYON CONNECT END (success) ==========")
                 return True
 
-            # Check if device responded (credential rejection vs connection failure)
-            if self.login_error and "credentials" in self.login_error.lower():
+            failure_kind = self.connection_failure_kind
+            if failure_kind == ConnectionFailureKind.AUTHENTICATION:
                 any_creds_rejected = True
 
-            # If not a credential error (e.g., connection failure), don't try more
-            if self.login_error and "credentials" not in self.login_error.lower():
-                logger.warning(f"[CREDS] Non-credential error, stopping: {self.login_error}")
+            # Credential rotation cannot correct transport or device-service
+            # failures. The outer session contract can retry those failures.
+            if failure_kind != ConnectionFailureKind.AUTHENTICATION:
+                logger.warning(
+                    "[CREDS] Connection attempt stopped: kind=%s",
+                    failure_kind.value,
+                )
                 logger.info(f"[CREDS] ========== TACHYON CONNECT END (connection error) ==========")
                 return False
 
         # All credentials failed - set error message to prompt for manual entry
         if any_creds_rejected:
             self.login_error = "Invalid credentials - please enter correct password"
+            self.set_connection_failure(ConnectionFailureKind.AUTHENTICATION)
             logger.error(f"[CREDS] FAILED for {self.ip} - credentials rejected, prompting for manual entry")
         else:
             self.login_error = "Device not responding - check network connectivity"
+            self.set_connection_failure(ConnectionFailureKind.TRANSPORT)
             logger.error(f"[CREDS] FAILED for {self.ip} - device did not respond")
         logger.info(f"[CREDS] ========== TACHYON CONNECT END (failed) ==========")
         return False
+
+    def required_secrets(self) -> List[str]:
+        # The SM baseline carries the profile list without passphrases; the
+        # shared PSK must come from the host or the radio cannot associate.
+        return ["wpa_key"]
+
+    async def apply_secrets(self, secrets: Dict[str, str]) -> bool:
+        """Merge secret-owned fields into the live config and apply it.
+
+        Secrets never live in a template (``docs/PROVISIONING_NORTH_STAR.md``).
+        The SNMP community arrives from the host credentials. The verification
+        basis recorded by the baseline apply is preserved. Values are never
+        logged.
+        """
+        overlay = {}  # type: Dict[str, Any]
+        community = secrets.get("snmp_community")
+        if community:
+            overlay = {"services": {"snmp": {"v2": {"ro": {"community": community}}}}}
+        wpa_key = secrets.get("wpa_key")
+        if not overlay and not wpa_key:
+            return True
+        live = await self._get_config_curl()
+        if not live:
+            logger.error("Cannot apply secrets: live config unavailable on %s", self.ip)
+            return False
+        merged = self._deep_merge(live, overlay) if overlay else copy.deepcopy(live)
+        if wpa_key:
+            # One shared PSK for every SM profile (fleet evidence: identical
+            # passphrase hash on every populated SM export).
+            count = 0
+            try:
+                for vap in merged["wireless"]["radios"]["wlan0"].get("vaps") or []:
+                    for profile in ((vap.get("sta_profiles") or {}).get("profiles") or []):
+                        security = profile.setdefault("security", {})
+                        security.setdefault("mode", "wpapsk")
+                        security.setdefault("wpapsk", {})["passphrase"] = wpa_key
+                        count += 1
+            except (KeyError, TypeError, AttributeError):
+                logger.error("Cannot apply the profile passphrase: unexpected config shape on %s", self.ip)
+                return False
+            if not count:
+                logger.error("Cannot apply the profile passphrase: no SM profiles on %s", self.ip)
+                return False
+            overlay = overlay or {"wireless": True}
+        previous = self._last_applied_config
+        try:
+            applied = await self.apply_config(merged)
+        finally:
+            self._last_applied_config = previous
+        if applied:
+            logger.info("Applied %d secret field(s) on %s", len(overlay), self.ip)
+        return bool(applied)
 
     def _update_credentials_from_config(self, config: Dict[str, Any]) -> None:
         """Extract password from config and update self.credentials.
@@ -331,8 +575,15 @@ class TachyonHandler(BaseHandler):
                     try:
                         data = await response.json()
                         # Check for error in JSON response (200 status but login failed)
-                        if data.get("statusCode") == 401 or "Authorization Failed" in str(data):
+                        if (
+                            data.get("statusCode") == 401
+                            or data.get("auth") is False
+                            or "Authorization Failed" in str(data)
+                        ):
                             self.login_error = "Invalid credentials - wrong username or password"
+                            self.set_connection_failure(
+                                ConnectionFailureKind.AUTHENTICATION
+                            )
                             logger.warning(f"Tachyon login failed: {self.login_error}")
                             return False
                     except Exception:
@@ -343,24 +594,43 @@ class TachyonHandler(BaseHandler):
                     self._api_token = self._cookies.get("token")
 
                     if not self._api_token:
-                        logger.warning("No token cookie received from login")
+                        self.login_error = "Login returned no session token"
+                        self.set_connection_failure(
+                            ConnectionFailureKind.INVALID_RESPONSE
+                        )
+                        logger.warning("Tachyon login returned no session token")
+                        return False
 
                     self._connected = True
+                    self.set_connection_failure(None)
                     logger.info(f"Connected to Tachyon at {self.ip}")
                     return True
-                elif response.status == 401:
+                elif response.status in (401, 403):
                     self.login_error = "Invalid credentials - wrong username or password"
+                    self.set_connection_failure(
+                        ConnectionFailureKind.AUTHENTICATION
+                    )
                     logger.warning(f"Tachyon login failed: {self.login_error}")
                     return False
+                elif response.status in (429, 503):
+                    self.login_error = "Device login service is busy (HTTP %s)" % response.status
+                    self.set_connection_failure(ConnectionFailureKind.DEVICE_BUSY)
+                    logger.warning("Tachyon login service is busy: HTTP %s", response.status)
+                    return False
                 else:
-                    text = await response.text()
-                    self.login_error = f"Login failed ({response.status}): {text[:100]}"
-                    logger.error(f"Login failed ({response.status}): {text}")
+                    self.login_error = f"Login returned HTTP {response.status}"
+                    self.set_connection_failure(
+                        ConnectionFailureKind.INVALID_RESPONSE
+                    )
+                    logger.error("Tachyon login returned HTTP %s", response.status)
                     return False
 
         except aiohttp.ClientError as e:
-            self.login_error = f"Connection error: {e}"
-            logger.error(f"Failed to connect to Tachyon at {self.ip}: {e}")
+            self.login_error = "Connection error: %s" % type(e).__name__
+            self.set_connection_failure(ConnectionFailureKind.TRANSPORT)
+            logger.error(
+                "Tachyon connection failed at %s: %s", self.ip, type(e).__name__
+            )
             return False
 
     async def _connect_curl(self) -> bool:
@@ -374,6 +644,7 @@ class TachyonHandler(BaseHandler):
                 "username": self.credentials.get("username", "root"),
                 "password": self.credentials.get("password", "admin"),
             })
+            payload_bytes = payload.encode("utf-8")
 
             # Create temp file for cookie jar (cleaner than parsing stdout mix)
             cookie_fd = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
@@ -383,79 +654,139 @@ class TachyonHandler(BaseHandler):
             try:
                 # Use curl with interface binding and cookie jar file
                 proc = await asyncio.create_subprocess_exec(
-                    "curl", "-s", "-k", "-m", "10",  # -k for self-signed certs
+                    "curl", "-sS", "-k", "-m", "10",  # -k for self-signed certs
+                    "-w", "\nHTTPSTATUS:%{http_code}",
                     "--interface", self.interface,
                     "-X", "POST",
                     "-H", "Content-Type: application/json",
                     "-c", cookie_file,  # Save cookies to file
-                    "-d", payload,
+                    "--data-binary", "@-",
                     login_url,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await proc.communicate()
-
-                if proc.returncode == 0:
-                    response = stdout.decode("utf-8", errors="ignore")
-                    logger.info(f"Tachyon login response length: {len(response)}")
-
-                    # Parse JSON response to check for errors
-                    json_data = None
+                stdout, stderr = await proc.communicate(payload_bytes)
+                output = stdout.decode("utf-8", errors="ignore")
+                response = output
+                http_code = None
+                marker = "\nHTTPSTATUS:"
+                marker_index = output.rfind(marker)
+                if marker_index != -1:
+                    response = output[:marker_index]
                     try:
-                        json_data = json.loads(response)
-                        logger.debug(f"Parsed login JSON keys: {list(json_data.keys()) if isinstance(json_data, dict) else type(json_data).__name__}")
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Failed to parse login JSON: {e}")
+                        http_code = int(
+                            output[marker_index + len(marker):].strip()
+                        )
+                    except ValueError:
+                        http_code = None
 
-                    # Check for authentication failure in response
-                    if json_data:
-                        if json_data.get("statusCode") == 401 or "Authorization Failed" in str(json_data):
-                            self.login_error = "Invalid credentials - wrong username or password"
-                            logger.warning(f"Tachyon login failed: {self.login_error}")
-                            return False
-                        if json_data.get("auth") is False:
-                            self.login_error = "Invalid credentials - wrong username or password"
-                            logger.warning(f"Tachyon login failed: auth=false in response")
-                            return False
-
-                    # Also check raw response for error messages
-                    if "Authorization Failed" in response or "Invalid credentials" in response:
-                        self.login_error = "Invalid credentials - wrong username or password"
-                        logger.warning(f"Tachyon login failed: {self.login_error}")
-                        return False
-
-                    # Read cookies from file
-                    logger.info(f"Reading cookies from {cookie_file}")
-                    with open(cookie_file, 'r') as f:
-                        cookie_content = f.read()
-                    logger.debug(f"Cookie file lines: {len(cookie_content.splitlines())}")
-
-                    for line in cookie_content.split("\n"):
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            parts = line.split("\t")
-                            if len(parts) >= 7:
-                                # Cookie jar format: domain, flag, path, secure, expiry, name, value
-                                self._cookies[parts[5]] = parts[6]
-                                logger.info(f"Found cookie: {parts[5]}")
-
-                    # Extract token from cookies
-                    self._api_token = self._cookies.get("token")
-                    logger.info(f"Extracted token: {'present' if self._api_token else 'None'}")
-
-                    if not self._api_token:
-                        self.login_error = "Invalid credentials - no session token received"
-                        logger.warning(f"No token cookie received from login - credentials likely incorrect")
-                        return False
-
-                    self._connected = True
-                    self._use_curl = True
-                    logger.info(f"Connected to Tachyon at {self.ip} via {self.interface} (token: present)")
-                    return True
-                else:
-                    self.login_error = f"Connection failed: {stderr.decode()}"
-                    logger.error(f"Tachyon login curl failed: {stderr.decode()}")
+                if proc.returncode != 0:
+                    if proc.returncode == 28:
+                        self.login_error = "Connection timeout (curl code 28)"
+                    elif proc.returncode == 7:
+                        self.login_error = "Connection refused (curl code 7)"
+                    else:
+                        self.login_error = (
+                            "Connection failed (curl code %s)" % proc.returncode
+                        )
+                    self.set_connection_failure(ConnectionFailureKind.TRANSPORT)
+                    logger.error(
+                        "Tachyon login transport failure: curl_code=%s http=%s",
+                        proc.returncode,
+                        http_code if http_code is not None else "none",
+                    )
                     return False
+
+                if http_code in (401, 403):
+                    self.login_error = "Invalid credentials - wrong username or password"
+                    self.set_connection_failure(
+                        ConnectionFailureKind.AUTHENTICATION
+                    )
+                    logger.warning("Tachyon login rejected the credentials")
+                    return False
+                if http_code in (429, 503):
+                    self.login_error = "Device login service is busy (HTTP %s)" % http_code
+                    self.set_connection_failure(ConnectionFailureKind.DEVICE_BUSY)
+                    logger.warning("Tachyon login service is busy: HTTP %s", http_code)
+                    return False
+                if http_code is None or http_code < 200 or http_code >= 400:
+                    self.login_error = "Login returned HTTP %s" % (
+                        http_code if http_code is not None else "unknown"
+                    )
+                    self.set_connection_failure(
+                        ConnectionFailureKind.INVALID_RESPONSE
+                    )
+                    logger.error(
+                        "Tachyon login returned an invalid HTTP result: %s",
+                        http_code if http_code is not None else "unknown",
+                    )
+                    return False
+
+                logger.info(
+                    "Tachyon login response: http=%s bytes=%s",
+                    http_code,
+                    len(response),
+                )
+
+                json_data = None
+                try:
+                    json_data = json.loads(response)
+                    logger.debug(
+                        "Parsed Tachyon login JSON keys: %s",
+                        list(json_data.keys())
+                        if isinstance(json_data, dict)
+                        else type(json_data).__name__,
+                    )
+                except json.JSONDecodeError:
+                    self.login_error = "Login returned invalid JSON"
+                    self.set_connection_failure(
+                        ConnectionFailureKind.INVALID_RESPONSE
+                    )
+                    logger.warning("Tachyon login returned invalid JSON")
+                    return False
+
+                if isinstance(json_data, dict) and (
+                    json_data.get("statusCode") == 401
+                    or json_data.get("auth") is False
+                    or "Authorization Failed" in str(json_data)
+                ):
+                    self.login_error = "Invalid credentials - wrong username or password"
+                    self.set_connection_failure(
+                        ConnectionFailureKind.AUTHENTICATION
+                    )
+                    logger.warning("Tachyon login rejected the credentials")
+                    return False
+
+                # Read only cookie names and values from the private temporary
+                # file. Never log the cookie value.
+                with open(cookie_file, "r") as cookie_handle:
+                    cookie_content = cookie_handle.read()
+                for line in cookie_content.split("\n"):
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        parts = line.split("\t")
+                        if len(parts) >= 7:
+                            self._cookies[parts[5]] = parts[6]
+
+                self._api_token = self._cookies.get("token")
+                if not self._api_token:
+                    self.login_error = "Login returned no session token"
+                    self.set_connection_failure(
+                        ConnectionFailureKind.INVALID_RESPONSE
+                    )
+                    logger.warning("Tachyon login returned no session token")
+                    return False
+
+                self._connected = True
+                self._use_curl = True
+                self.set_connection_failure(None)
+                logger.info(
+                    "Connected to Tachyon at %s via %s (token present)",
+                    self.ip,
+                    self.interface,
+                )
+                return True
 
             finally:
                 # Clean up temp cookie file
@@ -465,8 +796,11 @@ class TachyonHandler(BaseHandler):
                     pass
 
         except Exception as e:
-            self.login_error = f"Connection error: {e}"
-            logger.error(f"Failed to connect to Tachyon via curl: {e}")
+            self.login_error = "Connection error: %s" % type(e).__name__
+            self.set_connection_failure(ConnectionFailureKind.TRANSPORT)
+            logger.error(
+                "Tachyon curl connection failed: %s", type(e).__name__
+            )
             return False
 
     async def disconnect(self) -> None:
@@ -497,6 +831,11 @@ class TachyonHandler(BaseHandler):
         """
         return {"Content-Type": "application/json"}
 
+    @staticmethod
+    def _config_request_payload(config: Dict[str, Any]) -> Dict[str, Any]:
+        """Wrap a config document in the payload expected by Tachyon."""
+        return {"data": config}
+
     async def _api_request(
         self,
         method: str,
@@ -520,10 +859,14 @@ class TachyonHandler(BaseHandler):
         if self._api_token:
             cookies["token"] = self._api_token
 
+        request_data = data if data else None
+        if method == "POST" and endpoint == self.API_CONFIG and data is not None:
+            request_data = self._config_request_payload(data)
+
         async with self._session.request(
             method,
             url,
-            json=data if data else None,
+            json=request_data,
             params=params,
             cookies=cookies,
             headers=headers
@@ -535,7 +878,7 @@ class TachyonHandler(BaseHandler):
                     response.request_info,
                     response.history,
                     status=response.status,
-                    message=text
+                    message="Tachyon API request failed",
                 )
 
             try:
@@ -575,20 +918,33 @@ class TachyonHandler(BaseHandler):
         # Add headers
         cmd.extend(["-H", "Content-Type: application/json"])
 
-        # Tachyon uses 'token' cookie for auth
+        # Keep the URL, auth token, and request body in curl's stdin config.
+        # These values must not appear in the process argument list.
+        config_lines = ['url = "{}"'.format(self._curl_config_value(url))]
         if self._api_token:
-            cmd.extend(["-H", f"Cookie: token={self._api_token}"])
-            logger.debug(f"Using token: {self._api_token[:30]}...")
+            config_lines.append(
+                'header = "{}"'.format(
+                    self._curl_config_value(f"Cookie: token={self._api_token}")
+                )
+            )
+            logger.debug("Using authenticated Tachyon session token")
         else:
             logger.warning(f"No token for API request to {endpoint}")
 
-        # Add data for POST/PUT
         if data and method in ("POST", "PUT", "PATCH"):
-            cmd.extend(["-d", json.dumps(data)])
+            request_data = data
+            if method == "POST" and endpoint == self.API_CONFIG:
+                request_data = self._config_request_payload(data)
+            config_lines.append(
+                'data-binary = "{}"'.format(
+                    self._curl_config_value(json.dumps(request_data))
+                )
+            )
 
-        cmd.append(url)
-
-        returncode, body, http_code, stderr = await self._run_curl(cmd)
+        returncode, body, http_code, stderr = await self._run_curl(
+            cmd,
+            config_input=("\n".join(config_lines) + "\n").encode("utf-8"),
+        )
 
         if returncode != 0:
             logger.error(f"API request failed: {method} {endpoint}: {stderr}")
@@ -597,8 +953,14 @@ class TachyonHandler(BaseHandler):
         # curl -s exits 0 even on HTTP 4xx/5xx; surface real HTTP errors so callers
         # (read-back GET, update_firmware POST) cannot mistake an error page for data.
         if http_code is not None and http_code >= 400:
-            logger.error(f"API request {method} {endpoint} returned HTTP {http_code}: {body[:300]}")
-            raise RuntimeError(f"HTTP {http_code} from {endpoint}: {body[:200]}")
+            logger.error(
+                "API request %s %s returned HTTP %s (%s response bytes)",
+                method,
+                endpoint,
+                http_code,
+                len(body),
+            )
+            raise RuntimeError("HTTP %s from %s" % (http_code, endpoint))
 
         try:
             data = json.loads(body)
@@ -616,7 +978,17 @@ class TachyonHandler(BaseHandler):
     # ``curl -s`` (no -f) otherwise hides. Must match the parsing in _run_curl().
     _CURL_STATUS_MARKER = "HTTPSTATUS:"
 
-    async def _run_curl(self, cmd: list):
+    @staticmethod
+    def _curl_config_value(value: str) -> str:
+        """Escape a value for a curl config file read from stdin."""
+        return (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\r", "\\r")
+            .replace("\n", "\\n")
+        )
+
+    async def _run_curl(self, cmd: list, config_input: Optional[bytes] = None):
         """Run a curl command and recover (returncode, body, http_code, stderr).
 
         Appends ``-w '\\nHTTPSTATUS:%{http_code}'`` so the HTTP status code is captured.
@@ -624,16 +996,23 @@ class TachyonHandler(BaseHandler):
         error/login pages be reported as successful config/firmware uploads.
 
         http_code is None if curl produced no status line (e.g. a transport failure).
+        When config_input is provided, curl reads URL, headers, and body from stdin.
         """
         write_out = "\n" + self._CURL_STATUS_MARKER + "%{http_code}"
         full_cmd = [cmd[0], "-w", write_out] + list(cmd[1:])
+        process_kwargs = {
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+        }
+        if config_input is not None:
+            full_cmd.extend(["--config", "-"])
+            process_kwargs["stdin"] = asyncio.subprocess.PIPE
 
         proc = await asyncio.create_subprocess_exec(
             *full_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            **process_kwargs,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await proc.communicate(config_input)
         out = stdout.decode("utf-8", errors="ignore")
         err = stderr.decode("utf-8", errors="ignore")
 
@@ -831,7 +1210,7 @@ class TachyonHandler(BaseHandler):
             ok = await self._apply_config_curl(config)
         else:
             try:
-                # Post full config directly (API expects raw config, not wrapped)
+                # Post the full config with the wrapper required by Tachyon.
                 result = await self._api_request(
                     "POST",
                     self.API_CONFIG,
@@ -844,20 +1223,27 @@ class TachyonHandler(BaseHandler):
                 # so this path matches the curl branch and update_firmware().
                 if isinstance(result, dict):
                     if result.get("statusCode") and result.get("statusCode") >= 400:
-                        logger.error(f"Config apply failed with status {result['statusCode']}: {result.get('error')}")
+                        logger.error(
+                            "Config apply failed with API status %s",
+                            result["statusCode"],
+                        )
                         return False
                     if result.get("error"):
-                        logger.error(f"Config apply error: {result['error']}")
+                        logger.error("Config apply returned an API error")
                         return False
                     if result.get("errors"):
-                        for error in result["errors"]:
-                            logger.error(f"Config error: {error}")
+                        logger.error(
+                            "Config apply returned %s API errors",
+                            len(result["errors"]),
+                        )
                         return False
                     if result.get("reboot_required"):
                         logger.info("Configuration requires reboot")
                     if result.get("warnings"):
-                        for warning in result["warnings"]:
-                            logger.warning(f"Config warning: {warning}")
+                        logger.warning(
+                            "Config apply returned %s API warnings",
+                            len(result["warnings"]),
+                        )
 
                 logger.info(f"Configuration applied to {self.ip}")
                 ok = True
@@ -876,8 +1262,7 @@ class TachyonHandler(BaseHandler):
         # is FAIL-CLOSED: if we cannot read the config back, or it does not
         # match, we report failure. We never claim success we could not confirm.
         if self._has_verifiable_config_fields(config):
-            await asyncio.sleep(2)  # Brief pause for config to settle
-            readback = await self._get_config_curl()
+            readback = await self._read_config_after_apply()
             if not readback:
                 logger.error(
                     f"[CONFIG VERIFY] Could not read back config on {self.ip} — failing closed"
@@ -896,6 +1281,65 @@ class TachyonHandler(BaseHandler):
 
         return True
 
+    async def _read_config_after_apply(self) -> Dict[str, Any]:
+        """Read config after apply while the device reloads its web service.
+
+        A successful config POST can restart the Tachyon web service. The first
+        readback can fail while that service returns. Retry with bounded delays,
+        then reconnect once to refresh an expired session before failing closed.
+        """
+        reconnect_attempted = False
+        for attempt in range(1, self.CONFIG_READBACK_ATTEMPTS + 1):
+            readback = await self._get_config_curl()
+            if readback:
+                return readback
+
+            if attempt >= self.CONFIG_READBACK_ATTEMPTS:
+                break
+
+            delay = self.CONFIG_READBACK_DELAYS[attempt - 1]
+            logger.info(
+                "[CONFIG VERIFY] Read-back unavailable on %s; retrying in %ss "
+                "(%s/%s)",
+                self.ip,
+                delay,
+                attempt,
+                self.CONFIG_READBACK_ATTEMPTS,
+            )
+            await asyncio.sleep(delay)
+
+            if (
+                attempt == self.CONFIG_READBACK_RECONNECT_AFTER
+                and not reconnect_attempted
+            ):
+                reconnect_attempted = True
+                logger.info(
+                    "[CONFIG VERIFY] Refreshing the Tachyon session on %s before "
+                    "the next read-back",
+                    self.ip,
+                )
+                try:
+                    if await self.refresh_connection("config read-back"):
+                        logger.info(
+                            "[CONFIG VERIFY] Tachyon session refreshed on %s",
+                            self.ip,
+                        )
+                    else:
+                        logger.warning(
+                            "[CONFIG VERIFY] Could not refresh the Tachyon session "
+                            "on %s: %s",
+                            self.ip,
+                            self.login_error or "unknown connection error",
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[CONFIG VERIFY] Tachyon session refresh failed on %s: %s",
+                        self.ip,
+                        exc,
+                    )
+
+        return {}
+
     def _normalize_config_for_apply(self, config: Dict[str, Any]) -> None:
         """Fill Tachyon API-required defaults omitted by older config exports."""
         try:
@@ -904,6 +1348,19 @@ class TachyonHandler(BaseHandler):
             radios = config.get("wireless", {}).get("radios", {})
         except AttributeError:
             return
+
+        # Some older bench exports placed the ethernet section below network.
+        # The device API accepts it only as a top-level section.
+        network_section = config.get("network")
+        if (
+            "ethernet" not in config
+            and isinstance(network_section, dict)
+            and isinstance(network_section.get("ethernet"), dict)
+        ):
+            config["ethernet"] = network_section.pop("ethernet")
+            logger.warning(
+                "Moved legacy network.ethernet section to top-level ethernet"
+            )
 
         if isinstance(system, dict):
             for key, default in (
@@ -970,24 +1427,14 @@ class TachyonHandler(BaseHandler):
                     "Added default network.zones.wan.dhcp.enabled_options for Tachyon config apply"
                 )
 
-        ethernet_ports = (
-            config.get("ethernet", {}).get("ports", {})
-            if isinstance(config.get("ethernet"), dict)
-            else {}
-        )
-        try:
-            wlan0_mode = radios.get("wlan0", {}).get("vaps", [{}])[0].get("mode")
-        except (AttributeError, IndexError, TypeError):
-            wlan0_mode = None
-        eth0 = ethernet_ports.get("eth0") if isinstance(ethernet_ports, dict) else None
-        eth0_network = eth0.get("network") if isinstance(eth0, dict) else None
-        if wlan0_mode == "sta" and isinstance(eth0_network, dict):
-            if "mgmt_vlan_enabled" not in eth0_network:
-                eth0_network["mgmt_vlan_enabled"] = True
-                logger.info(
-                    "Added default ethernet.ports.eth0.network.mgmt_vlan_enabled=true for Tachyon config apply"
-                )
-
+        # NOTE: do NOT synthesize `mgmt_vlan_enabled` on eth0 or on any VAP.
+        # These management-VLAN tags must stay coherent as a set — e.g. a
+        # station-mode CPE needs the wired port AND the wireless STA backhaul
+        # both tagged so management/DHCP can traverse the backhaul. Blindly
+        # defaulting them here produced an inconsistent config (eth0 tagged but
+        # the STA backhaul left untagged) that failed to obtain a
+        # management-VLAN DHCP lease. The captured template/export is
+        # authoritative for these fields; the device authors them correctly.
         if not isinstance(radios, dict):
             return
 
@@ -1013,24 +1460,25 @@ class TachyonHandler(BaseHandler):
                         radio_name,
                         index,
                     )
-                network = vap.get("network")
-                if isinstance(network, dict) and "mgmt_vlan_enabled" not in network:
-                    network["mgmt_vlan_enabled"] = False
-                    logger.info(
-                        "Added default wireless.radios.%s.vaps[%s].network.mgmt_vlan_enabled=false for Tachyon config apply",
-                        radio_name,
-                        index,
-                    )
 
-    def _is_full_config_export(self, config: Dict[str, Any]) -> bool:
-        """Return True when a JSON template looks like a full Tachyon export."""
+    @staticmethod
+    def is_full_config_export(config: Dict[str, Any]) -> bool:
+        """Return True when a JSON template looks like a full Tachyon export.
+
+        Overrides the BaseHandler class-level hook so the config resolver
+        can detect replace-not-merge templates before instantiation.
+        """
         if not isinstance(config, dict):
             return False
         keys = set(config.keys())
-        return (
-            {"ethernet", "network", "version"}.issubset(keys)
-            or {"network", "wireless", "system", "version"}.issubset(keys)
-        )
+        return {
+            "ethernet",
+            "network",
+            "services",
+            "system",
+            "version",
+            "wireless",
+        }.issubset(keys)
 
     def _has_verifiable_config_fields(self, config: Dict[str, Any]) -> bool:
         if not isinstance(config, dict):
@@ -1150,6 +1598,14 @@ class TachyonHandler(BaseHandler):
         actual_vap = actual_vaps[0]
         if "ssid" in expected_vap and expected_vap.get("ssid") != actual_vap.get("ssid"):
             mismatches.append("wireless.radios.wlan0.vaps[0].ssid")
+        for key in ("mode", "isolate"):
+            if key in expected_vap and expected_vap.get(key) != actual_vap.get(key):
+                mismatches.append("wireless.radios.wlan0.vaps[0].%s" % key)
+        if isinstance(expected_vap.get("network"), dict):
+            # The VAP management-VLAN flag is part of the coherent VLAN set.
+            self._append_expected_value_mismatches(
+                mismatches, "wireless.radios.wlan0.vaps[0].network", expected_vap["network"], actual_vap.get("network")
+            )
 
         expected_profiles = expected_vap.get("sta_profiles", {}).get("profiles", [])
         actual_profiles = actual_vap.get("sta_profiles", {}).get("profiles", [])
@@ -1168,6 +1624,13 @@ class TachyonHandler(BaseHandler):
                 mismatches.append("wireless.radios.wlan0.vaps[0].sta_profiles.profiles.ssid")
 
     def _is_sensitive_path(self, path: str) -> bool:
+        """Return whether *path* is secret-owned under the contract."""
+        try:
+            parsed = parse_path(path.replace(" ", "_"))
+        except ValueError:
+            parsed = tuple(path.split("."))
+        if classify(self.FIELD_OWNERSHIP, parsed) is Owner.SECRET:
+            return True
         sensitive_parts = ("password", "passphrase", "private_key", "public_key", "community")
         return any(part in path.lower() for part in sensitive_parts)
 
@@ -1200,7 +1663,7 @@ class TachyonHandler(BaseHandler):
         """
         try:
             url = f"{self._base_url}{self.API_CONFIG}"
-            payload = json.dumps(config)  # API expects raw config, not wrapped
+            payload = json.dumps(self._config_request_payload(config))
 
             # Log config keys being applied (not values - may contain sensitive data)
             config_keys = list(config.keys()) if isinstance(config, dict) else "non-dict"
@@ -1214,19 +1677,32 @@ class TachyonHandler(BaseHandler):
                 "-H", "Content-Type: application/json",
             ]
 
-            # Add auth - Tachyon uses 'token' cookie
+            config_lines = [
+                'url = "{}"'.format(self._curl_config_value(url)),
+                'data-binary = "{}"'.format(
+                    self._curl_config_value(payload)
+                ),
+            ]
             if self._api_token:
-                cmd.extend(["-H", f"Cookie: token={self._api_token}"])
-
-            cmd.extend(["-d", payload, url])
-
-            returncode, body, http_code, stderr = await self._run_curl(cmd)
+                config_lines.append(
+                    'header = "{}"'.format(
+                        self._curl_config_value(f"Cookie: token={self._api_token}")
+                    )
+                )
+            returncode, body, http_code, stderr = await self._run_curl(
+                cmd,
+                config_input=("\n".join(config_lines) + "\n").encode("utf-8"),
+            )
 
             if returncode != 0:
                 logger.error(f"Config apply curl failed (rc={returncode}): {stderr}")
                 return False
             if http_code is not None and http_code >= 400:
-                logger.error(f"Config apply failed: HTTP {http_code}, body: {body[:300]}")
+                logger.error(
+                    "Config apply failed: HTTP %s (%s response bytes)",
+                    http_code,
+                    len(body),
+                )
                 return False
 
             body_stripped = body.strip()
@@ -1237,29 +1713,37 @@ class TachyonHandler(BaseHandler):
             try:
                 result = json.loads(body_stripped)
             except json.JSONDecodeError:
-                logger.error(f"Config apply returned non-JSON response (HTTP {http_code}): {body_stripped[:300]}")
+                logger.error(
+                    "Config apply returned a non-JSON response: HTTP %s (%s bytes)",
+                    http_code,
+                    len(body_stripped),
+                )
                 return False
 
             if isinstance(result, dict):
                 # Tachyon API error format: {"statusCode":400,"error":{...}}
                 if result.get("statusCode") and result.get("statusCode") >= 400:
-                    error_details = result.get("error", {}).get("details", "Unknown error")
-                    logger.error(f"Config apply failed with status {result['statusCode']}: {error_details}")
+                    logger.error(
+                        "Config apply failed with API status %s",
+                        result["statusCode"],
+                    )
                     return False
                 if result.get("error"):
-                    error_details = result["error"].get("details", str(result["error"])) \
-                        if isinstance(result["error"], dict) else str(result["error"])
-                    logger.error(f"Config apply error: {error_details}")
+                    logger.error("Config apply returned an API error")
                     return False
                 if result.get("errors"):
-                    for error in result["errors"]:
-                        logger.error(f"Config error: {error}")
+                    logger.error(
+                        "Config apply returned %s API errors",
+                        len(result["errors"]),
+                    )
                     return False
                 if result.get("reboot_required"):
                     logger.info("Configuration requires reboot")
                 if result.get("warnings"):
-                    for warning in result["warnings"]:
-                        logger.warning(f"Config warning: {warning}")
+                    logger.warning(
+                        "Config apply returned %s API warnings",
+                        len(result["warnings"]),
+                    )
 
             logger.info(f"Configuration applied to {self.ip} via {self.interface} (HTTP {http_code})")
             return True
@@ -1269,14 +1753,39 @@ class TachyonHandler(BaseHandler):
             return False
 
     def _deep_merge(self, base: dict, overlay: dict) -> dict:
-        """Recursively merge overlay into base. Overlay values win on conflict."""
-        merged = base.copy()
-        for key, value in overlay.items():
-            if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
-                merged[key] = self._deep_merge(merged[key], value)
-            else:
-                merged[key] = value
-        return merged
+        """Recursively merge overlay into base. Overlay values win on conflict.
+
+        Delegates to the shared vendor-neutral utility (config_merge.py),
+        which was promoted from this handler's original implementation.
+        """
+        return deep_merge(base, overlay)
+
+    def _merge_legacy_config(self, base: Any, overlay: Any) -> Any:
+        """Merge a reduced Tachyon archive and keep omitted list fields.
+
+        Legacy archives contain partial VAP objects. The shared merge rule
+        replaces lists, which would remove required fields from the live VAP.
+        Merge list items by index only for this legacy archive path.
+        """
+        if isinstance(base, dict) and isinstance(overlay, dict):
+            merged = deepcopy(base)
+            for key, value in overlay.items():
+                if key in merged:
+                    merged[key] = self._merge_legacy_config(merged[key], value)
+                else:
+                    merged[key] = deepcopy(value)
+            return merged
+
+        if isinstance(base, list) and isinstance(overlay, list):
+            merged = deepcopy(base)
+            for index, value in enumerate(overlay):
+                if index < len(merged):
+                    merged[index] = self._merge_legacy_config(merged[index], value)
+                else:
+                    merged.append(deepcopy(value))
+            return merged
+
+        return deepcopy(overlay)
 
     async def apply_config_file(self, config_path: str) -> bool:
         """Apply configuration from JSON file or tarball.
@@ -1296,7 +1805,14 @@ class TachyonHandler(BaseHandler):
                 loaded_template.top_level_keys,
             )
 
-            if loaded_template.source_type == "tar" or self._is_full_config_export(config):
+            is_full_export = self.is_full_config_export(config)
+            is_legacy_tar = loaded_template.source_type == "tar" and not is_full_export
+            if is_legacy_tar:
+                # Older Tachyon archives are reduced profiles with a legacy
+                # network.ethernet section. Normalize them before merging.
+                self._normalize_config_for_apply(config)
+
+            if is_full_export:
                 logger.info("Applying Tachyon config export as authoritative full config")
             else:
                 # Partial JSON templates remain patch-like and merge into the
@@ -1304,10 +1820,16 @@ class TachyonHandler(BaseHandler):
                 try:
                     current_config = await self._api_request("GET", self.API_CONFIG)
                     if isinstance(current_config, dict):
-                        config = self._deep_merge(current_config, config)
-                        logger.info(f"Merged partial template config into current device config")
+                        if is_legacy_tar:
+                            config = self._merge_legacy_config(current_config, config)
+                        else:
+                            config = self._deep_merge(current_config, config)
+                        logger.info("Merged partial template config into current device config")
                 except Exception as e:
-                    logger.warning(f"Could not GET current config for merge, applying template as-is: {e}")
+                    logger.warning(
+                        "Could not GET current config for merge; applying template as-is: %s",
+                        type(e).__name__,
+                    )
 
             return await self.apply_config(config)
 
@@ -1359,8 +1881,7 @@ class TachyonHandler(BaseHandler):
                         logger.info(f"Firmware uploaded to {self.ip}")
                         return True
                     else:
-                        text = await response.text()
-                        logger.error(f"Firmware upload failed ({response.status}): {text}")
+                        logger.error("Firmware upload failed: HTTP %s", response.status)
                         return False
 
         except Exception as e:
@@ -1389,24 +1910,37 @@ class TachyonHandler(BaseHandler):
                 "-F", "force=false",
             ])
 
-            # Add auth - Tachyon uses 'token' cookie
+            config_lines = ['url = "{}"'.format(self._curl_config_value(url))]
             if self._api_token:
-                cmd.extend(["-H", f"Cookie: token={self._api_token}"])
-
-            cmd.append(url)
+                config_lines.append(
+                    'header = "{}"'.format(
+                        self._curl_config_value(f"Cookie: token={self._api_token}")
+                    )
+                )
 
             logger.info(f"Uploading firmware {firmware_file.name} to {self.ip}")
 
-            returncode, body, http_code, stderr = await self._run_curl(cmd)
+            returncode, body, http_code, stderr = await self._run_curl(
+                cmd,
+                config_input=("\n".join(config_lines) + "\n").encode("utf-8"),
+            )
 
             if returncode != 0:
                 logger.error(f"Firmware upload curl failed (rc={returncode}): {stderr}")
                 return False
             if http_code is not None and http_code >= 400:
-                logger.error(f"Firmware upload failed: HTTP {http_code}, body: {body[:300]}")
+                logger.error(
+                    "Firmware upload failed: HTTP %s (%s response bytes)",
+                    http_code,
+                    len(body),
+                )
                 return False
 
-            logger.info(f"Firmware upload response (HTTP {http_code}): {body[:500]}")
+            logger.info(
+                "Firmware upload response: HTTP %s (%s bytes)",
+                http_code,
+                len(body),
+            )
 
             # A successful upload returns a JSON body (documented: {"version":"unknown"}).
             # An empty body or a non-JSON body (HTML login/error page) is a FAILURE —
@@ -1420,14 +1954,18 @@ class TachyonHandler(BaseHandler):
             try:
                 result = json.loads(body_stripped)
             except json.JSONDecodeError:
-                logger.error(f"Firmware upload returned non-JSON response (HTTP {http_code}): {body_stripped[:300]}")
+                logger.error(
+                    "Firmware upload returned a non-JSON response: HTTP %s (%s bytes)",
+                    http_code,
+                    len(body_stripped),
+                )
                 return False
 
             if isinstance(result, dict) and (result.get("error") or result.get("statusCode", 200) >= 400):
-                logger.error(f"Firmware upload API error: {result}")
+                logger.error("Firmware upload returned an API error")
                 return False
 
-            logger.info(f"Firmware uploaded to {self.ip} (HTTP {http_code}, response: {body_stripped[:200]})")
+            logger.info("Firmware uploaded to %s (HTTP %s)", self.ip, http_code)
             return True
 
         except Exception as e:
@@ -1456,15 +1994,21 @@ class TachyonHandler(BaseHandler):
                 data={"reset": False, "force": False}
             )
 
-            logger.info(f"Firmware update API response: {result}")
+            logger.info(
+                "Firmware update API response received: type=%s",
+                type(result).__name__,
+            )
 
             # Check for errors in response
             if isinstance(result, dict):
                 if result.get("error"):
-                    logger.error(f"Firmware update API error: {result.get('error')}")
+                    logger.error("Firmware update returned an API error")
                     return False
                 if result.get("statusCode", 200) >= 400:
-                    logger.error(f"Firmware update failed with status: {result}")
+                    logger.error(
+                        "Firmware update failed with API status %s",
+                        result.get("statusCode"),
+                    )
                     return False
 
             logger.info(f"Firmware update triggered on {self.ip}{bank_str}")
@@ -1758,28 +2302,12 @@ class TachyonHandler(BaseHandler):
             ``True`` / ``False`` / :data:`UNVERIFIED`.
         """
         logger.info(f"[CONFIG VERIFY] Verifying Tachyon device state on {self.ip}")
-        await self.disconnect()
-
-        # Reconnect
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            try:
-                logger.info(f"[CONFIG VERIFY] Login attempt {attempt}/{max_attempts} for {self.ip}")
-                if await self.connect():
-                    break
-                login_err = self.login_error or ""
-                auth_keywords = ["credentials", "password", "locked", "session", "unauthorized"]
-                if any(kw in login_err.lower() for kw in auth_keywords):
-                    logger.error(f"[CONFIG VERIFY] Auth/lockout error, stopping: {login_err}")
-                    return False
-                logger.warning(f"[CONFIG VERIFY] Reconnect attempt {attempt} failed: {login_err}")
-            except Exception as e:
-                logger.warning(f"[CONFIG VERIFY] Attempt {attempt} error: {e}")
-                await self.disconnect()
-            if attempt < max_attempts:
-                await asyncio.sleep(10)
-        else:
-            logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed for {self.ip}")
+        if not await self.refresh_connection("config verification"):
+            logger.error(
+                "[CONFIG VERIFY] Tachyon connection failed on %s: kind=%s",
+                self.ip,
+                self.connection_failure_kind.value,
+            )
             return False
 
         # Check firmware banks (informational signal, not the verification gate)

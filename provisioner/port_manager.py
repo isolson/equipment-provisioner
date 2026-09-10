@@ -14,9 +14,11 @@ Architecture:
 """
 
 import asyncio
+import json
 import collections
 import logging
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -24,6 +26,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Callable, Awaitable, Tuple, Union
 
 from .fingerprint import is_mikrotik_oui
+from .vendor_ips import boot_ping_ips, probe_ip_candidates, registered_vendor_ips
 
 logger = logging.getLogger(__name__)
 
@@ -113,29 +116,54 @@ class ProvisioningChecklist:
 
 
 class DeviceLinkLocalIP:
-    """Known link-local/default IPs for device types."""
-    CAMBIUM = "169.254.1.1"
-    TACHYON = "169.254.1.1"
-    TACHYON_ALT = "192.168.1.1"  # Some Tachyon devices use this
-    TARANA = "169.254.100.1"
-    MIKROTIK = "192.168.88.1"  # Mikrotik default, but often uses DHCP
-    UBIQUITI = "192.168.1.20"  # Ubiquiti AirMax and Wave default
+    """Known link-local/default IPs for device types.
 
-    # All IPs to probe when detecting device type
-    ALL = [
-        ("169.254.1.1", ["cambium", "tachyon"]),
-        ("192.168.1.1", ["tachyon"]),  # Tachyon alternate IP
-        ("192.168.1.20", ["ubiquiti"]),  # Ubiquiti AirMax/Wave default
-        ("169.254.100.1", ["tarana"]),
-        ("192.168.88.1", ["mikrotik"]),
-    ]
+    Derived from the vendor-IP views in ``provisioner.vendor_ips``
+    (Stories 4/#74 and 6/#76). Add or change vendor IPs in the vendor's
+    ``VendorSpec`` (``vendor_registry.py``), not here.
+
+    Per-vendor address attributes (``CAMBIUM``, ``TACHYON``,
+    ``TACHYON_ALT``, ``TARANA``, ``MIKROTIK``, ``UBIQUITI``, ...) are
+    generated below from ``registered_vendor_ips()`` — the *unfiltered*
+    registry — so they stay defined under a ``PROVISIONER_VENDORS``
+    allowlist (they are facts about vendor gear, not detection
+    candidates) and disappear automatically when a vendor's spec is
+    removed. ``ALL`` / ``BOOT_PING`` derive from the *filtered* views:
+    an allowlisted build only probes for enabled vendors.
+    """
+
+    # All (ip, [candidate vendors]) pairs to probe when detecting device
+    # type — derived; registry order is the probe order.
+    ALL = probe_ip_candidates()
+
+    # IPs pinged during the boot wait for a quick liveness check — derived;
+    # preserves the historical boot-ping order (MikroTik before Tarana).
+    BOOT_PING = boot_ping_ips()
 
     # Some MikroTik units may be reset with different default LAN subnets.
-    # We only probe these if standard defaults do not match.
+    # We only probe these if standard defaults do not match. Deliberately
+    # not part of the vendor-IP registry: fallbacks are conditional
+    # behavior (probed only after every standard probe misses), not part
+    # of the standard probe/boot-ping enumeration.
     MIKROTIK_FALLBACKS = [
         "192.168.0.1",
         "10.0.0.1",
     ]
+
+
+def _generate_vendor_address_constants():
+    """Attach <VENDOR> / <VENDOR>_ALT[n] address attributes to
+    DeviceLinkLocalIP: <VENDOR> is the primary IP (e.g. CAMBIUM =
+    "169.254.1.1"), <VENDOR>_ALT the second (e.g. TACHYON_ALT =
+    "192.168.1.1"), <VENDOR>_ALT2... any further alternates."""
+    for vendor, ips in registered_vendor_ips().items():
+        setattr(DeviceLinkLocalIP, vendor.upper(), ips[0])
+        for alt_index, alt_ip in enumerate(ips[1:], start=1):
+            suffix = "_ALT" if alt_index == 1 else "_ALT{}".format(alt_index)
+            setattr(DeviceLinkLocalIP, vendor.upper() + suffix, alt_ip)
+
+
+_generate_vendor_address_constants()
 
 
 @dataclass
@@ -151,6 +179,31 @@ class PortConfig:
 
 
 @dataclass
+class PortEvent:
+    """One persisted timeline entry for a port. Never carries a secret value."""
+    seq: int
+    ts: float
+    kind: str
+    label: str
+    key: Optional[str] = None
+    status: Optional[Union[bool, str]] = None
+    detail: Optional[str] = None
+    run_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "seq": self.seq,
+            "ts": self.ts,
+            "kind": self.kind,
+            "key": self.key,
+            "label": self.label,
+            "status": self.status,
+            "detail": self.detail,
+            "run_id": self.run_id,
+        }
+
+
+@dataclass
 class PortState:
     """Current state of a port."""
     port_number: int
@@ -162,6 +215,7 @@ class PortState:
     device_mac: Optional[str] = None  # MAC address (retrieved during provisioning)
     device_serial: Optional[str] = None  # Serial number (retrieved during provisioning)
     device_model: Optional[str] = None  # Device model (retrieved during fingerprint/provisioning)
+    firmware_version: Optional[str] = None  # Firmware version (retrieved during fingerprint/provisioning)
     provisioning: bool = False
     last_seen: Optional[float] = None
     provisioning_ended: Optional[float] = None  # When provisioning finished (for grace period)
@@ -172,7 +226,15 @@ class PortState:
     boot_ping_responded: bool = False  # True once device responds to ping during boot
     last_result: Optional[str] = None  # "success" or "failed"
     last_error: Optional[str] = None  # Error message if failed
+    needs_credentials: bool = False  # Last failure needs an operator login
     checklist: ProvisioningChecklist = field(default_factory=ProvisioningChecklist)  # Step-by-step progress
+    # Ordered, run-specific validation plan plus generic status/detail maps.
+    # The legacy checklist remains the compatibility surface for existing API
+    # clients, while these fields let capability-driven flows (and MikroTik
+    # Netinstall) expose only the checks they actually run.
+    step_plan: List[Dict[str, str]] = field(default_factory=list)
+    step_status: Dict[str, Union[bool, str]] = field(default_factory=dict)
+    step_details: Dict[str, str] = field(default_factory=dict)
     provision_attempted: bool = False  # True once provisioning has been attempted (prevents re-trigger)
     last_provisioned_at: Optional[float] = None  # Timestamp of last successful provisioning (survives disconnect)
     last_provisioned_mac: Optional[str] = None  # MAC of the last successfully provisioned device — cooldown is bypassed when a different MAC appears
@@ -186,6 +248,9 @@ class PortState:
     device_mode: Optional[str] = None
     mode_config: Optional[Dict[str, Any]] = None  # Naming params used to configure mode
     ptp_link_id: Optional[str] = None  # Canonical PTP link ID, e.g. "tw05-tw12"
+    # The job-intent flow can require AP/PTP selection after base provisioning.
+    # Until that flow sets this, mode actions remain optional.
+    mode_selection_required: bool = False
 
     # Rolling buffer of (timestamp, link_up: bool, speed: Optional[str]) events
     # recorded on every switch-port webhook. Used by the passive Evolution
@@ -193,6 +258,16 @@ class PortState:
     link_events: Deque[Tuple[float, bool, Optional[str]]] = field(
         default_factory=lambda: collections.deque(maxlen=50)
     )
+
+    # Server-owned timeline (survives kiosk reload and Chromium respawn).
+    events: Deque["PortEvent"] = field(default_factory=lambda: collections.deque(maxlen=200))
+    event_seq: int = 0
+    run_id: Optional[str] = None  # Current provisioning run id
+    boot_wait_started: Optional[float] = None  # When the current boot wait began
+    # Active post-provision mode change: {id, mode, started, steps, status}
+    mode_job: Optional[Dict[str, Any]] = None
+    # Seconds until auto-provisioning may run again for the same unit.
+    reprovision_wait: int = 0
 
 
 @dataclass
@@ -235,6 +310,8 @@ class PortManager:
         local_ip_base: str = "169.254.1.2",
         management: Optional[ManagementConfig] = None,
         setup_vlans: bool = True,
+        mode_config_enabled: bool = False,
+        events_path: Optional[str] = None,
     ):
         """Initialize port manager.
 
@@ -257,6 +334,7 @@ class PortManager:
         self.num_ports = num_ports if setup_vlans else 1
         self.local_ip_base = local_ip_base
         self.management = management or ManagementConfig()
+        self.mode_config_enabled = mode_config_enabled
         # Single-port mode only: optional DHCP/static subnet to ARP-sweep for
         # devices that arrive at addresses outside the vendor link-local list
         # (e.g. routers that already DHCP'd to 192.168.1.x).  Set by
@@ -280,6 +358,11 @@ class PortManager:
 
         self._running = False
         self._initialized = False
+        self._ptp_reservations: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._ptp_reservation_lock = threading.RLock()
+        # Per-port event log persistence (JSONL, one file per port).
+        self.events_path = Path(events_path) if events_path else None
+        self._events_loaded = False
 
     def _generate_port_configs(self) -> None:
         """Generate port configurations."""
@@ -668,6 +751,13 @@ class PortManager:
                 )
                 continue
 
+            # A successful run intentionally preserves COMPLETE/checklist state
+            # through a short reboot grace window. A different, trusted
+            # MikroTik MAC means the operator has already replaced the unit;
+            # clear the old run immediately instead of making the replacement
+            # inherit that grace-period state.
+            self._reset_run_state_if_replaced(port_num, mac)
+
             # If the same unit is still advertising BOOTP after a fired
             # Netinstall, do not automatically reflash it again. Require a
             # physical remove/reinsert (which clears port state) or a
@@ -860,9 +950,10 @@ class PortManager:
             if not is_running:
                 state.last_result = None
                 state.last_error = None
+                state.needs_credentials = False
                 state.provision_attempted = False
                 state.provisioning_ended = None
-                state.checklist.reset()
+                self.reset_checklist(port_num)
                 self.clear_device_mode(port_num)
 
     # Grace period after provisioning before marking device as disconnected (seconds)
@@ -949,11 +1040,12 @@ class PortManager:
                 logger.info(f"Port {port_num} clearing stale post-grace last_result")
                 state.last_result = None
                 state.last_error = None
+                state.needs_credentials = False
                 state.provision_attempted = False
                 state.provisioning_ended = None
                 state.last_bootp_fired_at = None
                 state.last_bootp_fired_mac = None
-                state.checklist.reset()
+                self.reset_checklist(port_num)
                 self.clear_device_mode(port_num)
                 try:
                     from provisioner.web.websocket import notify_port_change
@@ -998,14 +1090,10 @@ class PortManager:
 
             async def boot_ping_check(port_num: int, config: PortConfig, state: PortState) -> None:
                 """Ping device during boot wait to detect when it's up."""
-                # Try known device IPs for boot detection
-                ips_to_try = [
-                    DeviceLinkLocalIP.CAMBIUM,      # 169.254.1.1
-                    DeviceLinkLocalIP.TACHYON_ALT,  # 192.168.1.1
-                    DeviceLinkLocalIP.UBIQUITI,     # 192.168.1.20
-                    DeviceLinkLocalIP.MIKROTIK,     # 192.168.88.1
-                    DeviceLinkLocalIP.TARANA,       # 169.254.100.1
-                ]
+                # Try known device IPs for boot detection — derived from
+                # the vendor-IP registry (Story 4 / #74), historical order
+                # preserved.
+                ips_to_try = DeviceLinkLocalIP.BOOT_PING
                 for ip in ips_to_try:
                     # Skip ARP fallback during boot ping — we just need a
                     # quick liveness check, not thorough MikroTik detection.
@@ -1106,10 +1194,23 @@ class PortManager:
                 )
 
                 if device_type:
+                    # Resolve identity before consulting provision_attempted.
+                    # During the post-success reboot grace, that flag belongs
+                    # to the previous unit. A different MAC must clear the
+                    # preserved run so a rapid bench swap can proceed.
+                    current_mac = await self._lookup_neighbor_mac(
+                        config.interface_name,
+                        device_ip,
+                    )
+                    self._reset_run_state_if_replaced(port_num, current_mac)
+
                     state.link_up = True
                     state.device_detected = True
                     state.device_type = device_type
                     state.device_ip = device_ip
+                    self.record_event(port_num, "device_detected", "Device detected", detail=str(device_type))
+                    if current_mac:
+                        state.device_mac = current_mac
                     state.last_seen = asyncio.get_event_loop().time()
 
                     logger.info(f"Detected {device_type} on port {port_num}")
@@ -1122,9 +1223,6 @@ class PortManager:
                         # change means a different physical device; bypass
                         # the cooldown in that case.
                         import time as _time
-                        current_mac = await self._lookup_neighbor_mac(config.interface_name, device_ip)
-                        if current_mac:
-                            state.device_mac = current_mac
                         in_cooldown = (
                             state.last_provisioned_at is not None
                             and _time.time() - state.last_provisioned_at < self.REPROVISION_COOLDOWN
@@ -1132,7 +1230,7 @@ class PortManager:
                         same_device = (
                             state.last_provisioned_mac is None
                             or current_mac is None
-                            or current_mac == state.last_provisioned_mac
+                            or current_mac.lower() == state.last_provisioned_mac.lower()
                         )
                         if in_cooldown and same_device:
                             elapsed = int(_time.time() - state.last_provisioned_at)
@@ -1174,10 +1272,19 @@ class PortManager:
                 ["mikrotik"],
             )
             if device_type:
+                current_mac = await self._lookup_neighbor_mac(
+                    config.interface_name,
+                    device_ip,
+                )
+                self._reset_run_state_if_replaced(port_num, current_mac)
+
                 state.link_up = True
                 state.device_detected = True
                 state.device_type = device_type
                 state.device_ip = device_ip
+                self.record_event(port_num, "device_detected", "Device detected", detail=str(device_type))
+                if current_mac:
+                    state.device_mac = current_mac
                 state.last_seen = asyncio.get_event_loop().time()
 
                 logger.info(f"Detected {device_type} on port {port_num} via fallback IP {device_ip}")
@@ -1250,10 +1357,13 @@ class PortManager:
             if not device_type:
                 continue
 
+            self._reset_run_state_if_replaced(port_num, device_mac)
+
             state.link_up = True
             state.device_detected = True
             state.device_type = device_type
             state.device_ip = device_ip
+            self.record_event(port_num, "device_detected", "Device detected", detail=str(device_type))
             state.device_mac = device_mac
             state.last_seen = asyncio.get_event_loop().time()
             logger.info(
@@ -1342,9 +1452,12 @@ class PortManager:
             )
             return
 
+        self._reset_run_state_if_replaced(port_num, mac)
+
         device_type = DeviceType.EVOLUTION_DIGITAL.value
         state.device_detected = True
         state.device_type = device_type
+        self.record_event(port_num, "device_detected", "Device detected", detail=device_type)
         state.device_ip = None
         state.device_mac = mac
         state.checklist.mac_address = mac
@@ -1596,6 +1709,10 @@ class PortManager:
         if port_num in self.port_states:
             state = self.port_states[port_num]
             state.provisioning = provisioning
+            if provisioning:
+                state.needs_credentials = False
+                state.run_id = "%d-%d" % (port_num, int(time.time()))
+                self.record_event(port_num, "run_started", "Provisioning started", detail=state.device_type)
             if not provisioning:
                 # Only start grace period for successful provisioning (firmware updates need reboot time)
                 if success:
@@ -1604,11 +1721,22 @@ class PortManager:
                     state.last_provisioned_mac = state.device_mac
                     state.last_result = "success"
                     state.last_error = None
+                    state.needs_credentials = False
+                    self.record_event(port_num, "run_finished", "Provisioning complete", status="success")
                 else:
                     state.provisioning_ended = None  # No grace period for failures
                     state.last_result = "failed"
                     state.last_error = error
+                    self.record_event(port_num, "run_finished", "Provisioning failed", status="failed", detail=error)
                 state.ping_failures = 0  # Reset ping failures
+
+    def set_needs_credentials(self, port_num: int, required: bool) -> None:
+        """Persist the retry reason across REST and WebSocket reconnects."""
+        state = self.port_states.get(port_num)
+        if state:
+            state.needs_credentials = required
+            if required:
+                self.record_event(port_num, "credentials_required", "Credentials required")
 
     def set_expecting_reboot(self, port_num: int, expecting: bool) -> None:
         """Set whether a port is expecting a planned reboot (firmware update).
@@ -1642,13 +1770,18 @@ class PortManager:
         if state.link_down_grace_task and not state.link_down_grace_task.done():
             state.link_down_grace_task.cancel()
         state.link_down_grace_task = None
+        if state.link_up or state.device_detected:
+            self.record_event(port_num, "link_down", "Link down", detail=state.device_type)
         state.link_up = False
         state.device_detected = False
         state.device_type = None
+        state.boot_wait_started = None
+        state.mode_job = None
         state.device_ip = None
         state.device_mac = None
         state.device_serial = None
         state.device_model = None
+        state.firmware_version = None
         state.ping_failures = 0
         state.link_speed = None
         state.waiting_for_boot = False
@@ -1658,12 +1791,66 @@ class PortManager:
         if not in_grace:
             state.last_result = None
             state.last_error = None
+            state.needs_credentials = False
             state.provision_attempted = False
             state.last_bootp_fired_at = None
             state.last_bootp_fired_mac = None
             state.provisioning_ended = None
-            state.checklist.reset()
+            self.reset_checklist(port_num)
             self.clear_device_mode(port_num)
+
+    def _reset_run_state_if_replaced(
+        self,
+        port_num: int,
+        observed_mac: Optional[str],
+    ) -> bool:
+        """Clear preserved run state when a different device is observed.
+
+        Successful provisioning keeps its result and checklist visible during
+        ``PROVISIONING_GRACE_PERIOD`` so planned reboots do not make COMPLETE
+        disappear. Bench operators can replace equipment faster than that
+        grace period. Once a trusted detection path observes a MAC different
+        from ``last_provisioned_mac``, the old visible and idempotency state
+        belongs to another physical unit and must not suppress the replacement.
+
+        Keep the successful-run timestamp and MAC as historical cooldown
+        identity. Existing cooldown checks can then bypass that cooldown only
+        for this demonstrably different device.
+        """
+        state = self.port_states.get(port_num)
+        if not state or not observed_mac or not state.last_provisioned_mac:
+            return False
+
+        previous_mac = state.last_provisioned_mac.strip().lower()
+        current_mac = observed_mac.strip().lower()
+        if not previous_mac or not current_mac or previous_mac == current_mac:
+            return False
+
+        # The replacement may still differ from the last *successful* MAC
+        # while its own run is active or has failed. Once device_mac already
+        # identifies the observed unit, this is a repeat observation, not a
+        # second replacement. Preserve its attempt/result gates so a BOOTP
+        # device cannot loop destructive retries.
+        active_mac = (state.device_mac or "").strip().lower()
+        if active_mac and active_mac == current_mac:
+            return False
+
+        logger.info(
+            f"Port {port_num} observed replacement MAC {observed_mac}; "
+            "clearing preserved result from the previous device"
+        )
+        state.last_result = None
+        state.last_error = None
+        state.provision_attempted = False
+        state.provisioning_ended = None
+        state.last_bootp_fired_at = None
+        state.last_bootp_fired_mac = None
+        state.device_model = None
+        state.firmware_version = None
+        state.device_serial = None
+        self.reset_checklist(port_num)
+        self.clear_device_mode(port_num)
+        return True
 
     def update_port_device_info(
         self,
@@ -1671,6 +1858,7 @@ class PortManager:
         mac: Optional[str] = None,
         serial: Optional[str] = None,
         model: Optional[str] = None,
+        firmware_version: Optional[str] = None,
     ) -> None:
         """Update device info for a port (called by handlers after login).
 
@@ -1679,6 +1867,7 @@ class PortManager:
             mac: Device MAC address
             serial: Device serial number
             model: Device model
+            firmware_version: Device firmware version
         """
         if port_num in self.port_states:
             state = self.port_states[port_num]
@@ -1690,12 +1879,168 @@ class PortManager:
                 state.checklist.serial_number = serial
             if model:
                 state.device_model = model
+            if firmware_version:
+                state.firmware_version = firmware_version
+
+    # ------------------------------------------------------------------
+    # Event log
+    # ------------------------------------------------------------------
+
+    def _events_file(self, port_num: int) -> Optional[Path]:
+        if self.events_path is None:
+            return None
+        return self.events_path / ("port%d.jsonl" % port_num)
+
+    def _ensure_events_loaded(self) -> None:
+        """Load persisted events once, lazily, so tests and boot stay cheap."""
+        if self._events_loaded:
+            return
+        self._events_loaded = True
+        if self.events_path is None:
+            return
+        for port_num, state in self.port_states.items():
+            path = self._events_file(port_num)
+            if path is None or not path.is_file():
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines[-state.events.maxlen:]:
+                try:
+                    data = json.loads(line)
+                    event = PortEvent(**{k: data.get(k) for k in ("seq", "ts", "kind", "label", "key", "status", "detail", "run_id")})
+                except (ValueError, TypeError):
+                    continue
+                state.events.append(event)
+                state.event_seq = max(state.event_seq, int(event.seq or 0))
+
+    def _persist_event(self, port_num: int, event: PortEvent) -> None:
+        path = self._events_file(port_num)
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event.to_dict()) + "\n")
+            # Rewrite when the file grows past twice the ring size.
+            if path.stat().st_size > 400 * 240:
+                state = self.port_states.get(port_num)
+                if state is not None:
+                    path.write_text(
+                        "".join(json.dumps(e.to_dict()) + "\n" for e in state.events),
+                        encoding="utf-8",
+                    )
+        except OSError as exc:
+            logger.debug("Could not persist port %s event: %s", port_num, exc)
+
+    def record_event(
+        self,
+        port_num: int,
+        kind: str,
+        label: str = "",
+        key: Optional[str] = None,
+        status: Optional[Union[bool, str]] = None,
+        detail: Optional[str] = None,
+        run_id: Optional[str] = None,
+        broadcast: bool = True,
+    ) -> Optional[PortEvent]:
+        """Append one timeline entry. ``detail`` must never carry a secret."""
+        state = self.port_states.get(port_num)
+        if state is None:
+            return None
+        self._ensure_events_loaded()
+        state.event_seq += 1
+        if detail is not None:
+            detail = str(detail)
+            if len(detail) > 160:
+                detail = detail[:157] + "..."
+        event = PortEvent(
+            seq=state.event_seq,
+            ts=time.time(),
+            kind=kind,
+            label=label or kind.replace("_", " ").title(),
+            key=key,
+            status=status,
+            detail=detail,
+            run_id=run_id if run_id is not None else state.run_id,
+        )
+        state.events.append(event)
+        self._persist_event(port_num, event)
+        if broadcast:
+            try:
+                from provisioner.web.websocket import notify_port_event
+                loop = asyncio.get_running_loop()
+                loop.create_task(notify_port_event(port_num, event.to_dict()))
+            except RuntimeError:
+                pass
+            except Exception as exc:  # pragma: no cover - broadcast is best effort
+                logger.debug("Failed to broadcast port event: %s", exc)
+        return event
+
+    def get_events(self, port_num: int, since: int = 0, limit: int = 200) -> Dict[str, Any]:
+        """Return events after ``since`` (by seq), oldest first."""
+        state = self.port_states.get(port_num)
+        if state is None:
+            return {"port_number": port_num, "latest_seq": 0, "events": []}
+        self._ensure_events_loaded()
+        events = [e.to_dict() for e in state.events if e.seq > since]
+        return {
+            "port_number": port_num,
+            "latest_seq": state.event_seq,
+            "events": events[-max(1, limit):],
+        }
+
+    # ------------------------------------------------------------------
+    # Mode job (post-provision mode change progress)
+    # ------------------------------------------------------------------
+
+    def begin_mode_job(self, port_num: int, mode: str, steps: List[Dict[str, str]]) -> Optional[str]:
+        state = self.port_states.get(port_num)
+        if state is None:
+            return None
+        job_id = "%d-%d" % (port_num, int(time.time()))
+        state.mode_job = {
+            "id": job_id,
+            "mode": mode,
+            "started": time.time(),
+            "steps": [dict(step) for step in steps],
+            "status": {},
+        }
+        self.record_event(port_num, "mode_change_requested", "Mode change requested", detail=mode, run_id=job_id)
+        return job_id
+
+    def update_mode_job(self, port_num: int, key: str, status: Union[bool, str], detail: Optional[str] = None) -> None:
+        state = self.port_states.get(port_num)
+        if state is None or not state.mode_job:
+            return
+        state.mode_job["status"][key] = status
+        label = next((s["label"] for s in state.mode_job["steps"] if s.get("key") == key), key)
+        kind = "step_started" if status == "loading" else "step_finished"
+        self.record_event(port_num, kind, label, key=key, status=status, detail=detail, run_id=state.mode_job["id"])
+
+    def finish_mode_job(self, port_num: int, success: bool, error: Optional[str] = None) -> None:
+        state = self.port_states.get(port_num)
+        if state is None or not state.mode_job:
+            return
+        job_id = state.mode_job["id"]
+        mode = state.mode_job.get("mode")
+        state.mode_job = None
+        self.record_event(
+            port_num,
+            "mode_change_applied" if success else "mode_change_failed",
+            "Mode change applied" if success else "Mode change failed",
+            status="success" if success else "failed",
+            detail=mode if success else (error or mode),
+            run_id=job_id,
+        )
 
     def update_checklist(
         self,
         port_num: int,
         step: str,
         status: Optional[Union[bool, str]],
+        detail: Optional[str] = None,
     ) -> None:
         """Update a specific checklist step for a port.
 
@@ -1706,12 +2051,61 @@ class PortManager:
         """
         if port_num in self.port_states:
             state = self.port_states[port_num]
+            if status is not None:
+                state.step_status[step] = status
+            if detail:
+                state.step_details[step] = detail
+            if status is not None:
+                label = next(
+                    (item["label"] for item in state.step_plan if item.get("key") == step),
+                    step.replace("_", " ").title(),
+                )
+                self.record_event(
+                    port_num,
+                    "step_started" if status == "loading" else "step_finished",
+                    label,
+                    key=step,
+                    status=status,
+                    detail=detail if status != "loading" else None,
+                )
             if hasattr(state.checklist, step):
                 if step == "firmware_banks" and isinstance(status, str):
                     if not state.checklist.firmware_banks_initial:
                         state.checklist.firmware_banks_initial = status
                 setattr(state.checklist, step, status)
                 logger.debug(f"Port {port_num} checklist: {step} = {status}")
+
+    def set_step_plan(self, port_num: int, steps: List[Dict[str, str]]) -> None:
+        """Set the ordered validation plan for the current port run.
+
+        Each entry has a stable ``key`` and a user-facing ``label``. Unknown
+        keys are intentional: vendor-specific flows can publish their checks
+        without adding another fixed field to :class:`ProvisioningChecklist`.
+        """
+        if port_num not in self.port_states:
+            return
+
+        normalized = []
+        seen = set()
+        for item in steps:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()
+            if not key or key in seen:
+                continue
+            label = str(item.get("label", key.replace("_", " ").title())).strip()
+            normalized.append({"key": key, "label": label or key})
+            seen.add(key)
+        self.port_states[port_num].step_plan = normalized
+        state = self.port_states[port_num]
+        if not state.run_id:
+            state.run_id = "%d-%d" % (port_num, int(time.time()))
+        self.record_event(
+            port_num,
+            "plan",
+            "Validation plan",
+            detail=", ".join(item["label"] for item in normalized),
+        )
 
     def reset_checklist(self, port_num: int) -> None:
         """Reset the checklist for a port (for new device or re-provisioning).
@@ -1722,6 +2116,9 @@ class PortManager:
         if port_num in self.port_states:
             state = self.port_states[port_num]
             state.checklist.reset()
+            state.step_plan.clear()
+            state.step_status.clear()
+            state.step_details.clear()
             logger.debug(f"Port {port_num} checklist reset")
 
     def get_link_events_since(
@@ -1747,36 +2144,21 @@ class PortManager:
         import time
         current_time = time.time()
         return {
-            port_num: {
-                "vlan_id": state.vlan_id,
-                "link_up": state.link_up,
-                "device_detected": state.device_detected,
-                "device_type": state.device_type,
-                "device_ip": state.device_ip,
-                "device_mac": state.device_mac,
-                "device_serial": state.device_serial,
-                "device_model": state.device_model,
-                "provisioning": state.provisioning,
-                "link_speed": state.link_speed,
-                "waiting_for_boot": state.waiting_for_boot,
-                "boot_wait_remaining": max(0, int(state.boot_wait_until - current_time)) if state.boot_wait_until else None,
-                "last_result": state.last_result,
-                "last_error": state.last_error,
-                "checklist": state.checklist.to_dict(),
-                "device_mode": state.device_mode,
-                "mode_config": state.mode_config,
-                "ptp_link_id": state.ptp_link_id,
-            }
+            port_num: self._serialize_port_state(state, current_time)
             for port_num, state in self.port_states.items()
         }
 
-    def _get_single_port_status(self, port_num: int) -> Dict:
-        """Get status of a single port for WebSocket notifications."""
-        import time
-        current_time = time.time()
-        state = self.port_states.get(port_num)
-        if not state:
-            return {}
+    def _serialize_port_state(
+        self,
+        state: PortState,
+        current_time: float,
+    ) -> Dict[str, Any]:
+        """Serialize one port, including its server-owned workflow contract."""
+        from .workflow_actions import presentation_for_port, workflow_for_port
+
+        self._ensure_events_loaded()
+        state.reprovision_wait = self._reprovision_wait(state, current_time)
+        workflow = workflow_for_port(state, self.mode_config_enabled)
         return {
             "vlan_id": state.vlan_id,
             "link_up": state.link_up,
@@ -1786,17 +2168,51 @@ class PortManager:
             "device_mac": state.device_mac,
             "device_serial": state.device_serial,
             "device_model": state.device_model,
+            "firmware_version": state.firmware_version,
             "provisioning": state.provisioning,
             "link_speed": state.link_speed,
             "waiting_for_boot": state.waiting_for_boot,
-            "boot_wait_remaining": max(0, int(state.boot_wait_until - current_time)) if state.boot_wait_until else None,
+            "boot_wait_remaining": (
+                max(0, int(state.boot_wait_until - current_time))
+                if state.boot_wait_until else None
+            ),
             "last_result": state.last_result,
             "last_error": state.last_error,
+            "needs_credentials": state.needs_credentials,
             "checklist": state.checklist.to_dict(),
+            "step_plan": state.step_plan,
+            "step_status": state.step_status,
+            "step_details": state.step_details,
             "device_mode": state.device_mode,
             "mode_config": state.mode_config,
             "ptp_link_id": state.ptp_link_id,
+            "workflow": workflow,
+            "presentation": presentation_for_port(
+                state, self.mode_config_enabled, now=current_time, workflow=workflow
+            ),
+            "event_seq": state.event_seq,
+            "run_id": state.run_id,
+            "mode_job": state.mode_job,
+            "reprovision_wait": state.reprovision_wait,
         }
+
+    def _reprovision_wait(self, state: PortState, current_time: float) -> int:
+        """Seconds until auto-provisioning may run again for the same unit."""
+        if not state.last_provisioned_at or state.provisioning or state.last_result:
+            return 0
+        if state.device_mac and state.last_provisioned_mac and state.device_mac != state.last_provisioned_mac:
+            return 0
+        remaining = self.REPROVISION_COOLDOWN - (current_time - state.last_provisioned_at)
+        return int(remaining) if remaining > 0 else 0
+
+    def _get_single_port_status(self, port_num: int) -> Dict:
+        """Get status of a single port for WebSocket notifications."""
+        import time
+        current_time = time.time()
+        state = self.port_states.get(port_num)
+        if not state:
+            return {}
+        return self._serialize_port_state(state, current_time)
 
     def _map_switch_port_to_port_num(self, switch_port: str) -> Optional[int]:
         """Map MikroTik switch port name to our port number.
@@ -1882,15 +2298,18 @@ class PortManager:
                     )
                     state.last_result = None
                     state.last_error = None
+                    state.needs_credentials = False
                     state.provision_attempted = False
                     state.provisioning_ended = None
-                    state.checklist.reset()
+                    self.reset_checklist(port_num)
                     self.clear_device_mode(port_num)
 
                 # Start boot wait timer - will ping until device responds, then wait for web init
                 state.waiting_for_boot = True
                 state.boot_ping_responded = False
                 state.boot_wait_until = time.time() + self.BOOT_WAIT_MAX_SECONDS
+                state.boot_wait_started = time.time()
+                self.record_event(port_num, "link_up", "Link up", detail=speed or None)
                 logger.info(f"Port {port_num} link up, waiting for device to boot (max {self.BOOT_WAIT_MAX_SECONDS}s)")
             elif state.waiting_for_boot:
                 logger.debug(f"Port {port_num} link flap during boot wait, ignoring")
@@ -1968,7 +2387,7 @@ class PortManager:
 
     # In-memory PTP link registry.
     # Maps link_id (e.g. "tw05-tw12") -> (data_dict, timestamp)
-    # data_dict contains: side_a_port, side_b_port, device_type, my_tower, remote_tower
+    # data_dict contains side ports, device identities, and link towers.
     _ptp_links: Dict[str, Tuple[Dict[str, Any], float]] = {}
     PTP_LINK_TTL_HOURS = 24  # Cleanup links older than this
 
@@ -1991,28 +2410,67 @@ class PortManager:
         if not state:
             return
 
+        if ptp_link_id and mode in ("ptp-a", "ptp-b"):
+            side_prefix = "side_a" if mode == "ptp-a" else "side_b"
+            with self._ptp_reservation_lock:
+                existing = self._ptp_links.get(ptp_link_id)
+                if existing and existing[0].get(side_prefix + "_port") not in (
+                    None,
+                    port_num,
+                ):
+                    raise ValueError(
+                        f"PTP {mode} is already assigned to port "
+                        f"{existing[0].get(side_prefix + '_port')}"
+                    )
+
         state.device_mode = mode
         state.mode_config = mode_config
         state.ptp_link_id = ptp_link_id
+        state.mode_selection_required = False
 
         # Update PTP link registry with timestamp
         if ptp_link_id and mode in ("ptp-a", "ptp-b"):
-            existing = self._ptp_links.get(ptp_link_id)
-            if existing:
-                link_data, _ = existing
-            else:
-                link_data = {
-                    "side_a_port": None,
-                    "side_b_port": None,
-                    "device_type": state.device_type,
-                    "my_tower": mode_config.get("my_tower"),
-                    "remote_tower": mode_config.get("remote_tower"),
-                }
-            if mode == "ptp-a":
-                link_data["side_a_port"] = port_num
-            else:
-                link_data["side_b_port"] = port_num
-            self._ptp_links[ptp_link_id] = (link_data, time.time())
+            with self._ptp_reservation_lock:
+                existing = self._ptp_links.get(ptp_link_id)
+                if existing:
+                    link_data, _ = existing
+                else:
+                    link_data = {
+                        "side_a_port": None,
+                        "side_b_port": None,
+                        "device_type": state.device_type,
+                        "my_tower": mode_config.get("my_tower"),
+                        "remote_tower": mode_config.get("remote_tower"),
+                    }
+                side_prefix = "side_a" if mode == "ptp-a" else "side_b"
+                registered_port = link_data.get(side_prefix + "_port")
+                if registered_port not in (None, port_num):
+                    raise ValueError(
+                        f"PTP {mode} is already assigned to port {registered_port}"
+                    )
+                link_data[side_prefix + "_port"] = port_num
+                link_data[side_prefix + "_device_type"] = state.device_type
+                link_data[side_prefix + "_device_model"] = state.device_model
+                try:
+                    from .vendor_registry import config_family_for_model
+
+                    family = config_family_for_model(
+                        state.device_type or "", state.device_model
+                    )
+                    link_data[side_prefix + "_family"] = (
+                        family.directory if family is not None else None
+                    )
+                except (ImportError, ValueError):
+                    link_data[side_prefix + "_family"] = None
+                # Preserve the original summary fields for existing UI clients.
+                link_data.setdefault("device_type", state.device_type)
+                link_data.setdefault("device_model", state.device_model)
+                self._ptp_links[ptp_link_id] = (link_data, time.time())
+                reservation = self._ptp_reservations.get(ptp_link_id)
+                if reservation:
+                    reservation.pop("a" if mode == "ptp-a" else "b", None)
+                    if not reservation:
+                        self._ptp_reservations.pop(ptp_link_id, None)
 
         logger.info(f"Port {port_num} mode set to {mode}"
                      + (f" (link {ptp_link_id})" if ptp_link_id else ""))
@@ -2037,9 +2495,18 @@ class PortManager:
                 # Update timestamp
                 self._ptp_links[state.ptp_link_id] = (link_data, time.time())
 
+        with self._ptp_reservation_lock:
+            for link_id, reservation in list(self._ptp_reservations.items()):
+                for side, reserved in list(reservation.items()):
+                    if (reserved or {}).get("port") == port_num:
+                        reservation.pop(side, None)
+                if not reservation:
+                    self._ptp_reservations.pop(link_id, None)
+
         state.device_mode = None
         state.mode_config = None
         state.ptp_link_id = None
+        state.mode_selection_required = False
 
     def get_ptp_link(self, link_id: str) -> Optional[Dict[str, Any]]:
         """Get PTP link info by link ID."""
@@ -2050,8 +2517,55 @@ class PortManager:
         """Get all active PTP links (without timestamps)."""
         return {k: v[0] for k, v in self._ptp_links.items()}
 
+    def get_ptp_peer(
+        self, link_id: str, port_num: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return the other device on a tracked PTP link, if present."""
+        with self._ptp_reservation_lock:
+            entry = self._ptp_links.get(link_id)
+            link_data = entry[0] if entry else {}
+            reservations = self._ptp_reservations.get(link_id, {})
+
+            def side_port(side: str) -> Optional[int]:
+                registered = link_data.get("side_{}_port".format(side))
+                if registered is not None:
+                    return registered
+                reservation = reservations.get(side) or {}
+                return reservation.get("port")
+
+            side_a_port = side_port("a")
+            side_b_port = side_port("b")
+            if side_a_port == port_num:
+                peer_side = "b"
+            elif side_b_port == port_num:
+                peer_side = "a"
+            elif side_a_port is not None:
+                peer_side = "a"
+            else:
+                return None
+
+            peer_port = side_b_port if peer_side == "b" else side_a_port
+            if peer_port is None or peer_port == port_num:
+                return None
+            peer_reservation = reservations.get(peer_side) or {}
+            return {
+                "port": peer_port,
+                "device_type": link_data.get(
+                    "side_{}_device_type".format(peer_side),
+                    peer_reservation.get("device_type", link_data.get("device_type")),
+                ),
+                "device_model": link_data.get(
+                    "side_{}_device_model".format(peer_side),
+                    peer_reservation.get("device_model", link_data.get("device_model")),
+                ),
+                "family": link_data.get(
+                    "side_{}_family".format(peer_side),
+                    peer_reservation.get("family"),
+                ),
+            }
+
     def get_available_ptp_side(
-        self, my_tower: int, remote_tower: int
+        self, my_tower: int, remote_tower: int, port_num: Optional[int] = None
     ) -> str:
         """Determine which PTP side to assign (auto A or B).
 
@@ -2060,10 +2574,121 @@ class PortManager:
         """
         from .mode_config import make_ptp_link_id
         link_id = make_ptp_link_id(my_tower, remote_tower)
-        entry = self._ptp_links.get(link_id)
-        if entry is None or entry[0].get("side_a_port") is None:
-            return "a"
-        return "b"
+        with self._ptp_reservation_lock:
+            # The link registry is in-memory and may be rebuilt later than
+            # the per-port state. Prefer the port's recorded side when
+            # available so a corrective reapply cannot silently swap Main
+            # and SM.
+            if port_num is not None:
+                state = self.port_states.get(port_num)
+                if (
+                    state
+                    and state.ptp_link_id == link_id
+                    and state.device_mode in ("ptp-a", "ptp-b")
+                ):
+                    return state.device_mode[-1]
+
+            entry = self._ptp_links.get(link_id)
+            if entry is None:
+                entry_data = {"side_a_port": None, "side_b_port": None}
+            else:
+                entry_data = entry[0]
+            if port_num is not None:
+                if entry_data.get("side_a_port") == port_num:
+                    return "a"
+                if entry_data.get("side_b_port") == port_num:
+                    return "b"
+            reservation = self._ptp_reservations.get(link_id, {})
+            reserved_a = (reservation.get("a") or {}).get("port")
+            reserved_b = (reservation.get("b") or {}).get("port")
+            if (
+                entry_data.get("side_a_port") in (None, port_num)
+                and reserved_a in (None, port_num)
+            ):
+                return "a"
+            if (
+                entry_data.get("side_b_port") in (None, port_num)
+                and reserved_b in (None, port_num)
+            ):
+                return "b"
+            return "b"
+
+    def reserve_ptp_side(
+        self,
+        my_tower: int,
+        remote_tower: int,
+        port_num: int,
+        requested_side: Optional[str] = None,
+        device_type: Optional[str] = None,
+        device_model: Optional[str] = None,
+    ) -> str:
+        """Reserve one PTP side before the asynchronous mode task starts."""
+        from .mode_config import make_ptp_link_id
+
+        link_id = make_ptp_link_id(my_tower, remote_tower)
+        requested = requested_side.lower() if requested_side else None
+        if requested is not None and requested not in ("a", "b"):
+            raise ValueError("PTP side must be 'a' or 'b'")
+
+        with self._ptp_reservation_lock:
+            for reservation in self._ptp_reservations.values():
+                if any(
+                    (reserved or {}).get("port") == port_num
+                    for reserved in reservation.values()
+                ):
+                    raise ValueError(
+                        f"Port {port_num} already has a PTP configuration in progress"
+                    )
+
+            entry = self._ptp_links.get(link_id)
+            link_data = entry[0] if entry else {}
+            reservation = self._ptp_reservations.setdefault(link_id, {})
+            candidates = (requested,) if requested else ("a", "b")
+            for side in candidates:
+                side_key = "side_{}_port".format(side)
+                registered_port = link_data.get(side_key)
+                if registered_port not in (None, port_num):
+                    continue
+                reserved_entry = reservation.get(side)
+                reserved_port = (reserved_entry or {}).get("port")
+                if reserved_port not in (None, port_num):
+                    continue
+                family = None
+                try:
+                    from .vendor_registry import config_family_for_model
+
+                    resolved = config_family_for_model(device_type or "", device_model)
+                    family = resolved.directory if resolved is not None else None
+                except (ImportError, ValueError):
+                    pass
+                reservation[side] = {
+                    "port": port_num,
+                    "device_type": device_type,
+                    "device_model": device_model,
+                    "family": family,
+                }
+                return side
+
+        raise ValueError("Both PTP sides are already assigned for this link")
+
+    def get_reserved_ptp_side(self, link_id: str, port_num: int) -> Optional[str]:
+        """Return the side reserved for a port's pending PTP task."""
+        with self._ptp_reservation_lock:
+            reservation = self._ptp_reservations.get(link_id, {})
+            for side, reserved in reservation.items():
+                if (reserved or {}).get("port") == port_num:
+                    return side
+        return None
+
+    def release_ptp_side(self, link_id: str, port_num: int, side: str) -> None:
+        """Release a PTP reservation when the mode task cannot complete."""
+        with self._ptp_reservation_lock:
+            reservation = self._ptp_reservations.get(link_id)
+            if not reservation or (reservation.get(side) or {}).get("port") != port_num:
+                return
+            reservation.pop(side, None)
+            if not reservation:
+                self._ptp_reservations.pop(link_id, None)
 
     def cleanup_stale_ptp_links(self, max_age_hours: Optional[int] = None) -> int:
         """Remove PTP link entries older than max_age_hours.
@@ -2114,6 +2739,8 @@ def init_port_manager(
     management: Optional[ManagementConfig] = None,
     setup_vlans: bool = True,
     simple_subnet: Optional[str] = None,
+    mode_config_enabled: bool = False,
+    events_path: Optional[str] = None,
 ) -> PortManager:
     """Initialize the global port manager.
 
@@ -2126,6 +2753,7 @@ def init_port_manager(
         setup_vlans: False for single-port (no-switch) deployments
         simple_subnet: When setup_vlans is False, a CIDR to ARP-sweep for
             DHCP-addressed devices outside the vendor link-local list.
+        mode_config_enabled: Expose handler-supported AP/PTP actions.
     """
     global _port_manager
     pm = PortManager(
@@ -2135,6 +2763,8 @@ def init_port_manager(
         local_ip_base=local_ip_base,
         management=management,
         setup_vlans=setup_vlans,
+        events_path=events_path,
+        mode_config_enabled=mode_config_enabled,
     )
     if not setup_vlans and simple_subnet:
         pm._simple_subnet = simple_subnet

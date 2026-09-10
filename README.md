@@ -4,6 +4,16 @@
 
 The provisioner detects devices, applies configuration, and updates firmware. It supports Cambium, MikroTik, Tachyon, Tarana, and Ubiquiti devices. It can provision up to six devices at the same time.
 
+## Provisioning North Star
+
+The system always starts a supported radio with the verified SM baseline. It
+then verifies firmware and configuration. AP or PTP is an explicit later
+elevation with its own approved profile. A model's AP capture must never become
+the default upload for another model in the same firmware family.
+
+See [docs/PROVISIONING_NORTH_STAR.md](docs/PROVISIONING_NORTH_STAR.md) for the
+model, family, role, and evidence rules.
+
 ---
 
 ## What It Does
@@ -204,7 +214,13 @@ After a device is provisioned, you can set its operational mode:
 - **Access Point (AP)**: Enter tower number, system sets hostname + SSID
 - **Point-to-Point (PTP)**: Enter tower numbers for both ends, system names them `tw05-tw12-a` / `tw05-tw12-b`
 
-The mode configuration applies immediately. No need to unplug and re-provision.
+The AP and PTP mode configuration applies immediately. You do not need to
+unplug the device or run full provisioning again.
+
+If a device is already in AP or PTP mode, select **Restore SM config** in the
+port modal. The system applies the standard SM config, verifies it, and clears
+the PTP link state for that port. You do not need to run full provisioning
+again for an SM restore. The device can reboot during the config import.
 
 ---
 
@@ -241,7 +257,8 @@ The mode configuration applies immediately. No need to unplug and re-provision.
 
 | Model | Config | Firmware | Modes |
 |-------|--------|----------|-------|
-| 30x series | ✓ | ✓ | SM, AP, PTP |
+| TNA-301, TNA-302, TNA-303X, TNA-303L | ✓ | ✓ | SM, AP, PTP |
+| TNA-305X, TNA-305A, TNS-100 | - | - | Out of scope |
 
 **What gets configured:**
 - Management IP: `192.168.88.10`
@@ -502,7 +519,7 @@ The deploy script:
 
 ### Add a New Device Type
 
-Follow the complete checklist in [HANDLER_DEVELOPMENT.md](docs/HANDLER_DEVELOPMENT.md). The checklist covers the handler, detection, registration, firmware, templates, and tests.
+Follow the complete checklist in [HANDLER_DEVELOPMENT.md](docs/HANDLER_DEVELOPMENT.md). The checklist covers the handler, detection, registration, firmware, templates, and tests. Use the [new hardware provisioning SOP](docs/hardware-provisioning-sop.md) for the audit, bench setup, hardware validation, and rollback procedure.
 
 ---
 

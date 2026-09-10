@@ -10,6 +10,8 @@ combinations.
 
 import pytest
 
+from provisioner.handlers.base import ConnectionFailureKind
+
 
 PROVISION_KWARGS = dict(
     config={"key": "value"},
@@ -17,6 +19,62 @@ PROVISION_KWARGS = dict(
     expected_firmware="new",
     dual_bank=True,
 )
+
+
+# ---------------------------------------------------------------------------
+# connection/session contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ensure_connected_reuses_live_session(spy_handler_factory):
+    """A verified session must not be discarded before the next operation."""
+    spy = spy_handler_factory()
+    spy._connected = True
+
+    assert await spy.ensure_connected("next operation") is True
+    assert "connect" not in spy.call_names
+    assert "disconnect" not in spy.call_names
+
+
+@pytest.mark.asyncio
+async def test_ensure_connected_retries_transient_failure(
+    spy_handler_factory, monkeypatch, fast_sleep
+):
+    spy = spy_handler_factory()
+    spy.connection_retry_attempts = 3
+    outcomes = [False, True]
+
+    async def connect():
+        spy._record("connect")
+        success = outcomes.pop(0)
+        spy._connected = success
+        if not success:
+            spy.set_connection_failure(ConnectionFailureKind.TRANSPORT)
+        return success
+
+    monkeypatch.setattr(spy, "connect", connect)
+
+    assert await spy.ensure_connected("transient test") is True
+    assert spy.call_names.count("connect") == 2
+
+
+@pytest.mark.asyncio
+async def test_ensure_connected_does_not_retry_authentication_failure(
+    spy_handler_factory, monkeypatch, fast_sleep
+):
+    spy = spy_handler_factory()
+    spy.connection_retry_attempts = 3
+
+    async def connect():
+        spy._record("connect")
+        spy.set_connection_failure(ConnectionFailureKind.AUTHENTICATION)
+        return False
+
+    monkeypatch.setattr(spy, "connect", connect)
+
+    assert await spy.ensure_connected("authentication test") is False
+    assert spy.call_names.count("connect") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +95,84 @@ async def test_single_bank_skips_fw2_phase(spy_handler_factory):
     assert update_calls[0][1]["bank"] is None
     upload_calls = [c for c in spy.calls if c[0] == "upload_firmware"]
     assert len(upload_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_step_plan_uses_handler_capabilities(spy_handler_factory):
+    """Single-bank handlers must not advertise a second firmware-bank step."""
+    spy = spy_handler_factory(supports_dual_bank=False)
+    events = []
+
+    async def progress(step, status, detail=None):
+        events.append((step, status, detail))
+
+    result = await spy.provision(**PROVISION_KWARGS, on_progress=progress)
+
+    assert result.success, result.error_message
+    plan = next(detail for step, _status, detail in events if step == "step_plan")
+    keys = [item["key"] for item in plan]
+    assert keys == [
+        "login",
+        "model_confirmed",
+        "firmware_banks",
+        "firmware_update_1",
+        "config_upload",
+        "config_verify",
+        "reboot",
+        "verify",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_step_plan_omits_reboot_verify_when_banks_are_current(spy_handler_factory):
+    """Already-current dual-bank devices have seven checks, not a fixed nine."""
+    spy = spy_handler_factory(
+        supports_dual_bank=True,
+        initial_bank1="new",
+        initial_bank2="new",
+    )
+    events = []
+
+    async def progress(step, status, detail=None):
+        events.append((step, status, detail))
+
+    result = await spy.provision(**PROVISION_KWARGS, on_progress=progress)
+
+    assert result.success, result.error_message
+    plan = next(detail for step, _status, detail in events if step == "step_plan")
+    keys = [item["key"] for item in plan]
+    assert keys == [
+        "login",
+        "model_confirmed",
+        "firmware_banks",
+        "firmware_update_1",
+        "config_upload",
+        "config_verify",
+        "firmware_update_2",
+    ]
+    assert not any(step in ("reboot", "verify") for step, _status, _detail in events)
+
+
+@pytest.mark.asyncio
+async def test_current_single_bank_does_not_report_a_firmware_reboot(spy_handler_factory):
+    """An unused second-bank value must not invent reboot and verify checks."""
+    spy = spy_handler_factory(
+        supports_dual_bank=False,
+        initial_bank1="new",
+        initial_bank2="old",
+    )
+    events = []
+
+    async def progress(step, status, detail=None):
+        events.append((step, status, detail))
+
+    result = await spy.provision(**PROVISION_KWARGS, on_progress=progress)
+
+    assert result.success, result.error_message
+    plan = next(detail for step, _status, detail in events if step == "step_plan")
+    assert "reboot" not in [item["key"] for item in plan]
+    assert "verify" not in [item["key"] for item in plan]
+    assert not any(step in ("reboot", "verify") for step, _status, _detail in events)
 
 
 @pytest.mark.asyncio
@@ -102,6 +238,24 @@ async def test_config_default_runs_between_firmware_phases(spy_handler_factory):
     )
     final_fw_idx = names.index("get_firmware_version")
     assert apply_idx < verify_cfg_idx < fw2_update_idx < final_fw_idx
+
+
+@pytest.mark.asyncio
+async def test_config_verification_session_is_reused_for_fw2(spy_handler_factory):
+    """The flow must not force a login between config verification and FW2."""
+    spy = spy_handler_factory(supports_dual_bank=True)
+
+    result = await spy.provision(**PROVISION_KWARGS)
+
+    assert result.success, result.error_message
+    verify_idx = spy.call_names.index("verify_config")
+    fw2_upload_idx = next(
+        index
+        for index, call in enumerate(spy.calls)
+        if call[0] == "upload_firmware" and call[1]["bank"] == 2
+    )
+    assert "disconnect" not in spy.call_names[verify_idx + 1:fw2_upload_idx]
+    assert "connect" not in spy.call_names[verify_idx + 1:fw2_upload_idx]
 
 
 @pytest.mark.asyncio
@@ -292,3 +446,123 @@ async def test_tarana_pattern_verify_active_skip_fw2_reboot(spy_handler_factory,
     )
     assert apply_idx < fw2_idx
     assert "verify_config" in names
+
+
+# ---------------------------------------------------------------------------
+# firmware_lookup_key wiring — provision() asks the handler for the lookup key
+# ---------------------------------------------------------------------------
+
+from conftest import SpyHandler
+
+
+@pytest.mark.asyncio
+async def test_firmware_lookup_callback_receives_handler_key(spy_handler_factory):
+    """No initial firmware path ⇒ provision() resolves firmware via
+    firmware_lookup_callback using the handler's firmware_lookup_key
+    (base default: device model)."""
+    spy = spy_handler_factory()
+    lookups = []
+
+    def lookup(device_type, key):
+        lookups.append((device_type, key))
+        return ("/tmp/fw.bin", "new")
+
+    result = await spy.provision(
+        config={"key": "value"},
+        expected_firmware="new",
+        dual_bank=True,
+        firmware_lookup_callback=lookup,
+    )
+
+    assert result.success, result.error_message
+    assert lookups == [("spy", "SPY-MODEL")]
+
+
+class ArchKeySpyHandler(SpyHandler):
+    """Spy whose firmware lookup is keyed off hardware_version, mirroring the
+    MikrotikHandler override pattern."""
+
+    async def get_info(self):
+        info = await super().get_info()
+        info.hardware_version = "arch-key"
+        return info
+
+    def firmware_lookup_key(self, device_info):
+        if device_info and device_info.hardware_version:
+            return device_info.hardware_version
+        return super().firmware_lookup_key(device_info)
+
+
+# ---------------------------------------------------------------------------
+# Config-resolver seam (R1, design §5.3 test 3): with an empty JobContext the
+# resolver hands provision() the exact (config, config_path) pair the direct
+# store lookup produced — for a default-order flow and a
+# config_after_all_firmware flow.
+# ---------------------------------------------------------------------------
+
+from provisioner.config_resolver import ConfigResolver, JobContext
+from provisioner.config_store import ConfigStore
+
+
+def _template_fixture(tmp_path):
+    template = tmp_path / "configs" / "templates" / "tachyon" / "tns-100.json"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_text('{"system": {"hostname": "spy"}}')
+    return ConfigStore(str(tmp_path)), template
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config_after_all_firmware", [False, True])
+async def test_resolver_seam_hands_handler_identical_config_path(
+    spy_handler_factory, tmp_path, config_after_all_firmware
+):
+    store, template = _template_fixture(tmp_path)
+    resolver = ConfigResolver(store, None)
+
+    # Pre-refactor control: the direct lookup main.py used to make.
+    control_path = store.get_config_template("tachyon", "TNS-100")
+
+    # Post-refactor: resolve with the empty context and run a full mocked
+    # provision, mirroring main.py's provision call expression.
+    resolved = resolver.resolve("tachyon", "TNS-100", JobContext())
+    override_cfg, config_path = resolved.as_provision_args()
+
+    spy = spy_handler_factory(
+        supports_dual_bank=True,
+        config_after_all_firmware=config_after_all_firmware,
+    )
+    result = await spy.provision(
+        config=override_cfg,
+        config_path=str(config_path) if config_path else None,
+        firmware_path="/tmp/fw.bin",
+        expected_firmware="new",
+        dual_bank=True,
+    )
+
+    assert result.success, result.error_message
+    file_applies = [c for c in spy.calls if c[0] == "apply_config_file"]
+    assert len(file_applies) == 1
+    assert file_applies[0][1]["path"] == str(control_path)
+    assert "apply_config" not in spy.call_names  # no inline config sneaks in
+
+
+@pytest.mark.asyncio
+async def test_firmware_lookup_callback_honors_handler_override():
+    """A handler override of firmware_lookup_key changes the key provision()
+    passes to firmware_lookup_callback — no vendor branching in base.py."""
+    spy = ArchKeySpyHandler()
+    lookups = []
+
+    def lookup(device_type, key):
+        lookups.append((device_type, key))
+        return ("/tmp/fw.bin", "new")
+
+    result = await spy.provision(
+        config={"key": "value"},
+        expected_firmware="new",
+        dual_bank=True,
+        firmware_lookup_callback=lookup,
+    )
+
+    assert result.success, result.error_message
+    assert lookups == [("spy", "arch-key")]

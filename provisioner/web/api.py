@@ -1,12 +1,14 @@
 """REST API endpoints for Network Provisioner web interface."""
 
 import asyncio
+import io
 import json
 import logging
 import os
 import re
-import shutil
 import subprocess
+import tarfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -14,21 +16,46 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import aiohttp
-from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
+from ..config_assets import (
+    ConfigAsset,
+    ConfigAssetCatalog,
+    MODE_TO_PTP_SIDE,
+)
+from ..fingerprint import is_mikrotik_oui
+from ..handler_manager import HandlerManager, provisionable_device_types
 from ..setup_tools import (
     build_readiness_report,
     import_setup_bundle,
     seed_bundled_templates,
     write_setup_bundle,
 )
+from ..vendor_registry import (
+    builtin_ui_credentials,
+    config_family_metadata,
+    nonprovisionable_device_types,
+    ptp_families_compatible,
+    spec_for,
+    ui_styles,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["api"])
+_SECRET_KEY_RE = re.compile(
+    r"(?:password|passphrase|psk|secret|token|community|private[_-]?key|encryption[_-]?key)",
+    re.IGNORECASE,
+)
+
+
+def _normalized_firmware_version(value: Any) -> str:
+    """Return a firmware version in the form used by asset directories."""
+    normalized = str(value or "").strip().lower()
+    return re.sub(r"^v", "", normalized)
 
 
 # ============================================================================
@@ -43,12 +70,32 @@ class PortStatus(BaseModel):
     device_detected: bool
     device_type: Optional[str] = None
     device_ip: Optional[str] = None
+    device_mac: Optional[str] = None
+    device_serial: Optional[str] = None
     device_model: Optional[str] = None
     provisioning: bool = False
+    waiting_for_boot: bool = False
+    boot_wait_remaining: Optional[int] = None
     last_activity: Optional[str] = None
     link_speed: Optional[str] = None
     last_result: Optional[str] = None
     last_error: Optional[str] = None
+    needs_credentials: bool = False
+    checklist: Dict[str, Any] = Field(default_factory=dict)
+    step_plan: List[Dict[str, str]] = Field(default_factory=list)
+    step_status: Dict[str, Any] = Field(default_factory=dict)
+    step_details: Dict[str, str] = Field(default_factory=dict)
+    device_mode: Optional[str] = None
+    mode_config: Optional[Dict[str, Any]] = None
+    ptp_link_id: Optional[str] = None
+    workflow: Dict[str, Any] = Field(default_factory=dict)
+    # Server-owned presentation state, event cursor, and mode-change job.
+    presentation: Dict[str, Any] = Field(default_factory=dict)
+    event_seq: int = 0
+    run_id: Optional[str] = None
+    mode_job: Optional[Dict[str, Any]] = None
+    firmware_version: Optional[str] = None
+    reprovision_wait: int = 0
 
 
 class ProvisionRequest(BaseModel):
@@ -60,6 +107,10 @@ class ProvisionRequest(BaseModel):
     skip_config: bool = False
     config_override: Optional[Dict[str, Any]] = None
     operator_id: Optional[int] = None
+    # Site-role config overlay for this job (opaque string, e.g. "tower").
+    # None falls back to config.yaml provisioning.default_role. Absent in
+    # old clients, so requests are wire-compatible. UI exposure is R2.
+    role: Optional[str] = None
 
 
 class ProvisionResponse(BaseModel):
@@ -75,14 +126,17 @@ class NetinstallRequest(BaseModel):
 
 
 class ApplyModeRequest(BaseModel):
-    """Request to apply a device mode (AP or PTP) after provisioning."""
-    mode: str  # "ap" or "ptp"
+    """Request to apply a device mode after provisioning."""
+    mode: str  # "sm", "ap", or "ptp"
     # AP fields
     tower: Optional[int] = None
     direction: Optional[str] = None
     # PTP fields
     my_tower: Optional[int] = None
     remote_tower: Optional[int] = None
+    # Optional post-provision override for connectorized Cambium radios.
+    # Omitted means the handler uses its safe connectorized default.
+    antenna_gain_db: Optional[int] = None
 
 
 class CredentialOverride(BaseModel):
@@ -138,18 +192,7 @@ async def get_all_ports(request: Request):
     port_status = provisioner.port_manager.get_port_status()
     
     return [
-        PortStatus(
-            port_number=port_num,
-            vlan_id=status["vlan_id"],
-            link_up=status["link_up"],
-            device_detected=status["device_detected"],
-            device_type=status["device_type"],
-            device_ip=status["device_ip"],
-            provisioning=status["provisioning"],
-            link_speed=status.get("link_speed"),
-            last_result=status.get("last_result"),
-            last_error=status.get("last_error"),
-        )
+        PortStatus(port_number=port_num, **status)
         for port_num, status in port_status.items()
     ]
 
@@ -172,18 +215,28 @@ async def get_port(port_number: int, request: Request):
         raise HTTPException(status_code=404, detail="Port not found")
     
     status = port_status[port_number]
-    return PortStatus(
-        port_number=port_number,
-        vlan_id=status["vlan_id"],
-        link_up=status["link_up"],
-        device_detected=status["device_detected"],
-        device_type=status["device_type"],
-        device_ip=status["device_ip"],
-        provisioning=status["provisioning"],
-        link_speed=status.get("link_speed"),
-        last_result=status.get("last_result"),
-        last_error=status.get("last_error"),
-    )
+    return PortStatus(port_number=port_number, **status)
+
+
+@router.get("/ports/{port_number}/events")
+async def get_port_events(
+    port_number: int,
+    request: Request,
+    since: int = 0,
+    limit: int = 200,
+):
+    """Return the server-owned timeline for one port (oldest first).
+
+    Entries carry step names, results, and mismatch field names. They never
+    carry a credential or a device secret.
+    """
+    provisioner = request.app.state.provisioner
+    if not provisioner or not provisioner.port_manager:
+        raise HTTPException(status_code=503, detail="Port manager not available")
+    port_manager = provisioner.port_manager
+    if port_number not in port_manager.get_port_status():
+        raise HTTPException(status_code=404, detail="Port not found")
+    return port_manager.get_events(port_number, since=max(0, since), limit=max(1, min(limit, 500)))
 
 
 # ============================================================================
@@ -404,6 +457,24 @@ async def netinstall_device(
     if status.get("provisioning"):
         raise HTTPException(status_code=409, detail="Port already provisioning")
 
+    capabilities = HandlerManager.operator_capabilities_for(
+        status.get("device_type")
+    )
+    if not capabilities["manual_netinstall"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Netinstall is not supported for the detected device",
+        )
+
+    # Manual recovery is destructive. Match the automatic BOOTP path's OUI
+    # safety boundary instead of trusting a possibly stale device-type tag.
+    device_mac = status.get("device_mac")
+    if not device_mac or not is_mikrotik_oui(device_mac):
+        raise HTTPException(
+            status_code=400,
+            detail="Netinstall requires a detected MikroTik MAC address",
+        )
+
     background_tasks.add_task(
         _run_netinstall,
         provisioner,
@@ -474,6 +545,21 @@ async def _run_netinstall(provisioner, port_number: int):
 
     port_manager = provisioner.port_manager
     port_manager.mark_port_provisioning(port_number, True)
+    port_manager.reset_checklist(port_number)
+
+    netinstall_step_plan = [
+        {"key": "script_fetch", "label": "Fetch served scripts"},
+        {"key": "netinstall", "label": "Netinstall"},
+        {"key": "reboot", "label": "First boot"},
+        {"key": "login", "label": "Login"},
+        {"key": "model_confirmed", "label": "Device identity"},
+        {"key": "base_flash", "label": "Base flash marker"},
+        {"key": "ztp_ready", "label": "ZTP readiness"},
+        {"key": "phone_home_url", "label": "Phone-home endpoint"},
+        {"key": "register", "label": "Equipment registration"},
+        {"key": "ship_ready", "label": "Ship-ready state"},
+    ]
+    port_manager.set_step_plan(port_number, netinstall_step_plan)
 
     state = port_manager.port_states.get(port_number)
     if state:
@@ -485,7 +571,11 @@ async def _run_netinstall(provisioner, port_number: int):
 
     # Progress callback for UI
     async def on_progress(step, success, detail=None):
-        port_manager.update_checklist(port_number, step, detail if detail else success)
+        status = "loading" if success == "running" else success
+        # device_info carries MAC/serial for internal state transfer. Do not
+        # copy those identifiers into the generic validation-detail map.
+        if step != "device_info":
+            port_manager.update_checklist(port_number, step, status, detail)
         port_status = port_manager._get_single_port_status(port_number)
         await notify_port_change(port_number, port_status)
 
@@ -540,7 +630,7 @@ async def _run_netinstall(provisioner, port_number: int):
     # password, so the post-flash SSH login must use that value. Fetch it from
     # the contract credentials endpoint (same API key); fall back to the local
     # MIKROTIK_BOOTSTRAP_PASS when the endpoint is unavailable.
-    local_bootstrap_pass = config.credentials.mikrotik.bootstrap_password
+    local_bootstrap_pass = config.credentials["mikrotik"].bootstrap_password
     canonical_bootstrap_pass = None
     try:
         creds = await MikrotikHandler.fetch_provisioning_credentials(
@@ -570,17 +660,16 @@ async def _run_netinstall(provisioner, port_number: int):
         await finish(False, "No bootstrap password (fetch failed, MIKROTIK_BOOTSTRAP_PASS unset)")
         return
 
-    await on_progress("config", "running", "Fetching served netinstall-bootstrap.rsc...")
+    await on_progress("script_fetch", "running", "Fetching served Netinstall scripts...")
     try:
         configure_script_body = await MikrotikHandler.fetch_netinstall_bootstrap(
             ztp_api_url,
             ztp_api_key,
         )
     except Exception as exc:
-        await on_progress("config", False, f"Fetch failed: {str(exc)[:100]}")
+        await on_progress("script_fetch", False, f"Fetch failed: {str(exc)[:100]}")
         await finish(False, f"netinstall-bootstrap fetch failed: {exc}")
         return
-    await on_progress("config", True, "Fetched served netinstall-bootstrap.rsc")
 
     # The Mode script is also backend-owned (served ungated — a single static
     # device-mode command, no secrets). Stage 1 of the wifi runbook requires
@@ -588,9 +677,10 @@ async def _run_netinstall(provisioner, port_number: int):
     try:
         mode_script_body = await MikrotikHandler.fetch_netinstall_mode(ztp_api_url)
     except Exception as exc:
-        await on_progress("config", False, f"Mode-script fetch failed: {str(exc)[:100]}")
+        await on_progress("script_fetch", False, f"Mode-script fetch failed: {str(exc)[:100]}")
         await finish(False, f"netinstall-mode fetch failed: {exc}")
         return
+    await on_progress("script_fetch", True, "Fetched Configure and Mode scripts")
 
     try:
         # Step 1: Netinstall with the served Mode script plus the served
@@ -642,6 +732,7 @@ async def _run_netinstall(provisioner, port_number: int):
         # Step 3: Connect and get device info
         await on_progress("login", "running")
         if not await handler.connect():
+            await on_progress("login", False, "Failed to connect after Netinstall")
             await finish(False, "Failed to connect after Netinstall")
             return
         await on_progress("login", True)
@@ -662,7 +753,7 @@ async def _run_netinstall(provisioner, port_number: int):
         # rather than POST `UNKNOWN` to the wifi-api and pollute the registry.
         serial = info.serial_number
         if not serial or serial.upper() == "UNKNOWN":
-            await on_progress("config", False, "No serial — cannot register")
+            await on_progress("model_confirmed", False, "No serial — cannot register")
             await finish(False, "Could not read RouterBOARD serial; refusing to register")
             return
 
@@ -673,7 +764,7 @@ async def _run_netinstall(provisioner, port_number: int):
                 "Netinstall pipeline failed on port %s: base_flash_version marker missing",
                 port_number,
             )
-            await on_progress("config", False, "base_flash_version marker missing")
+            await on_progress("base_flash", False, "base_flash_version marker missing")
             await finish(
                 False,
                 f"/system/note missing base_flash_version "
@@ -686,7 +777,7 @@ async def _run_netinstall(provisioner, port_number: int):
             port_number,
             detected_bf,
         )
-        await on_progress("config", True, f"Configure script verified ({detected_bf})")
+        await on_progress("base_flash", True, f"Configure script verified ({detected_bf})")
 
         # Step 5: Verify the served Configure script left the device ZTP-ready.
         ztp_ready, ztp_detail = await handler.verify_ztp_ready(serial)
@@ -708,6 +799,14 @@ async def _run_netinstall(provisioner, port_number: int):
         # unit would ship a wifi-dead router.
         device_arch = (getattr(info, "hardware_version", "") or "").lower()
         if MikrotikHandler.wifi_driver_for_model(info.model, device_arch):
+            wifi_step = {"key": "wifi_bind", "label": "WiFi radio binding"}
+            phone_home_index = next(
+                index
+                for index, item in enumerate(netinstall_step_plan)
+                if item["key"] == "phone_home_url"
+            )
+            netinstall_step_plan.insert(phone_home_index, wifi_step)
+            port_manager.set_step_plan(port_number, netinstall_step_plan)
             if not await handler.verify_wifi_radios_bound():
                 logger.error(
                     "Netinstall pipeline failed on port %s: /interface/wifi is "
@@ -782,7 +881,9 @@ async def _run_netinstall(provisioner, port_number: int):
             ),
         )
         try:
+            await on_progress("register", "running", "Registering equipment")
             readback = await register_mikrotik(**register_kwargs)
+            await on_progress("register", True, "Equipment registered")
 
             if not any(
                 key in readback for key in ("role", "customer_id", "has_checkin_secret")
@@ -1184,6 +1285,36 @@ class ConfigInfo(BaseModel):
     path: str
 
 
+class ConfigAssetInfo(BaseModel):
+    """Structured metadata for a family/mode-aware config asset."""
+    path: str
+    device_type: str
+    config_type: str
+    filename: str
+    size: int
+    modified: str
+    family: Optional[str] = None
+    firmware: Optional[str] = None
+    role: Optional[str] = None
+    mode: Optional[str] = None
+    profile: Optional[str] = None
+    link_profile: Optional[str] = None
+    scope: Optional[str] = None
+    asset_kind: str = "standard"
+    secret_present: bool = False
+    property_count: int = 0
+    dynamic_fields: List[str] = Field(default_factory=list)
+    content_type: str
+    protected: bool
+    editable: bool
+
+
+class ConfigAssetUpdate(BaseModel):
+    """Content update for one non-protected text asset."""
+    path: str
+    content: str
+
+
 class FirmwareUrlRequest(BaseModel):
     """Request to download firmware from URL."""
     url: str
@@ -1232,13 +1363,14 @@ def _get_repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-VALID_DEVICE_TYPES = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
+# Valid device types derive from HANDLER_MAP — see
+# provisioner.handler_manager.provisionable_device_types() (Story 2 / #72).
 
 
 def _validate_device_type(device_type: str) -> str:
     """Validate device_type is a known type. Raises HTTPException if not."""
     sanitized = os.path.basename(device_type).lower().strip()
-    if sanitized not in VALID_DEVICE_TYPES:
+    if sanitized not in provisionable_device_types():
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
     return sanitized
 
@@ -1281,19 +1413,24 @@ def _extract_version_from_filename(filename: str) -> str:
     return "unknown"
 
 
+# Filename keywords that identify a vendor beyond its own device-type
+# string. Hand-keyed per-vendor extras (like _template_requirements in
+# setup_tools.py) — a vendor absent here simply matches on its
+# device-type string alone, so use .get(), never direct indexing.
+_DEVICE_TYPE_FILENAME_HINTS = {
+    "cambium": ("epmp",),
+    "mikrotik": ("routeros",),
+    "ubiquiti": ("airos", "ubnt"),
+}
+
+
 def _get_device_type_from_filename(filename: str) -> Optional[str]:
     """Try to detect device type from filename."""
     filename_lower = filename.lower()
-    if 'epmp' in filename_lower or 'cambium' in filename_lower:
-        return 'cambium'
-    elif 'routeros' in filename_lower or 'mikrotik' in filename_lower:
-        return 'mikrotik'
-    elif 'tachyon' in filename_lower:
-        return 'tachyon'
-    elif 'tarana' in filename_lower:
-        return 'tarana'
-    elif 'ubiquiti' in filename_lower or 'airos' in filename_lower or 'ubnt' in filename_lower:
-        return 'ubiquiti'
+    for device_type in provisionable_device_types():
+        hints = (device_type,) + _DEVICE_TYPE_FILENAME_HINTS.get(device_type, ())
+        if any(hint in filename_lower for hint in hints):
+            return device_type
     return None
 
 
@@ -1854,6 +1991,631 @@ async def firmware_checker_toggle(request: Request, enabled: bool = True):
 # Config Management Endpoints
 # ============================================================================
 
+
+def _config_asset_catalog(request: Request) -> ConfigAssetCatalog:
+    return ConfigAssetCatalog(_get_data_path(request))
+
+
+def _config_asset_response(asset: ConfigAsset) -> ConfigAssetInfo:
+    return ConfigAssetInfo(**asset.as_dict())
+
+
+def _validate_family_directory(device_type: str, family: Optional[str]) -> None:
+    """Reject a family name that is not declared by the vendor registry."""
+    if not family:
+        return
+    spec = spec_for(device_type)
+    if spec is None or family not in {entry.directory for entry in spec.config_families}:
+        raise HTTPException(status_code=400, detail="Unknown config family")
+
+
+def _validate_family_role(
+    device_type: str,
+    family: Optional[str],
+    role: Optional[str],
+    mode: Optional[str],
+    profile: Optional[str],
+) -> None:
+    """Validate structured hierarchy fields against the registry contract."""
+    if not family:
+        if any(value for value in (role, mode, profile)):
+            raise HTTPException(status_code=400, detail="Family is required for structured fields")
+        return
+
+    spec = spec_for(device_type)
+    family_spec = next(
+        (entry for entry in (spec.config_families if spec else ()) if entry.directory == family),
+        None,
+    )
+    if family_spec is None:
+        raise HTTPException(status_code=400, detail="Unknown config family")
+    if role and role.upper() not in family_spec.roles:
+        raise HTTPException(status_code=400, detail="Role is not supported by this config family")
+    if mode and mode not in ("ap", "sm"):
+        raise HTTPException(status_code=400, detail="Structured uploads support AP or SM mode only")
+    if mode == "ap" and role and role.upper() != "AP":
+        raise HTTPException(status_code=400, detail="AP mode requires AP role")
+    if mode == "sm" and role and role.upper() != "SM":
+        raise HTTPException(status_code=400, detail="SM mode requires SM role")
+    if profile and role and role.upper() != "AP":
+        raise HTTPException(status_code=400, detail="Profiles are supported only for AP assets")
+    if profile and profile.lower() not in {"default", "north", "east", "south", "west"}:
+        raise HTTPException(status_code=400, detail="Unknown AP profile")
+
+
+def _contains_secret_key(value: Any) -> bool:
+    """Detect credential-like keys without inspecting or logging their values."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_lower = str(key).lower()
+            if _SECRET_KEY_RE.search(key_lower) and child not in (None, "", [], {}):
+                return True
+            if _contains_secret_key(child):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_secret_key(child) for child in value)
+    return False
+
+
+def _asset_config_for_ownership(filename: str, content: bytes) -> Optional[Dict[str, Any]]:
+    """Return the JSON object inside a JSON or TAR asset, for the ownership gate."""
+    lower_name = filename.lower()
+    try:
+        if lower_name.endswith(".json"):
+            parsed = json.loads(content.decode("utf-8"))
+            return parsed if isinstance(parsed, dict) else None
+        if lower_name.endswith((".tar", ".tar.gz", ".tgz")):
+            with tarfile.open(fileobj=io.BytesIO(content), mode="r:*") as archive:
+                member = next(
+                    (m for m in archive.getmembers() if Path(m.name).name == "config.json"),
+                    None,
+                )
+                if member is None:
+                    return None
+                handle = archive.extractfile(member)
+                parsed = json.load(handle) if handle is not None else None
+                return parsed if isinstance(parsed, dict) else None
+    except (ValueError, UnicodeDecodeError, tarfile.TarError, OSError):
+        return None
+    return None
+
+
+def _asset_role_for_ownership(role: Optional[str], mode: Optional[str], filename: str) -> Optional[str]:
+    """Infer the role a written asset declares. A flat baseline is SM."""
+    if role:
+        return role.upper()
+    if mode in ("ap", "sm"):
+        return mode.upper()
+    if mode in ("ptp-a", "ptp-b"):
+        return "PTP"
+    base = Path(filename).name.lower()
+    if base.startswith("ptp"):
+        return "PTP"
+    if base.startswith("ap"):
+        return "AP"
+    return "SM"
+
+
+def _ownership_violations(
+    device_type: str,
+    config: Optional[Dict[str, Any]],
+    role: Optional[str],
+    family: Optional[str],
+) -> List[str]:
+    """Return field names (never values) that break the vendor's contract.
+
+    Uploads that reach the active template tree must satisfy the field
+    ownership contract (docs/PROVISIONING_NORTH_STAR.md), so a secret, a
+    device default, or a site identity field can never enter a baseline.
+    """
+    if not isinstance(config, dict) or not role:
+        return []
+    from ..field_ownership import template_violations
+    from ..vendor_registry import spec_for
+
+    spec = spec_for(device_type)
+    handler_cls = spec.handler_cls if spec else None
+    contract = getattr(handler_cls, "FIELD_OWNERSHIP", None)
+    if contract is None:
+        return []
+    return [
+        "%s (%s)" % (violation.path, violation.reason)
+        for violation in template_violations(contract, config, role, family, strict=True)
+    ]
+
+
+def _validate_uploaded_asset(
+    filename: str,
+    content: bytes,
+    structured: bool,
+    allow_field_export: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Validate JSON/TAR shape and return JSON when one is uploaded.
+
+    Standard assets reject credential-like fields.  Native field exports are
+    the explicit exception: they keep their secrets in protected runtime
+    storage and are never returned by the content API.
+    """
+    lower_name = filename.lower()
+    if lower_name.endswith(".json"):
+        try:
+            parsed = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON: %s" % exc)
+        if not allow_field_export and _contains_secret_key(parsed):
+            raise HTTPException(
+                status_code=400,
+                detail="Only field deployment exports may contain credential or secret fields",
+            )
+        return parsed if isinstance(parsed, dict) else None
+    if allow_field_export:
+        raise HTTPException(
+            status_code=400,
+            detail="Field deployment exports must be native Cambium JSON",
+        )
+    if lower_name.endswith((".tar", ".tar.gz", ".tgz")):
+        try:
+            with tarfile.open(fileobj=io.BytesIO(content), mode="r:*") as archive:
+                members = archive.getmembers()
+                if not any(Path(member.name).name == "config.json" for member in members):
+                    raise HTTPException(status_code=400, detail="TAR asset has no config.json")
+                for member in members:
+                    member_path = Path(member.name)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise HTTPException(status_code=400, detail="TAR contains an unsafe path")
+                if structured:
+                    config_member = next(
+                        member for member in members if Path(member.name).name == "config.json"
+                    )
+                    config_file = archive.extractfile(config_member)
+                    if config_file is not None:
+                        parsed = json.load(config_file)
+                        if _contains_secret_key(parsed):
+                            raise HTTPException(
+                                status_code=400,
+                                detail="Family assets cannot contain credential or secret fields",
+                            )
+        except HTTPException:
+            raise
+        except (tarfile.TarError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid TAR asset: %s" % exc)
+    return None
+
+
+def _protected_config_upload_path(data_root: Path, source_id: str, filename: str) -> Path:
+    """Return the private path for one original field export."""
+    return data_root / "config-uploads" / "cambium" / source_id / filename
+
+
+def _store_protected_config_upload(
+    data_root: Path,
+    source_id: str,
+    filename: str,
+    content: bytes,
+) -> Path:
+    """Store exact upload bytes outside the catalog with private permissions."""
+    destination = _protected_config_upload_path(data_root, source_id, filename)
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    protected_root = data_root / "config-uploads"
+    protected_vendor_root = protected_root / "cambium"
+    for directory in (protected_root, protected_vendor_root, destination.parent):
+        try:
+            os.chmod(str(directory), 0o700)
+        except OSError:
+            pass
+    temporary = destination.with_name(destination.name + ".part")
+    temporary.write_bytes(content)
+    os.chmod(str(temporary), 0o600)
+    os.replace(str(temporary), str(destination))
+    return destination
+
+
+@router.get("/config-assets", response_model=List[ConfigAssetInfo])
+async def list_config_assets(
+    request: Request,
+    device_type: Optional[str] = None,
+    family: Optional[str] = None,
+    firmware: Optional[str] = None,
+    role: Optional[str] = None,
+    mode: Optional[str] = None,
+    scope: Optional[str] = None,
+    config_type: Optional[str] = None,
+):
+    """List the recursive family/mode configuration catalog."""
+    if device_type:
+        device_type = _validate_device_type(device_type)
+    try:
+        assets = _config_asset_catalog(request).list_assets(
+            device_type=device_type,
+            family=family,
+            firmware=firmware,
+            role=role,
+            mode=mode,
+            scope=scope,
+            config_type=config_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return [_config_asset_response(asset) for asset in assets]
+
+
+@router.get("/config-assets/metadata")
+async def config_asset_metadata():
+    """Return registry-derived family metadata and stable mode labels."""
+    return {
+        "families": config_family_metadata(),
+        "modes": {
+            "ap": "AP",
+            "sm": "SM",
+            "ptp-a": "PTP Main",
+            "ptp-b": "PTP SM",
+        },
+        "scopes": {
+            "family": "Family profile",
+            "shared": "Shared baseline",
+        },
+        "asset_kinds": {
+            "standard": "Standard template",
+            "field_export": "Field deployment export",
+        },
+    }
+
+
+@router.get("/config-assets/content")
+async def get_config_asset_content(request: Request, path: str):
+    """Return editable text content; protected assets never leave the host."""
+    try:
+        asset_path, asset = _config_asset_catalog(request).resolve(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Config asset not found")
+    if asset.protected:
+        raise HTTPException(status_code=403, detail="Protected runtime asset content is host-only")
+    if not asset.editable:
+        raise HTTPException(status_code=415, detail="This asset is not editable text")
+    try:
+        content = asset_path.read_text()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not read config asset") from exc
+    response = {"path": asset.path, "filename": asset.filename, "content": content}
+    if asset.content_type == "json":
+        try:
+            response["parsed"] = json.loads(content)
+        except json.JSONDecodeError:
+            pass
+    return response
+
+
+@router.post("/config-assets/upload")
+async def upload_config_asset(
+    request: Request,
+    file: UploadFile = File(...),
+    config_type: str = Form("template"),
+    device_type: str = Form(...),
+    family: Optional[str] = Form(None),
+    firmware: Optional[str] = Form(None),
+    role: Optional[str] = Form(None),
+    mode: Optional[str] = Form(None),
+    profile: Optional[str] = Form(None),
+    link_profile: Optional[str] = Form(None),
+    scope: Optional[str] = Form(None),
+    asset_kind: str = Form("auto"),
+    model: Optional[str] = Form(None),
+    ptp_side: Optional[str] = Form(None),
+):
+    """Upload a deployment profile (AP or PTP) or a Cambium field export.
+
+    The page sends family, role, and a direction (AP) or link plus side
+    (PTP). The kind of file and the firmware of a field export are inferred.
+    """
+    device_type = _validate_device_type(device_type)
+    if config_type not in ("template", "override"):
+        raise HTTPException(status_code=400, detail="Invalid config type")
+    if asset_kind not in ("standard", "field_export", "auto"):
+        raise HTTPException(status_code=400, detail="Invalid asset kind")
+    if ptp_side:
+        if ptp_side.lower() not in ("a", "b"):
+            raise HTTPException(status_code=400, detail="PTP side must be a or b")
+        mode = "ptp-%s" % ptp_side.lower()
+        role = role or "PTP"
+    if role and role.upper() == "AP" and not mode:
+        mode = "ap"
+    if role and role.upper() == "SM" and not mode:
+        mode = "sm"
+
+    catalog = _config_asset_catalog(request)
+    if asset_kind == "auto":
+        peek = await file.read()
+        await file.seek(0)
+        inferred = "standard"
+        if device_type == "cambium" and (file.filename or "").lower().endswith(".json"):
+            try:
+                from ..handlers.cambium import CambiumHandler
+
+                if CambiumHandler.is_full_config_export(json.loads(peek.decode("utf-8"))):
+                    inferred = "field_export"
+            except (ValueError, UnicodeDecodeError):
+                inferred = "standard"
+        asset_kind = inferred
+    is_field_export = asset_kind == "field_export"
+    if is_field_export:
+        if model:
+            raise HTTPException(
+                status_code=400,
+                detail="Model inference is not supported for field exports",
+            )
+        if device_type != "cambium":
+            raise HTTPException(status_code=400, detail="Field exports are supported for Cambium only")
+        if config_type != "template":
+            raise HTTPException(status_code=400, detail="Field exports must be templates")
+        if not role or role.upper() not in {"AP", "SM", "PTP"}:
+            raise HTTPException(status_code=400, detail="Field exports require an explicit AP, SM, or PTP role")
+        if mode and mode not in ("ap", "sm", "ptp-a", "ptp-b"):
+            raise HTTPException(status_code=400, detail="Invalid field export mode")
+        if role.upper() == "SM" and mode and mode != "sm":
+            raise HTTPException(status_code=400, detail="SM field exports require SM mode")
+        if True:
+            # Every field export lands in a model family. The runtime-only
+            # shared profile is retired: it could not be linted in git.
+            if scope not in (None, "family"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="The shared scope is retired; upload the export to a model family",
+                )
+            if not family:
+                raise HTTPException(status_code=400, detail="Field exports require a model family")
+            if not firmware:
+                # Take the firmware from the export itself.
+                try:
+                    peek = await file.read()
+                    await file.seek(0)
+                    from ..handlers.cambium import CambiumHandler
+
+                    firmware = CambiumHandler.field_export_metadata(json.loads(peek.decode("utf-8"))).get("firmware_version")
+                except (ValueError, UnicodeDecodeError):
+                    firmware = None
+            if not firmware:
+                raise HTTPException(status_code=400, detail="Field exports require a firmware version (not found in the export)")
+            _validate_family_directory(device_type, family)
+            spec = spec_for(device_type)
+            family_spec = next(
+                (entry for entry in (spec.config_families if spec else ()) if entry.directory == family),
+                None,
+            )
+            if family_spec is None or role.upper() not in family_spec.roles:
+                raise HTTPException(status_code=400, detail="Role is not supported by this config family")
+            if role.upper() == "AP" and mode and mode != "ap":
+                raise HTTPException(status_code=400, detail="AP field exports require AP mode")
+            if role.upper() == "PTP":
+                if mode and mode not in ("ptp-a", "ptp-b"):
+                    raise HTTPException(status_code=400, detail="PTP field exports require PTP mode")
+                if mode and not profile:
+                    # The page sends the side (a/b); the side directory follows.
+                    profile = MODE_TO_PTP_SIDE.get(mode)
+                if not link_profile or not profile:
+                    raise HTTPException(status_code=400, detail="PTP exports require link and side profiles")
+                expected_profile = MODE_TO_PTP_SIDE.get(mode) if mode else None
+                if expected_profile is None and profile.lower() not in {
+                    value.lower() for value in MODE_TO_PTP_SIDE.values()
+                }:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="PTP exports require a Main or SM side profile",
+                    )
+                if expected_profile and profile.lower() != expected_profile.lower():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{mode} exports require the {expected_profile} side profile",
+                    )
+            elif profile and profile.lower() not in {"default", "north", "east", "south", "west"}:
+                raise HTTPException(status_code=400, detail="Unknown AP profile")
+        if scope is None:
+            scope = "family"
+    else:
+        if model and scope == "shared":
+            raise HTTPException(
+                status_code=400,
+                detail="Model-specific uploads cannot use the shared scope",
+            )
+        if model:
+            try:
+                family, role = catalog.infer_structured_fields_for_model(
+                    device_type, model, family=family, role=role, mode=mode
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if family is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No config family is registered for this model",
+                )
+        if scope == "shared":
+            raise HTTPException(
+                status_code=400,
+                detail="The shared scope is retired; upload the asset to a model family",
+            )
+        else:
+            _validate_family_directory(device_type, family)
+            _validate_family_role(device_type, family, role, mode, profile)
+            if mode == "ptp-a" or mode == "ptp-b" or (role and role.lower() == "ptp"):
+                raise HTTPException(status_code=403, detail="PTP assets use the host-only installation workflow")
+            if mode == "ap" and role and role.lower() != "ap":
+                raise HTTPException(status_code=400, detail="AP mode requires AP role")
+            if mode == "sm" and role and role.lower() != "sm":
+                raise HTTPException(status_code=400, detail="SM mode requires SM role")
+
+    safe_filename = _sanitize_filename(file.filename or "")
+    if not safe_filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    try:
+        content = await file.read()
+        original_content = content
+        parsed = _validate_uploaded_asset(
+            safe_filename,
+            content,
+            structured=bool(family or scope == "shared") or is_field_export,
+            allow_field_export=is_field_export,
+        )
+        upload_metadata = None
+        source_id = None
+        if is_field_export:
+            from ..handlers.cambium import CambiumHandler
+
+            if not CambiumHandler.is_full_config_export(parsed):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Field export must contain device_props and template_props",
+                )
+            upload_metadata = CambiumHandler.field_export_metadata(parsed)
+            exported_firmware = upload_metadata.get("firmware_version")
+            if not exported_firmware:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Field export must include a firmware version",
+                )
+            if _normalized_firmware_version(firmware) != _normalized_firmware_version(
+                exported_firmware
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Selected firmware must match the native export firmware version",
+                )
+            role = role.upper()
+            parsed = CambiumHandler.normalize_field_export(parsed, role)
+            content = json.dumps(parsed, indent=2).encode("utf-8") + b"\n"
+            source_id = uuid.uuid4().hex
+            _store_protected_config_upload(
+                _get_data_path(request), source_id, safe_filename, original_content,
+            )
+
+        gate_config = parsed if isinstance(parsed, dict) else _asset_config_for_ownership(safe_filename, content)
+        violations = _ownership_violations(
+            device_type,
+            gate_config,
+            _asset_role_for_ownership(role, mode, safe_filename),
+            family,
+        )
+        if violations:
+            raise HTTPException(
+                status_code=400,
+                detail="Template violates the field ownership contract: "
+                + ", ".join(violations[:12]),
+            )
+
+        active_filename = "default.json" if is_field_export else safe_filename
+        if model:
+            destination = catalog.destination_for_model(
+                config_type,
+                device_type,
+                model,
+                family,
+                firmware,
+                role,
+                mode,
+                profile,
+                link_profile,
+                active_filename,
+            )
+        else:
+            destination = catalog.destination(
+                config_type,
+                device_type,
+                family,
+                firmware,
+                role,
+                mode,
+                profile,
+                link_profile,
+                active_filename,
+                scope=scope,
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if is_field_export:
+            try:
+                os.chmod(str(destination.parent), 0o700)
+            except OSError:
+                pass
+        temporary = destination.with_name(destination.name + ".part." + uuid.uuid4().hex)
+        temporary.write_bytes(content)
+        if is_field_export:
+            os.chmod(str(temporary), 0o600)
+        os.replace(str(temporary), str(destination))
+        data_root = _get_data_path(request).resolve()
+        asset = _config_asset_catalog(request).resolve(
+            str(destination.relative_to(data_root))
+        )[1]
+        response = {"success": True, "asset": _config_asset_response(asset)}
+        if upload_metadata is not None:
+            response["metadata"] = upload_metadata
+            response["metadata"]["source_id"] = source_id
+        return response
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.error("Failed to upload config asset: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to store config asset") from exc
+
+
+@router.put("/config-assets/content")
+async def update_config_asset(request: Request, body: ConfigAssetUpdate):
+    """Update one editable non-protected asset."""
+    try:
+        asset_path, asset = _config_asset_catalog(request).resolve(body.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Config asset not found")
+    if asset.protected:
+        raise HTTPException(status_code=403, detail="Protected runtime asset content is host-only")
+    if not asset.editable:
+        raise HTTPException(status_code=415, detail="This asset is not editable text")
+    _validate_uploaded_asset(
+        asset.filename,
+        body.content.encode("utf-8"),
+        structured=bool(asset.family or asset.scope == "shared"),
+    )
+    violations = _ownership_violations(
+        asset.device_type,
+        _asset_config_for_ownership(asset.filename, body.content.encode("utf-8")),
+        _asset_role_for_ownership(asset.role, asset.mode, asset.filename),
+        asset.family,
+    )
+    if violations:
+        raise HTTPException(
+            status_code=400,
+            detail="Template violates the field ownership contract: " + ", ".join(violations[:12]),
+        )
+    try:
+        temporary = asset_path.with_name(asset_path.name + ".part")
+        temporary.write_text(body.content)
+        os.replace(str(temporary), str(asset_path))
+    except OSError as exc:
+        logger.error("Failed to update config asset: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to update config asset") from exc
+    return {"success": True, "path": asset.path}
+
+
+@router.delete("/config-assets/content")
+async def delete_config_asset(request: Request, path: str):
+    """Delete one editable non-protected asset."""
+    try:
+        asset_path, asset = _config_asset_catalog(request).resolve(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Config asset not found")
+    if asset.protected:
+        raise HTTPException(status_code=403, detail="Protected PTP asset content is host-only")
+    try:
+        asset_path.unlink()
+    except OSError as exc:
+        logger.error("Failed to delete config asset: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to delete config asset") from exc
+    return {"success": True, "path": asset.path}
+
 @router.get("/configs", response_model=List[ConfigInfo])
 async def list_configs(request: Request):
     """List all available config files."""
@@ -1965,10 +2727,17 @@ async def get_config_content(
         if config_path.suffix == '.json':
             try:
                 parsed = json.loads(content)
+                if _contains_secret_key(parsed):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Protected runtime asset content is host-only",
+                    )
                 return {"filename": filename, "content": content, "parsed": parsed}
             except json.JSONDecodeError:
                 pass
         return {"filename": filename, "content": content}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to read config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2010,6 +2779,8 @@ async def upload_config(
                 json.loads(content.decode('utf-8'))
             except json.JSONDecodeError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+
+        _validate_uploaded_asset(safe_filename, content, structured=True)
 
         with open(dest_path, "wb") as f:
             f.write(content)
@@ -2074,6 +2845,8 @@ async def update_config_content(
                 json.loads(content)
             except json.JSONDecodeError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+
+        _validate_uploaded_asset(filename, content.encode('utf-8'), structured=True)
 
         config_path.write_text(content)
         return {"success": True, "message": f"Config updated: {filename}"}
@@ -2162,24 +2935,13 @@ async def test_api():
 # Default Credentials Management
 # ============================================================================
 
-# Known defaults for each device type (hardcoded fallbacks)
-BUILTIN_CREDENTIALS = {
-    "cambium": [
-        {"username": "admin", "password": "admin"},
-    ],
-    "mikrotik": [
-        {"username": "admin", "password": ""},
-    ],
-    "tachyon": [
-        {"username": "root", "password": "admin"},
-    ],
-    "tarana": [
-        {"username": "admin", "password": "admin123"},
-    ],
-    "ubiquiti": [
-        {"username": "ubnt", "password": "ubnt"},
-    ],
-}
+# Known factory-shipped logins for each device type, shown as read-only
+# entries in the credentials UI, derived from the
+# VendorSpec registry (Story 6 / #76): each vendor's default_credentials,
+# unless its spec sets builtin_ui_credentials (Tarana ships
+# admin/admin123, but the config default keeps an empty password because
+# each fleet sets its own).
+BUILTIN_CREDENTIALS = builtin_ui_credentials()
 
 
 def _get_credentials_path(request: Request) -> Path:
@@ -2235,8 +2997,8 @@ async def get_all_default_credentials(request: Request):
         custom_creds = _load_credentials(request)
 
         result = []
-        # Use sorted list for consistent ordering
-        for device_type in sorted(VALID_DEVICE_TYPES):
+        # provisionable_device_types() is sorted, for consistent ordering
+        for device_type in provisionable_device_types():
             builtin = BUILTIN_CREDENTIALS.get(device_type, [])
             custom = custom_creds.get(device_type, [])
 
@@ -2270,7 +3032,7 @@ async def get_all_default_credentials(request: Request):
 @router.get("/default-credentials/{device_type}")
 async def get_device_credentials(request: Request, device_type: str):
     """Get credentials for a specific device type."""
-    if device_type not in VALID_DEVICE_TYPES:
+    if device_type not in provisionable_device_types():
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
 
     custom_creds = _load_credentials(request)
@@ -2312,7 +3074,7 @@ async def add_credential(
     """Add a custom credential for a device type."""
     logger.info(f"POST /default-credentials/{device_type} - Adding credential for user: {credential.username}")
 
-    if device_type not in VALID_DEVICE_TYPES:
+    if device_type not in provisionable_device_types():
         logger.warning(f"Invalid device type: {device_type}")
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
 
@@ -2347,7 +3109,7 @@ async def delete_credential(
     index: int,
 ):
     """Delete a custom credential by index."""
-    if device_type not in VALID_DEVICE_TYPES:
+    if device_type not in provisionable_device_types():
         raise HTTPException(status_code=400, detail=f"Invalid device type: {device_type}")
 
     credentials = _load_credentials(request)
@@ -2504,8 +3266,358 @@ async def get_display_status(request: Request):
 
 
 # ============================================================================
-# Device Mode Endpoints (AP / PTP)
+# Device Mode Endpoints (SM / AP / PTP)
 # ============================================================================
+
+
+def _validate_ptp_request(
+    request: Request,
+    port_manager: Any,
+    port_number: int,
+    status: Dict[str, Any],
+    req: ApplyModeRequest,
+    capabilities: Dict[str, Any],
+    reserve: bool = True,
+) -> str:
+    """Validate the certified family pair and generated PTP settings.
+
+    ``reserve=False`` (preview) validates without reserving the PTP side.
+    """
+    from ..mode_config import ModeConfigManager, make_ptp_link_id
+
+    link_id = make_ptp_link_id(req.my_tower, req.remote_tower)
+    side = port_manager.get_available_ptp_side(
+        req.my_tower, req.remote_tower, port_num=port_number
+    )
+    peer = port_manager.get_ptp_peer(link_id, port_number)
+    if peer is not None and not ptp_families_compatible(
+        status.get("device_type"),
+        status.get("device_model"),
+        peer.get("device_type"),
+        peer.get("device_model"),
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The two device families are not certified for PTP",
+        )
+
+    if not capabilities.get("ptp_settings_required"):
+        if reserve:
+            _reserve_ptp_side(
+                port_manager,
+                req.my_tower,
+                req.remote_tower,
+                port_number,
+                side,
+                status.get("device_type"),
+                status.get("device_model"),
+            )
+        return side
+
+    mode = "ptp-a" if side == "a" else "ptp-b"
+    manager = ModeConfigManager(
+        str(_get_data_path(request) / "configs" / "templates")
+    )
+    template = manager.load_template(
+        status.get("device_type"),
+        mode,
+        model=status.get("device_model"),
+        link_profile=link_id,
+        firmware=status.get("firmware_version"),
+        require_firmware_match=True,
+    )
+    if template is None:
+        raise HTTPException(
+            status_code=409,
+            detail="A certified PTP settings profile is required for this family and link",
+        )
+
+    naming = manager.generate_ptp_naming(
+        req.my_tower,
+        req.remote_tower,
+        side,
+        status.get("device_type"),
+    )
+    try:
+        manager.generate_ptp_settings(
+            template,
+            naming,
+            status.get("device_type"),
+            side,
+            status.get("device_model"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if reserve:
+        _reserve_ptp_side(
+            port_manager,
+            req.my_tower,
+            req.remote_tower,
+            port_number,
+            side,
+            status.get("device_type"),
+            status.get("device_model"),
+        )
+    return side
+
+
+def _reserve_ptp_side(
+    port_manager: Any,
+    my_tower: int,
+    remote_tower: int,
+    port_number: int,
+    side: str,
+    device_type: Optional[str] = None,
+    device_model: Optional[str] = None,
+) -> None:
+    """Reserve a side before the asynchronous mode task starts."""
+    reserve = getattr(port_manager, "reserve_ptp_side", None)
+    if not callable(reserve):
+        return
+    try:
+        reserve(
+            my_tower,
+            remote_tower,
+            port_number,
+            requested_side=side,
+            device_type=device_type,
+            device_model=device_model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _resolve_sm_template(
+    request: Request,
+    provisioner: Any,
+    device_type: str,
+    device_model: Optional[str],
+):
+    """Resolve the same standard SM template used by provisioning."""
+    from ..config_resolver import ConfigResolver, JobContext, effective_role
+    from ..config_store import ConfigStore
+
+    resolver = getattr(provisioner, "config_resolver", None)
+    if resolver is None:
+        store = ConfigStore(str(_get_data_path(request)))
+        handler_manager = getattr(provisioner, "handler_manager", None)
+        resolver = ConfigResolver(store, handler_manager)
+
+    config = getattr(provisioner, "config", None)
+    provisioning_config = getattr(config, "provisioning", None)
+    default_role = getattr(provisioning_config, "default_role", None)
+    resolved = resolver.resolve(
+        device_type,
+        device_model,
+        JobContext(role=effective_role(None, default_role)),
+    )
+    _, config_path = resolved.as_provision_args()
+    if config_path is None:
+        resolved.cleanup()
+        return None, None
+    return config_path, resolved
+
+
+class ModePlan(BaseModel):
+    """Validated plan for one mode change, shared by preview and apply."""
+
+    port_number: int
+    device_type: str
+    device_ip: Optional[str] = None
+    device_model: Optional[str] = None
+    firmware: Optional[str] = None
+    current_mode: Optional[str] = None
+    target_mode: str
+    naming: Dict[str, Any] = Field(default_factory=dict)
+    ptp_link_id: Optional[str] = None
+    ptp_side: Optional[str] = None
+    peer: Optional[Dict[str, Any]] = None
+    template_found: bool = False
+    template_label: Optional[str] = None
+    changes: List[Dict[str, Any]] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    sm_config_path: Optional[str] = None
+
+
+def _plan_mode_change(
+    request: Request,
+    provisioner: Any,
+    port_number: int,
+    req: "ApplyModeRequest",
+    reserve: bool = False,
+):
+    """Validate a mode change and describe what it will do.
+
+    Every rule that ``apply-mode`` enforces lives here, so the preview shown
+    to the operator is exactly what the apply will do. Raises
+    ``HTTPException`` with the same codes as before. Returns
+    ``(plan, resolved_sm_config)``; the caller owns the resolved artifact.
+    """
+    from ..config import get_config
+    from ..mode_config import ModeConfigManager, make_ptp_link_id
+
+    if not get_config().features.mode_config:
+        raise HTTPException(status_code=503, detail="Mode configuration is disabled (feature flag)")
+    if not provisioner:
+        raise HTTPException(status_code=503, detail="Provisioner not available")
+    port_manager = provisioner.port_manager
+    if not port_manager:
+        raise HTTPException(status_code=503, detail="Port manager not available")
+
+    port_status = port_manager.get_port_status()
+    if port_number not in port_status:
+        raise HTTPException(status_code=404, detail="Port not found")
+    status = port_status[port_number]
+    if not status["device_detected"]:
+        raise HTTPException(status_code=400, detail="No device detected on port")
+    if status.get("mode_job"):
+        raise HTTPException(status_code=409, detail="A mode change is already running on this port")
+
+    device_type = status["device_type"]
+    device_model = status.get("device_model")
+    device_firmware = status.get("firmware_version")
+    if req.mode not in ("sm", "ap", "ptp"):
+        raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
+
+    capabilities = HandlerManager.operator_capabilities_for(device_type, device_model, device_firmware)
+    is_sm_restore = req.mode == "sm"
+    if not is_sm_restore and req.mode not in capabilities["post_provision_modes"]:
+        reason = (capabilities.get("unqualified") or {}).get(req.mode)
+        raise HTTPException(
+            status_code=400,
+            detail=reason or f"Mode configuration not supported for {device_type}",
+        )
+
+    current_mode = str(status.get("device_mode") or "")
+    if is_sm_restore:
+        if capabilities.get("required_baseline_mode") != "sm":
+            raise HTTPException(
+                status_code=400,
+                detail=f"SM configuration restore not supported for {device_type}",
+            )
+        if current_mode != "ap" and not current_mode.startswith("ptp"):
+            raise HTTPException(status_code=409, detail="The device is not in AP or PTP mode")
+
+    baseline_mode = capabilities.get("required_baseline_mode") or ""
+    baseline_label = baseline_mode.upper() if baseline_mode else "Standard"
+    operation_label = "SM restore" if is_sm_restore else "AP/PTP conversion"
+    if status.get("last_result") not in ("success", "complete"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{baseline_label} provisioning must complete before {operation_label}",
+        )
+    if baseline_mode:
+        checklist = status.get("checklist") or {}
+        if checklist.get("config_upload") is not True or checklist.get("config_verify") is not True:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Verified {baseline_mode.upper()} configuration is required "
+                    f"before {operation_label}"
+                ),
+            )
+
+    plan = ModePlan(
+        port_number=port_number,
+        device_type=device_type,
+        device_ip=status.get("device_ip"),
+        device_model=device_model,
+        firmware=device_firmware,
+        current_mode=current_mode or "sm",
+        target_mode=req.mode,
+    )
+    resolved_sm_config = None
+
+    if is_sm_restore:
+        sm_config_path, resolved_sm_config = _resolve_sm_template(
+            request, provisioner, device_type, device_model
+        )
+        if sm_config_path is None:
+            raise HTTPException(
+                status_code=409,
+                detail="A standard SM configuration template is required for restore",
+            )
+        plan.sm_config_path = sm_config_path
+        plan.template_found = True
+        plan.template_label = "Standard SM baseline"
+        plan.changes = [
+            {"field": "radio role", "from": current_mode, "to": "sm"},
+            {"field": "hostname", "from": (status.get("mode_config") or {}).get("hostname"), "to": "standard SM"},
+            {"field": "ssid", "from": (status.get("mode_config") or {}).get("ssid"), "to": "standard SM"},
+        ]
+        plan.warnings = ["PTP settings and link tracking will be cleared"] if current_mode.startswith("ptp") else []
+        return plan, resolved_sm_config
+
+    mcm = ModeConfigManager(str(_get_data_path(request) / "configs" / "templates"))
+    if req.mode == "ap":
+        if req.tower is None or req.direction is None:
+            raise HTTPException(status_code=400, detail="AP mode requires 'tower' and 'direction'")
+        naming = mcm.generate_ap_naming(req.tower, req.direction, device_type)
+        mode = "ap"
+        profile = req.direction.title()
+        link_profile = None
+    else:
+        if req.my_tower is None or req.remote_tower is None:
+            raise HTTPException(status_code=400, detail="PTP mode requires 'my_tower' and 'remote_tower'")
+        side = _validate_ptp_request(
+            request, port_manager, port_number, status, req, capabilities, reserve=reserve
+        )
+        plan.ptp_link_id = make_ptp_link_id(req.my_tower, req.remote_tower)
+        plan.ptp_side = side
+        plan.peer = port_manager.get_ptp_peer(plan.ptp_link_id, port_number) if hasattr(port_manager, "get_ptp_peer") else None
+        naming = mcm.generate_ptp_naming(req.my_tower, req.remote_tower, side, device_type)
+        mode = "ptp-%s" % side
+        profile = None
+        link_profile = plan.ptp_link_id
+
+    plan.naming = dict(naming)
+    template = mcm.load_template(
+        device_type,
+        mode,
+        model=device_model,
+        profile=profile,
+        link_profile=link_profile,
+        firmware=device_firmware,
+        require_firmware_match=True,
+    )
+    plan.template_found = template is not None
+    plan.template_label = "%s / %s%s" % (
+        mode.upper(),
+        device_model or device_type,
+        (" / " + str(device_firmware)) if device_firmware else "",
+    )
+    if req.mode == "ptp" and capabilities.get("ptp_settings_required") and not template:
+        raise HTTPException(
+            status_code=409,
+            detail="A certified PTP settings profile is required for this family and link",
+        )
+    plan.changes = [
+        {"field": "radio role", "from": current_mode or "sm", "to": mode},
+        {"field": "hostname", "from": "standard SM", "to": naming.get("hostname")},
+        {"field": "ssid", "from": "standard SM", "to": naming.get("ssid")},
+    ]
+    if req.antenna_gain_db is not None:
+        plan.changes.append({"field": "antenna gain", "from": "device default", "to": req.antenna_gain_db})
+    return plan, None
+
+
+@router.post("/ports/{port_number}/mode-preview")
+async def preview_device_mode(port_number: int, req: ApplyModeRequest, request: Request):
+    """Describe what a mode change would do, without changing anything.
+
+    Identity values shown are the generated hostname and SSID only. Secrets
+    are never part of the preview.
+    """
+    provisioner = request.app.state.provisioner
+    plan, resolved = _plan_mode_change(request, provisioner, port_number, req)
+    if resolved is not None:
+        resolved.cleanup()
+    body = plan.model_dump()
+    body.pop("sm_config_path", None)
+    body["ok"] = True
+    return body
+
 
 @router.post("/ports/{port_number}/apply-mode")
 async def apply_device_mode(
@@ -2514,76 +3626,221 @@ async def apply_device_mode(
     request: Request,
     background_tasks: BackgroundTasks,
 ):
-    """Apply a device mode (AP or PTP) to a provisioned device.
+    """Apply a device mode (SM, AP, or PTP) to a provisioned device.
 
     After standard SM provisioning completes, this endpoint lets the user
-    reconfigure the device as an AP or PTP endpoint.
+    reconfigure the device as an AP or PTP endpoint. A device in AP or PTP
+    mode can use this endpoint to restore its standard SM configuration.
+    The same plan that ``mode-preview`` returns is enforced here.
     """
-    from ..config import get_config
-    if not get_config().features.mode_config:
-        raise HTTPException(status_code=503, detail="Mode configuration is disabled (feature flag)")
-
     provisioner = request.app.state.provisioner
-    if not provisioner:
-        raise HTTPException(status_code=503, detail="Provisioner not available")
-
+    plan, resolved_sm_config = _plan_mode_change(
+        request, provisioner, port_number, req, reserve=True
+    )
     port_manager = provisioner.port_manager
-    if not port_manager:
-        raise HTTPException(status_code=503, detail="Port manager not available")
 
-    # Validate port
-    port_status = port_manager.get_port_status()
-    if port_number not in port_status:
-        raise HTTPException(status_code=404, detail="Port not found")
+    steps = [{"key": "connect", "label": "Connect"}, {"key": "apply", "label": "Apply"}, {"key": "verify", "label": "Verify"}]
+    job_id = None
+    begin = getattr(port_manager, "begin_mode_job", None)
+    if callable(begin):
+        job_id = begin(port_number, plan.target_mode if plan.target_mode != "ptp" else "ptp-%s" % plan.ptp_side, steps)
 
-    status = port_status[port_number]
-    if not status["device_detected"]:
-        raise HTTPException(status_code=400, detail="No device detected on port")
-
-    device_type = status["device_type"]
-    device_ip = status["device_ip"]
-
-    if device_type not in ("cambium", "tachyon"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Mode configuration not supported for {device_type}",
-        )
-
-    # Validate mode-specific parameters
-    if req.mode == "ap":
-        if req.tower is None or req.direction is None:
-            raise HTTPException(
-                status_code=400,
-                detail="AP mode requires 'tower' and 'direction'",
-            )
-    elif req.mode == "ptp":
-        if req.my_tower is None or req.remote_tower is None:
-            raise HTTPException(
-                status_code=400,
-                detail="PTP mode requires 'my_tower' and 'remote_tower'",
-            )
-    else:
-        raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
-
-    # Run config application in background
     background_tasks.add_task(
         _run_apply_mode,
         provisioner,
         port_number,
-        device_type,
-        device_ip,
+        plan.device_type,
+        plan.device_ip,
         req,
+        plan.sm_config_path,
+        resolved_sm_config,
     )
+    return {"success": True, "job_id": job_id, "message": f"Applying {req.mode} mode on port {port_number}"}
 
-    return {"success": True, "message": f"Applying {req.mode} mode on port {port_number}"}
+
+class HostCredentialUpdate(BaseModel):
+    """Credential values to set in the host config.yaml. Never echoed back."""
+    username: Optional[str] = None
+    password: Optional[str] = None
+    backup_password: Optional[str] = None
+    wpa_key: Optional[str] = None
+    snmp_community: Optional[str] = None
+
+
+_host_config_restart_required = False
+
+
+def _baseline_witnesses(device_type: str) -> Dict[str, Dict[str, Any]]:
+    """Return ``family -> {models: [...], fresh_sm_proven: bool}`` from evidence manifests."""
+    import yaml as _yaml
+    from ..qualification import evidence_root, recorded_transitions
+    from ..vendor_registry import config_family_for_model
+
+    result = {}  # type: Dict[str, Dict[str, Any]]
+    root = evidence_root()
+    for manifest_path in sorted(root.glob("%s/*/*/manifest.yaml" % device_type)) if root.is_dir() else []:
+        try:
+            manifest = _yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if str(manifest.get("config_role", "")).upper() != "SM":
+            continue
+        family = config_family_for_model(device_type, manifest.get("model"))
+        if family is None:
+            continue
+        entry = result.setdefault(family.directory, {"models": [], "fresh_sm_proven": False})
+        label = "%s %s" % (manifest.get("model"), manifest.get("firmware"))
+        if str(manifest.get("fixture_witness", "role")) == "baseline":
+            entry["models"].append(label)
+        if ("fresh", "sm") in recorded_transitions(device_type, manifest.get("model"), manifest.get("firmware")):
+            entry["fresh_sm_proven"] = True
+    return result
+
+
+@router.get("/config-baselines")
+async def get_config_baselines(request: Request, device_type: str):
+    """Per family: the git SM baseline, its install state on the host, lint, and evidence."""
+    from ..config_assets import ConfigAssetCatalog
+    from ..config_templates import ConfigTemplateError, load_config_template
+    from ..field_ownership import template_violations
+    from ..vendor_registry import spec_for
+
+    device_type = _validate_device_type(device_type)
+    spec = spec_for(device_type)
+    repo_root = _get_repo_root() / "configs" / "templates"
+    data_root = _get_data_path(request)
+    contract = getattr(spec.handler_cls, "FIELD_OWNERSHIP", None) if spec and spec.handler_cls else None
+    runtime_assets = ConfigAssetCatalog(data_root).list_assets(device_type=device_type, config_type="template")
+    witnesses = _baseline_witnesses(device_type)
+    families = []
+    for family in (spec.config_families if spec else ()):
+        repo_sm = sorted((repo_root / device_type / family.directory).rglob("default.*"))
+        repo_sm = [p for p in repo_sm if "SM" in p.relative_to(repo_root / device_type / family.directory).parts[:-1]]
+        runtime_sm = [a for a in runtime_assets if a.family == family.directory and a.role and a.role.upper() == "SM"]
+        repo_path = repo_sm[0] if repo_sm else None
+        runtime_path = (data_root / runtime_sm[0].path) if runtime_sm else None
+        in_sync = bool(repo_path and runtime_path and runtime_path.is_file() and repo_path.read_bytes() == runtime_path.read_bytes())
+        lint = []  # type: List[str]
+        if runtime_path and runtime_path.is_file() and contract is not None:
+            try:
+                config = load_config_template(str(runtime_path)).config
+                lint = ["%s (%s)" % (v.path, v.reason) for v in template_violations(contract, config, "SM", family.directory, strict=True)]
+            except ConfigTemplateError as exc:
+                lint = ["cannot load: %s" % exc]
+        if not repo_path:
+            status = "no_repo_baseline"
+        elif not runtime_path:
+            status = "not_installed"
+        elif lint:
+            status = "lint_problem"
+        elif not in_sync:
+            status = "out_of_date"
+        else:
+            status = "installed"
+        profiles = [a.as_dict() for a in runtime_assets if a.family == family.directory and a.role and a.role.upper() in ("AP", "PTP")]
+        witness = witnesses.get(family.directory, {"models": [], "fresh_sm_proven": False})
+        families.append({
+            "family": family.directory,
+            "name": family.name,
+            "roles": list(family.roles),
+            "models": list(family.model_patterns),
+            "sm_baseline": {
+                "status": status,
+                "repo_path": str(repo_path.relative_to(_get_repo_root())) if repo_path else None,
+                "runtime_path": runtime_sm[0].path if runtime_sm else None,
+                "in_sync": in_sync,
+                "lint": lint[:12],
+                "witnesses": witness["models"],
+                "fresh_sm_proven": witness["fresh_sm_proven"],
+            },
+            "profiles": profiles,
+        })
+    return {"device_type": device_type, "uses_files": bool(spec and spec.config_template_dir), "families": families}
+
+
+class BaselineSyncRequest(BaseModel):
+    device_type: str
+    family: Optional[str] = None
+
+
+@router.post("/config-baselines/sync")
+async def sync_config_baselines(request: Request, body: BaselineSyncRequest):
+    """Install (or refresh) the tracked repo templates for one vendor on the host."""
+    device_type = _validate_device_type(body.device_type)
+    if body.family:
+        _validate_family_directory(device_type, body.family)
+    try:
+        return seed_bundled_templates(
+            _get_repo_root(),
+            data_path=_get_data_path(request),
+            overwrite=True,
+            device_type=device_type,
+            family=body.family,
+        )
+    except Exception as exc:
+        logger.error("Baseline sync failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/host-credentials")
+async def get_host_credentials(request: Request):
+    """Per vendor: which credential keys are set on the host. Never the values."""
+    from ..config import get_config
+    from ..host_config import EDITABLE_KEYS
+
+    config = get_config()
+    configured = getattr(config, "credentials", None) or {}
+    rows = []
+    for device_type in provisionable_device_types():
+        creds = configured.get(device_type)
+        handler_class = HandlerManager.handler_class_for(device_type)
+        required = []
+        if handler_class is not None:
+            try:
+                probe = handler_class(ip="0.0.0.0", credentials={k: getattr(creds, k, "") for k in ("username", "password", "wpa_key", "snmp_community")})
+                required = list(probe.required_secrets())
+            except Exception:
+                required = []
+        rows.append({
+            "device_type": device_type,
+            "username": getattr(creds, "username", "") or "",
+            "keys": {key: bool(getattr(creds, key, "")) for key in EDITABLE_KEYS if key != "username"},
+            "required_secrets": required,
+            "missing_secrets": [key for key in required if not getattr(creds, key, "")],
+        })
+    return {"credentials": rows, "restart_required": _host_config_restart_required}
+
+
+@router.put("/host-credentials/{device_type}")
+async def put_host_credentials(device_type: str, body: HostCredentialUpdate):
+    """Set credential keys in the host config.yaml. A service restart applies them."""
+    global _host_config_restart_required
+    from ..host_config import set_credential_values
+
+    device_type = _validate_device_type(device_type)
+    path = _get_system_config_path()
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Host config file not found")
+    values = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not values:
+        raise HTTPException(status_code=400, detail="No credential values supplied")
+    try:
+        changed = set_credential_values(path, device_type, values)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not write the host config: %s" % exc.__class__.__name__) from exc
+    if changed:
+        _host_config_restart_required = True
+    return {"success": True, "changed": changed, "restart_required": _host_config_restart_required}
 
 
 @router.get("/ptp-links")
 async def get_ptp_links(request: Request):
     """Get all active PTP links.
 
-    Returns links with side info so the UI can show PTP-B shortcuts
-    on ports where the paired device's vendor matches.
+    Returns links with side and family info so the UI can show the paired
+    endpoint and the API can enforce the certified family matrix.
     """
     provisioner = request.app.state.provisioner
     if not provisioner or not provisioner.port_manager:
@@ -2599,37 +3856,108 @@ async def _run_apply_mode(
     device_type: str,
     device_ip: str,
     req: ApplyModeRequest,
+    sm_config_path: Optional[str] = None,
+    resolved_sm_config: Any = None,
 ):
     """Apply device mode in a background task."""
+    from ..fingerprint import DeviceType, identify_device
     from ..mode_config import get_mode_config_manager, make_ptp_link_id
-    from ..fingerprint import identify_device, DeviceType
     from .websocket import notify_port_change
 
     port_manager = provisioner.port_manager
-    mcm = get_mode_config_manager()
+    mcm = get_mode_config_manager() if req.mode != "sm" else None
+    device_model = (port_manager.get_port_status().get(port_number) or {}).get("device_model")
+    device_firmware = (port_manager.get_port_status().get(port_number) or {}).get(
+        "firmware_version"
+    )
+    ptp_link_id = None
+    ptp_side = None
+    ptp_reservation_active = False
 
     try:
+        capabilities = HandlerManager.operator_capabilities_for(
+            device_type, device_model, device_firmware
+        )
         # Determine mode and naming
-        if req.mode == "ap":
+        if req.mode == "sm":
+            mode = "sm"
+            naming = {}
+            ptp_link_id = None
+        elif req.mode == "ap":
             mode = "ap"
             naming = mcm.generate_ap_naming(req.tower, req.direction, device_type)
             ptp_link_id = None
         else:
             # PTP: auto-assign side
-            side = port_manager.get_available_ptp_side(req.my_tower, req.remote_tower)
-            mode = f"ptp-{side}"
-            naming = mcm.generate_ptp_naming(
-                req.my_tower, req.remote_tower, side, device_type,
-            )
             ptp_link_id = make_ptp_link_id(req.my_tower, req.remote_tower)
+            get_reserved_side = getattr(port_manager, "get_reserved_ptp_side", None)
+            if callable(get_reserved_side):
+                ptp_side = get_reserved_side(ptp_link_id, port_number)
+                ptp_reservation_active = ptp_side is not None
+            if ptp_side is None:
+                reserve = getattr(port_manager, "reserve_ptp_side", None)
+                if callable(reserve):
+                    ptp_side = reserve(
+                        req.my_tower,
+                        req.remote_tower,
+                        port_number,
+                        device_type=device_type,
+                        device_model=device_model,
+                    )
+                    ptp_reservation_active = True
+                else:
+                    ptp_side = port_manager.get_available_ptp_side(
+                        req.my_tower, req.remote_tower, port_num=port_number
+                    )
+            mode = f"ptp-{ptp_side}"
+            naming = mcm.generate_ptp_naming(
+                req.my_tower, req.remote_tower, ptp_side, device_type,
+            )
+            peer = port_manager.get_ptp_peer(ptp_link_id, port_number)
+            if peer is not None and not ptp_families_compatible(
+                device_type,
+                device_model,
+                peer.get("device_type"),
+                peer.get("device_model"),
+            ):
+                logger.error(
+                    "Refusing uncertified PTP family pair on port %s",
+                    port_number,
+                )
+                return
 
-        logger.info(
-            f"Applying {mode} to port {port_number} ({device_type}): "
-            f"hostname={naming['hostname']}, ssid={naming['ssid']}"
-        )
+        if req.mode == "sm":
+            logger.info(
+                f"Applying standard SM config to port {port_number} ({device_type})"
+            )
+        else:
+            logger.info(
+                f"Applying {mode} to port {port_number} ({device_type}): "
+                f"hostname={naming['hostname']}, ssid={naming['ssid']}"
+            )
 
-        # Load mode template
-        template = mcm.load_template(device_type, mode)
+        # Load the model family profile.  AP directions map directly to the
+        # standard library's North/East/South/West directories.  PTP side A
+        # resolves Main and side B resolves SM inside ModeConfigManager.
+        profile = req.direction.title() if req.mode == "ap" and req.direction else None
+        template = None
+        if req.mode != "sm":
+            template = mcm.load_template(
+                device_type,
+                mode,
+                model=device_model,
+                profile=profile,
+                link_profile=ptp_link_id,
+                firmware=device_firmware,
+                require_firmware_match=True,
+            )
+        if req.mode == "ptp" and capabilities.get("ptp_settings_required") and not template:
+            logger.error(
+                "Required PTP settings profile disappeared before applying mode "
+                "on port %s",
+                port_number,
+            )
+            return
 
         # Create handler and connect
         interface = port_manager.get_interface_for_port(port_number)
@@ -2643,31 +3971,109 @@ async def _run_apply_mode(
         )
         if not handler:
             logger.error(f"No handler for {device_type} on port {port_number}")
+            finish = getattr(port_manager, "finish_mode_job", None)
+            if callable(finish):
+                finish(port_number, False, "No handler for this device")
             return
 
+        job_update = getattr(port_manager, "update_mode_job", None)
+        job_finish = getattr(port_manager, "finish_mode_job", None)
+
+        def _step(key, status, detail=None):
+            if callable(job_update):
+                job_update(port_number, key, status, detail)
+
+        _step("connect", "loading")
         connected = await handler.connect()
         if not connected:
             logger.error(f"Failed to connect to {device_type} at {device_ip} for mode config")
+            _step("connect", False, "login failed")
+            if callable(job_finish):
+                job_finish(port_number, False, "Could not connect to the device")
             return
+        _step("connect", True)
 
+        error_detail = None
         try:
-            # Apply config: template + naming injection, or just naming if no template
-            if template:
-                rendered = mcm.render_template(template, naming, device_type)
-                success = await handler.apply_config(rendered)
+            _step("apply", "loading")
+            if req.mode == "sm":
+                if not sm_config_path:
+                    logger.error(
+                        "Cannot restore SM config without a resolved template "
+                        "on port %s",
+                        port_number,
+                    )
+                    _step("apply", False, "no SM template")
+                    return
+                success = await handler.apply_config_file(sm_config_path)
+                _step("apply", bool(success))
+                if success:
+                    _step("verify", "loading")
+                    expectations_hook = getattr(handler, "applied_config_expectations", None)
+                    expectations = expectations_hook() if callable(expectations_hook) else None
+                    if expectations:
+                        success = await handler.verify_config(expectations) is True
+                    else:
+                        success = await handler.verify_config() is True
+                    mismatches = list(getattr(handler, "last_verify_mismatches", []) or [])
+                    error_detail = ("mismatch: " + ", ".join(mismatches[:6])) if (not success and mismatches) else None
+                    _step("verify", bool(success), error_detail)
+            # Apply config: template + generated identity/radio settings, or
+            # just naming for handlers that explicitly allow the fallback.
+            elif template:
+                if req.mode == "ptp":
+                    rendered = mcm.generate_ptp_settings(
+                        template,
+                        naming,
+                        device_type,
+                        ptp_side,
+                        device_model,
+                    )
+                else:
+                    rendered = mcm.render_template(template, naming, device_type)
+                # apply_mode_config verifies fail-closed inside the handler.
+                success = await handler.apply_mode_config(rendered)
+                mismatches = list(getattr(handler, "last_verify_mismatches", []) or [])
+                error_detail = ("mismatch: " + ", ".join(mismatches[:6])) if (not success and mismatches) else None
+                _step("apply", bool(success), error_detail)
+                _step("verify", bool(success))
+            elif req.mode == "ptp" and capabilities.get("ptp_settings_required"):
+                logger.error(
+                    "Cannot apply PTP mode without the required settings profile "
+                    "on port %s",
+                    port_number,
+                )
+                _step("apply", False, "no PTP settings profile")
+                return
             else:
                 # No template — just apply hostname/SSID via apply_ap_naming
                 success = await handler.apply_ap_naming(
                     naming["hostname"], naming["ssid"],
                 )
+                _step("apply", bool(success))
+                _step("verify", "skipped")
+
+            if success and req.mode != "sm":
+                success = await handler.apply_antenna_gain(
+                    req.antenna_gain_db,
+                    model=device_model or fingerprint.model,
+                )
+                if not success:
+                    error_detail = "antenna gain"
 
             if success:
                 logger.info(f"Mode {mode} applied successfully on port {port_number}")
-                port_manager.set_device_mode(
-                    port_number, mode, naming, ptp_link_id,
-                )
+                if req.mode == "sm":
+                    port_manager.clear_device_mode(port_number)
+                else:
+                    port_manager.set_device_mode(
+                        port_number, mode, naming, ptp_link_id,
+                    )
+                ptp_reservation_active = False
             else:
                 logger.error(f"Failed to apply {mode} config on port {port_number}")
+            if callable(job_finish):
+                job_finish(port_number, bool(success), None if success else (error_detail or "apply failed"))
         finally:
             await handler.disconnect()
 
@@ -2677,3 +4083,112 @@ async def _run_apply_mode(
 
     except Exception as e:
         logger.exception(f"Error applying mode on port {port_number}: {e}")
+        finish = getattr(port_manager, "finish_mode_job", None)
+        if callable(finish):
+            finish(port_number, False, "Unexpected error during mode change")
+    finally:
+        if getattr(port_manager, "port_states", None) is not None:
+            state = port_manager.port_states.get(port_number)
+            if state is not None and state.mode_job:
+                port_manager.finish_mode_job(port_number, False, "Mode change did not complete")
+        if ptp_reservation_active and ptp_link_id and ptp_side:
+            release = getattr(port_manager, "release_ptp_side", None)
+            if callable(release):
+                release(ptp_link_id, port_number, ptp_side)
+        if resolved_sm_config is not None:
+            resolved_sm_config.cleanup()
+
+
+# ============================================================================
+# Vendor UI Metadata (Story 5 / #75)
+# ============================================================================
+#
+# The kiosk dashboard's `deviceVendors` map is no longer hardcoded in
+# index.html: the dashboard route (web/app.py) injects vendor_ui_metadata()
+# into the template server-side, so adding a vendor to HANDLER_MAP needs
+# zero JS edits and the long-lived kiosk Chromium can never serve a stale
+# vendor list (see docs/KIOSK_ARCHITECTURE.md on kiosk uptimes).
+#
+# The vendor *list* derives from provisionable_device_types() (HANDLER_MAP,
+# Story 2 / #72) plus two documented exceptions (same as
+# tests/test_vendor_registry.py):
+#   - evolution_digital: a real DeviceType dispatched via the main.py
+#     side-door, intentionally absent from HANDLER_MAP.
+#   - unknown: a UI-only fallback card, not a vendor.
+#
+# _VENDOR_UI_STYLE is presentation data (display name, accent color),
+# derived from each VendorSpec's ui_style (Story 6 / #76): entries are
+# looked up with .get() and any vendor missing from it still renders with
+# derived defaults. `unknown` is the UI-only fallback card, not a vendor,
+# so its style stays here rather than in the registry.
+
+_VENDOR_UI_STYLE: Dict[str, Dict[str, str]] = dict(ui_styles())
+_VENDOR_UI_STYLE["unknown"] = {"name": "Unknown", "color": "#6b7280"}
+
+# Fallback accent for a vendor without a style entry (same gray as `unknown`).
+_DEFAULT_VENDOR_COLOR = "#6b7280"
+
+_VENDOR_ICONS_DIR = Path(__file__).parent / "static" / "vendor-icons"
+
+
+def _vendor_default_user(device_type: str) -> str:
+    """Default-username hint for the kiosk's custom-credentials form.
+
+    Read-only indirection over the credentials source so the UI hint can
+    never drift from it (it is the first builtin entry's username; "" when
+    the vendor has no builtin credentials, e.g. evolution_digital).
+    BUILTIN_CREDENTIALS itself derives from the VendorSpec registry
+    (Story 6 / #76).
+    """
+    builtin = BUILTIN_CREDENTIALS.get(device_type, [])
+    if not builtin:
+        return ""
+    return builtin[0].get("username", "")
+
+
+def _vendor_icon(device_type: str) -> str:
+    """Static icon URL for a vendor, or "" when no icon file is bundled.
+
+    Icons live at web/static/vendor-icons/<device_type>.png by convention;
+    the empty string preserves the kiosk's no-icon rendering path (used by
+    `unknown` today and by any newly added vendor until an icon ships).
+    """
+    if (_VENDOR_ICONS_DIR / f"{device_type}.png").is_file():
+        return f"/static/vendor-icons/{device_type}.png"
+    return ""
+
+
+def _vendor_ui_entry(device_type: str) -> Dict[str, str]:
+    """Build one kiosk metadata entry (name, color, defaultUser, icon)."""
+    style = _VENDOR_UI_STYLE.get(device_type, {})
+    return {
+        "name": style.get("name", device_type.replace("_", " ").title()),
+        "color": style.get("color", _DEFAULT_VENDOR_COLOR),
+        "defaultUser": _vendor_default_user(device_type),
+        "icon": _vendor_icon(device_type),
+    }
+
+
+def vendor_ui_metadata() -> Dict[str, Dict[str, str]]:
+    """Vendor metadata map injected into the dashboard template.
+
+    Keys: every provisionable device type (from HANDLER_MAP) plus the
+    documented `evolution_digital` and `unknown` exceptions. Values are the
+    exact shape the kiosk JS consumes: name, color, defaultUser, icon.
+    """
+    metadata = {
+        device_type: _vendor_ui_entry(device_type)
+        for device_type in provisionable_device_types()
+    }
+    # Non-provisionable vendors (evolution_digital) still get a card —
+    # they are real device types, just dispatched via the main.py
+    # side-door instead of HANDLER_MAP.
+    for device_type in nonprovisionable_device_types():
+        metadata[device_type] = _vendor_ui_entry(device_type)
+    unknown = _vendor_ui_entry("unknown")
+    # The unknown-device card offers "admin" as the generic username hint
+    # (matches the JS `vendor.defaultUser || 'admin'` fallback); it is a UI
+    # affordance, not a credential-source entry.
+    unknown["defaultUser"] = "admin"
+    metadata["unknown"] = unknown
+    return metadata

@@ -12,6 +12,9 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from .config import _default_credentials
+from .config_assets import ConfigAssetCatalog
+from .handler_manager import HandlerManager, provisionable_device_types
 
 STATUS_PRIORITY = {
     "ready": 0,
@@ -20,7 +23,12 @@ STATUS_PRIORITY = {
     "error": 3,
 }
 
-SUPPORTED_DEVICE_TYPES = ("cambium", "mikrotik", "tachyon", "tarana", "ubiquiti")
+# The supported device-type list derives from HANDLER_MAP — see
+# provisioner.handler_manager.provisionable_device_types() (Story 2 / #72).
+# Credential defaults derive from config._default_credentials (Story 3 /
+# #73). The remaining per-vendor readiness/hint/mode dicts stay hand-keyed
+# until Story 6 consolidates them; iteration over the derived list must
+# tolerate a vendor missing from those dicts (.get(), never indexing).
 ROOT_BUNDLE_NAMES = {
     "configs",
     "firmware",
@@ -74,37 +82,82 @@ def _interface_exists(interface_name: str) -> bool:
     return Path("/sys/class/net") .joinpath(interface_name).exists()
 
 
+# Prose shown in the "recommended" hint for vendors whose config-level
+# default ships with an empty password (the credential values themselves
+# derive from config._default_credentials — Story 3 / #73).
+_EMPTY_PASSWORD_HINTS = {
+    "mikrotik": "(empty until switch password is set)",
+    "tarana": "(set your fleet password)",
+}
+
+
 def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
-    defaults = {
-        "cambium": "admin/admin",
-        "mikrotik": "admin/(empty until switch password is set)",
-        "tachyon": "root/admin",
-        "tarana": "admin/(set your fleet password)",
-        "ubiquiti": "ubnt/ubnt",
-    }
+    factory = _default_credentials()
+    # Union of the non-empty factory-default passwords (admin, ubnt) —
+    # configuring any of them on a vendor that ships with a factory login
+    # gets the "still factory default" warning.
+    factory_passwords = {creds.password for creds in factory.values() if creds.password}
+
+    # config.credentials is a plain dict (Story 3 / #73) — getattr on it
+    # would silently return None, so read it with .get().
+    configured = getattr(config, "credentials", None)
+    if not isinstance(configured, dict):
+        configured = {}
 
     result = []
-    for device_type in SUPPORTED_DEVICE_TYPES:
-        creds = getattr(getattr(config, "credentials", None), device_type, None)
+    for device_type in provisionable_device_types():
+        creds = configured.get(device_type)
         password = getattr(creds, "password", "")
+        factory_default = factory.get(device_type)
         status = "ready"
         summary = "Configured"
 
         if _is_placeholder_secret(password):
             status = "warning"
             summary = "Missing or placeholder"
-        elif device_type in {"cambium", "tachyon", "ubiquiti"} and password in {"admin", "ubnt"}:
+        elif getattr(factory_default, "password", "") and password in factory_passwords:
             status = "warning"
             summary = "Still using factory default"
+
+        # Secret-owned device fields the handler cannot finish without
+        # (docs/PROVISIONING_NORTH_STAR.md). Derived from the handler class,
+        # never from a vendor list here.
+        missing_secrets = []
+        handler_class = HandlerManager.handler_class_for(device_type)
+        if handler_class is not None:
+            try:
+                probe = handler_class(
+                    ip="0.0.0.0",
+                    credentials={
+                        key: getattr(creds, key, "") for key in ("username", "password", "wpa_key", "snmp_community")
+                    },
+                )
+                missing_secrets = list(probe.missing_required_secrets())
+            except Exception:  # pragma: no cover - a handler that cannot probe is reported as unknown
+                missing_secrets = []
+        if missing_secrets:
+            note = "Missing required secret: " + ", ".join(missing_secrets)
+            summary = note if status == "ready" else summary + "; " + note
+            status = "warning"
+
+        if factory_default is None:
+            recommended = None
+        else:
+            recommended = "{}/{}".format(
+                factory_default.username,
+                factory_default.password
+                or _EMPTY_PASSWORD_HINTS.get(device_type, "(no default password)"),
+            )
 
         result.append(
             {
                 "device_type": device_type,
                 "username": getattr(creds, "username", "admin"),
+                "missing_secrets": missing_secrets,
                 "has_password": bool(password),
                 "status": status,
                 "summary": summary,
-                "recommended": defaults[device_type],
+                "recommended": recommended,
             }
         )
 
@@ -113,7 +166,11 @@ def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
 
 def _template_requirements(config: Any) -> Dict[str, Dict[str, Any]]:
     requirements = {
-        "cambium": {"required": True, "modes": ["default", "ap", "ptp-a", "ptp-b"]},
+        "cambium": {
+            "required": True,
+            "modes": ["default", "ap", "ptp-a", "ptp-b"],
+            "requires_family_sm_baseline": True,
+        },
         "tachyon": {"required": True, "modes": ["default", "ap", "ptp-a", "ptp-b"]},
         "tarana": {
             # Tarana's "config" is just an integer (operator_id); no template
@@ -142,16 +199,36 @@ def _tarana_operator_id(config: Any) -> Optional[int]:
         return None
 
 
-def _existing_template_modes(device_dir: Path) -> Dict[str, List[str]]:
+def _existing_template_modes(
+    device_dir: Path,
+    data_path: Optional[Path] = None,
+    device_type: Optional[str] = None,
+) -> Dict[str, List[str]]:
     matches: Dict[str, List[str]] = {}
-    if not device_dir.exists():
-        return matches
+    if device_dir.exists():
+        for file_path in sorted(p for p in device_dir.iterdir() if p.is_file()):
+            stem = file_path.name
+            for prefix in ("default", "ap", "ptp-a", "ptp-b"):
+                if stem.startswith(prefix):
+                    matches.setdefault(prefix, []).append(file_path.name)
 
-    for file_path in sorted(p for p in device_dir.iterdir() if p.is_file()):
-        stem = file_path.name
-        for prefix in ("default", "ap", "ptp-a", "ptp-b"):
-            if stem.startswith(prefix):
-                matches.setdefault(prefix, []).append(file_path.name)
+    # The promoted library is recursive: family/firmware/role directories
+    # replace the old flat ``default.json``/``ptp-a.json`` convention.  Keep
+    # the readiness contract stable by projecting catalog metadata back onto
+    # the legacy mode keys without reading protected PTP contents.
+    if data_path is not None and device_type is not None:
+        from .config_assets import ConfigAssetCatalog
+
+        for asset in ConfigAssetCatalog(data_path).list_assets(
+            device_type=device_type,
+            config_type="template",
+        ):
+            if asset.mode == "sm":
+                mode = "default"
+            else:
+                mode = asset.mode
+            if mode:
+                matches.setdefault(mode, []).append(asset.path)
     return matches
 
 
@@ -188,7 +265,30 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
             )
             continue
 
-        existing = _existing_template_modes(templates_root / device_type)
+        existing = _existing_template_modes(
+            templates_root / device_type,
+            data_path=data_path,
+            device_type=device_type,
+        )
+        # Every registered family needs its own linted SM baseline. The
+        # runtime-only shared profile is retired (docs/PROVISIONING_NORTH_STAR.md).
+        from .vendor_registry import config_family_metadata
+
+        registered_families = [
+            entry["directory"] for entry in config_family_metadata().get(device_type, [])
+        ]
+        families_with_sm = {
+            asset.family
+            for asset in ConfigAssetCatalog(data_path).list_assets(
+                device_type=device_type,
+                config_type="template",
+            )
+            if asset.family and asset.role and asset.role.lower() == "sm"
+        }
+        missing_sm_families = [
+            family for family in registered_families if family not in families_with_sm
+        ]
+        family_sm_baseline = bool(registered_families) and not missing_sm_families
         missing_modes = [mode for mode in info["modes"] if mode not in existing]
         required_default_missing = info["required"] and "default" not in existing
 
@@ -201,9 +301,19 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
         elif not existing:
             status = "warning"
             summary = "No templates uploaded yet"
-        elif missing_modes:
-            status = "warning"
-            summary = f"Missing mode templates: {', '.join(missing_modes)}"
+        else:
+            warning_reasons = []
+            if missing_modes:
+                warning_reasons.append(
+                    "Missing mode templates: {}".format(", ".join(missing_modes))
+                )
+            if info.get("requires_family_sm_baseline") and not family_sm_baseline:
+                warning_reasons.append(
+                    "Missing family SM baseline: " + ", ".join(missing_sm_families or ["all"])
+                )
+            if warning_reasons:
+                status = "warning"
+                summary = "; ".join(warning_reasons)
 
         device_checks.append(
             {
@@ -213,6 +323,8 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
                 "summary": summary,
                 "existing": existing,
                 "missing_modes": missing_modes,
+                "family_sm_baseline": family_sm_baseline,
+                "missing_sm_families": missing_sm_families,
             }
         )
 
@@ -223,7 +335,7 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
         summary = "Upload a default template for each required device type."
     elif any(item["status"] == "warning" for item in device_checks):
         status = "warning"
-        summary = "Optional AP/PTP templates are still missing for some device types."
+        summary = "Some config baselines or optional mode templates are still missing."
 
     return {
         "id": "config_templates",
@@ -239,7 +351,7 @@ def _build_firmware_check(data_path: Path) -> Dict[str, Any]:
     per_vendor = []
     missing_required = []
 
-    for device_type in SUPPORTED_DEVICE_TYPES:
+    for device_type in provisionable_device_types():
         device_dir = firmware_root / device_type
         files = sorted(p.name for p in device_dir.iterdir() if p.is_file()) if device_dir.exists() else []
         status = "ready" if files else "warning"
@@ -293,7 +405,7 @@ def _build_credentials_check(config: Any, data_path: Path) -> Dict[str, Any]:
 
     custom_counts = {
         device_type: len(custom_credentials.get(device_type, []))
-        for device_type in SUPPORTED_DEVICE_TYPES
+        for device_type in provisionable_device_types()
     }
 
     status = "ready"
@@ -324,7 +436,11 @@ def probe_mikrotik_switch(config: Any) -> Dict[str, Any]:
     """Inspect the provisioning switch, preferring RouterOS API when available."""
     management = getattr(getattr(config, "network", None), "management", None)
     switch_ip = getattr(management, "switch_ip", None) or "192.168.88.1"
-    configured_password = getattr(getattr(config.credentials, "mikrotik", None), "password", "")
+    # config.credentials is a plain dict (Story 3 / #73) — .get(), not getattr.
+    credentials_table = getattr(config, "credentials", None)
+    if not isinstance(credentials_table, dict):
+        credentials_table = {}
+    configured_password = getattr(credentials_table.get("mikrotik"), "password", "")
     password_candidates = []
     for password in (configured_password, ""):
         if password not in password_candidates:
@@ -779,16 +895,39 @@ def write_setup_bundle(
         "system_files": 0,
     }
 
-    def add_tree(archive: zipfile.ZipFile, source: Path, prefix: str, key: str) -> None:
+    protected_config_paths = {
+        (data_path / asset.path).resolve()
+        for asset in ConfigAssetCatalog(data_path).list_assets()
+        if asset.protected
+    }
+
+    def add_tree(
+        archive: zipfile.ZipFile,
+        source: Path,
+        prefix: str,
+        key: str,
+        excluded_paths: Optional[set[Path]] = None,
+    ) -> None:
         if not source.exists():
             return
         for file_path in sorted(path for path in source.rglob("*") if path.is_file()):
-            archive.write(file_path, arcname=str(PurePosixPath(prefix) / file_path.relative_to(source)))
+            if excluded_paths and file_path.resolve() in excluded_paths:
+                continue
+            archive.write(
+                file_path,
+                arcname=str(PurePosixPath(prefix) / file_path.relative_to(source)),
+            )
             summary[key] += 1
 
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        add_tree(archive, data_path / "configs", "configs", "configs")
+        add_tree(
+            archive,
+            data_path / "configs",
+            "configs",
+            "configs",
+            excluded_paths=protected_config_paths,
+        )
         add_tree(archive, data_path / "firmware", "firmware", "firmware")
 
         credentials_path = data_path / "credentials.json"
@@ -828,8 +967,14 @@ def seed_bundled_templates(
     *,
     data_path: Path,
     overwrite: bool = False,
+    device_type: Optional[str] = None,
+    family: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Copy bundled repo templates into the live data store."""
+    """Copy bundled repo templates into the live data store.
+
+    ``device_type`` limits the copy to one vendor tree and ``family`` to one
+    family inside it (the "install baselines from repo" action).
+    """
 
     source_root = repo_root / "configs" / "templates"
     target_root = data_path / "configs" / "templates"
@@ -840,10 +985,14 @@ def seed_bundled_templates(
         raise FileNotFoundError(f"Bundled template directory not found: {source_root}")
 
     for source_file in sorted(path for path in source_root.rglob("*") if path.is_file()):
-        if source_file.name.startswith("."):
+        if source_file.name.startswith(".") or source_file.name.lower() == "readme.md":
             continue
 
         relative = source_file.relative_to(source_root)
+        if device_type and (not relative.parts or relative.parts[0] != device_type):
+            continue
+        if family and (len(relative.parts) < 2 or relative.parts[1] != family):
+            continue
         target = target_root / relative
         if target.exists() and not overwrite:
             skipped_files.append(str(relative))

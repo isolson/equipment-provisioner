@@ -14,7 +14,7 @@ import signal
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -24,6 +24,7 @@ from .db import init_db, close_db, ProvisioningRecord, ProvisioningStatus
 from .fingerprint import identify_device, DeviceType
 from .firmware import FirmwareManager
 from .config_store import init_store, get_store
+from .config_resolver import ConfigResolver, JobContext, effective_role
 from .mode_config import init_mode_config_manager
 from .gpio import init_gpio, cleanup_gpio, get_gpio
 from .handler_manager import HandlerManager
@@ -34,6 +35,23 @@ from . import telemetry
 
 logger = logging.getLogger(__name__)
 console = Console()
+
+
+def _switch_management_credentials(config: Config) -> Tuple[str, str]:
+    """(username, password) for the bench management switch.
+
+    The switch is *infrastructure* — present regardless of which device
+    vendors are enabled — so this must not assume a ``mikrotik`` entry
+    exists in the credentials table: a ``PROVISIONER_VENDORS`` allowlist
+    without mikrotik filters that entry out of the derived defaults.
+    Falls back to the MikroTik factory default (admin, empty password),
+    which is exactly what the table's backfilled default holds in a full
+    build.
+    """
+    creds = config.credentials.get("mikrotik")
+    if creds is None:
+        return "admin", ""
+    return creds.username, creds.password
 
 
 class Provisioner:
@@ -49,8 +67,10 @@ class Provisioner:
     def __init__(self, config: Config):
         self.config = config
         self.port_manager: Optional[PortManager] = None
+        self._run_errors: Dict[int, Optional[str]] = {}
         self.handler_manager: Optional[HandlerManager] = None
         self.firmware_manager: Optional[FirmwareManager] = None
+        self.config_resolver: Optional[ConfigResolver] = None
         self._running = False
         self._provisioning_semaphore = asyncio.Semaphore(8)  # Max concurrent
         self._use_vlan_mode = config.network.mode == "vlan"
@@ -105,28 +125,20 @@ class Provisioner:
         )
         logger.info("Firmware checker initialized (enabled=%s)", self.config.firmware.checker.enabled)
 
-        # Initialize handler manager with credentials
+        # Initialize handler manager with credentials. The per-vendor table
+        # comes straight from config.credentials (Story 3 / #73) — adding or
+        # removing a vendor is a config.py defaults-factory change; nothing
+        # to edit here.
         credentials = {
-            "mikrotik": {
-                "username": self.config.credentials.mikrotik.username,
-                "password": self.config.credentials.mikrotik.password,
-            },
-            "cambium": {
-                "username": self.config.credentials.cambium.username,
-                "password": self.config.credentials.cambium.password,
-            },
-            "tachyon": {
-                "username": self.config.credentials.tachyon.username,
-                "password": self.config.credentials.tachyon.password,
-            },
-            "tarana": {
-                "username": self.config.credentials.tarana.username,
-                "password": self.config.credentials.tarana.password,
-            },
-            "ubiquiti": {
-                "username": self.config.credentials.ubiquiti.username,
-                "password": self.config.credentials.ubiquiti.password,
-            },
+            device_type: {
+                "username": creds.username,
+                "password": creds.password,
+                # Secret-owned device fields; written by the handler's secret
+                # path after config, never by a template.
+                "wpa_key": creds.wpa_key,
+                "snmp_community": creds.snmp_community,
+            }
+            for device_type, creds in self.config.credentials.items()
         }
 
         # Load alternate credentials from credentials.json
@@ -142,20 +154,27 @@ class Provisioner:
 
         self.handler_manager = HandlerManager(credentials, alternate_credentials)
 
+        # Config resolver — decides which ordered config layers (base
+        # template + role overlays) apply to each provisioning job.
+        self.config_resolver = ConfigResolver(store, self.handler_manager)
+
         # Both modes use PortManager. VLAN mode creates per-port VLAN
         # subinterfaces + a management VLAN; simple mode treats the base
         # interface as port 1 with no VLAN setup.
         mgmt_config = None
         if self._use_vlan_mode and hasattr(self.config.network, 'management'):
             mgmt = self.config.network.management
+            switch_username, switch_password = _switch_management_credentials(
+                self.config
+            )
             mgmt_config = ManagementConfig(
                 enabled=mgmt.enabled,
                 ip=mgmt.ip,
                 netmask=mgmt.netmask,
                 switch_ip=getattr(mgmt, 'switch_ip', None) or getattr(mgmt, 'gateway', None),
                 vlan=mgmt.vlan,
-                switch_username=self.config.credentials.mikrotik.username,
-                switch_password=self.config.credentials.mikrotik.password,
+                switch_username=switch_username,
+                switch_password=switch_password,
             )
 
         self.port_manager = init_port_manager(
@@ -168,6 +187,10 @@ class Provisioner:
             simple_subnet=(
                 None if self._use_vlan_mode else self.config.simple_mode.subnet
             ),
+            mode_config_enabled=self.config.features.mode_config,
+            # Per-port timeline persisted under the data dir so the kiosk
+            # keeps its history across reloads and Chromium respawns.
+            events_path=str(Path(self.config.data.local_path) / "port_events"),
         )
         await self.port_manager.setup()
         self.port_manager.on_device_detected(self._on_port_device_detected)
@@ -356,6 +379,7 @@ class Provisioner:
         cancelled = False
 
         success = False
+        self._run_errors.pop(port_num, None)
         try:
             async with self._provisioning_semaphore:
                 success = await self._provision_port_device(port_num, device_type, device_ip)
@@ -370,7 +394,18 @@ class Provisioner:
                 state.expecting_reboot = False
             # Don't overwrite state if cancelled — link-down handler already reset everything
             if not cancelled:
-                self.port_manager.mark_port_provisioning(port_num, False, success=success)
+                # Carry the run's error into port state so the card, the
+                # sheet, and the timeline show why it failed.
+                self.port_manager.mark_port_provisioning(
+                    port_num, False, success=success, error=self._run_errors.pop(port_num, None)
+                )
+                # The completion event is emitted inside _provision_port_device,
+                # before mark_port_provisioning() can derive the terminal
+                # workflow. Push the authoritative post-run state immediately
+                # instead of waiting for the next two-second status broadcast.
+                from .web.websocket import notify_port_change
+                port_status = self.port_manager._get_single_port_status(port_num)
+                await notify_port_change(port_num, port_status)
 
             # Push device info to equipment registry on success
             if success and not cancelled:
@@ -421,7 +456,7 @@ class Provisioner:
             notify_provisioning_completed,
             notify_port_change,
         )
-        from typing import Optional, Union
+        from typing import Any, Optional, Union
 
         notifier = get_notifier()
         db = await get_db()
@@ -450,7 +485,11 @@ class Provisioner:
         job_id = await db.create_job(record)
 
         # Create progress callback to update checklist in real-time
-        async def on_checklist_progress(step: str, success: Union[bool, str], detail: Optional[str] = None):
+        async def on_checklist_progress(
+            step: str,
+            success: Union[bool, str],
+            detail: Optional[Any] = None,
+        ):
             """Update checklist as each step completes."""
             logger.debug(f"Checklist progress: port={port_num} step={step} success={success} detail={detail}")
 
@@ -462,13 +501,20 @@ class Provisioner:
                 self.port_manager.set_expecting_reboot(port_num, False)
                 return  # Internal signal, don't update checklist or UI
 
+            if step == "step_plan":
+                if isinstance(detail, list):
+                    self.port_manager.set_step_plan(port_num, detail)
+                port_status = self.port_manager._get_single_port_status(port_num)
+                await notify_port_change(port_num, port_status)
+                return
+
             # Send provisioning progress to update status bar in UI
             await notify_provisioning_progress(port_num, job_id, step)
 
             if step == "model_confirmed":
                 # For model_confirmed, always store the model name (detail), not the boolean
                 # This prevents "true" showing up when model is None
-                self.port_manager.update_checklist(port_num, step, detail)
+                self.port_manager.update_checklist(port_num, step, detail, detail)
             elif step == "device_info" and detail:
                 # Parse device info: "mac:XX:XX:XX|serial:YYYY"
                 mac = None
@@ -487,13 +533,17 @@ class Provisioner:
             elif step == "firmware_status":
                 # Store firmware status with version detail
                 # success can be "current", detail is version like "v5.10.4"
-                self.port_manager.update_checklist(port_num, step, detail if detail else success)
+                self.port_manager.update_checklist(
+                    port_num, step, detail if detail else success, detail
+                )
             elif step == "firmware_banks" and detail:
                 # Parse firmware banks: "bank1:5.10.4|bank2:5.10.4|active:1"
                 # Store as-is for UI - no need to reformat
-                self.port_manager.update_checklist(port_num, "firmware_banks", detail)
+                self.port_manager.update_checklist(
+                    port_num, "firmware_banks", detail, detail
+                )
             else:
-                self.port_manager.update_checklist(port_num, step, success)
+                self.port_manager.update_checklist(port_num, step, success, detail)
 
             # Also update device info for model if available
             if step == "model_confirmed" and detail:
@@ -502,6 +552,8 @@ class Provisioner:
             # Broadcast the updated port status to UI
             port_status = self.port_manager._get_single_port_status(port_num)
             await notify_port_change(port_num, port_status)
+
+        resolved = None  # ResolvedConfig; set at the config-resolution seam
 
         try:
             # Notify started via WebSocket and notifier
@@ -544,7 +596,11 @@ class Provisioner:
 
             # Push fingerprint info to port state for immediate UI display
             if fingerprint.model:
-                self.port_manager.update_port_device_info(port_num, model=fingerprint.model)
+                self.port_manager.update_port_device_info(
+                    port_num,
+                    model=fingerprint.model,
+                    firmware_version=fingerprint.firmware_version,
+                )
                 # Broadcast the update so UI shows model immediately
                 port_status = self.port_manager._get_single_port_status(port_num)
                 await notify_port_change(port_num, port_status)
@@ -585,6 +641,7 @@ class Provisioner:
                         mac=info.mac_address,
                         serial=info.serial_number,
                         model=info.model,
+                        firmware_version=info.firmware_version,
                     )
                     port_status = self.port_manager._get_single_port_status(port_num)
                     await notify_port_change(port_num, port_status)
@@ -596,10 +653,27 @@ class Provisioner:
                         info_result.error_message,
                     )
 
-            config_path = store.get_config_template(
+            # Resolve config layers (base template + optional role overlay).
+            # With no role selected this is byte-identical to the old direct
+            # store.get_config_template() lookup (pass-through fast path).
+            job_context = JobContext(
+                role=effective_role(
+                    getattr(provision_request, "role", None),
+                    self.config.provisioning.default_role,
+                ),
+            )
+            if self.config_resolver is None:
+                # Normally built in setup(); construct on demand for
+                # callers that wire a Provisioner directly (tests).
+                self.config_resolver = ConfigResolver(store, self.handler_manager)
+            resolved = self.config_resolver.resolve(
                 device_type,
                 fingerprint.model,
+                job_context,
             )
+            for note in resolved.notes:
+                logger.info(f"Config resolution note (port {port_num}): {note}")
+            override_cfg, config_path = resolved.as_provision_args()
 
             # Check feature flags for per-device-type config application
             if config_path:
@@ -609,7 +683,7 @@ class Provisioner:
                     config_path = None
 
             # Check for device-specific override (requires MAC, get it from handler)
-            override = None
+            override = override_cfg
 
             # Build device-type-specific config from settings + request overrides
             if device_type == "tarana":
@@ -688,12 +762,18 @@ class Provisioner:
             if result.device_info:
                 if result.device_info.mac_address:
                     await db.update_job(job_id, mac_address=result.device_info.mac_address)
-                    self.port_manager.update_port_device_info(
-                        port_num,
-                        mac=result.device_info.mac_address,
-                        serial=result.device_info.serial_number,
-                        model=result.device_info.model,
-                    )
+
+                # Restore the full summary after any firmware-reboot link flap.
+                # Some handlers cannot read a MAC, but their detected model is
+                # still valid and must not remain null in /api/ports.
+                final_firmware = result.new_firmware or result.device_info.firmware_version
+                self.port_manager.update_port_device_info(
+                    port_num,
+                    mac=result.device_info.mac_address,
+                    serial=result.device_info.serial_number,
+                    model=result.device_info.model,
+                    firmware_version=final_firmware,
+                )
 
                 # Device override provisioning (gated by feature flag)
                 if self.config.features.device_overrides and result.device_info.mac_address:
@@ -761,6 +841,13 @@ class Provisioner:
                     completed_at=datetime.now(),
                 )
 
+                # Persist the retry reason in port state so page refreshes and
+                # WebSocket reconnects render the same contextual action.
+                self._run_errors[port_num] = result.error_message
+                self.port_manager.set_needs_credentials(
+                    port_num, result.needs_credentials
+                )
+
                 # If credentials failed, send special notification to prompt UI
                 if result.needs_credentials:
                     from .web.websocket import notify_credentials_required
@@ -798,8 +885,13 @@ class Provisioner:
 
             from .handlers.base import ProvisioningResult
             result = ProvisioningResult(success=False, error_message=str(e))
+            self._run_errors[port_num] = "Unexpected error: %s" % str(e)[:120]
             await notifier.notify_failed(result, device_ip)
             return False
+        finally:
+            # Composed config artifacts are job-scoped; remove them.
+            if resolved is not None:
+                resolved.cleanup()
 
     async def _provision_evolution_digital(
         self,

@@ -1,5 +1,10 @@
 # Cambium ePMP Config API Reference
 
+Store and review new Cambium captures by following the
+[Bench Evidence SOP](BENCH_EVIDENCE.md). The endpoint notes below are derived
+from hardware captures; raw files belong in the secure bench evidence
+directory.
+
 > **WARNING TO AI AGENTS AND DEVELOPERS**: Do NOT guess or assume Cambium API
 > behavior. Every endpoint in this document is labeled CONFIRMED or UNCONFIRMED.
 > If an endpoint is UNCONFIRMED, do NOT write code that uses it until it has been
@@ -90,7 +95,8 @@ curl -s -k --interface eth0.104 \
   tables, and hardware information) rather than rejecting the entire upload
 - The `image` field name is required — this is the same field used for TAR uploads
 - Works for both JSON config files and TAR backup archives
-- The JSON file uses flat `device_props` key names directly (no wrapper needed)
+- A native full export uses the `device_props` and `template_props` wrapper
+- A small partial template may use flat `device_props` keys
 
 ---
 
@@ -183,15 +189,93 @@ curl -s -k --interface eth0.104 \
 
 ---
 
+## Field deployment exports
+
+Use the `/files` upload type **Field deployment export** for a complete
+Cambium export. Select the model family, firmware, and role. The selected role
+is authoritative; the provisioner does not infer AP or SM from an SSID or
+model string. An export whose radio role fields do not match the selected
+role is refused, so an AP export can never become an SM baseline.
+
+The upload stores the exact original in private runtime storage. It activates
+a reduced copy in the family tree, for example
+`configs/templates/cambium/ePMP-4K/5.11.1/SM/default.json`. The runtime-only
+shared profile is retired: git and CI could not lint it.
+
+The reduced copy keeps only the fields the field ownership contract lets a
+profile own (`docs/PROVISIONING_NORTH_STAR.md`). Secrets, device defaults,
+unit identity, and captured addresses are dropped. The API refuses an upload
+that still breaks the contract and names the fields, never the values.
+
+The SM baseline (fleet policy, verified exact on read-back):
+
+| Policy | Value |
+|---|---|
+| Management VLAN | Enabled, VLAN 12 |
+| Management address | DHCP |
+| DNS | From DHCP |
+| NTP | `time.google.com`, `time.cloudflare.com` |
+| Syslog | 100.126.15.28, UDP 514, mask 31 |
+| cnMaestro | `cnmaestro.infra.treehouse.mn`, agent on, zero touch on |
+| SNMP | Protocol version 1, remote access on; community via the secret path |
+| SSH / Telnet | SSH on, Telnet off |
+| Country | US |
+| Scan mask (per family) | Bits: 1 = 20 MHz, 2 = 40, 16 = 80, 32 = 160. ePMP-4K `51` (20/40/80/160), ePMP-3K `19` (20/40/80). Factory is `3` (20 and 40 only), which cannot follow an 80 MHz access point. |
+
+The SM radio role (verified exact on read-back):
+
+| Field | SM | AP | PTP-A | PTP-B |
+|---|---|---|---|---|
+| `wirelessInterfaceMode` | `2` | `1` | `1` | `2` |
+| `wirelessInterfacePTPMode` | `1` | `0` | `1` | `1` |
+| `wirelessInterfaceProtocolMode` | `1` | `1` | `3` | `3` |
+
+Every value traces to a known-good export fixture under
+`bench-evidence/cambium/` (`tests/test_cambium_evidence.py`). A change starts
+with a new fixture. The handler holds the same values in `SM_FLEET_POLICY` and
+`SM_ROLE_VALUES`.
+
+Device defaults are never written and never verified as exact values:
+`wirelessInterfaceTDDAntennaGain` (integrated radios), `systemConfigMinAntGain`,
+`cambiumGPSConfigPrioritizeUSB`, and `wirelessInterface2PTPMode`. The
+fixtures show these vary per unit (gain 18 on 4518, 16 on 4616, 25 on 4625;
+GPS USB 1 or 0).
+
+Site identity and RF (SSID, hostname, device name, center frequency, TX power,
+TDD frame and ratio, preferred AP list) belong to the AP and PTP workflow.
+They never appear in the SM baseline.
+
+Secrets (admin password, `wirelessInterfaceEncryptionKey`, SNMP community,
+RADIUS) never appear in a template. The handler writes them through
+`apply_secrets()` from the host credentials after the config step. Presence
+is verified, never the value.
+
+Full exports always use native `config_import` with `skipIllegal=1`. They
+never use `set_param`. The export is imported as-is; there is no per-model
+projection of device defaults.
+
+Antenna gain: standard SM provisioning never writes gain. Integrated radios
+are never written. During AP or PTP setup a connectorized radio (ePMP 4600C)
+requires an explicit operator value; there is no default.
+
 ## When to Use Which Endpoint
+
+Every row below traces to a capture summary under `bench-evidence/cambium/`
+(`capture-summary.md`, `reset-capture-summary.md`, `upgrade-capture-summary.md`).
+Read the summary before changing a row. The raw HAR stays on the bench host.
+
 
 | Scenario | Endpoint | Notes |
 |---|---|---|
+| Firmware upload, running 5.11 or newer | `upload_sw_image_local` then `upgrade_sw_image_local` (`type=device`) then poll `get_upgrade_status` | Force 300-25 captures at 5.11.1 |
+| Firmware upload, running older than 5.11 | `local_upload_image` then poll `get_upload_status` | ePMP 4518 workflow HAR at 5.10.4; `upload_sw_image_local` answered 404 |
+| Factory reset | `reset_to_def` (`mask=1`) then `reboot` | ePMP 4518 and Force 300-25 HARs |
 | Apply full JSON config file | `config_import` | Multipart upload, skipIllegal=1, poll for applyFinished |
 | Apply full TAR backup archive | `config_import` | Same endpoint, same flow |
 | Change a few fields (SSID, hostname) | `set_param` | Form-encoded, immediate, no polling needed |
 | Read current config | `get_param` | act=config_regular for full config, act=status for polling |
 | Post-provisioning AP naming | `set_param` | Only 3 keys: SSID, snmpName, deviceName |
+| Restore SM after AP or PTP | `config_import` | Apply the standard SM profile, verify it, then clear local PTP state |
 
 ---
 
@@ -199,11 +283,11 @@ curl -s -k --interface eth0.104 \
 
 ### Full config file (config_import path)
 1. Template is loaded from `configs/templates/cambium/`
-2. Model alias is resolved (e.g., `ePMP 4518` → `f4518-sm-defaultconfig`)
-3. Files starting with `ap` are excluded (AP config is post-provisioning only)
-4. JSON file is uploaded to `/admin/config_import` with `skipIllegal=1`
-5. Poll `get_param` with `act=status&applyStatusNeeded=true` until `applyFinished=1`
-6. Applied keys stored for verification
+2. The model family SM baseline is selected (`ePMP-3K` or `ePMP-4K`). There
+   is no shared profile and no cross-family fallback.
+3. A native full export is uploaded to `/admin/config_import` with `skipIllegal=1`.
+4. Poll `get_param` with `act=status&applyStatusNeeded=true` until `applyFinished=1`.
+5. The contract-owned applied fields (fleet policy and role) are stored for verification.
 
 ### Individual fields (set_param path)
 1. Used by `apply_ap_naming()` and `apply_config()` (dict input)
@@ -211,20 +295,79 @@ curl -s -k --interface eth0.104 \
 3. URL-encoded and POSTed to `/admin/set_param`
 4. Response checked for `"success": 1`
 
-**SM config is always used for provisioning. AP config is only applied
-post-provisioning via `apply_ap_naming()`.**
+**The family SM baseline is used for initial provisioning and for SM restore.
+AP and PTP exports are separate role profiles. The later mode workflow applies
+the selected AP or PTP profile, then injects the generated site identity. A
+mode is offered only after the bench recorded both transition directions
+(`provisioner/qualification.py`).**
+
+## Certified ePMP PTP family link profiles
+
+The PTP workflow certifies ePMP 3K and ePMP 4K family pairings. This includes
+links between two 46xx models and links between an ePMP 3K model and an ePMP
+4K model. Each endpoint still needs a PTP settings profile for its own family.
+The API rejects the link when the family pairing is not certified or either
+profile is missing.
+
+The supplied 46xx native exports are the ePMP 4K `tw32-tw18` link profile.
+Upload each export from the `/files` page. Use these values:
+
+| Field | PTP-A export | PTP-B export |
+|---|---|---|
+| Type | Field deployment export | Field deployment export |
+| Family | `ePMP-4K` | `ePMP-4K` |
+| Firmware | `5.11.1` | `5.11.1` |
+| Role | `PTP` | `PTP` |
+| Mode | `ptp-a` | `ptp-b` |
+| Scope | `family` | `family` |
+| Link profile | `tw32-tw18` | `tw32-tw18` |
+| Side profile | `Main` | `SM` |
+
+The firmware field must match the native export version in `template_props`.
+The service rejects an upload when the versions do not match.
+
+The service stores link IDs in ascending tower order. The generated SSID uses
+this same order. Reversing the two tower values does not change the link ID or
+SSID. For this pair the runtime ID is `tw18-tw32`; the resolver also accepts
+the reverse order shown in the field export names.
+
+The upload stores the active profiles under the protected runtime path:
+
+```text
+configs/templates/cambium/ePMP-4K/5.11.1/PTP/tw32-tw18/Main/default.json
+configs/templates/cambium/ePMP-4K/5.11.1/PTP/tw32-tw18/SM/default.json
+```
+
+The source exports and active PTP profiles contain secrets and site identity.
+They are host-only. Do not commit them or include them in a setup bundle.
+The protected profile must retain the native PTP radio settings, including the
+radio mode, PTP role, protocol mode, TDD frame size, TDD ratio, and center
+frequency. The handler generates the link identity (hostname and SSID) from
+the two tower numbers and leaves these hardware-specific settings from the
+profile unchanged.
+
+The PTP action appears only after the device has completed and verified SM
+provisioning. The operator enters the two tower numbers. The backend reserves
+one side before it starts the background task, checks the peer family, matches
+the device firmware to the profile version, and injects the generated link
+identity. A PTP-A upload must use the `Main` profile. A PTP-B upload must use
+the `SM` profile.
 
 ---
 
 ## How Config Verify Works
 
-1. POST to `/admin/get_param` with `act=config_regular&debug=true`
-2. Parse `device_props` from JSON response
-3. Compare values against what was applied:
-   - `wirelessInterfaceSSID` → expected `ssid`
-   - `snmpSystemName` → expected `hostname`
-   - `systemConfigDeviceName` → expected `devicename`
-4. Log pass/fail for each field
+1. POST to `/admin/get_param` with `act=config_regular&debug=true`.
+2. Parse `device_props` from the JSON response.
+3. Compare the expectation set from the field ownership contract
+   (`field_ownership.expected_values`): fleet policy and role fields as exact
+   values, plus identity fields when the mode workflow applied them. Secrets
+   and device defaults are never compared.
+4. The result is tri-state: `True` when every field matched, `False` on a
+   mismatch, `UNVERIFIED` when the read-back was incomplete.
+5. Mismatched field names (never values) are recorded on
+   `handler.last_verify_mismatches`, shown in the failure message and the port
+   timeline.
 
 ---
 
@@ -282,9 +425,9 @@ endpoint with multipart upload. This is separate from config.
 ## Debugging Tips
 
 - Always check `journalctl -u provisioner -f` during provisioning
-- `config_import` logs the full response including `filepath` and `err`
+- `config_import` logs success state and error presence, not response secrets
 - The apply-status poll logs progress and final `applyFinished` state
-- `set_param` failures log the full response body (up to 2000 chars)
+- `set_param` failures log error presence, not response values
 - Use `curl` directly on the provisioner to test endpoints in isolation
 - To capture new endpoint behavior, export a HAR file from browser dev tools
 
@@ -300,6 +443,7 @@ endpoint with multipart upload. This is separate from config.
 | 2026-01-27 | `set_param` (small key set) | Provisioner logs | 5.10.4 |
 | 2026-01-27 | Login (`/cgi-bin/luci`) | Provisioner logs | 5.10.4 |
 | 2026-05-28 | `upload_sw_image_local` + `upgrade_sw_image_local` + `get_upgrade_status` (FW2 alt-bank flash) | HAR capture from browser, Force 300-25 | 5.11.1 |
+| 2026-08-24 | `upload_sw_image_local` + `upgrade_sw_image_local` + `get_upgrade_status` (both passes) | Successful HAR capture, ePMP AX SKU 53560 | 5.11.0 |
 
 ---
 
@@ -310,6 +454,11 @@ full provisioning that ends with **both banks at the target version**
 needs two separate flash passes, each using a different endpoint set.
 This was confirmed via HAR capture of the web UI doing a successful
 manual dual-bank upgrade on a Force 300-25 running 5.11.1.
+
+ePMP AX uses the explicit second-pass sequence for both banks. The trigger
+and status requests use `type=device&debug=true`. A successful HAR confirmed
+status progression from 0 through 7. The AX web UI does not expose
+`local_upload_image`; that endpoint returns HTTP 404.
 
 ### First pass — first-bank flash
 
@@ -345,12 +494,13 @@ the step the provisioner was missing before #58.
 `get_upload_status` (verified empirically). The form body is mandatory;
 without it the endpoint returns a 400.
 
-Handler implementation: `CambiumHandler.upload_firmware()` branches on
-the `bank` parameter — `bank=1` → first-pass flow,
-`bank=2` → alt-bank flow.
+Handler implementation: `CambiumHandler.upload_firmware()` derives the
+flow from the model and bank. Force-series devices use the original
+first-pass and second-pass split. ePMP AX uses the explicit sequence for
+both passes.
 
 ---
 
-*Last updated: 2026-05-28*
+*Last updated: 2026-08-24*
 *This document is the source of truth for Cambium API behavior. Update it
 when new endpoints or behaviors are confirmed on actual hardware.*
