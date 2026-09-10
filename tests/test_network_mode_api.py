@@ -8,7 +8,7 @@ from provisioner.web import network_modes
 
 def setup_client(monkeypatch, busy=False, qualified=True):
     state = SimpleNamespace(provisioning=busy, provisioning_task=None, device_mac="00:00:00:00:00:01", device_mode=None, mode_config=None)
-    status = {"device_detected": True, "device_type": "mikrotik", "device_ip": "192.0.2.1", "device_mac": state.device_mac, "device_model": "hEX S", "provisioning": busy}
+    status = {"device_detected": True, "device_type": "mikrotik", "device_ip": "192.0.2.1", "device_mac": state.device_mac, "device_model": "hEX S", "provisioning": busy, "needs_credentials": True}
     pm = SimpleNamespace(port_states={1: state}, get_port_status=lambda: {1: dict(status, provisioning=state.provisioning)}, get_interface_for_port=lambda n: "test1", begin_mode_job=lambda *a: "job", update_mode_job=lambda *a: None, finish_mode_job=lambda *a: None)
     pm.update_port_device_info = lambda *a, **kw: None
     pm.set_device_mode = lambda port, mode, config: setattr(state, "device_mode", mode)
@@ -59,6 +59,8 @@ def test_verified_mode_and_cleanup(monkeypatch):
     assert response.status_code == 200
     assert response.json()['verified']
     assert state.device_mode == 'switch'
+    assert state.needs_credentials is False
+    assert state.last_result is None
     assert not state.provisioning
     assert state.provisioning_task is None
 

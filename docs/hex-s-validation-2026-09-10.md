@@ -38,8 +38,20 @@ not a replacement for the existing fleet Netinstall/ZTP pipeline.
 Role descriptions and commands live in the handler. The web workflow consumes
 those capabilities and the exact model/firmware evidence. Existing AP/PTP
 qualification requirements and transition reports retain their prior behavior.
-The shared deployment does not replace the previously reconciled application;
-only the new wired workflow and its integration are to be promoted.
+The wired workflow and its integration were deployed as scoped changes to the
+existing application, with private file backups and before/after hashes.
+
+An automated Chromium browser check exercised the deployed page through
+Inspect → Switch → Router. Both applications returned verified device readbacks,
+and the page had no JavaScript errors. The device was left in Router mode.
+A successful explicit mode application clears an earlier login failure without
+marking a full provisioning run successful. The unique label login is a
+temporary per-port override; after a service restart, use **Device login** on
+this page to enter it again. It was not added to fleet-wide credentials.
+
+The final regression suite passed 970 tests, with 5 skipped, on Python 3.13.
+Python 3.9 syntax compatibility was checked separately; no Python 3.9 runtime
+test is claimed.
 
 ## Evidence and limits
 

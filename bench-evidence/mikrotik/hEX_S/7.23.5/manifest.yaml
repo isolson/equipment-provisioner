@@ -21,6 +21,8 @@ raw_files:
   router-mode-after.private.rsc: Configuration export after the mode transition checks.
   upgrade-result.json: RouterOS package version after reboot.
   routerboot-result.json: RouterBOOT version after its reboot.
+  wired-modes-ui.private.har: Deployed provisioner browser inspect and two mode applications.
+  ui-verification.json: Successful browser-driven Switch and Router readbacks with no page errors.
 transitions:
   - {from: router, to: switch, result: success}
   - {from: switch, to: router, result: success}

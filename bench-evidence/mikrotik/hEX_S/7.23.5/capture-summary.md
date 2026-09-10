@@ -28,7 +28,7 @@ acceptance checks; this record qualifies the configuration transition only.
 
 ## Request sequence
 
-This capture used SSH/SFTP rather than HTTP/HAR:
+The device update and initial transition capture used SSH/SFTP:
 
 1. Read resource/package/RouterBOARD information and export the configuration.
 2. Upload the ARM NPK with SFTP and verify its remote size.
@@ -37,3 +37,9 @@ This capture used SSH/SFTP rather than HTTP/HAR:
 5. Read the wired layout, apply Router mode, and read back its role flags.
 6. Apply Switch mode and read back bridge membership, forwarding, NAT and DHCP.
 7. Restore Router mode, verify the same fields, and export the configuration.
+
+The deployed `/network-modes` page was subsequently exercised with Chromium:
+Inspect → Switch → Router. Both applications returned successful authenticated
+readbacks with no page JavaScript errors. The private
+`wired-modes-ui.private.har` and screenshot record that provisioner UI sequence;
+`ui-verification.json` records its results. The device was left in Router mode.

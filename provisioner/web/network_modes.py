@@ -90,6 +90,12 @@ async def _operate(request, port_number, change: Optional[NetworkModeRequest] = 
             if current is not slot or current.device_mac != status.get("device_mac"):
                 raise HTTPException(409, "The connected device changed during the operation")
             pm.set_device_mode(port_number, state["mode"], {"mode": state["mode"], "verified": True})
+            if status.get("needs_credentials"):
+                # This explicit login/role operation resolved the old login
+                # failure, but does not claim a full provisioning run passed.
+                slot.needs_credentials = False
+                slot.last_result = None
+                slot.last_error = None
             pm.update_mode_job(port_number, "apply", True)
             success = True
         return {"port": port_number, "model": model, "firmware": firmware,
