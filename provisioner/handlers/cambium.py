@@ -95,6 +95,8 @@ class CambiumHandler(BaseHandler):
             [(key, Owner.FLEET_POLICY) for key in SM_FLEET_POLICY]
             + [(key, Owner.ROLE) for key in SM_ROLE_VALUES]
             + [("wirelessInterfaceScanFrequencyBandwidth", Owner.FLEET_POLICY)]
+            # Enable only together with its password in the account secret path.
+            + [("installer_user_enabled", Owner.SECRET)]
             + [
                 (key, Owner.DEVICE_DEFAULT)
                 for key in (
@@ -529,8 +531,9 @@ class CambiumHandler(BaseHandler):
                  alternate_credentials: list = None):
         super().__init__(ip, credentials, interface)
         self._deployment_password = credentials.get("password", "")
-        if credentials.get("snmp_write_community"):
-            self._secret_values["snmp_write_community"] = credentials["snmp_write_community"]
+        for key in ("snmp_write_community", "installer_password"):
+            if credentials.get(key):
+                self._secret_values[key] = credentials[key]
         self._alternate_credentials = alternate_credentials or []
         self._session: Optional[aiohttp.ClientSession] = None
         self._auth_token: Optional[str] = None
@@ -894,7 +897,7 @@ class CambiumHandler(BaseHandler):
             changed_elements = json.dumps({
                 "device_props": {
                     "admin_password": new_password,
-                    "crashReporterEnable": "1",
+                    "crashReporterEnable": self.SM_FLEET_POLICY["crashReporterEnable"],
                     "wirelessInterfaceEncryptionKey": wpa_key
                 },
                 "template_props": {
@@ -920,7 +923,7 @@ class CambiumHandler(BaseHandler):
                 response = stdout.decode("utf-8", errors="ignore")
                 logger.debug("set_param returned a response")
                 # Check for success
-                if "success" in response.lower() or '"err":""' in response or proc.returncode == 0:
+                if self._curl_application_success("First-boot setup", stdout) is True:
                     logger.info(f"First-boot setup completed via set_param on {self.ip}")
                     return True
 
@@ -946,7 +949,7 @@ class CambiumHandler(BaseHandler):
             )
             if proc.returncode == 0:
                 response = stdout.decode("utf-8", errors="ignore")
-                if "success" in response.lower() or "200" in response:
+                if self._curl_application_success("Password change", stdout) is True:
                     return True
 
             return False
@@ -957,7 +960,7 @@ class CambiumHandler(BaseHandler):
 
     def required_secrets(self) -> list:
         """Require secured SM access and a deployment login before config apply."""
-        return ["wpa_key", "management_password"]
+        return ["wpa_key", "management_password", "installer_password"]
 
     def pending_secrets(self) -> Dict[str, str]:
         values = super().pending_secrets()
@@ -1005,7 +1008,59 @@ class CambiumHandler(BaseHandler):
             logger.error("Cambium management password apply or verification failed")
             return False
 
+    async def _verify_installer_password(self, password: str) -> bool:
+        probe = CambiumHandler(ip=self.ip, credentials={}, interface=self.interface)
+        probe._base_url = self._base_url
+        try:
+            ok, _ = await probe._try_cgi_login_curl("installer", password)
+            return bool(ok)
+        finally:
+            await probe.disconnect()
+
+    async def _ensure_installer_account(self, password: str) -> bool:
+        """Enable and secure the built-in installer for every Cambium model.
+
+        The 4625 HAR account write (entry 252) supplies both fields together.
+        No template may enable this account without its intended secret.
+        """
+        if not password or not self._stok:
+            return False
+        live = await self._get_config_curl()
+        if not live:
+            return False
+        if str(live.get("installer_user_enabled")) == "1" and await self._verify_installer_password(password):
+            return True
+        form = "changed_elements=" + urllib.parse.quote(json.dumps({
+            "device_props": {"installer_user_enabled": "1", "installer_password": password},
+        })) + "&debug=true"
+        try:
+            proc, stdout, _ = await self._run_curl_with_stdin_config(
+                ["curl", "-s", "-k", "-m", "30", "--interface", self.interface,
+                 "-b", self._cookie_file, "-X", "POST", "-H",
+                 "Content-Type: application/x-www-form-urlencoded"],
+                self._base_url + "/cgi-bin/luci/;stok=" + self._stok + "/admin/set_account_params",
+                form_data=form,
+            )
+            result = json.loads(stdout)
+            if proc.returncode != 0 or result.get("success") not in (1, "1") or result.get("err"):
+                return False
+            await asyncio.sleep(3)
+            live = await self._get_config_curl()
+            return str(live.get("installer_user_enabled")) == "1" and await self._verify_installer_password(password)
+        except Exception:
+            logger.error("Cambium installer account apply or verification failed")
+            return False
+
     async def apply_secrets(self, secrets: Dict[str, str]) -> bool:
+        installer_password = secrets.get("installer_password", "")
+        if not installer_password:
+            logger.error("A Cambium installer deployment credential is required")
+            return False
+        if not await self._apply_radio_and_admin_secrets(secrets):
+            return False
+        return await self._ensure_installer_account(installer_password)
+
+    async def _apply_radio_and_admin_secrets(self, secrets: Dict[str, str]) -> bool:
         """Require exact secret readback and fresh standard-admin access."""
         password = secrets.get("management_password", "")
         if not password or password == self.DEFAULT_CREDENTIALS["password"]:

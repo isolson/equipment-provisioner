@@ -10,6 +10,7 @@ async def test_setup_forwards_rw_secret_to_handler(monkeypatch,tmp_path):
     cfg=Config();cfg.data.local_path=str(tmp_path);cfg.gpio.enabled=False
     cfg.credentials['cambium'].snmp_write_community='test-write-community'
     cfg.credentials['cambium'].password='test-admin'
+    cfg.credentials['cambium'].installer_password='test-installer'
     monkeypatch.setattr(main,'init_db',AsyncMock())
     monkeypatch.setattr(main,'init_notifier',lambda **kwargs:None)
     store=SimpleNamespace(ensure_directories=lambda:None,templates_path=tmp_path,firmware_path=tmp_path,local_path=tmp_path)
@@ -30,3 +31,5 @@ async def test_setup_forwards_rw_secret_to_handler(monkeypatch,tmp_path):
     h.credentials=h.DEFAULT_CREDENTIALS.copy()
     assert h.pending_secrets()['snmp_write_community']=='test-write-community'
     assert h.pending_secrets()['management_password']=='test-admin'
+
+    assert h.pending_secrets()['installer_password']=='test-installer'

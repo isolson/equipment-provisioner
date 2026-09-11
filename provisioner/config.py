@@ -126,10 +126,11 @@ class DeviceCredentials(BaseModel):
     wpa_key: str = ""  # Wireless encryption key (WPA2 PSK)
     snmp_community: str = ""  # SNMP read-only community
     snmp_write_community: str = ""  # Separate SNMP read-write community
+    installer_password: str = ""  # Cambium installer account; secret-owned
 
     @field_validator(
         "password", "backup_password", "bootstrap_password", "onboarding_password",
-        "wpa_key", "snmp_community", "snmp_write_community",
+        "wpa_key", "snmp_community", "snmp_write_community", "installer_password",
         mode="before",
     )
     @classmethod

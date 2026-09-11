@@ -133,27 +133,27 @@ def test_default_credentials_golden():
         "cambium": {
             "username": "admin", "password": "admin", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
-            "wpa_key": "", "snmp_community": "", "snmp_write_community": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
         "mikrotik": {
             "username": "admin", "password": "", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
-            "wpa_key": "", "snmp_community": "", "snmp_write_community": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
         "tachyon": {
             "username": "root", "password": "admin", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
-            "wpa_key": "", "snmp_community": "", "snmp_write_community": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
         "tarana": {
             "username": "admin", "password": "", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
-            "wpa_key": "", "snmp_community": "", "snmp_write_community": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
         "ubiquiti": {
             "username": "ubnt", "password": "ubnt", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
-            "wpa_key": "", "snmp_community": "", "snmp_write_community": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
     }
     assert list(_default_credentials()) == [

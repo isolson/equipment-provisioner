@@ -187,7 +187,8 @@ async def test_cambium_apply_secrets_writes_secret_fields_and_keeps_verify_basis
     monkeypatch.setattr(h, "_verify_management_password", AsyncMock(return_value=True))
     monkeypatch.setattr(h, "_get_config_curl", AsyncMock(side_effect=[{"snmpReadWriteCommunity":"test-long"}, {"wirelessInterfaceEncryptionKey":"k", "snmpReadOnlyCommunity":"c"}]))
     monkeypatch.setattr("provisioner.handlers.cambium.asyncio.sleep", AsyncMock())
-    assert await h.apply_secrets({"wpa_key": "k", "snmp_community": "c", "management_password":"test-admin"}) is True
+    monkeypatch.setattr(h, "_ensure_installer_account", AsyncMock(return_value=True))
+    assert await h.apply_secrets({"wpa_key": "k", "snmp_community": "c", "management_password":"test-admin", "installer_password":"test-installer"}) is True
     assert seen == [{"wirelessInterfaceEncryptionKey": "k", "snmpReadOnlyCommunity": "c"}]
     assert h._last_applied_config == {"mgmtVLANVID": "12"}
     assert await h.apply_secrets({}) is False

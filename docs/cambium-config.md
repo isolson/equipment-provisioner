@@ -588,3 +588,29 @@ Both SM family templates must include every declared fleet-policy field.
 The completeness regression prevents omissions from silently shrinking the
 verification set. Do not copy unreviewed device-default values merely because
 several exports happen to agree on them.
+
+## Installer account standard — all Cambium models
+
+The installer account must be enabled and secured during every Cambium
+provisioning run. The 4625 capture's `set_account_params` request at entry 252
+sets `installer_user_enabled=1` and `installer_password` together. A factory
+reset erases that desired state; the capture records what provisioning must
+restore, not what is expected to survive reset.
+
+Configure `credentials.cambium.installer_password` in the private host config
+(or its supported environment reference). Provisioning fails readiness when
+this credential is absent. Never commit the value or put it in a template.
+The credentials page accepts it without returning the stored value.
+
+The handler owns enablement as a secret-dependent operation: it sends enable
+and password together, checks the application response, reads back enablement,
+and requires a fresh installer login. It also verifies the standard admin
+login. An already-correct account is verified without rewriting it. This is
+vendor-wide behavior with no model allowlist.
+
+First-boot setup must retain `crashReporterEnable=0`. HTTP success alone is not
+acceptance: the first-boot/password response must report application success.
+
+Bench deployment note: the older running host received scoped handler, config
+schema, and credential-forwarding changes. The credentials-page addition is
+in PR 168 and requires deployment of that page/API stack after merge.

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
 #: Credential keys the page may set. Everything else is refused.
-EDITABLE_KEYS = ("username", "password", "backup_password", "wpa_key", "snmp_community", "snmp_write_community")
+EDITABLE_KEYS = ("username", "password", "backup_password", "wpa_key", "snmp_community", "snmp_write_community", "installer_password")
 _VENDOR_RE = re.compile(r"^(\s*)([a-z_]+):\s*(#.*)?$")
 _KEY_RE = re.compile(r"^(\s*)([a-z_]+):")
 

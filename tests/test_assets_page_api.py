@@ -58,8 +58,8 @@ def test_host_credentials_report_keys_and_required_secrets(tmp_path, monkeypatch
     client, config = _client(tmp_path, monkeypatch)
     config.credentials["cambium"].wpa_key = ""
     rows = {r["device_type"]: r for r in client.get("/api/host-credentials").json()["credentials"]}
-    assert rows["cambium"]["required_secrets"] == ["wpa_key", "management_password"]
-    assert rows["cambium"]["missing_secrets"] == ["wpa_key", "management_password"]
+    assert rows["cambium"]["required_secrets"] == ["wpa_key", "management_password", "installer_password"]
+    assert rows["cambium"]["missing_secrets"] == ["wpa_key", "management_password", "installer_password"]
     assert rows["cambium"]["keys"]["password"] is True
     assert "wpa_key" not in json.dumps(rows["cambium"]["keys"]).replace('"wpa_key": false', "")
     assert rows["tarana"]["required_secrets"] == []
@@ -121,6 +121,7 @@ def test_host_credentials_resolves_management_target_and_edits_rw_without_echo(t
     client, config = _client(tmp_path, monkeypatch)
     config.credentials["cambium"].password = "test-deployment-login"
     config.credentials["cambium"].wpa_key = "test-wireless-key"
+    config.credentials["cambium"].installer_password = "test-installer"
     rows = {r["device_type"]: r for r in client.get("/api/host-credentials").json()["credentials"]}
     assert rows["cambium"]["missing_secrets"] == []
     path = tmp_path / "config.yaml"
@@ -133,3 +134,15 @@ def test_host_credentials_resolves_management_target_and_edits_rw_without_echo(t
     values = yaml.safe_load(path.read_text())["credentials"]["cambium"]
     assert values["snmp_write_community"] == "test-write-community"
     assert values["snmp_community"] == "test-read-only"
+
+
+def test_installer_credential_edit_never_returns_the_secret(tmp_path, monkeypatch):
+    client, _ = _client(tmp_path, monkeypatch)
+    path = tmp_path / "config.yaml"
+    path.write_text("credentials:\n  cambium:\n    username: admin\n")
+    monkeypatch.setattr("provisioner.web.api._get_system_config_path", lambda: path)
+    response = client.put("/api/host-credentials/cambium", json={"installer_password": "test-private-installer"})
+    assert response.status_code == 200
+    assert "test-private-installer" not in response.text
+    assert response.json()["changed"] == ["installer_password"]
+    assert "test-private-installer" not in client.get("/api/host-credentials").text

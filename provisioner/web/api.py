@@ -3666,6 +3666,7 @@ class HostCredentialUpdate(BaseModel):
     wpa_key: Optional[str] = None
     snmp_community: Optional[str] = None
     snmp_write_community: Optional[str] = None
+    installer_password: Optional[str] = None
 
 
 _host_config_restart_required = False

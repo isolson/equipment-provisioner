@@ -1,0 +1,70 @@
+{
+  "date": "2026-09-11",
+  "scope": "Installer account required for all Cambium models",
+  "test_results": {
+    "passed": 1000,
+    "skipped": 5,
+    "runtime": "Python 3.13",
+    "python_39_grammar": true
+  },
+  "devices": [
+    {
+      "port": 3,
+      "model": "Force 300-25",
+      "installer_enabled": true,
+      "fresh_installer_login": true,
+      "fresh_standard_admin_login": true,
+      "baseline_fields_matched": 33
+    },
+    {
+      "port": 4,
+      "model": "ePMP 4625",
+      "installer_enabled": true,
+      "fresh_installer_login": true,
+      "fresh_standard_admin_login": true,
+      "baseline_fields_matched": 33
+    },
+    {
+      "port": 5,
+      "model": "Force 300-19",
+      "installer_enabled": true,
+      "fresh_installer_login": true,
+      "fresh_standard_admin_login": true,
+      "baseline_fields_matched": 33
+    },
+    {
+      "port": 6,
+      "model": "ePMP 4518",
+      "installer_enabled": true,
+      "fresh_installer_login": true,
+      "fresh_standard_admin_login": true,
+      "baseline_fields_matched": 33
+    }
+  ],
+  "force_300_19_corrections": [
+    "systemNtpServerIPMode",
+    "systemNtpServerPrimaryIP",
+    "systemNtpServerSecondaryIP",
+    "syslogServerIPFirst",
+    "syslogServerLogMask",
+    "cambiumDeviceAgentCNSURL",
+    "crashReporterEnable"
+  ],
+  "force_300_19_apply_path": "set_param did not apply; config_import accepted and all fields read back",
+  "limitations": [
+    "No AP traffic or upstream VLAN 12 acceptance in this check",
+    "No firmware transfer qualification on port 5",
+    "Ports 3 and 5 reported waiting-for-load; external power cycle pending"
+  ],
+  "private_evidence_root": "cambium/installer-standard-2026-09-11/",
+  "after_poe_toggle": {
+    "all_four_devices_baseline_and_logins_passed": true,
+    "original_poe_modes_restored": true,
+    "ports_with_switch_poe_load": [
+      4,
+      6
+    ],
+    "all_ports_link_down_assertion_passed": false,
+    "note": "Ports 3/5 have no switch PoE load; do not claim their cold-start persistence."
+  }
+}
