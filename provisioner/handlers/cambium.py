@@ -41,9 +41,16 @@ class CambiumHandler(BaseHandler):
     allows_arbitrary_template_fallback = False
 
     #: Fleet policy that the SM baseline writes and verifies. Every value
-    #: traces to the known-good fixtures under ``bench-evidence/cambium``
+    #: traces to historical fixtures and dated operator policy corrections
+    #: under ``bench-evidence/cambium``
     #: (see ``tests/test_cambium_evidence.py``). Change a value there first.
     SM_FLEET_POLICY = {
+        # Dated policy witness: cambium/policy-correction-2026-09-11.json.
+        # Authentication mask is inverted: 5 disables open + EAP-TTLS.
+        "wirelessSecurityMethod": "5",
+        "wirelessInterfaceEncryption": "2",
+        "mgmtVLANVP": "0",
+        "crashReporterEnable": "0",
         "networkMode": "2",
         "mgmtVLANEnable": "1",
         "mgmtVLANVID": "12",

@@ -570,3 +570,21 @@ read the mask, and inspect the frequency lists. Then confirm association to an
 AP at the intended width, management VLAN DHCP/reachability, traffic, and
 persistence after a cold power cycle. A correct mask alone does not prove RF
 connectivity at every width. See the dated validation record for live results.
+
+
+### SM security and management policy correction — 2026-09-11
+
+The operator-reviewed SM standard requires `wirelessSecurityMethod=5`
+(WPA2 only, inverted mask), `wirelessInterfaceEncryption=2` (AES-256),
+`mgmtVLANVP=0`, and `crashReporterEnable=0`. These mappings are confirmed by
+the 4625's captured 5.11.1 UI; the dated policy witness under
+`bench-evidence/cambium/policy-correction-2026-09-11.json` records reference
+observations and their disagreements. A matching WPA key is insufficient:
+verify the authentication selector independently. Readback and cold-power persistence of all 33 updated baseline fields passed
+on the returned 4625 using the deployed handler and active template. A new
+factory provisioning trial and RF/VLAN traffic acceptance remain distinct.
+
+Both SM family templates must include every declared fleet-policy field.
+The completeness regression prevents omissions from silently shrinking the
+verification set. Do not copy unreviewed device-default values merely because
+several exports happen to agree on them.

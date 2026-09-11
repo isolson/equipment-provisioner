@@ -23,6 +23,14 @@
     "snmpProtocolVersion": "1",
     "snmpRemoteAccess": "1",
     "cambiumSSHServerEnable": "1",
-    "cambiumTelnetServerEnable": "0"
+    "cambiumTelnetServerEnable": "0",
+    "wirelessSecurityMethod": "5",
+    "wirelessInterfaceEncryption": "2",
+    "mgmtVLANVP": "0",
+    "crashReporterEnable": "0",
+    "mgmtIFEnable": "0",
+    "networkBridgeIPAddressMode": "2",
+    "mgmtIFIPAddressMode": "2",
+    "syslogServerTypeFirst": "1"
   }
 }

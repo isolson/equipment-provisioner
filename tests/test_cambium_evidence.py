@@ -1,7 +1,7 @@
 """Cambium template and handler values trace to bench-evidence fixtures.
 
-No test in this file hardcodes a role value. The known-good fixtures are the
-only source. A change to a value starts with a new fixture, not a chat.
+Role values trace to known-good fixtures. Dated operator-approved policy
+corrections supplement historical captures without rewriting their observations.
 """
 
 import json
@@ -14,6 +14,7 @@ from provisioner.handlers.cambium import CambiumHandler
 from provisioner.vendor_registry import config_family_for_model
 
 EVIDENCE = Path("bench-evidence/cambium")
+POLICY_CORRECTION = json.loads((EVIDENCE / "policy-correction-2026-09-11.json").read_text())["values"]
 
 
 def _records(role="SM", witness=None):
@@ -56,9 +57,10 @@ def _baseline_ids():
 
 @pytest.mark.parametrize("manifest,values", _records(witness="baseline"), ids=_baseline_ids())
 def test_handler_fleet_policy_matches_every_baseline_fixture(manifest, values):
+    effective_values = dict(values, **POLICY_CORRECTION)
     for key, expected in CambiumHandler.SM_FLEET_POLICY.items():
-        assert key in values, (manifest["model"], key, "fleet policy field not witnessed")
-        assert str(values[key]) == expected, (manifest["model"], key)
+        assert key in effective_values, (manifest["model"], key, "fleet policy field not witnessed")
+        assert str(effective_values[key]) == expected, (manifest["model"], key)
 
 
 @pytest.mark.parametrize("family", ["ePMP-4K", "ePMP-3K"])
@@ -67,7 +69,7 @@ def test_tracked_sm_template_values_trace_to_family_baseline_fixtures(family):
         Path("configs/templates/cambium/%s/5.11.1/SM/default.json" % family).read_text()
     )["device_props"]
     fixtures = [
-        values
+        dict(values, **POLICY_CORRECTION)
         for manifest, values in _records(witness="baseline")
         if config_family_for_model("cambium", manifest["model"]).directory == family
     ]
@@ -151,3 +153,17 @@ def test_scan_policy_matches_dated_readback(record):
     props = handler._with_sm_scan_policy(dict(handler.SM_ROLE_VALUES))
     assert props["wirelessInterfaceScanFrequencyBandwidth"] == observation["scan_mask"]
     assert handler._verification_values(props)["wirelessInterfaceScanFrequencyBandwidth"] == observation["scan_mask"]
+
+
+@pytest.mark.parametrize("family", ["ePMP-4K", "ePMP-3K"])
+def test_sm_templates_include_the_complete_declared_fleet_policy(family):
+    props = json.loads(Path("configs/templates/cambium", family, "5.11.1/SM/default.json").read_text())["device_props"]
+    for key, value in CambiumHandler.SM_FLEET_POLICY.items():
+        assert props.get(key) == value, (family, key)
+    # A matching WPA key cannot hide EAP-TTLS, priority, or telemetry drift.
+    expected = CambiumHandler._verification_values(props)
+    for key, value in POLICY_CORRECTION.items():
+        assert expected[key] == value
+        drifted = dict(props, **{key: "999"})
+        handler = CambiumHandler(ip="192.0.2.1", credentials={})
+        assert handler._check_config_values(drifted, expected) is False
