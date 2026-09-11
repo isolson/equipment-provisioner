@@ -43,3 +43,50 @@ Inspect → Switch → Router. Both applications returned successful authenticat
 readbacks with no page JavaScript errors. The private
 `wired-modes-ui.private.har` and screenshot record that provisioner UI sequence;
 `ui-verification.json` records its results. The device was left in Router mode.
+
+## Business VLAN profiles and advanced management
+
+The later business release supersedes the initial flat role profiles. See
+[the profile runbook](../../../../docs/business-wired-profiles.md) for source
+provenance, role policy, exact ports, credentials and remaining acceptance work.
+
+- Complete imports passed 66 router and 48 switch readback checks, including
+  VLAN filtering, DHCP/scope settings, management services, firewall, syslog and
+  NTP configuration. Router → Switch → Router completed.
+- DHCP probes received correct-scope offers on router VLANs 10, 20, 40 and 70.
+  Switch probes received no offers.
+- ARP reached each router VLAN gateway. Internal ICMP received replies; IoT,
+  Guest and OpenRoam gateway ICMP received none, as required by the standard.
+- Router configuration and the prepared WireGuard key survived a software reboot.
+- RoMON enable/disable on ether3 passed containment readback. The wildcard
+  remains forbidden. A per-device secret is stored privately.
+- WireGuard key preparation was repeatable and the private store permissions
+  were verified. The interface remains disabled; no peer or tunnel is claimed.
+
+The first tagged DHCP checks exposed the bench switch's untagged-only port
+setting. Port 1 was changed to tag stacking with PVID 1991 and admit-all,
+then the packet checks passed. Other bench ports were not changed.
+
+Two execution findings are retained: dry-run is a flag on this RouterOS
+version; syntax success does not detect built-in dynamic firewall rules that
+cannot be removed. Cleanup now preserves dynamic rules and removes static
+bridge VLAN rows before replacing the bridge. RouterOS readback stringifies
+lists with semicolons; unset default firewall flags must be handled as enabled.
+
+Sanitized business role readbacks are in `business-router.structure.json` and
+`business-switch.structure.json`. Private operational evidence includes
+`business-router-readback.json`, `business-switch-readback.json`,
+`business-router-dhcp.json`, `business-switch-dhcp.json`,
+`business-management-isolation.json`, `business-advanced.json`,
+`business-reboot.json` and `business-after-reboot.private.rsc`.
+
+Browser role changes and advanced controls passed without page errors. Synthetic
+UDP probes allowed Internal → IoT and blocked IoT → Internal, Guest →
+Internal/IoT, and OpenRoam → Internal/IoT. The full suite passed 983 tests,
+with 5 skipped on host Python 3.13. Login standardization remains pending;
+the unit retains its label login.
+
+WAN traffic (operator deferred), other client protocols, upstream switch forwarding,
+collector receipt, NTP synchronization and physical power-cycle acceptance
+remain unverified. The installed fleet reset/enrollment lifecycle is not part
+of this interim credentialed reconfiguration flow.

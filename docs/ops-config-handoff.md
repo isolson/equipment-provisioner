@@ -80,10 +80,10 @@ Extend the Ops contract with an executor job resource under
 - Both RB5009 profiles are marked `bench_validated: false` upstream. Complete
   that validation and the requested role mappings in Ops, then capture each
   supported transition on the bench.
-- The current hEX S business-labelled buttons verify simple routing/bridging
-  transitions only. They do not implement the complete Ops business standards
-  or infrastructure lifecycle. Do not count those checks as fleet-profile
-  acceptance. Keep infrastructure application unavailable until this handoff
+- The initial hEX S buttons verified simple routing/bridging only. The
+  subsequent [business bench profiles](business-wired-profiles.md) implement
+  business VLAN policy and advanced local management, but do not implement
+  the full Ops reset, KDF, claim or infrastructure lifecycle. Keep infrastructure application unavailable until this handoff
   and the exact model/firmware evidence are in place.
 
 Next implementation slice: an Ops executor request/manifest/status contract

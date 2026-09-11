@@ -192,7 +192,7 @@ def test_vendor_ips_golden():
         "tachyon": ["169.254.1.1", "192.168.1.1"],
         "ubiquiti": ["192.168.1.20"],
         "tarana": ["169.254.100.1"],
-        "mikrotik": ["192.168.88.1"],
+        "mikrotik": ["192.168.88.1", "192.168.10.1", "192.168.10.2"],
     }
     # Insertion order IS the detection-probe order (#74) — assert it too.
     assert list(VENDOR_LINK_LOCAL_IPS) == [
@@ -207,10 +207,12 @@ def test_probe_and_boot_ping_orders_golden():
         ("192.168.1.20", ["ubiquiti"]),
         ("169.254.100.1", ["tarana"]),
         ("192.168.88.1", ["mikrotik"]),
+        ("192.168.10.1", ["mikrotik"]),
+        ("192.168.10.2", ["mikrotik"]),
     ]
     assert boot_ping_ips() == [
         "169.254.1.1", "192.168.1.1", "192.168.1.20",
-        "192.168.88.1", "169.254.100.1",
+        "192.168.88.1", "192.168.10.1", "192.168.10.2", "169.254.100.1",
     ]
 
 

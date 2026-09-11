@@ -1,7 +1,7 @@
 """Handler-driven wired mode inspection and application."""
 import asyncio
 import hashlib
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -18,6 +18,7 @@ router = APIRouter()
 class NetworkModeRequest(BaseModel):
     mode: str
     device_token: str
+    advanced_options: Optional[Dict[str, bool]] = None
 
 
 def _port(request, port_number):
@@ -62,7 +63,7 @@ async def _operate(request, port_number, change: Optional[NetworkModeRequest] = 
             credentials = {"username": override.username, "password": override.password}
         fingerprint = DeviceFingerprint(device_type=DeviceType(status["device_type"]), model=status.get("device_model"))
         handler = provisioner.handler_manager.get_handler(fingerprint, status["device_ip"], interface=interface, custom_credentials=credentials)
-        if not handler or not await handler.connect():
+        if not handler or not await getattr(handler, "connect_network_mode", handler.connect)():
             raise HTTPException(401, "Device login failed; enter its credentials")
         info = await handler.get_info()
         token = _device_token(info, interface)
@@ -81,14 +82,25 @@ async def _operate(request, port_number, change: Optional[NetworkModeRequest] = 
                 raise HTTPException(409, "Device or firmware changed; inspect the port again")
             if change.mode not in choices:
                 raise HTTPException(409, "This mode is not verified for the detected model and firmware")
+            if change.advanced_options is not None:
+                validate_options = getattr(handler, "validate_network_mode_advanced", None)
+                if not validate_options:
+                    raise HTTPException(409, "Advanced management is unavailable for this device")
+                validate_options(change.advanced_options)
             pm.begin_mode_job(port_number, change.mode, [{"key": "apply", "label": "Apply and verify wired mode"}])
             job_started = True
             pm.update_mode_job(port_number, "apply", "loading")
             state = await handler.apply_network_mode(change.mode)
+            if change.advanced_options is not None:
+                advanced = getattr(handler, "apply_network_mode_advanced", None)
+                if not advanced:
+                    raise HTTPException(409, "Advanced management is unavailable for this device")
+                await advanced(change.advanced_options)
             # A disconnected/replaced port must never receive a stale success.
             current = pm.port_states.get(port_number)
             if current is not slot or current.device_mac != status.get("device_mac"):
                 raise HTTPException(409, "The connected device changed during the operation")
+            slot.device_ip = handler.ip
             pm.set_device_mode(port_number, state["mode"], {"mode": state["mode"], "verified": True})
             if status.get("needs_credentials"):
                 # This explicit login/role operation resolved the old login
@@ -98,12 +110,17 @@ async def _operate(request, port_number, change: Optional[NetworkModeRequest] = 
                 slot.last_error = None
             pm.update_mode_job(port_number, "apply", True)
             success = True
+        advanced_reader = getattr(handler, "network_mode_advanced_state", None)
+        advanced_state = await advanced_reader() if advanced_reader else None
         return {"port": port_number, "model": model, "firmware": firmware,
                 "mode": state["mode"], "device_token": token,
                 "choices": [{"value": mode, "label": labels[mode],
                              "description": getattr(handler, "network_mode_descriptions", {}).get(mode, "")}
                             for mode in choices],
                 "management_note": getattr(handler, "network_mode_management_note", ""),
+                "advanced": advanced_state,
+                "checks": state.get("checks", {}),
+                "management_ip": state.get("management_ip"),
                 "verified": bool(change and success)}
     except HTTPException:
         raise

@@ -1,5 +1,9 @@
 # hEX S package update and wired modes — 2026-09-10
 
+**Latest:** [Business wired profiles](business-wired-profiles.md) supersedes the
+initial flat routing/bridging profiles described below. It records VLAN policy,
+advanced management, current addresses and packet-test results.
+
 The E60iUGS ARM unit is on provisioner port 1, connected through its ether2 LAN
 port. Its label credentials are stored privately on the bench host. Initial
 login/readback used interface-bound IPv6 SSH; IPv4 SSH also succeeded with a

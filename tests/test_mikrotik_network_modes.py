@@ -35,50 +35,101 @@ async def test_unrecognized_layout_never_writes(key, value):
     h._run_command.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_wrong_readback_does_not_report_success():
-    h = handler()
-    h.network_mode_state = AsyncMock(side_effect=[state(), state()])
-    h._run_command = AsyncMock(return_value="")
-    with pytest.raises(RuntimeError, match="readback"):
-        await h.apply_network_mode("switch")
-
 
 @pytest.mark.asyncio
-async def test_device_command_error_stops_sequence():
+async def test_qualified_layout_delegates_to_business_executor(monkeypatch):
+    from provisioner.handlers import mikrotik_business
     h = handler()
     h.network_mode_state = AsyncMock(return_value=state())
-    h._run_command = AsyncMock(return_value="failure: blocked by device-mode")
-    with pytest.raises(RuntimeError, match="rejected"):
-        await h.apply_network_mode("switch")
-    assert h._run_command.await_count == 1
+    executor = AsyncMock(return_value={"profile": "business-v1", "mode": "switch"})
+    monkeypatch.setattr(mikrotik_business, "apply", executor)
+    assert (await h.apply_network_mode("switch"))["profile"] == "business-v1"
+    executor.assert_awaited_once_with(h, "switch")
 
 
 @pytest.mark.asyncio
-async def test_both_directions_verify_and_preserve_management():
+async def test_correct_business_profile_is_read_only(monkeypatch):
+    from provisioner.handlers import mikrotik_business
     h = handler()
-    h.network_mode_state = AsyncMock(side_effect=[state(), state("switch"), state("switch"), state()])
-    h._run_command = AsyncMock(return_value="")
-    assert (await h.apply_network_mode("switch"))["mode"] == "switch"
-    assert (await h.apply_network_mode("router"))["mode"] == "router"
-    commands = [c.args[0] for c in h._run_command.await_args_list]
-    assert not any("/ip address" in c or "/user" in c or "/import" in c or "reset-configuration" in c for c in commands)
+    before = state("router")
+    before.update(profile="business-v1", checks={"physical_ports":True,"policy":True})
+    h.network_mode_state = AsyncMock(return_value=before)
+    executor = AsyncMock()
+    monkeypatch.setattr(mikrotik_business,"apply",executor)
+    assert await h.apply_network_mode("router") == before
+    executor.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_mixed_flags_in_recognized_layout_can_be_reconciled():
+async def test_drifted_profile_requires_reapply(monkeypatch):
+    from provisioner.handlers import mikrotik_business
     h = handler()
-    before = state()
-    before.update(mode="custom", nat_enabled=0)
-    h.network_mode_state = AsyncMock(side_effect=[before, state()])
-    h._run_command = AsyncMock(return_value="")
-    assert (await h.apply_network_mode("router"))["mode"] == "router"
+    before = state("router")
+    before.update(profile="business-v1", checks={"physical_ports":True,"policy":False})
+    h.network_mode_state = AsyncMock(return_value=before)
+    executor = AsyncMock(return_value={"mode":"router"})
+    monkeypatch.setattr(mikrotik_business,"apply",executor)
+    await h.apply_network_mode("router")
+    executor.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_already_correct_mode_is_read_only():
+async def test_missing_readback_never_passes():
+    from provisioner.handlers import mikrotik_business
     h = handler()
-    h.network_mode_state = AsyncMock(return_value=state("switch"))
-    h._run_command = AsyncMock()
-    assert (await h.apply_network_mode("switch"))["mode"] == "switch"
+    h._run_command = AsyncMock(return_value="physical_ports=true")
+    result = await mikrotik_business.read_state(h,"router")
+    assert result["checks"]["physical_ports"]
+    assert not all(result["checks"].values())
+
+
+def test_switch_profile_has_no_routing_or_dhcp_server():
+    from provisioner.handlers.mikrotik_business import profile_text
+    text = profile_text("switch")
+    assert "ip-forward=no" in text
+    assert "dhcp-internal" not in text
+    assert "action=masquerade" not in text
+    assert "192.168.10.2/24" in text
+    assert "trusted=yes" in text
+    assert "poe-out=forced-on" not in text
+
+
+def test_business_profile_rejects_other_firmware():
+    before=state()
+    before.update(profile="business-v1",firmware="7.24.2",checks={"physical_ports":True})
+    with pytest.raises(ValueError):
+        handler().validate_network_mode_layout(before)
+
+
+def test_private_key_store_permissions(tmp_path, monkeypatch):
+    import stat
+    from provisioner.handlers import mikrotik_business as business
+    monkeypatch.setattr(business,"SECRET_ROOT",tmp_path / "secrets")
+    path=business._secret_file("TEST-DEVICE")
+    business._save_secrets(path,{"test":"private-test-value"})
+    assert stat.S_IMODE(path.stat().st_mode)==0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode)==0o700
+    assert "TEST-DEVICE" not in path.name
+
+
+@pytest.mark.asyncio
+async def test_unknown_advanced_option_never_contacts_device():
+    h=handler()
+    h._run_command=AsyncMock()
+    with pytest.raises(ValueError):
+        await h.apply_network_mode_advanced({"unknown":True})
     h._run_command.assert_not_awaited()
+
+
+def test_replacement_keeps_dynamic_firewall_counters():
+    from provisioner.handlers.mikrotik_business import CLEANUP
+    assert "/ip firewall filter remove [find where dynamic=no]" in CLEANUP
+    assert "/interface bridge vlan remove [find where dynamic=no]" in CLEANUP
+    assert "/interface wireguard" not in CLEANUP
+    assert "/user" not in CLEANUP
+
+
+@pytest.mark.parametrize("ip", ["192.168.88.1", "192.168.10.1", "192.168.10.2"])
+def test_management_discovery_uses_existing_isolated_source(ip):
+    assert MikrotikHandler.discovery_arp_source(ip)=="192.168.88.11"
+    assert MikrotikHandler.discovery_arp_source("169.254.1.1") is None

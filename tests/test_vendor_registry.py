@@ -722,7 +722,7 @@ class TestSingleVendorBuild:
         assert out["health"] == {"status": "healthy"}
         assert out["provisionable"] == ["mikrotik"]
         assert out["ip_vendors"] == ["mikrotik"]
-        assert out["probe"] == [["192.168.88.1", ["mikrotik"]]]
+        assert out["probe"] == [[ip, ["mikrotik"]] for ip in ["192.168.88.1", "192.168.10.1", "192.168.10.2"]]
         # evolution_digital is allowlist-filtered too; `unknown` is the
         # UI-only fallback card, not a vendor, so it always renders.
         assert out["ui_vendors"] == ["mikrotik", "unknown"]
@@ -735,7 +735,7 @@ class TestSingleVendorBuild:
         # port_manager/DeviceLinkLocalIP import path), Provisioner and
         # PortManager constructed.
         assert out["port_manager_ports"] == 1  # setup_vlans=False → 1 port
-        assert out["boot_ping"] == ["192.168.88.1"]
+        assert out["boot_ping"] == ["192.168.88.1", "192.168.10.1", "192.168.10.2"]
         # Excluded vendors' address constants stay defined (unfiltered
         # facts), while detection candidates are filtered.
         assert out["cambium_const"] == "169.254.1.1"

@@ -12,7 +12,7 @@ def setup_client(monkeypatch, busy=False, qualified=True):
     pm = SimpleNamespace(port_states={1: state}, get_port_status=lambda: {1: dict(status, provisioning=state.provisioning)}, get_interface_for_port=lambda n: "test1", begin_mode_job=lambda *a: "job", update_mode_job=lambda *a: None, finish_mode_job=lambda *a: None)
     pm.update_port_device_info = lambda *a, **kw: None
     pm.set_device_mode = lambda port, mode, config: setattr(state, "device_mode", mode)
-    handler = SimpleNamespace(supports_network_modes=True, connect=AsyncMock(return_value=True), disconnect=AsyncMock(), get_info=AsyncMock(return_value=SimpleNamespace(serial_number="TEST-UNIT", firmware_version="7.23.5", model="hEX S")), network_mode_state=AsyncMock(return_value={"model":"hEX S","firmware":"7.23.5","mode":"router"}), validate_network_mode_layout=lambda s: None, network_mode_labels_for_model=lambda model: {"router":"Router","switch":"Switch"}, apply_network_mode=AsyncMock(return_value={"model":"hEX S","firmware":"7.23.5","mode":"switch"}))
+    handler = SimpleNamespace(ip="192.0.2.1", supports_network_modes=True, connect=AsyncMock(return_value=True), disconnect=AsyncMock(), get_info=AsyncMock(return_value=SimpleNamespace(serial_number="TEST-UNIT", firmware_version="7.23.5", model="hEX S")), network_mode_state=AsyncMock(return_value={"model":"hEX S","firmware":"7.23.5","mode":"router"}), validate_network_mode_layout=lambda s: None, network_mode_labels_for_model=lambda model: {"router":"Router","switch":"Switch"}, apply_network_mode=AsyncMock(return_value={"model":"hEX S","firmware":"7.23.5","mode":"switch"}))
     monkeypatch.setattr(network_modes.HandlerManager, "handler_class_for", lambda kind: handler)
     monkeypatch.setattr(network_modes, "qualified_modes", lambda *a: ("router", "switch") if qualified else ())
     monkeypatch.setattr(network_modes, "get_credential_override", lambda n: None)
@@ -79,3 +79,25 @@ def test_private_device_error_is_not_returned(monkeypatch):
 def test_page_renders(monkeypatch):
     client, _, _ = setup_client(monkeypatch)
     assert client.get('/network-modes').status_code == 200
+
+
+def test_advanced_options_are_handler_owned(monkeypatch):
+    client, handler, state=setup_client(monkeypatch)
+    handler.apply_network_mode_advanced=AsyncMock()
+    handler.validate_network_mode_advanced=lambda options: None
+    token=client.get('/api/network-modes/1').json()['device_token']
+    response=client.post('/api/network-modes/1',json={"mode":"switch","device_token":token,"advanced_options":{"feature":True}})
+    assert response.status_code==200
+    handler.apply_network_mode_advanced.assert_awaited_once_with({"feature":True})
+    assert state.device_ip==handler.ip
+
+
+def test_invalid_advanced_option_refuses_mode_write(monkeypatch):
+    client, handler, _=setup_client(monkeypatch)
+    def reject(options):
+        raise ValueError("Unsupported option")
+    handler.validate_network_mode_advanced=reject
+    token=client.get('/api/network-modes/1').json()['device_token']
+    response=client.post('/api/network-modes/1',json={"mode":"switch","device_token":token,"advanced_options":{"invalid":True}})
+    assert response.status_code==409
+    handler.apply_network_mode.assert_not_awaited()

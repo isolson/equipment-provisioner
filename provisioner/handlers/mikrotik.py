@@ -24,10 +24,21 @@ class MikrotikHandler(BaseHandler):
     manual_netinstall_label = "MikroTik recovery (Netinstall)"
     supports_network_modes = True
     network_mode_descriptions = {
-        "router": "ether1 is WAN. Remaining Ethernet and SFP ports are LAN. Routing, NAT and the existing LAN DHCP server are enabled.",
-        "switch": "All Ethernet and SFP ports share one bridge. Routing, NAT and DHCP client/server functions are disabled.",
+        "router": "ether1 WAN; ether2/4/5 trunks; ether3/SFP Internal access. VLANs 10/20/40/70 with DHCP, NAT and isolation. Management: 192.168.10.1.",
+        "switch": "ether1 uplink; ether2/4/5 trunks; ether3/SFP Internal access. VLANs 10/20/40/70; no routing or DHCP server. Management: 192.168.10.2.",
     }
-    network_mode_management_note = "The existing management address and login are retained."
+    network_mode_management_note = "Internal VLAN 10 is native/untagged; 20/40/70 are tagged on trunks. Current login is retained. Syslog and NTP: 100.126.15.28. Applying replaces this bench profile."
+
+    @classmethod
+    def discovery_arp_source(cls, ip: str) -> Optional[str]:
+        from .mikrotik_business import MANAGEMENT_IPS
+        # ARP bypasses overlapping host management routes and source-restricted
+        # ICMP. The original factory source is already assigned on bench VLANs.
+        return "192.168.88.11" if ip == "192.168.88.1" or ip in MANAGEMENT_IPS.values() else None
+
+    async def connect_network_mode(self) -> bool:
+        from . import mikrotik_business
+        return await mikrotik_business.connect(self)
 
     @classmethod
     def network_mode_labels_for_model(cls, model: Optional[str]) -> Dict[str, str]:
@@ -38,6 +49,16 @@ class MikrotikHandler(BaseHandler):
 
     async def network_mode_state(self) -> Dict[str, Any]:
         """Read the factory-layout contract without exposing configuration secrets."""
+        from . import mikrotik_business
+        marker = (await self._run_command(":put [/system note get note]")).strip()
+        if marker.startswith(mikrotik_business.PROFILE_MARKER):
+            mode = marker[len(mikrotik_business.PROFILE_MARKER):]
+            if mode not in mikrotik_business.MANAGEMENT_IPS:
+                raise ValueError("Unknown managed business profile")
+            state = await mikrotik_business.read_state(self, mode)
+            info = await self.get_info()
+            state.update(model=info.model, firmware=info.firmware_version, architecture=info.hardware_version)
+            return state
         queries = {
             "model": "/system resource get board-name",
             "architecture": "/system resource get architecture-name",
@@ -88,6 +109,10 @@ class MikrotikHandler(BaseHandler):
     @staticmethod
     def _validate_network_mode_layout(state: Dict[str, Any]) -> None:
         """Refuse to repurpose an unknown model or overwrite a custom layout."""
+        if state.get("profile") == "business-v1":
+            if (state.get("model"), state.get("architecture"), state.get("firmware")) != ("hEX S", "arm", "7.23.5") or not state.get("checks", {}).get("physical_ports"):
+                raise ValueError("Unqualified business profile hardware")
+            return
         expected = {
             "model": "hEX S", "architecture": "arm", "bridges": 1,
             "standard_bridge": 1, "ethernet_ports": 6, "lan_bridged": 5,
@@ -108,45 +133,33 @@ class MikrotikHandler(BaseHandler):
         self._validate_network_mode_layout(state)
 
     async def apply_network_mode(self, mode: str) -> Dict[str, Any]:
-        """Toggle the verified wired layout, preserving bridge management access.
-
-        This path deliberately does not reset/import a configuration or alter
-        credentials, firewall filters, addressing, or backend-owned ZTP scripts.
-        The caller serializes this operation against provisioning on the port.
-        """
-        if mode not in ("router", "switch"):
+        """Apply and verify the complete hardware-qualified business profile."""
+        from . import mikrotik_business
+        if mode not in mikrotik_business.MANAGEMENT_IPS:
             raise ValueError("Unknown network mode")
         before = await self.network_mode_state()
         self._validate_network_mode_layout(before)
-        if before["mode"] == mode:
+        if before.get("profile") == "business-v1" and before["mode"] == mode and all(before["checks"].values()):
             return before
-        if mode == "switch":
-            commands = (
-                "/ip settings set ip-forward=no",
-                "/ipv6 settings set forward=no",
-                "/ip dhcp-server disable [find]",
-                "/ip dhcp-client disable [find]",
-                "/ip firewall nat disable [find]",
-                ':if ([:len [/interface bridge port find where interface="ether1"]] = 0) do={/interface bridge port add bridge=bridge interface=ether1 comment="provisioner: switch uplink"}',
-            )
-        else:
-            commands = (
-                '/interface bridge port remove [find where interface="ether1" and bridge="bridge"]',
-                "/ip firewall nat enable [find]",
-                "/ip dhcp-server enable [find]",
-                "/ip dhcp-client enable [find]",
-                "/ip settings set ip-forward=yes",
-                "/ipv6 settings set forward=yes",
-            )
-        for command in commands:
-            output = await self._run_command(command)
-            if re.search(r"failure:|syntax error|expected end|not allowed", output, re.I):
-                raise RuntimeError("Device rejected a network-mode command; review its current state")
-        after = await self.network_mode_state()
-        self._validate_network_mode_layout(after)
-        if after["mode"] != mode:
-            raise RuntimeError("Network-mode readback did not match the requested mode")
-        return after
+        return await mikrotik_business.apply(self, mode)
+
+    async def network_mode_advanced_state(self):
+        from . import mikrotik_business
+        state = await mikrotik_business.advanced_state(self)
+        return {"options": [
+            {"key": "romon_enabled", "label": "Enable RoMON on Internal access port ether3", "checked": state["romon_enabled"], "description": "A per-device secret is stored privately on the provisioner. All other ports stay excluded."},
+            {"key": "prepare_wireguard", "label": "Prepare and store a WireGuard key", "checked": False, "description": "The interface remains disabled until a management concentrator peer is configured."},
+        ], "status": state["wireguard_status"], "public_key": state["wireguard_public_key"]}
+
+    @staticmethod
+    def validate_network_mode_advanced(options):
+        if set(options) - {"romon_enabled", "prepare_wireguard"}:
+            raise ValueError("Unknown advanced management option")
+
+    async def apply_network_mode_advanced(self, options):
+        from . import mikrotik_business
+        self.validate_network_mode_advanced(options)
+        return await mikrotik_business.apply_advanced(self, options.get("romon_enabled"), options.get("prepare_wireguard", False))
 
     # Try common MikroTik defaults before failing to UI prompt
     DEFAULT_CREDENTIALS = [

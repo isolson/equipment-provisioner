@@ -1538,14 +1538,18 @@ class PortManager:
     async def _ping_device(self, interface: str, ip: str, arp_fallback: bool = True) -> bool:
         """Ping a device through a specific interface."""
 
-        # 192.168.88.1 is both the management switch IP AND the default IP of
-        # factory-reset MikroTik devices.  The pinned /32 management route
-        # sends ICMP to the switch, not the provisioning VLAN.  Use ARP-only
-        # detection for this address — ARP works at L2, bypassing routing.
-        if ip == DeviceLinkLocalIP.MIKROTIK:
-            if arp_fallback:
-                return await self._arp_probe(interface, ip, source_ip="192.168.88.11")
-            return False
+        # A handler can require ARP for its known addresses when ICMP uses
+        # a source-restricted management network or overlaps host routes.
+        from .handler_manager import HandlerManager
+        for known_ip, candidates in DeviceLinkLocalIP.ALL:
+            if known_ip != ip:
+                continue
+            for device_type in candidates:
+                handler_cls = HandlerManager.handler_class_for(device_type)
+                source_hook = getattr(handler_cls, "discovery_arp_source", None)
+                source_ip = source_hook(ip) if source_hook else None
+                if source_ip is not None:
+                    return await self._arp_probe(interface, ip, source_ip=source_ip) if arp_fallback else False
 
         proc = None
         try:
