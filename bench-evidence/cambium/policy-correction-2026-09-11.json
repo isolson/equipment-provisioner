@@ -1,0 +1,26 @@
+{
+  "kind": "operator-approved-policy-correction",
+  "date": "2026-09-11",
+  "values": {
+    "wirelessSecurityMethod": "5",
+    "wirelessInterfaceEncryption": "2",
+    "mgmtVLANVP": "0",
+    "crashReporterEnable": "0"
+  },
+  "sources": {
+    "wirelessSecurityMethod": "4518 supplied HAR final readback is 5; 4625 5.11.1 captured UI uses an inverted authentication mask with WPA2 bit 1, EAP-TTLS bit 2, open bit 0. Operator requires WPA2 only.",
+    "wirelessInterfaceEncryption": "4518, 4616 and Force 300-25 supplied HAR readbacks are 2; captured UI maps 2 to AES-256. This alone does not prove WPA2-only authentication.",
+    "mgmtVLANVP": "All three supplied HAR readbacks are 0; operator confirmed VLAN 12 priority 0.",
+    "crashReporterEnable": "4616 and Force 300-25 supplied HAR readbacks are 0; captured UI maps 0 to disabled. 4518 historical readback is 1 and is superseded by the operator decision."
+  },
+  "qualification": "Policy witness, not a completed live provisioning or RF acceptance. Older baseline fixtures remain historical and are not rewritten.",
+  "live_readback": {
+    "model": "ePMP 4625",
+    "firmware": "5.11.1",
+    "port": 4,
+    "all_33_fields_match": true,
+    "cold_power_persistence": true,
+    "source": "/var/lib/provisioner/bench-evidence/cambium/ePMP-4625/acceptance-2026-09-11/checks-expanded-after-power.json",
+    "scope": "Operator-corrected state; not a new factory provisioning trial or RF acceptance."
+  }
+}

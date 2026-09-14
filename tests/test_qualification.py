@@ -115,3 +115,13 @@ def test_module_has_no_vendor_names():
     source = open(qualification.__file__).read().lower()
     for vendor in ("cambium", "tachyon", "tarana", "mikrotik", "ubiquiti"):
         assert vendor not in source
+
+
+def test_wired_requirements_do_not_change_radio_transition_report(evidence_root):
+    _manifest(evidence_root, "mikrotik", "hEX S", "7.23.5", [
+        ("router", "switch", "success"), ("switch", "router", "success"),
+    ])
+    requirements = {mode: frozenset((("router", "switch"), ("switch", "router")))
+                    for mode in ("router", "switch")}
+    assert qualification.qualified_modes("mikrotik", "hEX S", "7.23.5", requirements, requirements) == ("router", "switch")
+    assert not any("router" in key or "switch" in key for key in qualification.transition_report("cambium", "ePMP 4518", "5.11.1"))

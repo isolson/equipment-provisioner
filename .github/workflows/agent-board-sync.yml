@@ -1,0 +1,84 @@
+name: Sync to Agent Pipeline board
+
+# Keeps the cross-repo "Agent Pipeline" GitHub Projects v2 board
+# (https://github.com/users/isolson/projects/1) in sync with agent:* labels.
+# Adds the item to the board if absent, maps its agent:* label to the Status
+# field, and sets Status=Done when the item closes. Self-contained — no
+# Project UI "workflows" config needed.
+#
+# Requires repo secret PROJECT_SYNC_TOKEN: a token with read+write access to
+# the user-owned project (the default GITHUB_TOKEN cannot write user Projects).
+
+on:
+  issues:
+    types: [labeled, unlabeled, closed, reopened]
+  pull_request:
+    types: [labeled, unlabeled, closed, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # Skip cleanly (green, not failed) if the operator hasn't set the token yet,
+      # so merging this before the secret exists doesn't spam failed runs.
+      - id: gate
+        env:
+          TOKEN: ${{ secrets.PROJECT_SYNC_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "PROJECT_SYNC_TOKEN not set — skipping board sync."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.skip != 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_SYNC_TOKEN }}
+          script: |
+            const PROJECT_ID = 'PVT_kwHOAD5Zs84BZY5s';
+            const STATUS_FIELD_ID = 'PVTSSF_lAHOAD5Zs84BZY5szhUX3gM';
+            // Priority order — first match wins when an item carries several agent:* labels.
+            const LABEL_TO_STATUS = [
+              ['agent:needs-human',       'Needs Human'],
+              ['agent:ready-for-signoff', 'Ready for Sign-off'],
+              ['agent:claude',            'Fixing'],
+              ['agent:review',            'In Review'],
+              ['agent:in-progress',       'In Progress'],
+              ['agent:ready',             'Ready'],
+            ];
+
+            const item = context.payload.issue || context.payload.pull_request;
+            if (!item) return;
+            const labels = (item.labels || []).map(l => l.name);
+            const agentLabels = LABEL_TO_STATUS.filter(([l]) => labels.includes(l));
+            const isClosed = item.state === 'closed';
+
+            // Ignore items that never carried an agent:* label (and aren't a close event for one).
+            if (agentLabels.length === 0 && !isClosed) return;
+
+            // Add to the project (idempotent — returns the existing item if already present).
+            const added = await github.graphql(
+              `mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}`,
+              { p: PROJECT_ID, c: item.node_id }
+            );
+            const itemId = added.addProjectV2ItemById.item.id;
+
+            const statusName = isClosed ? 'Done' : agentLabels[0][1];
+
+            // Resolve the option id by name (robust to option-id changes).
+            const field = await github.graphql(
+              `query($f:ID!){node(id:$f){... on ProjectV2SingleSelectField{options{id name}}}}`,
+              { f: STATUS_FIELD_ID }
+            );
+            const opt = field.node.options.find(o => o.name === statusName);
+            if (!opt) { core.warning(`No Status option named "${statusName}"`); return; }
+
+            await github.graphql(
+              `mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){
+                 updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}
+               }`,
+              { p: PROJECT_ID, i: itemId, f: STATUS_FIELD_ID, o: opt.id }
+            );
+            core.info(`Set Status="${statusName}" on ${item.html_url}`);

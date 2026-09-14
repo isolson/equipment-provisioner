@@ -33,10 +33,11 @@ The default order is preferred for most devices. Only use `config_after_all_firm
 
 ## Before Modifying
 
+- For hardware captures and validation work, read `docs/EVIDENCE_HANDOFF.md` first; it identifies the existing evidence workflow on the evidence branch and the secure raw-capture location.
 - Read `docs/HANDLER_DEVELOPMENT.md` for the handler property reference and provisioning flow
-- Read `AGENTS.md` for the coding-architecture standards (vendor isolation, the single-registry direction, and the anti-patterns to avoid)
+- Read `AGENTS.md` for the coding-architecture standards (vendor isolation, the single vendor registry, and the anti-patterns to avoid)
 - Read `STANDARDS.md` for interface binding, VLAN isolation, and UI requirements
-- Read `docs/ARCHITECTURE_ISOLATION_REVIEW.md` (current isolation state + exhaustive vendor-touchpoint map) and `docs/epic-vendor-isolation-refactor.md` (the remediation plan) before any cross-vendor refactor
+- Read `docs/ARCHITECTURE_ISOLATION_REVIEW.md` (current isolation state + exhaustive vendor-touchpoint map) and `docs/epic-vendor-isolation-refactor.md` (refactor status and remaining work) before any cross-vendor refactor
 - Read `docs/HOST_SETUP.md` before touching deploy scripts or systemd units — it covers the SSH-agent issue, the `/etc` versus `/opt` config split, and the required `CAP_SETUID`/`CAP_SETGID` capabilities for the display wake path
 - Read `docs/KIOSK_ARCHITECTURE.md` before touching `provisioner/display.py`, the openbox autostart, `restart-kiosk.sh`, or `auto-rotate.*` — covers the startx-based session, same-uid X access, and the native-DPMS-vs-JS-sleep split
 - Read `docs/cambium-config.md` before touching Cambium code — endpoints must be confirmed on hardware
@@ -97,9 +98,9 @@ Minimize the chance of leaking credentials, keys, or other private data — espe
 
 - Echoing/printing a secret value, or passing one as a CLI arg (`sshpass -p`, secrets in argv) instead of via env/stdin — see **Secrets & Private Data** above
 - Adding vendor branching to `base.py` instead of using handler properties
-- Adding a *new* place that enumerates vendors (another hardcoded list/dict or `if device_type == "..."`) instead of deriving from an existing registry — the vendor list peaked at ~10 copies and Phase 1 of the isolation epic just collapsed several; don't add one back
+- Adding a *new* place that enumerates vendors (another hardcoded list/dict or `if device_type == "..."`) instead of deriving from an existing registry — vendor metadata now derives from VendorSpec; do not add a duplicate
 - Using Python 3.10+ syntax (Pi runs 3.9)
-- Forgetting to add new device IPs to the vendor-IP registry (`provisioner/vendor_ips.py` — the boot-ping list derives from it; a missing IP causes 120s detection delay)
+- Forgetting to add new device IPs to the VendorSpec address entry (`provisioner/vendor_registry.py` — `vendor_ips.py` and the boot-ping list derive from it; a missing IP causes 120s detection delay)
 - Putting `{{placeholders}}` in config templates (no substitution engine exists)
 - Only deploying code without copying templates to the repo dir on the Pi
 - Making `config_after_all_firmware` globally true instead of conditional on model

@@ -1,0 +1,125 @@
+name: Sync board Priority to labels
+
+# Bridges the cross-repo "Agent Pipeline" Projects v2 board's Priority field to
+# each repo's own priority labels, so dragging a card into a higher priority on
+# the board reorders that repo's pickup queue (agent-issue-pickup.sh sorts by
+# AGENT_LOOP_PRIORITY_LABELS). One scheduled job covers every repo on the board;
+# the per-repo label vocabulary lives in SCHEMES below (e.g. personal-processes
+# uses `priority: high/medium/low`, sixtyops/wifi uses `priority/p0,p1`). Repos
+# not in SCHEMES are left untouched. Timer-driven poll — no webhook (per the
+# no-webhook design rule). The label is the canonical signal the loop reads; the
+# board field is one way to set it — you can also edit the label on the issue
+# directly, which is the reliable path from the GitHub mobile app.
+#
+# Setup: the board needs a single-select field named exactly "Priority" with
+# options High / Medium / Low. Reuses the PROJECT_SYNC_TOKEN secret (a token with
+# read+write on the user-owned project and write on the synced repos).
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # every 15 min; pickup cooldown is 20 min, so no lag that matters
+  workflow_dispatch:           # manual reconcile
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-priority-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # Skip cleanly (green, not failed) if the token isn't set yet.
+      - id: gate
+        env:
+          TOKEN: ${{ secrets.PROJECT_SYNC_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "PROJECT_SYNC_TOKEN not set — skipping priority sync."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.skip != 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_SYNC_TOKEN }}
+          script: |
+            const PROJECT_ID = 'PVT_kwHOAD5Zs84BZY5s';
+            // Per-repo: board Priority option (lowercased) -> that repo's label.
+            // Each repo keeps its own priority vocabulary; whichever option matches
+            // is set and the other tiers in that repo's scheme are removed, so a
+            // re-drag moves the issue cleanly. A null tier means "no label for this
+            // tier". Repos not listed here are left untouched by this sync.
+            const SCHEMES = {
+              'isolson/personal-processes':     { high: 'priority: high', medium: 'priority: medium', low: 'priority: low' },
+              'sixtyops/treehouse-architecture': { high: 'priority: high', medium: 'priority: medium', low: 'priority: low' },
+              'sixtyops/wifi':                  { high: 'priority/p0',    medium: 'priority/p1',     low: null },
+            };
+
+            // Page through every board item.
+            const items = [];
+            let cursor = null;
+            for (let guard = 0; guard < 50; guard++) {
+              const page = await github.graphql(
+                `query($p:ID!,$c:String){
+                   node(id:$p){... on ProjectV2{items(first:100,after:$c){
+                     pageInfo{hasNextPage endCursor}
+                     nodes{
+                       content{... on Issue{number state repository{name owner{login}}}}
+                       priority: fieldValueByName(name:"Priority"){
+                         ... on ProjectV2ItemFieldSingleSelectValue{name}
+                       }
+                     }
+                   }}}}`,
+                { p: PROJECT_ID, c: cursor }
+              );
+              const conn = page.node.items;
+              items.push(...conn.nodes);
+              if (!conn.pageInfo.hasNextPage) { cursor = null; break; }
+              cursor = conn.pageInfo.endCursor;
+            }
+            if (cursor) core.warning('Stopped paging board items at the 50-page guard — some items may be unsynced.');
+
+            const ensured = new Set();
+            let changed = 0;
+
+            for (const it of items) {
+              const c = it.content;
+              if (!c || !c.number || !c.repository) continue;   // not an issue (draft/PR)
+              if (c.state !== 'OPEN') continue;                  // closed issues: leave labels alone
+              const optName = it.priority && it.priority.name;
+              if (!optName) continue;                            // no Priority set: don't clobber manual labels
+              const owner = c.repository.owner.login;
+              const repo = c.repository.name;
+              const ref = `${owner}/${repo}`;
+              const scheme = SCHEMES[ref];
+              if (!scheme) continue;                             // repo not managed by this sync
+              const managed = Object.values(scheme).filter(Boolean);
+              const want = scheme[optName.trim().toLowerCase()]; // a label, null (no-label tier), or undefined
+              if (want === undefined) { core.warning(`Unmapped Priority option "${optName}" on ${ref}#${c.number}`); continue; }
+
+              try {
+                if (want) {
+                  // Create the label once per repo if missing (ignore "already exists").
+                  const key = `${ref}::${want}`;
+                  if (!ensured.has(key)) {
+                    ensured.add(key);
+                    try {
+                      await github.rest.issues.createLabel({ owner, repo, name: want, color: 'd93f0b' });
+                    } catch (e) { if (e.status !== 422) core.warning(`createLabel ${want} on ${ref}: ${e.message}`); }
+                  }
+                  await github.rest.issues.addLabels({ owner, repo, issue_number: c.number, labels: [want] });
+                }
+                for (const other of managed) {
+                  if (other === want) continue;
+                  try { await github.rest.issues.removeLabel({ owner, repo, issue_number: c.number, name: other }); }
+                  catch (e) { if (e.status !== 404) throw e; }   // 404 = label wasn't on the issue
+                }
+                changed++;
+                core.info(`${ref}#${c.number}: Priority "${optName}" -> ${want || '(none)'}`);
+              } catch (e) {
+                core.warning(`reconcile ${ref}#${c.number}: ${e.message}`);
+              }
+            }
+            core.info(`Priority sync done — ${items.length} board items scanned, ${changed} issues reconciled.`);

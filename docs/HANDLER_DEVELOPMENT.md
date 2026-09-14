@@ -695,9 +695,23 @@ Rules:
 
 ### Adding a New Model to an Existing Vendor
 
-If the new model has different provisioning behavior than existing models (e.g., a switch vs AP from the same vendor):
+1. Read the exact model/firmware evidence and identify its role and capabilities.
+2. Add firmware patterns and model patterns to the existing vendor's `VendorSpec`
+   and `ConfigFamilySpec`. Reuse a family only when its schema and role agree.
+3. Put the reviewed template in the registered family/firmware/role path. Test
+   `ConfigStore.get_config_template()` for the actual API-reported model name;
+   creating an arbitrary model directory does not register it.
+4. Put model differences in handler properties or handler-owned preparation.
+   Example: 4518 and 46xx share ePMP-4K templates but need scan masks 19 and 51.
+   Do not add model branches to the shared engine or assume all siblings have
+   the same capability. Preserve legacy aliases only where still required.
+5. Test the new model and an existing sibling, including template selection,
+   firmware lookup, missing credentials and failed readback. Run the full suite
+   and static/evidence gates before promotion.
+6. Validate the exact model on hardware. Record factory-reset provisioning,
+   fresh standard login and default-login rejection, AP/link connectivity,
+   management VLAN DHCP/reachability, traffic and cold-power persistence as
+   separate checks. A family match does not qualify a new model.
 
-1. Add firmware patterns to the vendor's `model_firmware_patterns` in its `VendorSpec` (`provisioner/vendor_registry.py`)
-2. Add config template as `configs/templates/{vendor}/{model}.json`
-3. If the model needs different flow (e.g., `config_after_all_firmware`), make the handler property conditional on model name
-4. Add model alias to `CONFIG_MODEL_ALIASES` if the API-reported model name differs from the template filename
+TNS-100 is end-of-life for this deployment program. Keep historical support and
+records, but exclude it from new-deployment qualification.

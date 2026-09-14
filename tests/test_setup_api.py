@@ -1282,10 +1282,11 @@ def test_setup_readiness_warns_when_a_required_secret_is_missing(tmp_path, monke
     checks = {item["id"]: item for item in client.get("/api/setup/readiness").json()["checks"]}
     cambium = next(d for d in checks["credentials"]["details"] if d["device_type"] == "cambium")
     assert cambium["status"] == "warning"
-    assert cambium["missing_secrets"] == ["wpa_key"]
-    assert cambium["summary"] == "Missing required secret: wpa_key"
+    assert cambium["missing_secrets"] == ["wpa_key", "installer_password"]
+    assert cambium["summary"] == "Missing required secret: wpa_key, installer_password"
 
     config.credentials["cambium"].wpa_key = "set-on-the-host"
+    config.credentials["cambium"].installer_password = "test-installer"
     checks = {item["id"]: item for item in client.get("/api/setup/readiness").json()["checks"]}
     cambium = next(d for d in checks["credentials"]["details"] if d["device_type"] == "cambium")
     assert cambium["missing_secrets"] == []

@@ -15,12 +15,11 @@ API Endpoints (discovered via browser inspection):
 """
 
 import asyncio
-import copy
 from copy import deepcopy
 import json
 import logging
 from pathlib import Path
-from typing import List, Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
 
@@ -225,6 +224,7 @@ class TachyonHandler(BaseHandler):
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None,
                  alternate_credentials: list = None):
         super().__init__(ip, credentials, interface)
+        self._deployment_password = credentials.get("password", "")
         self._session: Optional[aiohttp.ClientSession] = None
         self._api_token: Optional[str] = None
         self._cookies: Dict[str, str] = {}
@@ -422,12 +422,31 @@ class TachyonHandler(BaseHandler):
         logger.info(f"[CREDS] ========== TACHYON CONNECT END (failed) ==========")
         return False
 
-    def required_secrets(self) -> List[str]:
-        # The SM baseline carries the profile list without passphrases; the
-        # shared PSK must come from the host or the radio cannot associate.
-        return ["wpa_key"]
+    def required_secrets(self) -> list:
+        """Fresh SM profiles require the fleet passphrase before first apply."""
+        return ["wpa_key", "management_password"]
+
+    def pending_secrets(self) -> Dict[str, str]:
+        values = super().pending_secrets()
+        password = self._deployment_password
+        if not password or password == self.DEFAULT_CREDENTIALS["password"]:
+            tagged = self._get_custom_credential() or {}
+            password = tagged.get("password", "") if tagged.get("username", "root") == "root" else ""
+        # Keep this key even when absent: missing deployment credentials must
+        # fail the secrets phase instead of silently retaining factory access.
+        values["management_password"] = password
+        return values
 
     async def apply_secrets(self, secrets: Dict[str, str]) -> bool:
+        password = secrets.get("management_password", "")
+        if not password or password == self.DEFAULT_CREDENTIALS["password"]:
+            logger.error("A non-default Tachyon root deployment credential is required")
+            return False
+        if not await self._apply_network_secrets(secrets):
+            return False
+        return await self.set_password(password, username="root")
+
+    async def _apply_network_secrets(self, secrets: Dict[str, str]) -> bool:
         """Merge secret-owned fields into the live config and apply it.
 
         Secrets never live in a template (``docs/PROVISIONING_NORTH_STAR.md``).
@@ -442,11 +461,11 @@ class TachyonHandler(BaseHandler):
         wpa_key = secrets.get("wpa_key")
         if not overlay and not wpa_key:
             return True
-        live = await self._get_config_curl()
+        live = await self._read_config_after_apply()
         if not live:
             logger.error("Cannot apply secrets: live config unavailable on %s", self.ip)
             return False
-        merged = self._deep_merge(live, overlay) if overlay else copy.deepcopy(live)
+        merged = self._deep_merge(live, overlay) if overlay else deepcopy(live)
         if wpa_key:
             # One shared PSK for every SM profile (fleet evidence: identical
             # passphrase hash on every populated SM export).
@@ -465,14 +484,43 @@ class TachyonHandler(BaseHandler):
                 logger.error("Cannot apply the profile passphrase: no SM profiles on %s", self.ip)
                 return False
             overlay = overlay or {"wireless": True}
+        if merged == live:
+            logger.info("Secret fields already match device read-back on %s", self.ip)
+            return True
         previous = self._last_applied_config
         try:
             applied = await self.apply_config(merged)
         finally:
             self._last_applied_config = previous
-        if applied:
-            logger.info("Applied %d secret field(s) on %s", len(overlay), self.ip)
-        return bool(applied)
+        if not applied:
+            return False
+        readback = await self._read_config_after_apply()
+        if not readback:
+            logger.error("Cannot verify secrets: live config unavailable on %s", self.ip)
+            return False
+        if community:
+            actual = readback.get("services", {}).get("snmp", {}).get("v2", {}).get("ro", {}).get("community")
+            if actual != community:
+                logger.error("SNMP secret read-back mismatch on %s", self.ip)
+                return False
+        if wpa_key:
+            try:
+                profiles = [
+                    profile
+                    for vap in readback["wireless"]["radios"]["wlan0"].get("vaps") or []
+                    for profile in (vap.get("sta_profiles") or {}).get("profiles") or []
+                ]
+                if len(profiles) != count or any(
+                    profile.get("security", {}).get("wpapsk", {}).get("passphrase") != wpa_key
+                    for profile in profiles
+                ):
+                    logger.error("Station profile secret read-back mismatch on %s", self.ip)
+                    return False
+            except (KeyError, TypeError, AttributeError):
+                logger.error("Cannot verify profile secrets: unexpected config shape on %s", self.ip)
+                return False
+        logger.info("Secret fields applied and verified on %s", self.ip)
+        return True
 
     def _update_credentials_from_config(self, config: Dict[str, Any]) -> None:
         """Extract password from config and update self.credentials.
@@ -1199,6 +1247,30 @@ class TachyonHandler(BaseHandler):
         Args:
             config: Configuration dictionary to apply
         """
+        # Firmware 1.15 rejects new secured station profiles without their
+        # passphrase. Populate secret-owned fields from host credentials before
+        # the first config POST; a later secrets phase is too late for a fresh
+        # radio. The source template remains secret-free.
+        pending = self.pending_secrets()
+        community = pending.get("snmp_community")
+        if community:
+            try:
+                config.setdefault("services", {}).setdefault("snmp", {}).setdefault("v2", {}).setdefault("ro", {})["community"] = community
+            except (TypeError, AttributeError):
+                logger.error("Cannot prepare SNMP secret: invalid config shape on %s", self.ip)
+                return False
+        wpa_key = pending.get("wpa_key")
+        if wpa_key:
+            try:
+                vaps = config.get("wireless", {}).get("radios", {}).get("wlan0", {}).get("vaps") or []
+                for vap in vaps:
+                    for profile in (vap.get("sta_profiles") or {}).get("profiles") or []:
+                        security = profile.setdefault("security", {})
+                        security.setdefault("mode", "wpapsk")
+                        security.setdefault("wpapsk", {})["passphrase"] = wpa_key
+            except (TypeError, AttributeError):
+                logger.error("Cannot prepare station profile secrets: invalid config shape on %s", self.ip)
+                return False
         self._normalize_config_for_apply(config)
 
         # Extract password from config before applying — if the config changes
@@ -1817,19 +1889,15 @@ class TachyonHandler(BaseHandler):
             else:
                 # Partial JSON templates remain patch-like and merge into the
                 # live config before apply.
-                try:
-                    current_config = await self._api_request("GET", self.API_CONFIG)
-                    if isinstance(current_config, dict):
-                        if is_legacy_tar:
-                            config = self._merge_legacy_config(current_config, config)
-                        else:
-                            config = self._deep_merge(current_config, config)
-                        logger.info("Merged partial template config into current device config")
-                except Exception as e:
-                    logger.warning(
-                        "Could not GET current config for merge; applying template as-is: %s",
-                        type(e).__name__,
-                    )
+                current_config = await self._read_config_after_apply()
+                if not current_config:
+                    logger.error("Cannot merge partial template: live config unavailable on %s", self.ip)
+                    return False
+                if is_legacy_tar:
+                    config = self._merge_legacy_config(current_config, config)
+                else:
+                    config = self._deep_merge(current_config, config)
+                logger.info("Merged partial template config into current device config")
 
             return await self.apply_config(config)
 
@@ -2166,74 +2234,91 @@ class TachyonHandler(BaseHandler):
             logger.error(f"Failed to set hostname: {e}")
             return False
 
-    async def set_password(self, new_password: str, username: str = None) -> bool:
-        """Change the device password.
-
-        Tachyon devices use the config API to manage user credentials.
-        The password is changed by updating the user configuration.
-
-        Args:
-            new_password: The new password to set.
-            username: Username to change password for (defaults to 'root').
-
-        Returns:
-            True if password changed successfully.
-        """
+    async def _verify_root_password(self, password: str) -> bool:
+        """Authenticate a fresh session with exactly one credential, no fallback."""
+        probe = TachyonHandler(
+            ip=self.ip, credentials={"username": "root", "password": password},
+            interface=self.interface,
+        )
         try:
-            target_user = username or self.credentials.get("username", "root")
-
-            # Try user management endpoint first (newer firmware)
-            try:
-                result = await self._api_request(
-                    "POST",
-                    "/cgi.lua/user",
-                    data={
-                        "username": target_user,
-                        "password": new_password,
-                    }
-                )
-                if isinstance(result, dict) and not result.get("error"):
-                    logger.info(f"Password changed for {target_user} on {self.ip}")
-                    return True
-            except Exception:
-                pass
-
-            # Fall back to config-based password change
-            try:
-                config = await self._api_request("GET", self.API_CONFIG)
-
-                if isinstance(config, dict):
-                    # Common config structures for user/auth settings
-                    if "users" in config:
-                        # Array of users
-                        for user in config.get("users", []):
-                            if user.get("username") == target_user or user.get("name") == target_user:
-                                user["password"] = new_password
-                                break
-                        else:
-                            # User not found, add or update root
-                            config["users"] = [{"username": target_user, "password": new_password}]
-                    elif "auth" in config:
-                        config["auth"]["password"] = new_password
-                    elif "system" in config:
-                        if "auth" not in config["system"]:
-                            config["system"]["auth"] = {}
-                        config["system"]["auth"]["password"] = new_password
-                    else:
-                        # Try top-level password field
-                        config["password"] = new_password
-
-                    if await self.apply_config(config):
-                        logger.info(f"Password changed via config for {target_user} on {self.ip}")
-                        return True
-            except Exception as e:
-                logger.debug(f"Config-based password change failed: {e}")
-
-            logger.error(f"Failed to change password on {self.ip}")
+            for attempt in range(4):
+                ok = await (probe._connect_curl() if self.interface else probe._connect_aiohttp())
+                if ok:
+                    break
+                # Never retry rejected credentials; only wait out a service
+                # reload. Repeated bad logins can trigger device lockout.
+                if probe._connection_failure_kind not in (
+                    ConnectionFailureKind.TRANSPORT, ConnectionFailureKind.DEVICE_BUSY,
+                ) or attempt == 3:
+                    return False
+                await probe.disconnect()
+                await asyncio.sleep(2 * (attempt + 1))
+            probe._credentials_confirmed = True
+            config = await probe._read_config_after_apply()
+            return isinstance(config, dict) and isinstance(config.get("system"), dict)
+        except Exception:
             return False
+        finally:
+            await probe.disconnect()
 
-        except Exception as e:
-            logger.error(f"Failed to change password: {e}")
+    async def set_password(self, new_password: str, username: str = None) -> bool:
+        """Update the observed system.users root record and verify fresh login.
+
+        Captured 1.15 config POSTs contain MD5-crypt user passwords. Generate
+        that device-required representation using stdin, never command args.
+        Preserve other accounts and all non-password fields.
+        """
+        if (username or "root") != "root" or not new_password or new_password == self.DEFAULT_CREDENTIALS["password"]:
+            return False
+        if await self._verify_root_password(new_password):
+            return True
+        live = await self._read_config_after_apply()
+        if not live:
+            return False
+        config = deepcopy(live)
+        users = config.get("system", {}).get("users")
+        if not isinstance(users, list):
+            return False
+        roots = [user for user in users if isinstance(user, dict) and user.get("username") == "root"]
+        if len(roots) != 1 or roots[0].get("enabled") is not True:
+            return False
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "openssl", "passwd", "-1", "-stdin",
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await process.communicate(new_password.encode("utf-8"))
+            hashed = stdout.decode("ascii").strip()
+            if process.returncode != 0 or not hashed.startswith("$1$"):
+                return False
+            roots[0]["password"] = hashed
+            previous = self._last_applied_config
+            # The POST uses the current session; recovery must use the new
+            # credential once the device accepts the changed account hash.
+            self.credentials = {**self.credentials, "username": "root", "password": new_password}
+            self._credentials_confirmed = True
+            try:
+                applied = await self.apply_config(config)
+            finally:
+                self._last_applied_config = previous
+            if not applied:
+                return False
+            # Configuration acceptance precedes application of system users.
+            # Wait for the exact hash to land before attempting the new login.
+            for attempt in range(5):
+                readback = await self._read_config_after_apply()
+                actual_users = (readback or {}).get("system", {}).get("users", [])
+                if any(isinstance(user, dict) and user.get("username") == "root"
+                       and user.get("password") == hashed for user in actual_users):
+                    # The authentication service reload follows config storage.
+                    await asyncio.sleep(5)
+                    return await self._verify_root_password(new_password)
+                if attempt < 4:
+                    await asyncio.sleep(2 * (attempt + 1))
+            return False
+        except Exception:
+            logger.error("Tachyon root password application or verification failed")
             return False
 
     async def apply_ap_naming(self, hostname: str, ssid: str) -> bool:
@@ -2330,7 +2415,7 @@ class TachyonHandler(BaseHandler):
             logger.info(f"[CONFIG VERIFY] Device accessible on {self.ip}; no config fields to confirm")
             return UNVERIFIED
 
-        readback = await self._get_config_curl()
+        readback = await self._read_config_after_apply()
         if not readback:
             logger.error(f"[CONFIG VERIFY] Could not read back config on {self.ip} — failing closed")
             return False

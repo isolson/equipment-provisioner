@@ -448,7 +448,8 @@
                     </div>
                 </div>
                 ${secretRow('wpa_key', 'WPA2 key (written to every unit)')}
-                ${secretRow('snmp_community', 'SNMP read-only community')}`;
+                ${secretRow('snmp_community', 'SNMP read-only community')}
+                ${row.required_secrets.includes('installer_password') ? secretRow('installer_password', 'Installer account password') : ''}`;
             renderCredentialsList(credentialsData);
         }
 

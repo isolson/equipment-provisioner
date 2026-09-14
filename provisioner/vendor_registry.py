@@ -449,7 +449,7 @@ register(VendorSpec(
     # MikroTik default subnet; devices often use DHCP instead. The
     # post-miss fallback subnets (192.168.0.1, 10.0.0.1) are probe
     # *behavior* and stay in port_manager.DeviceLinkLocalIP.MIKROTIK_FALLBACKS.
-    link_local_ips=("192.168.88.1",),
+    link_local_ips=("192.168.88.1", "192.168.10.1", "192.168.10.2"),
     # No config_template_dir: configured via netinstall/ZTP .rsc scripts,
     # not deep-merge templates (documented exception).
     ui_style={"name": "MikroTik", "color": "#0E0E10"},

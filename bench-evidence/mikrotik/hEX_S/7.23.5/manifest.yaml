@@ -1,0 +1,45 @@
+vendor: mikrotik
+model: hEX S
+model_code: E60iUGS
+architecture: arm
+firmware: 7.23.5
+config_role: ROUTER
+artifact_purpose: hardware-validation
+reusable_template: false
+canonical_template_status: handler-owned-wired-mode-profile
+unit: unit-hex-s-a
+captured_utc: 2026-09-10
+operations: [package-update, routerboot-update, wired-mode-change, config-readback]
+result: success
+no_config_backup: missing
+fixture_witness: role
+capture_format: command-readback
+raw_evidence_path: /var/lib/provisioner/bench-evidence/mikrotik/E60iUGS/live-2026-09-10/
+raw_files:
+  business-ui-verification.json: Business role changes and advanced controls passed in browser.
+  business-ui.private.har: Private browser capture of business mode and advanced actions.
+  business-forwarding.json: Six synthetic UDP inter-VLAN forwarding checks.
+  business-router-readback.json: Complete Business router policy checks after import.
+  business-switch-readback.json: Complete Business switch policy checks after import.
+  business-router-dhcp.json: Correct-scope DHCP offers on all four router VLANs.
+  business-switch-dhcp.json: No DHCP offers from Business switch.
+  business-management-isolation.json: Internal-only gateway ICMP and ARP reachability checks.
+  business-advanced.json: RoMON containment and private WireGuard key storage checks.
+  business-reboot.json: Router profile and WireGuard key preserved across software reboot.
+  config.private.txt: Configuration exported before updates and mode changes.
+  network-transitions.json: Three authenticated mode readbacks, ending in router mode.
+  router-mode-after.private.rsc: Configuration export after the mode transition checks.
+  upgrade-result.json: RouterOS package version after reboot.
+  routerboot-result.json: RouterBOOT version after its reboot.
+  wired-modes-ui.private.har: Deployed provisioner browser inspect and two mode applications.
+  ui-verification.json: Successful browser-driven Switch and Router readbacks with no page errors.
+transitions:
+  - {from: router, to: switch, result: success}
+  - {from: switch, to: router, result: success}
+evidence_scope: >-
+  E60iUGS ARM on RouterOS and RouterBOOT 7.23.5 long-term. Initial flat-role
+  checks are historical. Business VLAN profiles passed readback in both
+  directions, router DHCP scope and gateway-isolation packet checks, advanced
+  management checks and router software-reboot persistence. No WAN forwarding,
+  exhaustive client isolation, standard login acceptance, collector receipt, NTP synchronization,
+  physical power cycle or fleet reset/enrollment qualification is claimed.

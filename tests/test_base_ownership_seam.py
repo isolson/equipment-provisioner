@@ -180,7 +180,7 @@ def test_cambium_and_tachyon_require_the_wpa_key():
 
     for cls in (CambiumHandler, TachyonHandler):
         handler = cls(ip="10.0.0.1", credentials={"username": "u", "password": "p"})
-        assert handler.required_secrets() == ["wpa_key"]
-        assert handler.missing_required_secrets() == ["wpa_key"]
-        handler = cls(ip="10.0.0.1", credentials={"username": "u", "password": "p", "wpa_key": "k"})
+        assert handler.required_secrets() == ["wpa_key", "management_password"] + (["installer_password"] if cls is CambiumHandler else [])
+        assert handler.missing_required_secrets() == ["wpa_key"] + (["installer_password"] if cls is CambiumHandler else [])
+        handler = cls(ip="10.0.0.1", credentials={"username": "u", "password": "p", "wpa_key": "k", "installer_password": "test-installer"})
         assert handler.missing_required_secrets() == []

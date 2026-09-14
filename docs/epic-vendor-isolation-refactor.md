@@ -1,136 +1,34 @@
-# Epic: Vendor Isolation Refactor
+# Vendor isolation refactor: status and remaining work
 
-> Status: In progress — Phase 1 (Stories 0–4) merged 2026-08 (PRs #84, #122, #125, #127, #124); Story 5 in review (PR #128, gated on a kiosk hardware check) · Owner: TBD · Source audit: `docs/ARCHITECTURE_ISOLATION_REVIEW.md`
+Reconciled 2026-09-10. The original implementation plan is preserved in Git
+history. Use [the current architecture review](ARCHITECTURE_ISOLATION_REVIEW.md)
+and [the handler development guide](HANDLER_DEVELOPMENT.md) for new work.
 
-## Goal
+| Original story | Current state |
+| --- | --- |
+| 0: Registry consistency | Implemented; tests cover derived views, fake-vendor insertion and registration removal |
+| 1: Vendor-neutral engine | Implemented; firmware lookup uses a handler override and the engine has no brand strings |
+| 2: Shared handler registration | Implemented; handler-derived CLI/API/setup lists |
+| 3: Credential defaults | Implemented; registry defaults and generic credential schema; reconciliation also forwards all schema fields internally |
+| 4: IP/boot-ping registry | Implemented; addresses derive from specs, with ordering regression tests |
+| 5: Frontend metadata | Implemented; UI metadata derives from backend specs |
+| 6: VendorSpec registry | Implemented; includes firmware sources, patterns, families, defaults and active-vendor filtering |
+| 7: Fingerprint modularization | Remaining; signatures/probes/model extraction are still shared code |
 
-Make the provisioner *additively pluggable*, not just *subtractively modular*: adding or removing a vendor should be a small, single-place change instead of a ~15-file hunt across ~10 duplicated registries. Do this **without touching any vendor's provisioning behavior** and without regressing the production touchscreen kiosk.
+## Remaining priorities
 
-## Problem (recap of the audit)
+1. Keep source, deployed code, runtime templates and evidence provenance aligned.
+   See [the reconciliation record](RECONCILIATION_2026-09-10.md). A stale host
+   `.git/HEAD` or a `-dirty` deployment marker is not a reproducible release.
+2. Require sibling-model regression coverage for shared family changes and
+   preserve the real resolver path in tests. Do not expand hardware qualification
+   based solely on matching family names.
+3. Retain credential preflight and fresh authentication/readback checks. New
+   credential fields must survive the real setup path.
+4. If detection is modularized, preserve historical order, weights, simple-mode
+   discovery, Evolution Digital's passive flow and MikroTik destructive-operation
+   gates. Make this a separately tested change, not part of adding a new model.
 
-- **Behavior is well isolated (A-grade):** each vendor lives entirely in `handlers/{vendor}.py` (+ `firmware_sources/{vendor}.py` + `configs/templates/{vendor}/`). No handler imports another. The property-driven `provision()` flow holds.
-- **Registration is leaky (C-grade):** the vendor list is duplicated across **~10 independent sources of truth** with no single add/remove point. CLAUDE.md's claim — *"only the `DeviceType` enum and `HANDLER_MAP`"* — is inaccurate.
-- The dominant failure mode of any vendor change is **omission**: forget an S1 site (handler or firmware-source import) and the service **crashes at boot**; forget an S2 site and you get **dead code or a silently-undetectable device**. (The `config.py↔main.py` credentials S1 named in the audit was resolved by Story 3 / PR #127.)
-
-### The duplicated sources of truth (what this epic collapses)
-
-| Concern | Copies at audit time | Target | Status (2026-08) |
-|---|---|---|---|
-| Vendor → handler | `HANDLER_MAP` (`handler_manager.py`), `cli.py`, `VALID_DEVICE_TYPES` (`api.py`), `index.html` | 1 (derive from `HANDLER_MAP`/`DeviceType`) | ✅ CLI/API/setup derive via `provisionable_device_types()` — Story 2, PR #125 (`VALID_DEVICE_TYPES` deleted); `index.html` in review — Story 5, PR #128 |
-| Credentials | `CredentialsConfig` typed fields, `main.py` dict, handler `DEFAULT_CREDENTIALS`, `BUILTIN_CREDENTIALS` (`api.py`) | 1 table (mirror `FirmwareSourceConfig`) | ✅ Done — Story 3, PR #127 (`_default_credentials()` table; handler-internal fallback lists stay vendor-local by design) |
-| Link-local IPs | `DeviceLinkLocalIP` (`port_manager.py`) + inline copy + `DeviceIPsConfig` (`config.py`) | 1 registry | ✅ Done — Story 4, PR #124 (`vendor_ips.py` `VENDOR_LINK_LOCAL_IPS`) |
-| Detection knowledge | `HTTP_SIGNATURES` + per-vendor probes + `_extract_device_details` (`fingerprint.py`) | per-vendor contribution | Open (Story 7) |
-| Firmware sources | `SOURCE_MAP` + imports (`firmware_checker.py`), `firmware_sources/__init__.py` | 1 registry (config is already table-driven; the class map + imports are not) | Open (Story 6) |
-| Setup / readiness | `SUPPORTED_DEVICE_TYPES` + readiness/hint/mode dicts (`setup_tools.py`) | derive from the vendor registry | ✅ device-type list derives (`SUPPORTED_DEVICE_TYPES` deleted — Story 2, PR #125); per-vendor dicts remain (Story 6) |
-| Vendor-in-engine leak | `if self.device_type == "mikrotik"` (`base.py` `firmware_lookup_key`) | handler property | ✅ Done — Story 1, PR #122 (`firmware_lookup_key()` override) |
-
-## Success criteria
-
-1. Adding/removing a vendor touches **≤ 2 hand-edited locations** plus the vendor's own files.
-2. A CI test fails if the registries ever drift out of sync.
-3. The one engine-level rule violation (`base.py` MikroTik branch) is gone.
-4. Zero behavioral change to provisioning, fingerprint *accuracy*, or the kiosk UI (existing tests stay green).
-5. Reducing to a single-vendor build (Direction B) becomes a config/registry toggle, not a code carve.
-
-## Non-goals (explicit scope guards)
-
-- **Not** generalizing genuinely vendor-specific machinery: MikroTik netinstall/ZTP/BOOTP/OUI gating and the Evolution Digital passive cross-port flow stay as **documented exceptions**.
-- **Not** removing any vendor in this epic — once Story 6 lands, removal becomes trivial and is a separate task.
-- **No** changes to handler provisioning logic or the `provision()` property contract itself.
-
----
-
-## Cross-cutting considerations (the "other considerations" check)
-
-These constrain *how* every story is executed:
-
-1. **Two-path deploy / config migration.** `scripts/deploy.sh` syncs code to `/opt/provisioner/` but **does not** touch `/etc/provisioner/config.yaml` or the `/var/lib/provisioner/repo/` data dir. Any schema change (Stories 3–4) ships safely *because* pydantic uses default `extra=ignore` (no `extra="forbid"` exists) — stale vendor keys in an old `config.yaml` parse harmlessly and defaults fill the rest. Still, each schema story must include a one-line host note. Config templates must already exist in the repo data dir to take effect.
-2. **Python 3.9 only.** No `match`/`case`, no `X | Y` unions (use `Optional[...]`/`Dict[...]`), no `str.removeprefix`, no `datetime.UTC`. New registry code must follow this.
-3. **No hardware simulator for most vendors.** Pure-enumeration refactors (Stories 0–5) are fully unit-testable and low-risk. Detection refactoring (Story 7) carries *behavioral* risk and must lean on existing detection tests (`test_fingerprint.py`, `test_mikrotik_detection_ui.py`, `test_mikrotik_edge_case_detection.py`) and preserve probe **ordering** (MikroTik :8728 short-circuit first, then Tachyon/Wave API probes, then HTTP/SSH/SNMP).
-4. **CI is the safety net.** `.github/workflows/test.yml` runs the suite. Story 0 adds the registry-consistency test that becomes the regression guard for all later stories.
-5. **Simple mode (no-switch ThinkPad).** `SimpleModeConfig` runs the *same* fingerprint + `DeviceLinkLocalIP.ALL` path on a single base interface (plus a subnet ARP-sweep). Stories 4 and 7 must preserve simple-mode detection, not just multi-port.
-6. **Evolution Digital side-door.** ED is intentionally absent from `HANDLER_MAP` and dispatched from `main.py:438`/`:757`. Every registry change must keep this path intact (it needs cross-port access).
-7. **Firmware sources are only *half* consolidated.** The *config* is table-driven — `Dict[str, FirmwareSourceConfig]` (`config.py:193`, `_default_firmware_sources()`) — and is the model to copy for credentials. But the vendor→source-*class* mapping is **not**: `firmware_checker.py` `SOURCE_MAP` (`:35`) plus its imports (`:20-23`) and `firmware_sources/__init__.py` are a hardcoded import registry that crashes on removal. Fold the class map into the registry alongside the handler map (Stories 2/6); don't mistake the table-driven config for full consolidation.
-8. **Kiosk UI is production.** Story 5 changes how `index.html` gets its vendor list; it must not break the live touchscreen. There's already a `/default-credentials` endpoint enumerating types — extend that pattern rather than add a parallel one.
-9. **Tests assert the vendor set.** `test_handler_manager.py`, `test_config.py`, `test_fingerprint.py` encode the current list and will need updates as registries consolidate — expected, and formalized by Story 0.
-
----
-
-## Stories
-
-Each story is independently shippable as its own PR. Effort: S ≈ <½ day, M ≈ 1–2 days, L ≈ 3–5 days. Risk reflects behavioral blast radius given the no-simulator constraint.
-
-### Story 0 — Registry-consistency contract test (foundation) · S · risk: none · ✅ Merged (PR #84)
-**Why:** lock the current effective vendor set before changing anything, and expose drift.
-**Scope:** add `tests/test_vendor_registry.py` asserting the *same* vendor set across `DeviceType` (minus `UNKNOWN`/`EVOLUTION_DIGITAL`), `HANDLER_MAP`, `cli.py` handler dict, `VALID_DEVICE_TYPES`, `CredentialsConfig` fields, `BUILTIN_CREDENTIALS`, `DeviceLinkLocalIP.ALL`, `firmware_checker.SOURCE_MAP` (+ `firmware_sources/__init__.__all__`), `setup_tools.SUPPORTED_DEVICE_TYPES`, and (via a parsed-constant or rendered-endpoint check) the `index.html` vendor map. Document ED + Mock as known exceptions.
-**Acceptance:** test passes today; deliberately breaking any one registry makes it fail. **Do this first** — it is the guard for Stories 2–7.
-*(Historical note: as Stories 2–4 merged, the test's source-parsing assertions became derivation checks — `VALID_DEVICE_TYPES` and `SUPPORTED_DEVICE_TYPES` no longer exist, and `CredentialsConfig` fields / `DeviceLinkLocalIP` are now derived views.)*
-
-### Story 1 — Remove the MikroTik branch from the engine (S1 fix) · S · risk: low · ✅ Merged (#71, PR #122, 2026-08)
-**Why:** the only true architecture-rule violation; vendor name inside `base.py`.
-**Scope:** replace the `base.py` `firmware_lookup_key()` MikroTik branch with a handler override (`firmware_lookup_key(device_info) -> Optional[str]`, default `model`; `MikrotikHandler` returns `hardware_version`). 
-**Acceptance (met):** no vendor string remains in `base.py`; `test_handler_properties.py` covers the override; MikroTik firmware lookup unchanged. Independent of all other stories.
-
-### Story 2 — One source of truth for the handler registry · M · risk: low · ✅ Merged (#72, PR #125, 2026-08)
-**Why:** collapse 5 copies of the vendor→handler list (`HANDLER_MAP`, `cli`, `VALID_DEVICE_TYPES`, `setup_tools.SUPPORTED_DEVICE_TYPES`, UI).
-**Scope:** make `cli.py`, `VALID_DEVICE_TYPES`, and `setup_tools.SUPPORTED_DEVICE_TYPES` *derive* from `HANDLER_MAP`/`DeviceType` (add a helper like `provisionable_device_types()`), preserving the ED exception explicitly. (The firmware `SOURCE_MAP` maps to imported classes, so it consolidates with the plugin registry in Story 6, not here.) 
-**Acceptance (met):** deleting an entry from `HANDLER_MAP` propagates everywhere; Story 0 test still green. As merged, `VALID_DEVICE_TYPES` and `SUPPORTED_DEVICE_TYPES` were **deleted** in favor of call-time derivation; the CLI also gained the previously missing `ubiquiti` choice.
-
-### Story 3 — Table-drive credentials (kill the crash-coupling) · M · risk: low-med · ✅ Merged (#73, PR #127, 2026-08)
-**Why:** removes the `config.py ↔ main.py` AttributeError-on-omission (S1) and collapses 4 credential sources to 1.
-**Scope:** convert `CredentialsConfig` typed fields → `Dict[str, DeviceCredentials]` keyed by device-type (mirror `FirmwareSourceConfig`), with per-vendor defaults supplied by a defaults factory. Reconcile `main.py` dict, `BUILTIN_CREDENTIALS` (`api.py`), and handler `DEFAULT_CREDENTIALS` to read from this one table. 
-**Migration note:** `extra=ignore` means existing `config.yaml` `credentials.<vendor>` blocks keep working; defaults backfill. Add host note in PR.
-**Acceptance (met):** `test_config.py` covers the dict form; removing a vendor no longer requires editing `main.py`; credential UI (`/default-credentials`) unchanged. As merged, a before-validator backfills partial `config.yaml` blocks from `_default_credentials()`; handler-internal `DEFAULT_CREDENTIALS` fallback lists deliberately stay vendor-local (MikroTik's is a multi-candidate retry list).
-
-### Story 4 — Centralize the IP / boot-ping registry · S · risk: low · ✅ Merged (#74, PR #124, 2026-08)
-**Why:** `DeviceLinkLocalIP` was duplicated (constants vs an inline boot-ping list in `port_manager.py`) and overlapped `DeviceIPsConfig` (`config.py`).
-**Scope:** single structure for vendor→link-local IP(s); the inline boot-ping list and `DeviceIPsConfig` defaults derive from it; config still overrides. Preserve MikroTik fallbacks and simple-mode behavior.
-**Acceptance (met):** one place defines IPs — `vendor_ips.py` `VENDOR_LINK_LOCAL_IPS`; `test_port_manager.py` green; simple-mode + multi-port probe identical sequences (test-proven).
-
-### Story 5 — Frontend derives vendor metadata from the API · M · risk: med (UI) · ⏳ In review (#75, PR #128 — approved, gated on a kiosk hardware check; not yet merged)
-**Why:** `index.html:347` is a hardcoded frontend copy of the vendor list.
-**Scope:** extend/return vendor metadata (name, color, icon, default user) from a backend endpoint derived from the registry; `index.html` fetches it instead of hardcoding. Keep the two genuinely *behavioral* UI branches (`canApplyMode` cambium/tachyon `:966`; Tachyon SSID-uppercase `:1307`) but data-drive the list/labels.
-**Acceptance:** kiosk renders identically; `test_web_pages.py`/`test_mikrotik_detection_ui.py` green; adding a vendor needs no JS edit.
-
-### Story 6 — Vendor descriptor / plugin registry (capstone) · L · risk: med
-**Why:** the end state — one place per vendor; makes add/remove and single-vendor builds a one-line change.
-**Scope:** introduce `VendorSpec` (handler class, **firmware-source class**, default creds, link-local IPs, firmware filename patterns, config-template dir, fingerprint signatures+probe ref, UI metadata) and a registry where each vendor registers once. Derive `DeviceType`, `HANDLER_MAP`, `firmware_checker.SOURCE_MAP`, `MODEL_FIRMWARE_PATTERNS`, IP registry, and credential defaults from it — replacing the `firmware_sources/__init__.py` + `firmware_checker.py` import block. Gate behind Stories 2–4 proving the sub-patterns.
-**Acceptance:** adding a vendor = add `handlers/x.py` + `firmware_sources/x.py` + templates + one `register(VendorSpec(...))`. Story 0 test green. A `VENDORS` allowlist makes Direction-B (single-vendor) a config toggle.
-
-### Story 7 — Modularize fingerprint detection (optional, highest effort) · L · risk: med-high
-**Why:** the largest leak by volume; today it's central switch/elif over `DeviceType`.
-**Scope:** move each vendor's HTTP signatures, dedicated probe, and `_extract_device_details` branch into that vendor's spec/contribution; the fingerprinter iterates contributions in a defined order. **Must preserve probe ordering and confidence weights exactly.**
-**Acceptance:** `test_fingerprint.py` + all `test_mikrotik_*detection*` green with byte-identical detection outcomes on fixtures; simple-mode detection preserved. Ship only if Stories 2–6 land and the win justifies the behavioral risk.
-
----
-
-## Recommended sequence
-
-```
-Story 0 (guard) ──┬─> Story 1 (S1 low-risk fix, parallel)
-                  ├─> Story 2 ─> Story 5 (UI)
-                  ├─> Story 3 ─┐
-                  └─> Story 4 ─┴─> Story 6 (capstone) ─> Story 7 (stretch)
-```
-
-- **Phase 1 (low-risk, high-value):** 0, 1, 2, 3, 4 — pure enumeration consolidation, fully unit-tested, no behavioral risk. This alone gets you from "~15 file edit" to "~2 places + vendor files" and kills both S1 issues. **✅ Complete — merged 2026-08 (PRs #84, #122, #125, #127, #124).**
-- **Phase 2 (UI):** 5 — independent, needs kiosk verification. **⏳ In review (PR #128).**
-- **Phase 3 (stretch):** 6 then 7 — the true plugin model and detection modularization; do only if the maintenance math justifies the effort and behavioral risk.
-
-## Risks & mitigations
-
-| Risk | Mitigation |
-|---|---|
-| Forgetting a registry mid-refactor reintroduces drift | Story 0 consistency test is the gate for every later PR |
-| Detection accuracy regression (Story 7) — no simulator | Preserve probe order/weights; assert byte-identical outcomes on existing fixtures; ship last |
-| Host `config.yaml` mismatch after schema change | `extra=ignore` makes it safe; include host reconciliation note per PR; remember deploy.sh skips config + repo data dir |
-| Kiosk UI breakage (Story 5) | Verify on the touchscreen path; keep behavioral branches; reuse existing `/default-credentials` endpoint pattern |
-| Python 3.10+ syntax slips in | 3.9 reviewer check; CI runs on the 3.9 target |
-| ED side-door or MikroTik netinstall accidentally "generalized" | Explicit non-goals; keep as documented exceptions; covered by `test_evolution_digital.py`, `test_bootp_auto_trigger.py`, `test_netinstall_packages.py` |
-
-## Definition of done (epic)
-
-- Stories 0–4 merged, CI green on the 3.9 target. ✅ *(2026-08)*
-- A vendor can be added or removed by editing ≤ 2 shared locations + its own files, enforced by the Story 0 test. *(Not yet — the S2 sites in fingerprint/firmware/setup-tools/UI remain until Stories 5–6.)*
-- `base.py` contains no vendor brand strings. ✅ *(PR #122)*
-- (If Phase 3 taken) `register(VendorSpec(...))` is the single add point and a `VENDORS` allowlist yields a single-vendor build.
+The architecture work above is not a claim that every vendor/model has completed
+hardware validation. Registry tests and bench qualification answer different
+questions.

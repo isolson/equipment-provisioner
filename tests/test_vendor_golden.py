@@ -133,27 +133,27 @@ def test_default_credentials_golden():
         "cambium": {
             "username": "admin", "password": "admin", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
-            "wpa_key": "", "snmp_community": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
         "mikrotik": {
             "username": "admin", "password": "", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
-            "wpa_key": "", "snmp_community": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
         "tachyon": {
             "username": "root", "password": "admin", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
-            "wpa_key": "", "snmp_community": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
         "tarana": {
             "username": "admin", "password": "", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
-            "wpa_key": "", "snmp_community": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
         "ubiquiti": {
             "username": "ubnt", "password": "ubnt", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
-            "wpa_key": "", "snmp_community": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
     }
     assert list(_default_credentials()) == [
@@ -192,7 +192,7 @@ def test_vendor_ips_golden():
         "tachyon": ["169.254.1.1", "192.168.1.1"],
         "ubiquiti": ["192.168.1.20"],
         "tarana": ["169.254.100.1"],
-        "mikrotik": ["192.168.88.1"],
+        "mikrotik": ["192.168.88.1", "192.168.10.1", "192.168.10.2"],
     }
     # Insertion order IS the detection-probe order (#74) — assert it too.
     assert list(VENDOR_LINK_LOCAL_IPS) == [
@@ -207,10 +207,12 @@ def test_probe_and_boot_ping_orders_golden():
         ("192.168.1.20", ["ubiquiti"]),
         ("169.254.100.1", ["tarana"]),
         ("192.168.88.1", ["mikrotik"]),
+        ("192.168.10.1", ["mikrotik"]),
+        ("192.168.10.2", ["mikrotik"]),
     ]
     assert boot_ping_ips() == [
         "169.254.1.1", "192.168.1.1", "192.168.1.20",
-        "192.168.88.1", "169.254.100.1",
+        "192.168.88.1", "192.168.10.1", "192.168.10.2", "169.254.100.1",
     ]
 
 
