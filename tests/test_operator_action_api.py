@@ -343,6 +343,19 @@ def test_mode_endpoint_accepts_cambium_family_ptp(tmp_path, monkeypatch):
 
 def test_mode_endpoint_rejects_cambium_ptp_profile_without_frequency(tmp_path, monkeypatch):
     _qualify(tmp_path, monkeypatch, "cambium", "ePMP 4518", "5.11.1")
+    # Exercise an incomplete profile, independent of installed bench templates.
+    monkeypatch.setattr(
+        "provisioner.mode_config.ModeConfigManager.load_template",
+        lambda *args, **kwargs: {
+            "device_props": {
+                "wirelessInterfaceMode": "1",
+                "wirelessInterfacePTPMode": "1",
+                "wirelessInterfaceProtocolMode": "3",
+                "wirelessInterfaceTDDFrameSize": "5000",
+                "wirelessInterfaceTDDRatio": "4",
+            }
+        },
+    )
     client = _client(
         monkeypatch,
         dict(_status("cambium", "00:00:00:00:00:01"), device_model="ePMP 4518"),

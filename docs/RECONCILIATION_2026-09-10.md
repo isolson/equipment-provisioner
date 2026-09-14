@@ -82,3 +82,40 @@ template ownership and committed-evidence gates all passed. The isolated logs
 are under `/var/lib/provisioner/bench-evidence/reconciliation-2026-09-10/`.
 The final live health check returned HTTP 200; provisioner and kiosk watchdog
 were active, and the deployed Cambium handler hash was unchanged.
+
+## Deployment reconciliation — 2026-09-14
+
+The September 11 scoped patches left the bench running a mixture of revisions.
+The September 14 audit confirmed that the committed handlers retain those
+hardware fixes. Remaining source differences add required-secret preflight,
+credential editing, baseline installation/status, and profile upload handling;
+MikroTik's handler difference was whitespace only.
+
+The PTP test failure was environment-dependent: it expected an incomplete
+profile but did not supply one. It now supplies an explicit profile without
+`centerFrequency`, so it exercises the intended rejection on both CI and the
+bench without relying on installed data files.
+
+The reconciled deployment installs a clean Git archive into `/opt/provisioner`
+and explicitly synchronizes every tracked `configs/templates/` file into
+`/var/lib/provisioner/repo/`. The reviewed Tachyon differences remove fields
+outside the template ownership contract; the Cambium generic PTP templates
+add the committed protocol selector. They still require certified complete
+profiles before use. Uploaded profiles outside tracked paths are preserved.
+Installing corrected templates does not establish fresh hardware acceptance.
+
+Private rollback snapshots, the source commit, per-file hashes, runtime
+configuration integrity checks, and deployment results are recorded under
+`/var/lib/provisioner/bench-evidence/reconciliation-2026-09-14/`.
+`/opt/provisioner/.deployed-rev` identifies the installed commit;
+`/opt/provisioner/.deployment-manifest.json` records the tracked-file hashes
+for both code and active templates. Recheck those hashes after any subsequent
+patch; a Git marker alone is not proof of the deployed bytes. Host credentials,
+raw captures, firmware, and operational state remain outside this release.
+
+Pre-deploy validation: 1,000 tests passed, 5 skipped on Python 3.13. Documentation,
+Python 3.9 syntax, template ownership, and committed-evidence checks passed.
+GitHub CI provides the separate Python 3.9 runtime result. PR 168 remains a
+bench feature release; the MikroTik secret-handling acceptance work in issue
+167 and the outstanding RF/cold-start hardware checks are not closed by source
+reconciliation.
