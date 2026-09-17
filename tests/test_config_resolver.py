@@ -110,12 +110,19 @@ STORE_SCENARIOS = [
     ([f"{T}/tachyon/tns-100.json"], "tachyon", "TNS-100", f"{T}/tachyon/tns-100.json"),
     # test_default_template_still_applies_without_model
     ([f"{T}/tachyon/default.json"], "tachyon", None, f"{T}/tachyon/default.json"),
-    # test_non_tachyon_vendor_keeps_legacy_any_file_fallback
+    # test_vendors_without_family_trees_keep_legacy_any_file_fallback
+    (
+        [f"{T}/ubiquiti/wave-nano-baseline.json"],
+        "ubiquiti",
+        None,
+        f"{T}/ubiquiti/wave-nano-baseline.json",
+    ),
+    # test_cambium_refuses_the_any_file_fallback
     (
         [f"{T}/cambium/f4518-sm-defaultconfig.json"],
         "cambium",
         None,
-        f"{T}/cambium/f4518-sm-defaultconfig.json",
+        None,
     ),
     # test_non_tachyon_timestamp_export_does_not_override_alias
     (

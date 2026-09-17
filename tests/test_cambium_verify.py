@@ -34,43 +34,72 @@ def _full_export():
             "cambiumCNSDeviceAgentID": "captured-agent-id",
             "wirelessInterfaceTDDAntennaGain": "25",
             "mgmtVLANVID": "99",
+            "wirelessInterfaceMode": "2",
+            "wirelessInterfacePTPMode": "1",
+            "wirelessInterfaceProtocolMode": "1",
+            "cambiumGPSConfigPrioritizeUSB": "1",
+            "snmpReadOnlyCommunity": "captured-community",
         },
         "template_props": {"version": "5.11.1"},
     }
 
 
-def test_cambium_shared_export_normalization_keeps_policy_and_removes_identity():
+def test_cambium_shared_export_normalization_keeps_only_contract_owned_fields():
     normalized = CambiumHandler.normalize_field_export(_full_export(), "SM")
     props = normalized["device_props"]
+    # Fleet policy is asserted.
     assert props["mgmtVLANVID"] == "12"
     assert props["mgmtIFEnable"] == "0"
-    assert "mgmtIFVLAN" not in props
     assert props["networkBridgeIPAddressMode"] == "2"
+    # Role fields survive with the export's values.
+    for key, value in CambiumHandler.SM_ROLE_VALUES.items():
+        assert props[key] == value
+    # Device defaults are never written by a profile.
+    assert "wirelessInterfaceTDDAntennaGain" not in props
+    assert "wirelessInterfaceScanFrequencyListEighty" not in props
+    # The scan mask is family fleet policy and survives from the export.
     assert props["wirelessInterfaceScanFrequencyBandwidth"] == "51"
-    assert props["wirelessInterfaceTDDAntennaGain"] == "17"
-    assert props["wirelessInterfaceScanFrequencyListEighty"] == "5180,5200"
-    assert "wirelessInterfaceSSID" not in props
-    assert "centerFrequency" not in props
+    assert "cambiumGPSConfigPrioritizeUSB" not in props
+    assert "mgmtIFVLAN" not in props
+    # Secrets never ride in a profile.
+    assert "snmpReadOnlyCommunity" not in props
+    # Identity, RF, and captured addresses belong to the mode workflow or the unit.
+    for key in (
+        "wirelessInterfaceSSID",
+        "centerFrequency",
+        "networkBridgeIPAddr",
+        "networkBridgeNetmask",
+        "systemConfigDeviceName",
+        "cambiumCNSDeviceAgentID",
+    ):
+        assert key not in props
+
+
+def test_cambium_normalize_refuses_an_ap_export_as_sm_baseline():
+    export = _full_export()
+    export["device_props"]["wirelessInterfaceMode"] = "1"
+    export["device_props"]["wirelessInterfacePTPMode"] = "0"
+    with pytest.raises(ValueError, match="not an SM export"):
+        CambiumHandler.normalize_field_export(export, "SM")
+
+
+def test_cambium_ap_profile_keeps_mode_action_fields():
+    export = _full_export()
+    export["device_props"]["wirelessInterfaceMode"] = "1"
+    export["device_props"]["wirelessInterfacePTPMode"] = "0"
+    props = CambiumHandler.normalize_field_export(export, "AP")["device_props"]
+    assert props["wirelessInterfaceSSID"] == "captured-ssid"
+    assert props["centerFrequency"] == "5180"
     assert "networkBridgeIPAddr" not in props
-    assert "networkBridgeNetmask" not in props
-    assert "systemConfigDeviceName" not in props
-    assert "cambiumCNSDeviceAgentID" not in props
+    assert "snmpReadOnlyCommunity" not in props
 
 
-@pytest.mark.parametrize(
-    "model,expected",
-    [
-        ("Force 300-25", "19"),
-        ("ePMP 3000", "19"),
-        ("ePMP 4600C", "51"),
-        ("ePMP 4518", "51"),
-        ("unknown", "51"),
-    ],
-)
-def test_cambium_shared_export_projects_scan_mask_by_model(model, expected):
-    normalized = CambiumHandler.normalize_field_export(_full_export(), "SM")
-    prepared = CambiumHandler.prepare_field_export_for_model(normalized, model)
-    assert prepared["device_props"]["wirelessInterfaceScanFrequencyBandwidth"] == expected
+def test_cambium_sm_template_role_fields_match_the_handler_role_table():
+    template = json.loads(
+        Path("configs/templates/cambium/ePMP-4K/5.11.1/SM/default.json").read_text()
+    )["device_props"]
+    for key, value in CambiumHandler.SM_ROLE_VALUES.items():
+        assert template[key] == value, key
 
 
 async def test_cambium_full_export_never_uses_set_param(monkeypatch):
@@ -120,10 +149,11 @@ async def test_cambium_full_export_uses_native_import_and_skip_illegal(tmp_path,
     assert "-F" in import_command
     assert "skipIllegal=1" in import_command
     assert "set_param" not in " ".join(import_command)
-    assert uploaded["device_props"]["wirelessInterfaceScanFrequencyBandwidth"] == "19"
+    # The export is imported as-is: no per-model projection of device defaults.
+    assert uploaded["device_props"] == _full_export()["device_props"]
 
 
-async def test_cambium_connectorized_gain_defaults_and_overrides(monkeypatch):
+async def test_cambium_connectorized_gain_requires_an_explicit_value(monkeypatch):
     h = _handler()
     seen = []
 
@@ -132,12 +162,48 @@ async def test_cambium_connectorized_gain_defaults_and_overrides(monkeypatch):
         return True
 
     monkeypatch.setattr(h, "_apply_config_settings_curl", fake_set)
-    assert await h.apply_antenna_gain(model="ePMP 4600C") is True
+    assert await h.apply_antenna_gain(model="ePMP 4600C") is False
     assert await h.apply_antenna_gain(18, model="ePMP 4600C") is True
-    assert seen == [
-        {"wirelessInterfaceTDDAntennaGain": "23"},
-        {"wirelessInterfaceTDDAntennaGain": "18"},
-    ]
+    assert seen == [{"wirelessInterfaceTDDAntennaGain": "18"}]
+
+
+async def test_cambium_apply_secrets_writes_secret_fields_and_keeps_verify_basis(monkeypatch):
+    h = _handler()
+    h._last_applied_config = {"mgmtVLANVID": "12"}
+    seen = []
+
+    async def fake_set(props):
+        seen.append(dict(props))
+        h._last_applied_config = dict(props)
+        return True
+
+    monkeypatch.setattr(h, "_apply_config_settings_curl", fake_set)
+    assert await h.apply_secrets({"wpa_key": "k", "snmp_community": "c"}) is True
+    assert seen == [{"wirelessInterfaceEncryptionKey": "k", "snmpReadOnlyCommunity": "c"}]
+    assert h._last_applied_config == {"mgmtVLANVID": "12"}
+    assert await h.apply_secrets({}) is True
+    assert h.applied_config_expectations() == {"mgmtVLANVID": "12"}
+
+
+def test_cambium_expectations_exclude_secrets_and_device_defaults():
+    props = {
+        "mgmtVLANVID": "12",
+        "wirelessInterfaceMode": "2",
+        "wirelessInterfaceSSID": "site",
+        "wirelessInterfaceEncryptionKey": "k",
+        "cambiumGPSConfigPrioritizeUSB": "1",
+        "wirelessInterfaceTDDAntennaGain": "18",
+        "prefferedAPTable": [{"prefferedListTableEntrySSID": "x"}],
+    }
+    assert CambiumHandler._verification_values(props) == {
+        "mgmtVLANVID": "12",
+        "wirelessInterfaceMode": "2",
+        "wirelessInterfaceSSID": "site",
+    }
+    assert CambiumHandler._field_export_verification_values(props) == {
+        "mgmtVLANVID": "12",
+        "wirelessInterfaceMode": "2",
+    }
 
 
 async def test_cambium_integrated_gain_is_not_injected(monkeypatch):
@@ -269,6 +335,17 @@ async def test_verify_config_confirms_native_import_properties(monkeypatch, fast
     assert await h.verify_config() is True
 
 
+def test_verification_ignores_force_hardware_normalized_temperature_field():
+    """Force read-back preheat normalization must not fail config verify."""
+    props = {
+        "mgmtVLANVID": 12,
+        "systemConfigPreheatStopTemp": 70,
+        "systemConfigPreheatStopTimeout": 60,
+    }
+
+    assert CambiumHandler._verification_values(props) == {"mgmtVLANVID": 12}
+
+
 async def test_verify_config_is_unverified_when_native_readback_is_incomplete(monkeypatch, fast_sleep):
     h = _handler()
     h._last_applied_config = {
@@ -339,10 +416,11 @@ async def test_upload_status_fails_immediately_on_non_json_body(monkeypatch):
     assert await h._poll_upload_status_curl("test-session", timeout=300) is False
 
 
-async def test_ax_bank_one_uses_explicit_upgrade_sequence(monkeypatch, tmp_path):
+async def test_running_5_11_uses_explicit_upgrade_sequence(monkeypatch, tmp_path):
+    """Both 5.11.1 captures (Force 300-25) used upload_sw_image_local."""
     h = _handler()
     h.interface = "eth0.1996"
-    h._device_info = DeviceInfo(device_type="cambium", model="ePMP AX (SKU 53560)")
+    h._device_info = DeviceInfo(device_type="cambium", model="ePMP AX (SKU 53560)", firmware_version="5.11.1")
     firmware = tmp_path / "ePMP-AX-v5.11.1.img"
     firmware.write_bytes(b"firmware")
     calls = []
@@ -352,7 +430,7 @@ async def test_ax_bank_one_uses_explicit_upgrade_sequence(monkeypatch, tmp_path)
         return True
 
     async def legacy(path):
-        raise AssertionError("AX must not use local_upload_image")
+        raise AssertionError("5.11.1 must not start with local_upload_image")
 
     monkeypatch.setattr(h, "_upload_firmware_curl_alt_bank", explicit)
     monkeypatch.setattr(h, "_upload_firmware_curl", legacy)
@@ -544,3 +622,49 @@ async def test_alt_bank_upload_fails_when_upgrade_status_is_not_confirmed(
     monkeypatch.setattr(h, "_poll_upgrade_status_curl", not_ready)
 
     assert await h._upload_firmware_curl_alt_bank(str(firmware)) is False
+
+
+async def test_running_5_10_uses_legacy_endpoint_first_and_falls_back(monkeypatch, tmp_path):
+    """An ePMP 4518 at 5.10.4 answered 404 on upload_sw_image_local (bench, 2026-09-02)."""
+    h = _handler()
+    h.interface = "eth0.1992"
+    h._device_info = DeviceInfo(device_type="cambium", model="ePMP 4518", firmware_version="5.10.4")
+    image = tmp_path / "ePMP-AX-v5.11.1.img"
+    image.write_bytes(b"x")
+    calls = []
+
+    async def primary(path):
+        calls.append("legacy")
+        return True
+
+    async def alt(path):
+        calls.append("explicit")
+        return False
+
+    monkeypatch.setattr(h, "_upload_firmware_curl", primary)
+    monkeypatch.setattr(h, "_upload_firmware_curl_alt_bank", alt)
+    assert await h.upload_firmware(str(image), bank=1) is True
+    assert calls == ["legacy"]
+
+    # 5.11.1 whose explicit endpoint fails still falls back to the legacy one.
+    calls.clear()
+    h._device_info = DeviceInfo(device_type="cambium", model="ePMP 4518", firmware_version="5.11.1")
+    assert await h.upload_firmware(str(image), bank=2) is True
+    assert calls == ["explicit", "legacy"]
+
+    async def both_fail(path):
+        calls.append("fail")
+        return False
+
+    calls.clear()
+    monkeypatch.setattr(h, "_upload_firmware_curl", both_fail)
+    monkeypatch.setattr(h, "_upload_firmware_curl_alt_bank", both_fail)
+    assert await h.upload_firmware(str(image), bank=1) is False
+    assert calls == ["fail", "fail"]
+
+
+def test_explicit_upgrade_rule_reads_the_running_firmware():
+    h = _handler()
+    for version, expected in (("5.10.4", False), ("5.11.1", True), ("v5.12.0", True), ("5.9.0", False), (None, False), ("unknown", False)):
+        h._device_info = DeviceInfo(device_type="cambium", model="ePMP 4518", firmware_version=version)
+        assert h._running_firmware_uses_explicit_upgrade() is expected, version

@@ -38,5 +38,20 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.9"
+      - name: Install project dependencies
+        run: pip install -e ".[dev,web,snmp]"
       - name: Config template validation gate
         run: python scripts/check_templates.py
+
+  bench-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Install project dependencies
+        run: pip install -e ".[dev,web,snmp]"
+      - name: Committed bench evidence validation gate
+        run: python scripts/check_bench_evidence.py --all --repo-only

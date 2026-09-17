@@ -10,6 +10,8 @@ combinations.
 
 import pytest
 
+from provisioner.handlers.base import ConnectionFailureKind
+
 
 PROVISION_KWARGS = dict(
     config={"key": "value"},
@@ -17,6 +19,62 @@ PROVISION_KWARGS = dict(
     expected_firmware="new",
     dual_bank=True,
 )
+
+
+# ---------------------------------------------------------------------------
+# connection/session contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ensure_connected_reuses_live_session(spy_handler_factory):
+    """A verified session must not be discarded before the next operation."""
+    spy = spy_handler_factory()
+    spy._connected = True
+
+    assert await spy.ensure_connected("next operation") is True
+    assert "connect" not in spy.call_names
+    assert "disconnect" not in spy.call_names
+
+
+@pytest.mark.asyncio
+async def test_ensure_connected_retries_transient_failure(
+    spy_handler_factory, monkeypatch, fast_sleep
+):
+    spy = spy_handler_factory()
+    spy.connection_retry_attempts = 3
+    outcomes = [False, True]
+
+    async def connect():
+        spy._record("connect")
+        success = outcomes.pop(0)
+        spy._connected = success
+        if not success:
+            spy.set_connection_failure(ConnectionFailureKind.TRANSPORT)
+        return success
+
+    monkeypatch.setattr(spy, "connect", connect)
+
+    assert await spy.ensure_connected("transient test") is True
+    assert spy.call_names.count("connect") == 2
+
+
+@pytest.mark.asyncio
+async def test_ensure_connected_does_not_retry_authentication_failure(
+    spy_handler_factory, monkeypatch, fast_sleep
+):
+    spy = spy_handler_factory()
+    spy.connection_retry_attempts = 3
+
+    async def connect():
+        spy._record("connect")
+        spy.set_connection_failure(ConnectionFailureKind.AUTHENTICATION)
+        return False
+
+    monkeypatch.setattr(spy, "connect", connect)
+
+    assert await spy.ensure_connected("authentication test") is False
+    assert spy.call_names.count("connect") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +238,24 @@ async def test_config_default_runs_between_firmware_phases(spy_handler_factory):
     )
     final_fw_idx = names.index("get_firmware_version")
     assert apply_idx < verify_cfg_idx < fw2_update_idx < final_fw_idx
+
+
+@pytest.mark.asyncio
+async def test_config_verification_session_is_reused_for_fw2(spy_handler_factory):
+    """The flow must not force a login between config verification and FW2."""
+    spy = spy_handler_factory(supports_dual_bank=True)
+
+    result = await spy.provision(**PROVISION_KWARGS)
+
+    assert result.success, result.error_message
+    verify_idx = spy.call_names.index("verify_config")
+    fw2_upload_idx = next(
+        index
+        for index, call in enumerate(spy.calls)
+        if call[0] == "upload_firmware" and call[1]["bank"] == 2
+    )
+    assert "disconnect" not in spy.call_names[verify_idx + 1:fw2_upload_idx]
+    assert "connect" not in spy.call_names[verify_idx + 1:fw2_upload_idx]
 
 
 @pytest.mark.asyncio

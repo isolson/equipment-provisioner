@@ -489,7 +489,9 @@ register(VendorSpec(
         ConfigFamilySpec(
             name="ePMP 3K",
             directory="ePMP-3K",
-            model_patterns=("epmp 3000", "epmp 3000l", "epmp 3000 mp"),
+            # Force 300 radios run the same ePMP-AC firmware and config
+            # schema as the ePMP 3000 access points (SKU map in the handler).
+            model_patterns=("epmp 3000", "epmp 3000l", "epmp 3000 mp", "force 300*"),
             roles=("AP", "SM", "PTP"),
             ptp_compatible_families=("ePMP-3K", "ePMP-4K"),
         ),

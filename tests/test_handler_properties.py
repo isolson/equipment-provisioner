@@ -150,6 +150,22 @@ def test_tachyon_config_after_all_firmware_by_model(model, expected_deferred):
     assert handler.config_after_all_firmware is expected_deferred
 
 
+@pytest.mark.parametrize(
+    "model,expected_role",
+    [
+        ("TNA-301", "AP"),
+        ("TNA-301-rev-a", "AP"),
+        ("TNA-302", "SM"),
+        ("TNA-302-rev-a", "SM"),
+        ("TNA-303X", None),
+        ("TNA-303L-65", "SM"),
+        (None, None),
+    ],
+)
+def test_tachyon_upload_role_is_model_specific(model, expected_role):
+    assert TachyonHandler.upload_role_for_model(model) == expected_role
+
+
 # ---------------------------------------------------------------------------
 # Tarana — verify active bank + skip reboot on FW2
 # ---------------------------------------------------------------------------
@@ -320,9 +336,15 @@ def test_tachyon_trait_overrides():
     }
 
 
-@pytest.mark.parametrize("handler_class", [CambiumHandler, MikrotikHandler, TaranaHandler, UbiquitiHandler])
+@pytest.mark.parametrize("handler_class", [MikrotikHandler, TaranaHandler, UbiquitiHandler])
 def test_other_vendors_keep_trait_defaults(handler_class):
     assert _traits(handler_class) == _traits(BaseHandler)
+
+
+def test_cambium_trait_overrides():
+    # Every Cambium model maps to a family tree, so the vendor-root fallback
+    # (which holds AP/PTP mode templates) is refused.
+    assert _traits(CambiumHandler) == dict(_traits(BaseHandler), allows_arbitrary_template_fallback=False)
 
 
 def test_handler_class_for_resolves_vendor_strings():

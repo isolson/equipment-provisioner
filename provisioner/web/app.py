@@ -22,6 +22,29 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _deployed_version() -> str:
+    """Return the deployed git short SHA (or an empty string) for the header."""
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent.parent
+    # deploy.sh writes .deployed-rev next to the code (no .git on the host).
+    for marker in (root / ".deployed-rev", root / "VERSION"):
+        try:
+            text = marker.read_text().strip()
+        except OSError:
+            continue
+        if text:
+            return text.split()[0][:20]
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).decode().strip()
+    except Exception:
+        return ""
+
+
 def create_app(
     provisioner=None,
     title: str = "Network Provisioner",
@@ -83,8 +106,17 @@ def create_app(
             "copies": 1,
         }
         port_manager = getattr(provisioner, "port_manager", None) if provisioner else None
+        initial_ports = {}
         if port_manager is not None:
             num_ports = port_manager.num_ports
+            try:
+                # Seed the first paint so a Chromium respawn never shows an
+                # empty grid while the WebSocket connects.
+                initial_ports = {
+                    str(port): status for port, status in port_manager.get_port_status().items()
+                }
+            except Exception:  # pragma: no cover - presentation must not break boot
+                initial_ports = {}
         config = getattr(provisioner, "config", None) if provisioner else None
         if config is not None:
             printer_config = getattr(config, "label_printer", None)
@@ -101,6 +133,8 @@ def create_app(
             # means the map exists at script-parse time — no async race at
             # first render, no stale-JS hazard on the long-lived kiosk.
             "vendor_metadata": vendor_ui_metadata(),
+            "initial_ports": initial_ports,
+            "deployed_version": _deployed_version(),
         })
 
     @app.get("/labels", response_class=HTMLResponse)

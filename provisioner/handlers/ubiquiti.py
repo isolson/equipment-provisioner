@@ -30,6 +30,7 @@ from typing import Dict, Any, Optional
 
 import aiohttp
 
+from ..field_ownership import Owner, OwnershipContract
 from .base import BaseHandler, DeviceInfo
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,20 @@ class UbiquitiHandler(BaseHandler):
 
     DEFAULT_IP = "192.168.1.20"
     LOCAL_BIND_IP = "192.168.1.2"  # Pi's IP on the same /24 as the device
+    #: Field ownership contract (``docs/PROVISIONING_NORTH_STAR.md``).
+    #: Wave management VLAN is a model requirement (fleet policy). Hostname
+    #: and SSID belong to the mode workflow. Anything else is a device default.
+    FIELD_OWNERSHIP = OwnershipContract.from_dotted(
+        {
+            "network.interfaces.data.mgmtVLAN": Owner.FLEET_POLICY,
+            "system.hostname": Owner.MODE_ACTION,
+            "wireless.interfaces[0].ssid": Owner.MODE_ACTION,
+            "wireless.interfaces[0].security": Owner.SECRET,
+            "system.users": Owner.SECRET,
+            "services.snmpAgent.community": Owner.SECRET,
+        }
+    )
+
     DEFAULT_CREDENTIALS = {"username": "ubnt", "password": "ubnt"}
 
     # Known login endpoints to try (varies by firmware/product line)

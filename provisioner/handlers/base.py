@@ -6,7 +6,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, Any, Callable, Awaitable, Tuple
+from typing import Optional, Dict, Any, Callable, Awaitable, List, Tuple
+
+from ..field_ownership import OwnershipContract, get_path, parse_path
 
 _logger = logging.getLogger(__name__)
 
@@ -34,6 +36,16 @@ class ProvisioningPhase(str, Enum):
     VERIFYING = "verifying"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class ConnectionFailureKind(str, Enum):
+    """Stable connection-failure classes for workflow retry decisions."""
+
+    AUTHENTICATION = "authentication"
+    TRANSPORT = "transport"
+    DEVICE_BUSY = "device_busy"
+    INVALID_RESPONSE = "invalid_response"
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -110,6 +122,68 @@ class BaseHandler(ABC):
     #: verified. A template or theoretical capability alone is not enough.
     qualified_post_provision_modes = ()  # type: Tuple[str, ...]
 
+    #: The handler's field ownership contract (see ``field_ownership.py``).
+    #: Shared code lints templates and derives verification expectations from
+    #: it. ``None`` means the vendor has not declared a contract yet; the flow
+    #: then behaves exactly as before (handler-private verification).
+    FIELD_OWNERSHIP = None  # type: Optional[OwnershipContract]
+
+    def applied_config_expectations(self) -> Optional[Dict[str, Any]]:
+        """Return the read-back expectations for the config just applied.
+
+        The default returns ``None`` so :meth:`verify_config` keeps its
+        handler-private behavior. Handlers with a ``FIELD_OWNERSHIP`` contract
+        override this to return ``field_ownership.expected_values(...)`` for
+        the configuration they applied.
+        """
+        return None
+
+    def pending_secrets(self) -> Dict[str, str]:
+        """Return secret-owned values that must be written after config.
+
+        Secrets never live in a template. They arrive through the host
+        credentials (for example ``wpa_key`` and ``snmp_community``). The
+        default reads those two keys; a handler may override.
+        """
+        values = dict(getattr(self, "_secret_values", {}) or {})
+        for key in ("wpa_key", "snmp_community"):
+            if isinstance(self.credentials, dict) and self.credentials.get(key):
+                values[key] = self.credentials[key]
+        return values
+
+    async def apply_secrets(self, secrets: Dict[str, str]) -> bool:
+        """Write secret-owned fields. The default has nothing to write."""
+        return True
+
+    def required_secrets(self) -> List[str]:
+        """Secret keys the standard run cannot finish without.
+
+        A handler lists a key here when the baseline leaves a field empty on
+        purpose (for example the SM profile passphrase). The run fails before
+        the config step when the host credentials do not provide it, so a
+        unit never leaves the bench with an empty secret.
+        """
+        return []
+
+    def missing_required_secrets(self) -> List[str]:
+        pending = self.pending_secrets()
+        return [key for key in self.required_secrets() if not pending.get(key)]
+
+    @classmethod
+    def upload_role_for_model(
+        cls, model: Optional[str] = None
+    ) -> Optional[str]:
+        """Return a model's known structured-upload role, when available.
+
+        This is used only while packaging or locating a structured upload
+        asset. A model may support more than one role, or the role may not be
+        known from the model alone; those handlers return ``None`` and the
+        caller must provide an explicit mode. Standard provisioning keeps
+        its existing baseline behavior and does not use this hint to bypass
+        an explicit post-provision mode workflow.
+        """
+        return None
+
     @classmethod
     def qualified_post_provision_modes_for_model(
         cls, model: Optional[str] = None
@@ -161,6 +235,15 @@ class BaseHandler(ABC):
     supports_manual_netinstall = False
     manual_netinstall_label = "Recovery (Netinstall)"
 
+    #: Number of attempts that :meth:`ensure_connected` makes for transient
+    #: failures. The default preserves the existing single-attempt behavior.
+    #: A handler can increase this value after bench verification.
+    connection_retry_attempts = 1
+
+    #: Delay before each retry from :meth:`ensure_connected`. A handler can
+    #: override :meth:`connection_retry_delay` for progressive backoff.
+    connection_retry_delay_seconds = 0.0
+
     @staticmethod
     def is_full_config_export(config: Dict[str, Any]) -> bool:
         """Return True when a loaded JSON config is a full device export
@@ -187,6 +270,17 @@ class BaseHandler(ABC):
         self.interface = interface
         self._connected = False
         self._device_info: Optional[DeviceInfo] = None
+        self._connection_failure_kind: Optional[ConnectionFailureKind] = None
+        #: Field names (never values) that mismatched in the last verify.
+        self.last_verify_mismatches: List[str] = []
+        #: Secret-owned device values from the host credentials, captured
+        #: here because handlers may replace ``self.credentials`` with a
+        #: login candidate during connect().
+        self._secret_values: Dict[str, str] = {
+            key: credentials[key]
+            for key in ("wpa_key", "snmp_community")
+            if isinstance(credentials, dict) and credentials.get(key)
+        }
 
     @property
     def device_type(self) -> str:
@@ -211,6 +305,133 @@ class BaseHandler(ABC):
     async def disconnect(self) -> None:
         """Disconnect from the device."""
         pass
+
+    @property
+    def connection_failure_kind(self) -> ConnectionFailureKind:
+        """Return the structured class for the last connection failure.
+
+        Handlers can call :meth:`set_connection_failure` when their transport
+        gives a precise result. The fallback classifies the existing
+        ``login_error`` text so current handlers remain compatible.
+        """
+        if self._connection_failure_kind is not None:
+            return self._connection_failure_kind
+
+        error = str(getattr(self, "login_error", "") or "").lower()
+        if any(
+            marker in error
+            for marker in (
+                "credential",
+                "password",
+                "unauthorized",
+                "forbidden",
+                "account locked",
+                "statuscode 401",
+                "http 401",
+                "http 403",
+            )
+        ):
+            return ConnectionFailureKind.AUTHENTICATION
+        if any(
+            marker in error
+            for marker in (
+                "too many active sessions",
+                "device busy",
+                "rebooting",
+                "temporarily unavailable",
+                "http 429",
+                "http 503",
+            )
+        ):
+            return ConnectionFailureKind.DEVICE_BUSY
+        if any(
+            marker in error
+            for marker in (
+                "connection",
+                "not responding",
+                "not reachable",
+                "timeout",
+                "timed out",
+            )
+        ):
+            return ConnectionFailureKind.TRANSPORT
+        if error:
+            return ConnectionFailureKind.INVALID_RESPONSE
+        return ConnectionFailureKind.UNKNOWN
+
+    def set_connection_failure(
+        self, kind: Optional[ConnectionFailureKind]
+    ) -> None:
+        """Record a connection result without logging credentials or payloads."""
+        self._connection_failure_kind = kind
+
+    def connection_retry_delay(self, failed_attempt: int) -> float:
+        """Return the delay after a failed connection attempt."""
+        return float(self.connection_retry_delay_seconds)
+
+    async def ensure_connected(self, reason: str = "operation") -> bool:
+        """Reuse a valid session or make bounded connection attempts.
+
+        A successful operation that verifies device state must leave
+        ``is_connected`` true. The shared flow calls this method before the
+        next in-band operation. It does not discard a verified session.
+
+        Authentication failures stop immediately. Other failures use the
+        handler retry contract.
+        """
+        if self.is_connected:
+            _logger.debug(
+                "[SESSION] Reusing the verified session for %s", reason
+            )
+            return True
+
+        attempts = max(1, int(self.connection_retry_attempts))
+        for attempt in range(1, attempts + 1):
+            self.set_connection_failure(None)
+            try:
+                connected = await self.connect()
+            except Exception as exc:
+                connected = False
+                if self._connection_failure_kind is None:
+                    self.set_connection_failure(ConnectionFailureKind.UNKNOWN)
+                _logger.warning(
+                    "[SESSION] Connection raised for %s: error=%s",
+                    reason,
+                    type(exc).__name__,
+                )
+
+            if connected:
+                self._connected = True
+                self.set_connection_failure(None)
+                return True
+
+            self._connected = False
+            kind = self.connection_failure_kind
+            _logger.warning(
+                "[SESSION] Connection failed for %s: kind=%s attempt=%s/%s",
+                reason,
+                kind.value,
+                attempt,
+                attempts,
+            )
+            if kind == ConnectionFailureKind.AUTHENTICATION:
+                return False
+            if attempt < attempts:
+                delay = max(0.0, self.connection_retry_delay(attempt))
+                if delay:
+                    await asyncio.sleep(delay)
+
+        return False
+
+    async def refresh_connection(self, reason: str = "operation") -> bool:
+        """Discard a stale session and apply the bounded retry contract."""
+        try:
+            await self.disconnect()
+        except Exception as exc:
+            _logger.debug(
+                "[SESSION] Disconnect failed before %s: %s", reason, exc
+            )
+        return await self.ensure_connected(reason)
 
     @abstractmethod
     async def get_info(self) -> DeviceInfo:
@@ -257,7 +478,7 @@ class BaseHandler(ABC):
         """Apply an optional post-provision antenna setting.
 
         Vendors that do not need this setting keep the no-op default.  The
-        Cambium handler owns its connectorized-radio detection and write path.
+        A vendor handler owns its connectorized-radio detection and write path.
         """
         return True
 
@@ -286,8 +507,8 @@ class BaseHandler(ABC):
     async def verify_config(self, expected_values: Optional[Dict[str, Any]] = None):
         """Verify that configuration was applied correctly (fail-closed).
 
-        Reconnects to the device, then — when ``expected_values`` are supplied —
-        reads the config back via :meth:`_read_back_config` and compares. The
+        Reuses the active device session, then — when ``expected_values`` are
+        supplied — reads the config back via :meth:`_read_back_config` and compares. The
         result is HONEST:
 
           - returns ``True`` only when read-back positively matched
@@ -304,36 +525,17 @@ class BaseHandler(ABC):
         Returns:
             ``True`` / ``False`` / :data:`UNVERIFIED`.
         """
-        # Config apply does not trigger a reboot, so the device should still be up.
-        _logger.info(f"[CONFIG VERIFY] Default verification - reconnecting to {self.ip}")
-        await self.disconnect()
-
-        # Try to reconnect first.
-        connected = False
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            try:
-                _logger.info(f"[CONFIG VERIFY] Login attempt {attempt}/{max_attempts}")
-                if await self.connect():
-                    connected = True
-                    break
-
-                # Check for auth/lockout errors — stop immediately, don't burn attempts
-                login_err = getattr(self, 'login_error', None) or ""
-                auth_keywords = ["credentials", "password", "locked", "session", "unauthorized"]
-                if any(kw in login_err.lower() for kw in auth_keywords):
-                    _logger.error(f"[CONFIG VERIFY] Auth/lockout error, stopping retries: {login_err}")
-                    return False
-
-                _logger.warning(f"[CONFIG VERIFY] Reconnect attempt {attempt} failed: {login_err}")
-            except Exception as e:
-                _logger.warning(f"[CONFIG VERIFY] Attempt {attempt} error: {e}")
-
-            if attempt < max_attempts:
-                await asyncio.sleep(10)
-
-        if not connected:
-            _logger.error(f"[CONFIG VERIFY] All {max_attempts} login attempts failed")
+        # Config apply does not trigger a reboot. Keep its valid session.
+        _logger.info(
+            "[CONFIG VERIFY] Default verification on active session for %s",
+            self.ip,
+        )
+        if not await self.ensure_connected("config verification"):
+            _logger.error(
+                "[CONFIG VERIFY] Could not establish a session for %s: kind=%s",
+                self.ip,
+                self.connection_failure_kind.value,
+            )
             return False
 
         # Reconnect confirmed the device is reachable. Without specific values to
@@ -350,13 +552,15 @@ class BaseHandler(ABC):
             )
             return UNVERIFIED
 
+        self.last_verify_mismatches = []
         for field_name, expected in expected_values.items():
-            actual = readback.get(field_name)
-            if actual != expected:
-                _logger.error(
-                    f"[CONFIG VERIFY] {field_name} mismatch: expected {expected!r}, got {actual!r}"
-                )
-                return False
+            found, actual = get_path(readback, parse_path(field_name))
+            if not found or actual != expected:
+                # Field names only. Values may be sensitive.
+                self.last_verify_mismatches.append(field_name)
+                _logger.error(f"[CONFIG VERIFY] {field_name} mismatch on {self.ip}")
+        if self.last_verify_mismatches:
+            return False
 
         _logger.info(f"[CONFIG VERIFY] All expected values confirmed on {self.ip}")
         return True
@@ -514,6 +718,7 @@ class BaseHandler(ABC):
             "firmware_update_1": "Firmware bank 1",
             "config_upload": "Config",
             "config_verify": "Config verify",
+            "secrets": "Secrets",
             "firmware_update_2": "Firmware bank 2",
             "reboot": "Reboot",
             "verify": "Firmware verify",
@@ -529,6 +734,8 @@ class BaseHandler(ABC):
         config_steps = ["config_upload"]
         if has_config:
             config_steps.append("config_verify")
+        if has_config and (self.pending_secrets() or self.required_secrets()):
+            config_steps.append("secrets")
 
         if self.config_after_all_firmware:
             keys.extend(firmware_steps)
@@ -608,9 +815,12 @@ class BaseHandler(ABC):
             # PHASE 1: LOGIN
             # ================================================================
             _logger.info(f"[PROVISION] Phase 1: Login to {self.ip}")
-            if not await self.connect():
+            if not await self.ensure_connected("initial login"):
                 result.error_message = getattr(self, 'login_error', None) or "Failed to connect to device"
-                result.needs_credentials = "credentials" in result.error_message.lower() or "password" in result.error_message.lower()
+                result.needs_credentials = (
+                    self.connection_failure_kind
+                    == ConnectionFailureKind.AUTHENTICATION
+                )
                 await notify("login", False, result.error_message)
                 return result
             result.phases_completed.append(ProvisioningPhase.CONNECTING)
@@ -811,7 +1021,9 @@ class BaseHandler(ABC):
                     # PHASE 5: VERIFY FIRMWARE UPDATE 1
                     # ================================================================
                     _logger.info(f"[PROVISION] Phase 5: Verify firmware update 1")
-                    if not await self.connect():
+                    if not await self.refresh_connection(
+                        "firmware update 1 verification"
+                    ):
                         result.error_message = "Failed to reconnect after reboot"
                         await notify("firmware_update_1", False, result.error_message)
                         return result
@@ -881,6 +1093,17 @@ class BaseHandler(ABC):
             #   device unreachable for subsequent operations.
             # ================================================================
 
+            missing_secrets = self.missing_required_secrets() if (config or config_path) else []
+            if missing_secrets:
+                result.error_message = (
+                    "Required secret not configured on the host: %s "
+                    "(set it under credentials.%s in config.yaml)"
+                    % (", ".join(missing_secrets), self.device_type)
+                )
+                _logger.error("[PROVISION] %s", result.error_message)
+                await notify("secrets", False, result.error_message)
+                return result
+
             if not self.config_after_all_firmware:
                 # --- DEFAULT ORDER: Config → Verify → FW2 ---
 
@@ -909,9 +1132,17 @@ class BaseHandler(ABC):
                     _logger.info(f"[PROVISION] Phase 6b: Verify config applied")
                     await notify("config_verify", "loading", None)
 
-                    verify_result = await self.verify_config()
+                    verify_result = await self.verify_config(
+                        self.applied_config_expectations()
+                    )
                     if verify_result is False:
-                        result.error_message = "Config verification failed - device may not have applied config correctly"
+                        mismatches = list(getattr(self, "last_verify_mismatches", []) or [])
+                        result.error_message = "Config verification failed"
+                        if mismatches:
+                            # Field names only. Never values.
+                            result.error_message += ": mismatch " + ", ".join(mismatches[:6])
+                        else:
+                            result.error_message += " - device may not have applied config correctly"
                         await notify("config_verify", False, result.error_message)
                         return result
                     elif verify_result == UNVERIFIED:
@@ -931,6 +1162,16 @@ class BaseHandler(ABC):
                     _logger.info(f"[PROVISION] No config to apply - skipping")
                     await notify("config_upload", "skipped", "No config specified")
 
+                # PHASE 6c: SECRETS (never in a template; presence only)
+                secrets = self.pending_secrets()
+                if secrets:
+                    await notify("secrets", "loading", None)
+                    if not await self.apply_secrets(secrets):
+                        result.error_message = "Failed to apply device secrets"
+                        await notify("secrets", False, result.error_message)
+                        return result
+                    await notify("secrets", True, None)
+
             # PHASE 7-9: FIRMWARE UPDATE 2 (bank 2, if dual-bank)
             if dual_bank and self.supports_dual_bank:
                 if not need_fw2:
@@ -948,15 +1189,12 @@ class BaseHandler(ABC):
                     _logger.info(f"    Current bank2: {bank2_ver}")
                     await notify("firmware_update_2", "loading", None)
 
-                    # Ensure fresh session before FW2 upload.
-                    # Config verify disconnects/reconnects and the session may
-                    # be stale, especially after a config-triggered reboot.
-                    _logger.info(f"[PROVISION] Reconnecting before FW2 upload...")
-                    try:
-                        await self.disconnect()
-                    except Exception:
-                        pass
-                    if not await self.connect():
+                    # Config verification must leave a usable session. Reuse
+                    # that session instead of forcing another device login.
+                    _logger.info(
+                        "[PROVISION] Preparing the verified session before FW2 upload..."
+                    )
+                    if not await self.ensure_connected("firmware update 2 upload"):
                         result.error_message = "Failed to reconnect before firmware update 2"
                         await notify("firmware_update_2", False, result.error_message)
                         return result
@@ -1004,7 +1242,9 @@ class BaseHandler(ABC):
                     # PHASE 9: VERIFY FIRMWARE UPDATE 2
                     _logger.info(f"[PROVISION] Phase 9: Verify firmware update 2")
                     if not self.fw2_skips_reboot:
-                        if not await self.connect():
+                        if not await self.refresh_connection(
+                            "firmware update 2 verification"
+                        ):
                             result.error_message = "Failed to reconnect after reboot"
                             await notify("firmware_update_2", False, result.error_message)
                             return result
@@ -1068,13 +1308,10 @@ class BaseHandler(ABC):
                 _logger.info(f"[PROVISION] Applying config after all firmware (config_after_all_firmware=True)")
                 _logger.info(f"[PROVISION] Config path: {config_path}, inline config: {bool(config)}")
                 if config or config_path:
-                    # Ensure fresh session before config apply
-                    _logger.info(f"[PROVISION] Reconnecting before config apply...")
-                    try:
-                        await self.disconnect()
-                    except Exception:
-                        pass
-                    if not await self.connect():
+                    _logger.info(
+                        "[PROVISION] Preparing the verified session before config apply..."
+                    )
+                    if not await self.ensure_connected("deferred config apply"):
                         result.error_message = "Failed to reconnect before config apply"
                         await notify("config_upload", False, result.error_message)
                         return result
@@ -1108,6 +1345,18 @@ class BaseHandler(ABC):
                 else:
                     _logger.info(f"[PROVISION] No config to apply - skipping")
                     await notify("config_upload", "skipped", "No config specified")
+
+                # Deferred flows still owe the secret-owned fields. The device
+                # may have left the bench network; apply_secrets reports
+                # honestly when it cannot reach it.
+                secrets = self.pending_secrets()
+                if secrets:
+                    await notify("secrets", "loading", None)
+                    if not await self.apply_secrets(secrets):
+                        result.error_message = "Failed to apply device secrets"
+                        await notify("secrets", False, result.error_message)
+                        return result
+                    await notify("secrets", True, None)
 
             result.success = True
             result.phases_completed.append(ProvisioningPhase.COMPLETED)

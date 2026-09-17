@@ -27,6 +27,17 @@ async def test_default_verify_config_does_not_claim_success_without_readback(
     assert result is not True
 
 
+async def test_default_verify_config_reuses_active_session(spy_handler_factory):
+    spy = spy_handler_factory()
+    spy._connected = True
+
+    result = await BaseHandler.verify_config(spy)
+
+    assert result is not True
+    assert "connect" not in spy.call_names
+    assert "disconnect" not in spy.call_names
+
+
 async def test_default_verify_config_fails_on_readback_mismatch(
     spy_handler_factory, fast_sleep
 ):

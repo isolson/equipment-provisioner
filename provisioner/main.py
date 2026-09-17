@@ -67,6 +67,7 @@ class Provisioner:
     def __init__(self, config: Config):
         self.config = config
         self.port_manager: Optional[PortManager] = None
+        self._run_errors: Dict[int, Optional[str]] = {}
         self.handler_manager: Optional[HandlerManager] = None
         self.firmware_manager: Optional[FirmwareManager] = None
         self.config_resolver: Optional[ConfigResolver] = None
@@ -132,6 +133,10 @@ class Provisioner:
             device_type: {
                 "username": creds.username,
                 "password": creds.password,
+                # Secret-owned device fields; written by the handler's secret
+                # path after config, never by a template.
+                "wpa_key": creds.wpa_key,
+                "snmp_community": creds.snmp_community,
             }
             for device_type, creds in self.config.credentials.items()
         }
@@ -183,6 +188,9 @@ class Provisioner:
                 None if self._use_vlan_mode else self.config.simple_mode.subnet
             ),
             mode_config_enabled=self.config.features.mode_config,
+            # Per-port timeline persisted under the data dir so the kiosk
+            # keeps its history across reloads and Chromium respawns.
+            events_path=str(Path(self.config.data.local_path) / "port_events"),
         )
         await self.port_manager.setup()
         self.port_manager.on_device_detected(self._on_port_device_detected)
@@ -371,6 +379,7 @@ class Provisioner:
         cancelled = False
 
         success = False
+        self._run_errors.pop(port_num, None)
         try:
             async with self._provisioning_semaphore:
                 success = await self._provision_port_device(port_num, device_type, device_ip)
@@ -385,7 +394,11 @@ class Provisioner:
                 state.expecting_reboot = False
             # Don't overwrite state if cancelled — link-down handler already reset everything
             if not cancelled:
-                self.port_manager.mark_port_provisioning(port_num, False, success=success)
+                # Carry the run's error into port state so the card, the
+                # sheet, and the timeline show why it failed.
+                self.port_manager.mark_port_provisioning(
+                    port_num, False, success=success, error=self._run_errors.pop(port_num, None)
+                )
                 # The completion event is emitted inside _provision_port_device,
                 # before mark_port_provisioning() can derive the terminal
                 # workflow. Push the authoritative post-run state immediately
@@ -830,6 +843,7 @@ class Provisioner:
 
                 # Persist the retry reason in port state so page refreshes and
                 # WebSocket reconnects render the same contextual action.
+                self._run_errors[port_num] = result.error_message
                 self.port_manager.set_needs_credentials(
                     port_num, result.needs_credentials
                 )
@@ -871,6 +885,7 @@ class Provisioner:
 
             from .handlers.base import ProvisioningResult
             result = ProvisioningResult(success=False, error_message=str(e))
+            self._run_errors[port_num] = "Unexpected error: %s" % str(e)[:120]
             await notifier.notify_failed(result, device_ip)
             return False
         finally:

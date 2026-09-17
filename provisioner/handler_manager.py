@@ -104,34 +104,49 @@ class HandlerManager:
 
     @classmethod
     def operator_capabilities_for(
-        cls, device_type: Optional[str], model: Optional[str] = None
+        cls,
+        device_type: Optional[str],
+        model: Optional[str] = None,
+        firmware: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Return handler-owned capabilities used by operator workflows.
 
-        The kiosk and API must not maintain their own vendor allowlists for
-        AP/PTP or recovery actions. Unknown and non-provisionable side-door
-        device types intentionally return the base, empty capability set.
+        The handler advertises the modes a model could support. The bench
+        evidence matrix (``provisioner/qualification.py``) decides which of
+        those are offered for this exact model and firmware. The kiosk and
+        API must not maintain their own vendor allowlists. Unknown and
+        non-provisionable side-door device types return the empty set.
         """
+        from . import qualification
+
+        empty = {
+            "post_provision_modes": [],
+            "advertised_modes": [],
+            "unqualified": {},
+            "baseline_qualified": False,
+            "transitions": {},
+            "required_baseline_mode": "",
+            "ptp_settings_required": False,
+            "manual_netinstall": False,
+            "manual_netinstall_label": "",
+        }
         if not device_type:
-            return {
-                "post_provision_modes": [],
-                "required_baseline_mode": "",
-                "ptp_settings_required": False,
-                "manual_netinstall": False,
-                "manual_netinstall_label": "",
-            }
+            return dict(empty)
         handler_class = cls.handler_class_for(device_type)
         if handler_class is None:
-            return {
-                "post_provision_modes": [],
-                "required_baseline_mode": "",
-                "ptp_settings_required": False,
-                "manual_netinstall": False,
-                "manual_netinstall_label": "",
-            }
-        qualified_modes = handler_class.qualified_post_provision_modes_for_model(model)
+            return dict(empty)
+        advertised = tuple(handler_class.qualified_post_provision_modes_for_model(model))
+        qualified = qualification.qualified_modes(device_type, model, firmware, advertised)
         return {
-            "post_provision_modes": list(qualified_modes),
+            "post_provision_modes": list(qualified),
+            "advertised_modes": list(advertised),
+            "unqualified": {
+                mode: qualification.unqualified_reason(device_type, model, firmware, mode)
+                for mode in advertised
+                if mode not in qualified
+            },
+            "baseline_qualified": qualification.baseline_qualified(device_type, model, firmware),
+            "transitions": qualification.transition_report(device_type, model, firmware),
             "required_baseline_mode": str(
                 getattr(handler_class, "required_baseline_mode", "") or ""
             ),
@@ -145,6 +160,27 @@ class HandlerManager:
                 getattr(handler_class, "manual_netinstall_label", "")
             ),
         }
+
+    @classmethod
+    def upload_role_for_model(
+        cls, device_type: Optional[str], model: Optional[str] = None
+    ) -> Optional[str]:
+        """Return a handler-owned role for a structured upload.
+
+        Shared asset code asks the handler instead of keeping a vendor or
+        model table of its own. ``None`` means the operator must specify the
+        role/mode because the model alone is ambiguous.
+        """
+        if not device_type:
+            return None
+        handler_class = cls.handler_class_for(device_type)
+        if handler_class is None:
+            return None
+        role = handler_class.upload_role_for_model(model)
+        if role is None:
+            return None
+        role = str(role).upper()
+        return role if role in ("AP", "SM", "PTP") else None
 
     async def provision_device(
         self,

@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .config import _default_credentials
 from .config_assets import ConfigAssetCatalog
-from .handler_manager import provisionable_device_types
+from .handler_manager import HandlerManager, provisionable_device_types
 
 STATUS_PRIORITY = {
     "ready": 0,
@@ -119,6 +119,27 @@ def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
             status = "warning"
             summary = "Still using factory default"
 
+        # Secret-owned device fields the handler cannot finish without
+        # (docs/PROVISIONING_NORTH_STAR.md). Derived from the handler class,
+        # never from a vendor list here.
+        missing_secrets = []
+        handler_class = HandlerManager.handler_class_for(device_type)
+        if handler_class is not None:
+            try:
+                probe = handler_class(
+                    ip="0.0.0.0",
+                    credentials={
+                        key: getattr(creds, key, "") for key in ("username", "password", "wpa_key", "snmp_community")
+                    },
+                )
+                missing_secrets = list(probe.missing_required_secrets())
+            except Exception:  # pragma: no cover - a handler that cannot probe is reported as unknown
+                missing_secrets = []
+        if missing_secrets:
+            note = "Missing required secret: " + ", ".join(missing_secrets)
+            summary = note if status == "ready" else summary + "; " + note
+            status = "warning"
+
         if factory_default is None:
             recommended = None
         else:
@@ -132,6 +153,7 @@ def _read_primary_credentials(config: Any) -> List[Dict[str, Any]]:
             {
                 "device_type": device_type,
                 "username": getattr(creds, "username", "admin"),
+                "missing_secrets": missing_secrets,
                 "has_password": bool(password),
                 "status": status,
                 "summary": summary,
@@ -147,7 +169,7 @@ def _template_requirements(config: Any) -> Dict[str, Dict[str, Any]]:
         "cambium": {
             "required": True,
             "modes": ["default", "ap", "ptp-a", "ptp-b"],
-            "requires_shared_baseline": True,
+            "requires_family_sm_baseline": True,
         },
         "tachyon": {"required": True, "modes": ["default", "ap", "ptp-a", "ptp-b"]},
         "tarana": {
@@ -248,13 +270,25 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
             data_path=data_path,
             device_type=device_type,
         )
-        shared_baseline = any(
-            asset.scope == "shared" and asset.role and asset.role.lower() == "sm"
+        # Every registered family needs its own linted SM baseline. The
+        # runtime-only shared profile is retired (docs/PROVISIONING_NORTH_STAR.md).
+        from .vendor_registry import config_family_metadata
+
+        registered_families = [
+            entry["directory"] for entry in config_family_metadata().get(device_type, [])
+        ]
+        families_with_sm = {
+            asset.family
             for asset in ConfigAssetCatalog(data_path).list_assets(
                 device_type=device_type,
                 config_type="template",
             )
-        )
+            if asset.family and asset.role and asset.role.lower() == "sm"
+        }
+        missing_sm_families = [
+            family for family in registered_families if family not in families_with_sm
+        ]
+        family_sm_baseline = bool(registered_families) and not missing_sm_families
         missing_modes = [mode for mode in info["modes"] if mode not in existing]
         required_default_missing = info["required"] and "default" not in existing
 
@@ -273,8 +307,10 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
                 warning_reasons.append(
                     "Missing mode templates: {}".format(", ".join(missing_modes))
                 )
-            if info.get("requires_shared_baseline") and not shared_baseline:
-                warning_reasons.append("Missing shared SM baseline")
+            if info.get("requires_family_sm_baseline") and not family_sm_baseline:
+                warning_reasons.append(
+                    "Missing family SM baseline: " + ", ".join(missing_sm_families or ["all"])
+                )
             if warning_reasons:
                 status = "warning"
                 summary = "; ".join(warning_reasons)
@@ -287,7 +323,8 @@ def _build_template_check(config: Any, data_path: Path) -> Dict[str, Any]:
                 "summary": summary,
                 "existing": existing,
                 "missing_modes": missing_modes,
-                "shared_baseline": shared_baseline,
+                "family_sm_baseline": family_sm_baseline,
+                "missing_sm_families": missing_sm_families,
             }
         )
 
@@ -930,8 +967,14 @@ def seed_bundled_templates(
     *,
     data_path: Path,
     overwrite: bool = False,
+    device_type: Optional[str] = None,
+    family: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Copy bundled repo templates into the live data store."""
+    """Copy bundled repo templates into the live data store.
+
+    ``device_type`` limits the copy to one vendor tree and ``family`` to one
+    family inside it (the "install baselines from repo" action).
+    """
 
     source_root = repo_root / "configs" / "templates"
     target_root = data_path / "configs" / "templates"
@@ -942,10 +985,14 @@ def seed_bundled_templates(
         raise FileNotFoundError(f"Bundled template directory not found: {source_root}")
 
     for source_file in sorted(path for path in source_root.rglob("*") if path.is_file()):
-        if source_file.name.startswith("."):
+        if source_file.name.startswith(".") or source_file.name.lower() == "readme.md":
             continue
 
         relative = source_file.relative_to(source_root)
+        if device_type and (not relative.parts or relative.parts[0] != device_type):
+            continue
+        if family and (len(relative.parts) < 2 or relative.parts[1] != family):
+            continue
         target = target_root / relative
         if target.exists() and not overwrite:
             skipped_files.append(str(relative))

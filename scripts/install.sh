@@ -104,12 +104,14 @@ create_directories() {
     mkdir -p "${CONFIG_DIR}"
     mkdir -p "${DATA_DIR}"
     mkdir -p "${DATA_DIR}/repo"
+    mkdir -p "${DATA_DIR}/bench-evidence"
     mkdir -p "${LOG_DIR}"
 
     # Set permissions
     chmod 755 "${INSTALL_DIR}"
     chmod 700 "${CONFIG_DIR}"
     chmod 755 "${DATA_DIR}"
+    chmod 700 "${DATA_DIR}/bench-evidence"
 }
 
 # Setup application files (run directly from repo, just copy configs)

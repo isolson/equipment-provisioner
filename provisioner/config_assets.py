@@ -423,3 +423,77 @@ class ConfigAssetCatalog:
         if root.resolve() != resolved and root.resolve() not in resolved.parents:
             raise ValueError("Invalid asset destination")
         return resolved
+
+    @staticmethod
+    def infer_structured_fields_for_model(
+        device_type: str,
+        model: Optional[str],
+        family: Optional[str] = None,
+        role: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Infer a safe family/role pair from a detected model.
+
+        Family membership comes from ``VendorSpec``. A model-specific role
+        hint comes from the handler. An explicit role is preserved, while an
+        explicit family must match the detected model. A requested AP/SM mode
+        is itself an explicit role for models whose family supports both
+        roles.
+        """
+        from .vendor_registry import config_family_for_model
+
+        family_spec = config_family_for_model(device_type, model)
+        if family_spec is None:
+            return family, role
+
+        if family is not None and family != family_spec.directory:
+            raise ValueError(
+                "Model %s belongs to config family %s, not %s"
+                % (model, family_spec.directory, family)
+            )
+        family = family_spec.directory
+
+        if role is None and mode in ("ap", "sm"):
+            role = mode.upper()
+        if role is None:
+            # Local import avoids making the asset catalog import the handler
+            # package during module initialization.
+            from .handler_manager import HandlerManager
+
+            role = HandlerManager.upload_role_for_model(device_type, model)
+        return family, role
+
+    def destination_for_model(
+        self,
+        config_type: str,
+        device_type: str,
+        model: Optional[str],
+        family: Optional[str],
+        firmware: Optional[str],
+        role: Optional[str],
+        mode: Optional[str],
+        profile: Optional[str],
+        link_profile: Optional[str],
+        filename: str,
+    ) -> Path:
+        """Build a structured asset destination from model metadata.
+
+        This is the packaging seam for model-specific uploads. It keeps the
+        model-to-family decision in the registry and the model-to-role
+        decision in the handler, so TNA-301 AP assets cannot silently become
+        TNA-302 SM assets (or the reverse).
+        """
+        family, role = self.infer_structured_fields_for_model(
+            device_type, model, family=family, role=role, mode=mode
+        )
+        return self.destination(
+            config_type,
+            device_type,
+            family,
+            firmware,
+            role,
+            mode,
+            profile,
+            link_profile,
+            filename,
+        )
