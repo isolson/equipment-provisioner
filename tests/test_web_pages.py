@@ -45,12 +45,7 @@ def test_dashboard_renders_setup_banner_without_label_controls():
 
 
 def test_dashboard_does_not_auto_queue_labels_on_completion():
-    """Completion events keep the label payload contract but do not enqueue it.
-
-    The printer queue remains available for manual use and future AP/PTP
-    workflow hooks, but provisioning completion is not production-enabled for
-    automatic label printing yet.
-    """
+    """Completion events keep the label payload contract but do not enqueue it."""
     client = make_client()
     html = client.get("/").text
 
@@ -182,109 +177,103 @@ def test_dashboard_vendor_metadata_renders_identically_to_the_old_map():
     }
 
 
-def test_dashboard_uses_server_owned_workflow_actions():
-    """The modal renders capabilities from port workflow state, not a new
-    frontend vendor allowlist. Tachyon's SSID preview remains a separate,
-    pre-existing mode-config behavior pending its handler-trait migration."""
-    client = make_client()
-    html = client.get("/").text
+def test_dashboard_uses_the_light_operations_console_theme():
+    """The rebuilt kiosk is a light, high-contrast console (outdoor 7-inch panel)."""
+    html = make_client().get("/").text
+
+    assert "--bg: #eef1f6" in html
+    assert "--panel: #ffffff" in html
+    assert "--tone-success: #15803d" in html
+    assert "--tone-error: #b91c1c" in html
+    assert 'class="card-rail"' in html
+    assert 'id="deployed-version"' in html
+    assert 'id="stale-banner"' in html
+    # No dark surfaces and no pastel-on-dark ink remain.
+    assert "#0b1220" not in html
+    assert "#fde68a" not in html
+    assert "background: #f5f5f5" not in html
+    assert "@media (orientation: portrait)" in html
+
+
+def test_dashboard_renders_server_owned_presentation_and_seeds_ports():
+    html = make_client().get("/").text
+
+    assert "const INITIAL_PORTS = " in html
+    assert "function presentationForPort(port)" in html
+    assert "port.presentation && port.presentation.phase" in html
+    assert "function updatePortCard(n)" in html
+    assert "if (lastCardSig[n] === sig) return;" in html
+    # Legacy client-side state machines are gone.
+    assert "function getCardState" not in html
+    assert "function getStatusCenterInfo" not in html
+    assert "function getStepProgress" not in html
+    assert "portActivityLogs" not in html
+
+
+def test_dashboard_timeline_comes_from_the_server_event_log():
+    html = make_client().get("/").text
+
+    assert "/api/ports/${portNum}/events?since=" in html
+    assert "case 'port_event':" in html
+    assert "function appendEvent(portNum, event)" in html
+    assert "function renderTimeline(portNum)" in html
+
+
+def test_dashboard_uses_server_owned_workflow_actions_and_reasons():
+    html = make_client().get("/").text
 
     assert "port.device_type === 'cambium' || port.device_type === 'tachyon'" not in html
     assert "workflow.available_actions" in html
     assert "workflow.service_actions" in html
-    assert "renderWorkflowActionPanel(portNum, port)" in html
-    assert "port.device_type === 'tachyon' ? dir.toUpperCase() : hostname" in html
+    assert "workflow.unqualified" in html
+    assert "renderWorkflowActionPanel(selectedPort, port)" in html
+    assert "dir.toUpperCase()" not in html
 
 
-def test_dashboard_renders_sm_restore_action_and_confirmation():
-    client = make_client()
-    html = client.get("/").text
+def test_dashboard_has_one_mode_change_flow_with_preview_and_confirm():
+    html = make_client().get("/").text
 
-    assert "action.id === 'configure_sm'" in html
-    assert "function openSMModal(portNum)" in html
-    assert "function applySMMode(portNum)" in html
-    assert "body: JSON.stringify({ mode: 'sm' })" in html
-    assert "PTP settings and link tracking will be cleared" in html
+    assert "function openModeChange(portNum, targetMode)" in html
+    assert "/api/ports/${v.port}/mode-preview" in html
+    assert "/api/ports/${v.port}/apply-mode" in html
+    assert "function renderModeConfirm()" in html
+    assert "function renderModeProgress()" in html
     assert "Restore SM Config" in html
+    assert "action.id === 'configure_sm'" not in html
+    assert "function openAPModal" not in html
+    assert "function openPTPModal" not in html
+    assert "function openSMModal" not in html
+
+
+def test_dashboard_never_uses_native_dialogs_or_dead_endpoints():
+    html = make_client().get("/").text
+
+    assert "alert(" not in html
+    assert " confirm(" not in html and "!confirm(" not in html
+    assert "/api/github/sync" not in html
+    assert "function confirmNetinstall(portNum)" in html
+    assert "function showModalNotice(notice)" in html
+
+
+def test_dashboard_reconnects_forever_and_shows_stale_state():
+    html = make_client().get("/").text
+
+    assert "maxReconnectAttempts" not in html
+    assert "function scheduleReconnect()" in html
+    assert "Math.min(1000 * Math.pow(2, Math.min(reconnectAttempts, 4)), 15000)" in html
+    assert "function checkStale()" in html
+    assert "Live updates paused" in html
 
 
 def test_dashboard_footer_is_contextual_and_touch_friendly():
-    client = make_client()
-    html = client.get("/").text
+    html = make_client().get("/").text
 
     assert "function renderPortModalFooter(portNum, port)" in html
     assert "Retry provisioning" in html
     assert "Enter credentials and retry" in html
     assert "Reprint label" not in html
-    assert "if (active)" in html
-    assert "port.workflow.state !== 'failed'" in html
-    assert "MikroTik recovery (Netinstall)" not in html
-    assert re.search(r"\.modal-action\s*\{[^}]*min-height:\s*48px", html)
-    assert "flex flex-wrap justify-end gap-2" in html
-    assert "const canApplyMode" not in html
-
-
-def test_dashboard_progress_uses_run_specific_validation_plan():
-    """The kiosk must not turn nine nullable checklist fields into nine steps."""
-    client = make_client()
-    html = client.get("/").text
-
-    assert "port.step_plan" in html
-    assert "port.step_status" in html
-    assert "cl[k] === undefined || cl[k] === null" in html
-    assert "return { done, total: plan.length };" in html
-
-
-def test_dashboard_rechecks_identity_before_showing_preserved_complete():
-    """Rapid swaps must render BOOTING while the returning MAC is unknown.
-
-    The backend intentionally preserves a successful result during reboot
-    grace. The kiosk must not let that old result visually outrank the boot
-    wait for a newly connected, not-yet-identified unit.
-    """
-    client = make_client()
-    html = client.get("/").text
-
-    card_state = html.split("function getCardState(port) {", 1)[1].split(
-        "function getIconState", 1
-    )[0]
-    assert card_state.index("if (port.waiting_for_boot)") < card_state.index(
-        "port.last_result === 'complete'"
-    )
-
-    status_center = html.split("function getStatusCenterInfo(port, portNum) {", 1)[1].split(
-        "function statusIconSVG", 1
-    )[0]
-    assert status_center.index("if (port.waiting_for_boot)") < status_center.index(
-        "const isDone"
-    )
-    assert "Checking connected device..." in status_center
-    assert "Waiting for link..." in status_center
-
-
-def test_dashboard_requires_verified_config_before_deploy_ready():
-    """Firmware-only success must not be presented as deployable.
-
-    Cambium and Tachyon can finish firmware work without a resolved config.
-    Treat that as a missing SM baseline and keep AP/PTP conversion locked
-    until standard SM configuration has been applied and verified.
-    """
-    client = make_client()
-    html = client.get("/").text
-
-    status_center = html.split("function getStatusCenterInfo(port, portNum) {", 1)[1].split(
-        "function statusIconSVG", 1
-    )[0]
-    assert "port.workflow?.state === 'config_required'" in html
-    assert "port.workflow?.state === 'config_unverified'" in html
-    assert "`${baselineMode} CONFIG MISSING`" in status_center
-    assert "sub: 'Cannot deploy'" in status_center
-    assert "`${baselineMode} CONFIG UNVERIFIED`" in status_center
-    assert "sub = 'Ready to deploy'" in status_center
-    assert "port.workflow.baseline_mode.toUpperCase()" in status_center
-    assert "function deploymentReadiness" not in html
-    assert "supportsModeConfiguration" not in html
-    assert "const requiresBaseline = Boolean(port.workflow?.baseline_mode)" in html
+    assert "min-height: 48px" in html
+    assert 'id="modal-footer"' in html
 
 
 def test_labels_page_renders_guarded_templates():
@@ -379,18 +368,29 @@ def test_manage_page_uses_vendor_tabs_for_assets():
     assert 'id="cred-device-type"' not in html
 
 
-def test_manage_page_keeps_first_cambium_export_controls_available_without_assets():
+def test_manage_page_is_organized_around_baselines_profiles_and_host_secrets():
+    """The assets page: git baselines (read-only, installable), guided AP/PTP
+    profile uploads, and host login plus required secrets. No shared scope,
+    no free-text mode fields, no native dialogs."""
     client = make_client()
-
     html = client.get("/files").text
 
-    assert '<input id="cfg-firmware"' in html
-    assert 'list="cfg-firmware-options"' in html
-    assert 'id="cfg-firmware-options"' in html
-    assert '<select id="cfg-role"' in html
-    assert '<select id="cfg-mode"' in html
-    assert "const registryRoles" in html
-    assert "const registryModes" in html
+    assert "Standard SM baseline" in html
+    assert "Install from repo" in html
+    assert "/api/config-baselines" in html
+    assert "Deployment profiles" in html
+    assert 'id="prof-family"' in html and 'id="prof-role"' in html
+    assert "ptp_side" in html
+    assert "Host login and secrets" in html
+    assert "/api/host-credentials" in html
+    assert "WPA2 key" in html and "SNMP read-only community" in html
+    assert 'id="restart-banner"' in html
+    assert "Extra logins to try" in html
+    assert "Shared baseline" not in html
+    assert 'id="cfg-scope"' not in html and 'id="cfg-asset-kind"' not in html
+    assert 'id="cfg-mode"' not in html
+    assert " confirm(" not in html and "!confirm(" not in html
+    assert "const FAMILY_METADATA" in html
 
 
 def test_firmware_page_uses_vendor_tabs_and_vendor_check():

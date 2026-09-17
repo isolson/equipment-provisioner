@@ -182,65 +182,39 @@
                 <div class="vendor-card">
                     <div class="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-start justify-between gap-3">
                         <div>
-                            <h3 class="text-base font-semibold flex items-center gap-2">
-                                <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                                </svg>
-                                Configuration Templates
-                            </h3>
+                            <h3 class="text-base font-semibold flex items-center gap-2">Configuration Templates</h3>
                             <div id="config-column-meta" class="text-xs text-gray-500 mt-1">Loading...</div>
                         </div>
                         <span id="config-column-status" class="px-2 py-0.5 text-xs font-medium rounded bg-gray-200 text-gray-600">...</span>
                     </div>
-                    <div class="p-4 space-y-4">
-                        <div id="config-file-section">
-                            <label class="block text-sm text-gray-600 mb-2">Template Type</label>
-                            <select id="cfg-type" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 mb-4 focus:border-blue-500 focus:outline-none">
-                                <option value="template">Default Template</option>
-                                <option value="override">Device Override (by MAC)</option>
-                            </select>
-                            <div class="grid grid-cols-2 gap-2 mb-4">
-                                <select id="cfg-asset-kind" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Upload type">
-                                    <option value="standard">Standard template</option>
-                                    <option value="field_export">Field deployment export</option>
-                                </select>
-                                <select id="cfg-scope" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Asset scope">
-                                    <option value="family">Family profile</option>
-                                    <option value="shared">Shared baseline</option>
-                                </select>
+                    <div class="p-4 space-y-5">
+                        <div id="config-file-section" class="space-y-5">
+                            <div>
+                                <div class="flex items-center justify-between mb-2">
+                                    <div class="text-sm font-semibold text-gray-800">Standard SM baseline <span class="text-xs font-normal text-gray-500">from git</span></div>
+                                    <button onclick="installBaselines()" class="touch-btn px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-medium text-white">Install from repo</button>
+                                </div>
+                                <p class="text-xs text-gray-500 mb-2">Every model family gets one linted SM baseline from the repository. Uploads never change it.</p>
+                                <div id="baseline-list" class="space-y-2"><div class="text-gray-400 text-center py-3">Loading...</div></div>
                             </div>
-                            <div id="config-asset-filters" class="grid grid-cols-2 gap-2 mb-4">
-                                <select id="cfg-family" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config family">
-                                    <option value="">All families</option>
-                                </select>
-                                <input id="cfg-firmware" oninput="updateConfigFilters()" list="cfg-firmware-options" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="Firmware version" aria-label="Config firmware">
-                                <datalist id="cfg-firmware-options"></datalist>
-                                <select id="cfg-role" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config role">
-                                    <option value="">All roles</option>
-                                </select>
-                                <select id="cfg-mode" onchange="updateConfigFilters()" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Config mode">
-                                    <option value="">All modes</option>
-                                </select>
-                                <input id="cfg-profile" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="AP profile (optional)" aria-label="AP profile">
-                                <input id="cfg-link-profile" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="PTP link profile (optional)" aria-label="PTP link profile">
-                            </div>
-                            <p class="text-xs text-gray-500 mb-4">
-                                First Cambium SM export: choose Field deployment export and Shared baseline, enter the firmware version, then choose SM for role and mode.
-                            </p>
-                            <div class="drop-zone rounded-lg flex items-center justify-center gap-2 p-4 text-center cursor-pointer bg-white"
-                                 onclick="document.getElementById('cfg-file-input').click()"
-                                 ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleConfigDrop(event)">
-                                <input type="file" id="cfg-file-input" class="hidden" accept=".json,.yaml,.rsc,.tar,.tar.gz,.tgz" onchange="uploadConfigFile(this.files[0])">
-                                <svg class="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-                                </svg>
-                                <span class="text-sm text-gray-500">Drop configuration file or click to browse</span>
-                            </div>
-                            <div class="border-t border-gray-200 pt-4 mt-4">
-                            <div id="config-list" class="space-y-2">
-                                <div class="text-gray-400 text-center py-4">Loading...</div>
-                            </div>
+                            <div class="border-t border-gray-200 pt-4">
+                                <div class="text-sm font-semibold text-gray-800 mb-2">Deployment profiles <span class="text-xs font-normal text-gray-500">AP and PTP</span></div>
+                                <div class="grid grid-cols-2 gap-2 mb-2">
+                                    <select id="prof-family" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Family" onchange="renderProfileForm()"></select>
+                                    <select id="prof-role" class="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm" aria-label="Role" onchange="renderProfileForm()">
+                                        <option value="AP">AP</option>
+                                        <option value="PTP">PTP link</option>
+                                    </select>
+                                </div>
+                                <div id="prof-params" class="mb-2"></div>
+                                <div class="drop-zone rounded-lg flex items-center justify-center gap-2 p-4 text-center cursor-pointer bg-white"
+                                     onclick="document.getElementById('cfg-file-input').click()"
+                                     ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleConfigDrop(event)">
+                                    <input type="file" id="cfg-file-input" class="hidden" accept=".json,.tar,.tar.gz,.tgz" onchange="uploadConfigFile(this.files[0])">
+                                    <span class="text-sm text-gray-500">Drop the device export or profile file, or tap to browse</span>
+                                </div>
+                                <p class="text-xs text-gray-500 mt-2">Cambium: drop the full device export. The firmware is read from the export, and secrets, identity, and device defaults are removed.</p>
+                                <div id="profile-list" class="space-y-2 mt-3"><div class="text-gray-400 text-center py-3">Loading...</div></div>
                             </div>
                         </div>
                         <div id="config-tarana-section" class="hidden">
@@ -255,29 +229,31 @@
                         </div>
                     </div>
                 </div>
-
                 <div class="vendor-card">
                     <div class="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-start justify-between gap-3">
                         <div>
-                            <h3 class="text-base font-semibold flex items-center gap-2">
-                                <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
-                                </svg>
-                                Login Credentials
-                            </h3>
+                            <h3 class="text-base font-semibold flex items-center gap-2">Login Credentials</h3>
                             <div id="credentials-column-meta" class="text-xs text-gray-500 mt-1">Loading...</div>
                         </div>
                         <span id="credentials-column-status" class="px-2 py-0.5 text-xs font-medium rounded bg-gray-200 text-gray-600">...</span>
                     </div>
-                    <div class="p-4 space-y-4">
-                        <p class="text-sm text-gray-600 mb-4">Custom entries are tried before built-in defaults.</p>
-                        <input type="text" id="cred-username" placeholder="Username" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 mb-3 focus:border-blue-500 focus:outline-none">
-                        <input type="password" id="cred-password" placeholder="Password" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 mb-3 focus:border-blue-500 focus:outline-none">
-                        <button onclick="addCredential()" class="touch-btn w-full py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-white">Add Credential</button>
-                        <div class="border-t border-gray-200 pt-4">
-                        <div id="credentials-list" class="space-y-2">
-                            <div class="text-gray-400 text-center py-4">Loading...</div>
+                    <div class="p-4 space-y-5">
+                        <div id="restart-banner" class="hidden rounded-lg border border-amber-300 bg-amber-50 text-amber-800 text-sm p-3 flex items-center justify-between gap-2">
+                            <span>Saved to the host config. Restart the service to apply.</span>
+                            <button onclick="restartService()" class="touch-btn px-3 py-1 bg-amber-600 hover:bg-amber-500 rounded-lg text-sm font-medium text-white">Restart</button>
                         </div>
+                        <div>
+                            <div class="text-sm font-semibold text-gray-800 mb-2">Host login and secrets <span class="text-xs font-normal text-gray-500">config.yaml</span></div>
+                            <p class="text-xs text-gray-500 mb-2">The provisioner logs in with these and writes the secrets to every unit. A required secret that is missing stops provisioning.</p>
+                            <div id="host-credentials" class="space-y-2"><div class="text-gray-400 text-center py-3">Loading...</div></div>
+                        </div>
+                        <div class="border-t border-gray-200 pt-4">
+                            <div class="text-sm font-semibold text-gray-800 mb-2">Extra logins to try</div>
+                            <p class="text-xs text-gray-500 mb-2">Tried before the built-in defaults when a unit rejects the host login.</p>
+                            <input type="text" id="cred-username" placeholder="Username" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 mb-2 focus:border-blue-500 focus:outline-none">
+                            <input type="password" id="cred-password" placeholder="Password" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 mb-2 focus:border-blue-500 focus:outline-none">
+                            <button onclick="addCredential()" class="touch-btn w-full py-2 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-white">Add login</button>
+                            <div id="credentials-list" class="space-y-2 mt-3"><div class="text-gray-400 text-center py-3">Loading...</div></div>
                         </div>
                     </div>
                 </div>
@@ -286,63 +262,303 @@
 
     </main>
 
-    <div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
-
-    <div id="editor-modal" class="fixed inset-0 z-50 hidden" role="dialog" aria-modal="true" aria-labelledby="editor-title">
-        <div class="absolute inset-0 bg-black/40" onclick="closeEditor()"></div>
-        <div class="absolute inset-4 md:inset-8 bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col border border-gray-200">
-            <div class="px-6 py-4 border-b border-gray-300 flex items-center justify-between">
-                <h3 class="text-xl font-bold" id="editor-title">Edit Config</h3>
-                <button onclick="closeEditor()" class="touch-btn p-2 rounded-lg hover:bg-gray-100" title="Close">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                    </svg>
-                </button>
-            </div>
-            <div class="flex-1 overflow-hidden p-4">
-                <textarea id="editor-content" class="w-full h-full bg-gray-50 border border-gray-300 rounded-lg p-4 font-mono text-sm text-gray-900 focus:border-blue-500 focus:outline-none resize-none"></textarea>
-            </div>
-            <div class="px-6 py-4 border-t border-gray-300 flex gap-3">
-                <button onclick="saveConfig()" class="touch-btn flex-1 py-3 bg-green-600 hover:bg-green-500 rounded-lg font-medium text-white">Save Changes</button>
-                <button onclick="closeEditor()" class="touch-btn flex-1 py-3 bg-gray-200 hover:bg-gray-300 rounded-lg font-medium text-gray-800">Cancel</button>
-            </div>
-        </div>
-    </div>
-
     <script>
         const VENDOR_METADATA = {{ vendor_metadata | tojson }};
         const FAMILY_METADATA = {{ family_metadata | tojson }};
         const VENDORS = Object.entries(VENDOR_METADATA).map(([value, metadata]) => ({
-            value,
-            label: metadata.name,
-            full: metadata.name,
-            color: metadata.color,
-            icon: metadata.icon,
+            value, label: metadata.name, full: metadata.name, color: metadata.color, icon: metadata.icon,
         }));
+        const DIRECTIONS = ['north', 'east', 'south', 'west'];
+        const BASELINE_LABELS = {
+            installed: ['Installed', 'ready'], out_of_date: ['Out of date', 'warning'], lint_problem: ['Lint problem', 'error'],
+            not_installed: ['Not installed', 'warning'], no_repo_baseline: ['No baseline in git', 'error'],
+        };
 
         let activeVendor = initialVendor();
         let editingConfig = null;
         let currentSort = 'newest';
         let readinessData = null;
         let firmwareData = [];
-        let configsData = [];
+        let baselineData = null;
         let credentialsData = [];
-        let configFilters = { family: '', firmware: '', role: '', mode: '' };
+        let hostCredentials = null;
+        let pendingDelete = null;
+        let profileParams = { direction: 'north', side: 'a' };
 
         document.addEventListener('DOMContentLoaded', async () => {
             syncActiveVendorHeader();
             updateVendorTabState();
             applyActiveVendorColor();
             applyVendorConfigSection();
-            document.addEventListener('keydown', (e) => {
-                if (e.key === 'Escape' && editingConfig) closeEditor();
-            });
-            await Promise.all([loadReadiness(), loadFirmware(), loadConfigs(), loadCredentials(), loadTaranaOperatorId()]);
+            document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && editingConfig) closeEditor(); });
+            await Promise.all([loadReadiness(), loadFirmware(), loadBaselines(), loadCredentials(), loadHostCredentials(), loadTaranaOperatorId()]);
         });
 
+        // ------------------------------------------------------------
+        // Baselines and deployment profiles
+        // ------------------------------------------------------------
+        async function loadBaselines() {
+            try {
+                const response = await fetch(`/api/config-baselines?device_type=${encodeURIComponent(activeVendor)}`);
+                baselineData = response.ok ? await response.json() : null;
+            } catch (error) { baselineData = null; }
+            renderBaselines();
+        }
+
+        function renderBaselines() {
+            const list = document.getElementById('baseline-list');
+            const profiles = document.getElementById('profile-list');
+            if (!baselineData || baselineData.device_type !== activeVendor) { loadBaselines(); return; }
+            const families = baselineData.families || [];
+            if (!families.length) {
+                list.innerHTML = '<div class="text-gray-400 text-center py-3">This vendor has no model families in the registry.</div>';
+                profiles.innerHTML = '';
+                renderProfileForm();
+                return;
+            }
+            list.innerHTML = families.map(f => {
+                const b = f.sm_baseline; const [label, tone] = BASELINE_LABELS[b.status] || [b.status, 'warning'];
+                const witness = b.witnesses.length ? `Witnessed by ${b.witnesses.map(escapeHtml).join(', ')}` : 'No baseline witness yet';
+                const proven = b.fresh_sm_proven ? 'Fresh to SM proven on the bench' : 'Fresh to SM not proven yet';
+                const lint = b.lint.length ? `<div class="text-xs text-red-700 mt-1">Contract: ${b.lint.map(escapeHtml).join(', ')}</div>` : '';
+                return `<div class="bg-white rounded-lg p-3 border border-gray-200">
+                    <div class="flex items-center justify-between gap-2">
+                        <div class="font-medium">${escapeHtml(f.name)} <span class="text-xs text-gray-500 font-mono">${escapeHtml(f.family)}</span></div>
+                        ${readinessBadge(tone).replace('>ready<', `>${escapeHtml(label)}<`).replace('>warning<', `>${escapeHtml(label)}<`).replace('>error<', `>${escapeHtml(label)}<`).replace('>missing<', `>${escapeHtml(label)}<`)}
+                    </div>
+                    <div class="text-xs text-gray-500 mt-1 break-all">${escapeHtml(b.runtime_path || b.repo_path || '')}</div>
+                    <div class="text-xs text-gray-600 mt-1">${witness} · ${proven}</div>${lint}
+                </div>`;
+            }).join('');
+            const allProfiles = families.flatMap(f => f.profiles.map(p => ({ ...p, familyName: f.name })));
+            profiles.innerHTML = allProfiles.length ? sortRows(allProfiles, r => r.filename, r => r.modified).map(p => `
+                <div class="bg-white rounded-lg p-3 flex items-center gap-3 border border-gray-200">
+                    <div class="flex-1 min-w-0">
+                        <div class="font-medium">${escapeHtml(p.role.toUpperCase())} ${escapeHtml(p.link_profile || p.profile || '')} ${p.mode && p.mode.startsWith('ptp') ? `<span class="text-xs text-gray-500">side ${p.mode.endsWith('a') ? 'A' : 'B'}</span>` : ''}</div>
+                        <div class="text-xs text-gray-500 break-all">${escapeHtml(p.family)}${p.firmware ? ' / ' + escapeHtml(p.firmware) : ''} · ${escapeHtml(p.filename)}${p.protected ? ' · protected' : ''}</div>
+                    </div>
+                    ${p.editable ? `<button onclick="editConfig(${JSON.stringify(p.path)})" class="icon-btn text-blue-600 rounded-lg" title="Edit">✎</button>` : ''}
+                    ${!p.protected ? `<button onclick="deleteConfig(${JSON.stringify(p.path)})" class="icon-btn text-red-600 rounded-lg" title="Delete">✕</button>` : ''}
+                </div>`).join('') : '<div class="text-gray-400 text-center py-3">No AP or PTP profiles yet.</div>';
+            renderProfileForm();
+        }
+
+        function renderProfileForm() {
+            const familySelect = document.getElementById('prof-family');
+            const families = (baselineData && baselineData.device_type === activeVendor ? baselineData.families : []) || [];
+            const current = familySelect.value;
+            familySelect.innerHTML = families.map(f => `<option value="${escapeHtml(f.family)}">${escapeHtml(f.name)}</option>`).join('');
+            if (families.some(f => f.family === current)) familySelect.value = current;
+            const role = document.getElementById('prof-role').value;
+            const params = document.getElementById('prof-params');
+            if (role === 'AP') {
+                params.innerHTML = `<div class="text-xs text-gray-500 mb-1">Direction</div><div class="grid grid-cols-4 gap-2">${DIRECTIONS.map(d =>
+                    `<button type="button" onclick="setProfileParam('direction','${d}')" class="touch-btn rounded-lg border text-sm font-medium ${profileParams.direction === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white border-gray-300 text-gray-800'}">${d[0].toUpperCase() + d.slice(1)}</button>`).join('')}</div>`;
+            } else {
+                params.innerHTML = `<div class="grid grid-cols-2 gap-2">
+                    <div><div class="text-xs text-gray-500 mb-1">Link (twXX-twYY)</div><input id="prof-link" value="${escapeHtml(profileParams.link || '')}" oninput="profileParams.link = this.value" placeholder="tw32-tw18" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono"></div>
+                    <div><div class="text-xs text-gray-500 mb-1">Side</div><div class="grid grid-cols-2 gap-2">${['a','b'].map(s =>
+                    `<button type="button" onclick="setProfileParam('side','${s}')" class="touch-btn rounded-lg border text-sm font-medium ${profileParams.side === s ? 'bg-blue-600 text-white border-blue-600' : 'bg-white border-gray-300 text-gray-800'}">${s.toUpperCase()}</button>`).join('')}</div></div>
+                </div>`;
+            }
+        }
+
+        function setProfileParam(key, value) { profileParams[key] = value; renderProfileForm(); }
+
+        async function installBaselines() {
+            showToast('Installing baselines from the repository...', 'info');
+            try {
+                const response = await fetch('/api/config-baselines/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device_type: activeVendor }) });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Install failed');
+                showToast(`Installed ${data.copied} file(s)`, 'success');
+                await Promise.all([loadBaselines(), loadReadiness()]);
+            } catch (error) { showToast(error.message || 'Install failed', 'error'); }
+        }
+
+        async function uploadConfigFile(file) {
+            if (!file) return;
+            const role = document.getElementById('prof-role').value;
+            const family = document.getElementById('prof-family').value;
+            if (!family) { showToast('Choose a model family first', 'warning'); return; }
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('config_type', 'template');
+            formData.append('device_type', activeVendor);
+            formData.append('family', family);
+            formData.append('role', role);
+            if (role === 'AP') {
+                formData.append('profile', profileParams.direction[0].toUpperCase() + profileParams.direction.slice(1));
+            } else {
+                const link = (profileParams.link || '').trim();
+                if (!/^tw\d{1,2}-tw\d{1,2}$/.test(link)) { showToast('Enter the link as twXX-twYY', 'warning'); return; }
+                formData.append('link_profile', link);
+                formData.append('ptp_side', profileParams.side);
+            }
+            showToast(`Uploading ${vendorMeta(activeVendor).label} ${role} profile...`, 'info');
+            try {
+                const response = await fetch('/api/config-assets/upload', { method: 'POST', body: formData });
+                const data = await response.json();
+                if (response.ok) {
+                    showToast(`Profile stored: ${file.name}`, 'success');
+                    document.getElementById('cfg-file-input').value = '';
+                    await Promise.all([loadBaselines(), loadReadiness()]);
+                } else {
+                    showToast(data.detail || 'Upload failed', 'error');
+                }
+            } catch (error) { showToast('Upload failed', 'error'); }
+        }
+
+        // ------------------------------------------------------------
+        // Host credentials and secrets
+        // ------------------------------------------------------------
+        async function loadHostCredentials() {
+            try {
+                const response = await fetch('/api/host-credentials');
+                hostCredentials = response.ok ? await response.json() : null;
+            } catch (error) { hostCredentials = null; }
+            renderCredentials();
+        }
+
+        function renderCredentials() {
+            const box = document.getElementById('host-credentials');
+            document.getElementById('restart-banner').classList.toggle('hidden', !(hostCredentials && hostCredentials.restart_required));
+            const row = hostCredentials ? (hostCredentials.credentials || []).find(r => r.device_type === activeVendor) : null;
+            if (!row) { box.innerHTML = '<div class="text-gray-400 text-center py-3">No host credentials for this vendor.</div>'; renderCredentialsList(credentialsData); return; }
+            const secretRow = (key, label) => {
+                const set = Boolean(row.keys[key]);
+                const required = row.required_secrets.includes(key);
+                const badge = set ? '<span class="px-2 py-0.5 text-xs rounded bg-green-100 text-green-800">set</span>'
+                    : (required ? '<span class="px-2 py-0.5 text-xs rounded bg-red-100 text-red-800">missing · required</span>' : '<span class="px-2 py-0.5 text-xs rounded bg-gray-100 text-gray-600">not set</span>');
+                return `<div class="bg-white rounded-lg p-3 border border-gray-200">
+                    <div class="flex items-center justify-between gap-2"><div class="font-medium">${label}</div>${badge}</div>
+                    <div class="flex gap-2 mt-2">
+                        <input type="password" id="host-${key}" placeholder="${set ? 'Replace value' : 'Enter value'}" class="flex-1 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        <button onclick="saveHostCredential('${key}')" class="touch-btn px-3 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-medium text-white">Save</button>
+                    </div>
+                </div>`;
+            };
+            box.innerHTML = `
+                <div class="bg-white rounded-lg p-3 border border-gray-200">
+                    <div class="flex items-center justify-between gap-2"><div class="font-medium">Login</div>${row.keys.password ? '<span class="px-2 py-0.5 text-xs rounded bg-green-100 text-green-800">password set</span>' : '<span class="px-2 py-0.5 text-xs rounded bg-red-100 text-red-800">password missing</span>'}</div>
+                    <div class="flex gap-2 mt-2">
+                        <input type="text" id="host-username" value="${escapeHtml(row.username)}" placeholder="Username" class="w-1/3 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        <input type="password" id="host-password" placeholder="${row.keys.password ? 'Replace password' : 'Password'}" class="flex-1 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                        <button onclick="saveHostLogin()" class="touch-btn px-3 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-medium text-white">Save</button>
+                    </div>
+                </div>
+                ${secretRow('wpa_key', 'WPA2 key (written to every unit)')}
+                ${secretRow('snmp_community', 'SNMP read-only community')}`;
+            renderCredentialsList(credentialsData);
+        }
+
+        async function putHostCredentials(values) {
+            const response = await fetch(`/api/host-credentials/${encodeURIComponent(activeVendor)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || 'Save failed');
+            return data;
+        }
+
+        async function saveHostCredential(key) {
+            const input = document.getElementById(`host-${key}`);
+            const value = input ? input.value : '';
+            if (!value) { showToast('Enter a value first', 'warning'); return; }
+            try {
+                await putHostCredentials({ [key]: value });
+                input.value = '';
+                showToast('Saved to the host config. Restart to apply.', 'success');
+                await Promise.all([loadHostCredentials(), loadReadiness()]);
+            } catch (error) { showToast(error.message, 'error'); }
+        }
+
+        async function saveHostLogin() {
+            const username = document.getElementById('host-username').value.trim();
+            const password = document.getElementById('host-password').value;
+            const values = {};
+            if (username) values.username = username;
+            if (password) values.password = password;
+            if (!Object.keys(values).length) { showToast('Enter a username or password', 'warning'); return; }
+            try {
+                await putHostCredentials(values);
+                document.getElementById('host-password').value = '';
+                showToast('Saved to the host config. Restart to apply.', 'success');
+                await Promise.all([loadHostCredentials(), loadReadiness()]);
+            } catch (error) { showToast(error.message, 'error'); }
+        }
+
+        async function restartService() {
+            showToast('Restarting the provisioner service...', 'info');
+            try {
+                const response = await fetch('/api/setup/restart-service', { method: 'POST' });
+                if (!response.ok) throw new Error('Restart failed');
+                setTimeout(() => location.reload(), 6000);
+            } catch (error) { showToast('Restart failed', 'error'); }
+        }
+
+        async function loadCredentials() {
+            try {
+                const response = await fetch('/api/default-credentials');
+                const data = await response.json();
+                credentialsData = Array.isArray(data) ? data : [];
+            } catch (error) { credentialsData = []; }
+            renderCredentialsList(credentialsData);
+            updateVendorColumnHeaders();
+        }
+
+        function renderCredentialsList(credentials) {
+            const list = document.getElementById('credentials-list');
+            const filtered = credentials.filter(cred => cred.device_type === activeVendor && cred.is_custom);
+            if (!filtered.length) { list.innerHTML = '<div class="text-gray-400 text-center py-3">No extra logins.</div>'; return; }
+            list.innerHTML = sortRows(filtered, row => row.username, () => '').map(cred => `
+                <div class="bg-white rounded-lg p-3 flex items-center gap-3 border border-gray-200">
+                    <div class="flex-1 min-w-0 flex items-center gap-4"><span class="font-mono text-sm">${escapeHtml(cred.username)}</span><span class="text-gray-500 text-sm">${escapeHtml(cred.password_hint)}</span></div>
+                    <button onclick="deleteCredential('${jsString(cred.device_type)}', ${cred.index})" class="icon-btn text-red-600 rounded-lg" title="Delete" aria-label="Delete credential">✕</button>
+                </div>`).join('');
+        }
+
+        async function addCredential() {
+            const username = document.getElementById('cred-username').value.trim();
+            const password = document.getElementById('cred-password').value;
+            if (!username) { showToast('Username is required', 'warning'); return; }
+            try {
+                const response = await fetch(`/api/default-credentials/${encodeURIComponent(activeVendor)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Failed to add login');
+                showToast(data.message || 'Login added', 'success');
+                document.getElementById('cred-username').value = '';
+                document.getElementById('cred-password').value = '';
+                await Promise.all([loadCredentials(), loadReadiness()]);
+            } catch (error) { showToast(error.message, 'error'); }
+        }
+
+        async function deleteCredential(deviceType, index) {
+            const key = `${deviceType}:${index}`;
+            if (pendingDelete !== key) { pendingDelete = key; showToast('Tap delete again to confirm', 'warning'); return; }
+            pendingDelete = null;
+            try {
+                const response = await fetch(`/api/default-credentials/${encodeURIComponent(deviceType)}/${index}`, { method: 'DELETE' });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Failed to delete');
+                showToast(data.message || 'Login deleted', 'success');
+                await Promise.all([loadCredentials(), loadReadiness()]);
+            } catch (error) { showToast(error.message, 'error'); }
+        }
+
+        // ------------------------------------------------------------
+        // Carried over: vendor tabs, firmware, Tarana, editor, helpers
+        // ------------------------------------------------------------
+
+        function updateVendorColumnHeaders() {
+            const credentials = vendorReadinessItem('credentials');
+            const configs = vendorReadinessItem('config_templates');
+            const firmware = vendorReadinessItem('firmware_inventory');
+            const summaryText = (item) => (item && item.summary) ? item.summary : '';
+            setColumnHeader('firmware', firmware ? firmware.status : 'warning', summaryText(firmware));
+            setColumnHeader('config', configs ? configs.status : 'ready', summaryText(configs));
+            setColumnHeader('credentials', credentials ? credentials.status : 'warning', summaryText(credentials));
+        }
         function showVendor(vendor) {
             activeVendor = vendor;
-            configFilters = { family: '', firmware: '', role: '', mode: '' };
             localStorage.setItem('provisioner.activeVendor', vendor);
             syncActiveVendorHeader();
             updateVendorTabState();
@@ -350,11 +566,9 @@
             applyVendorConfigSection();
             updateVendorColumnHeaders();
             renderFirmwareList(firmwareData);
-            renderConfigList(configsData);
-            updateConfigFilterOptions();
-            renderCredentialsList(credentialsData);
+            renderBaselines();
+            renderCredentials();
         }
-
         function applyVendorConfigSection() {
             const fileSection = document.getElementById('config-file-section');
             const taranaSection = document.getElementById('config-tarana-section');
@@ -367,7 +581,6 @@
                 taranaSection.classList.add('hidden');
             }
         }
-
         async function loadTaranaOperatorId() {
             try {
                 const response = await fetch('/api/device-settings');
@@ -380,7 +593,6 @@
                 // ignore — input simply stays blank
             }
         }
-
         async function saveTaranaOperatorId() {
             const el = document.getElementById('tarana-operator-id');
             if (!el) return;
@@ -407,12 +619,10 @@
                 showToast('Failed to save operator ID', 'error');
             }
         }
-
         function applyActiveVendorColor() {
             const color = vendorMeta(activeVendor).color || '#d1d5db';
             document.documentElement.style.setProperty('--active-vendor-color', color);
         }
-
         function updateVendorTabState() {
             for (const vendor of VENDORS) {
                 const tab = document.getElementById(`vendor-tab-${vendor.value}`);
@@ -422,102 +632,41 @@
                     : 'vendor-tab px-4 py-3 font-medium text-gray-600 hover:text-gray-900';
             }
         }
-
         function syncActiveVendorHeader() {
             document.getElementById('firmware-link').href = `/firmware?vendor=${encodeURIComponent(activeVendor)}`;
         }
-
         function initialVendor() {
             const requested = new URLSearchParams(window.location.search).get('vendor');
             const stored = localStorage.getItem('provisioner.activeVendor');
             const candidate = requested || stored || 'cambium';
             return VENDORS.some(vendor => vendor.value === candidate) ? candidate : 'cambium';
         }
-
         function applySort() {
             currentSort = document.getElementById('sort-by').value;
             renderFirmwareList(firmwareData);
-            renderConfigList(configsData);
-            renderCredentialsList(credentialsData);
+            renderBaselines();
+            renderCredentials();
         }
-
-        function updateConfigFilterOptions() {
-            const fields = [
-                ['family', 'All families'],
-                ['role', 'All roles'],
-                ['mode', 'All modes'],
-            ];
-            const vendorAssets = configsData.filter(asset => asset.device_type === activeVendor);
-            const registryFamilies = (FAMILY_METADATA[activeVendor] || []);
-            const registryRoles = [...new Set(registryFamilies.flatMap(family => family.roles || []))];
-            const registryModes = [...new Set(registryRoles.flatMap(role => {
-                const normalized = role.toLowerCase();
-                return normalized === 'ptp' ? ['ptp-a', 'ptp-b'] : [normalized];
-            }))];
-            const registryValues = {
-                family: registryFamilies.map(family => family.directory),
-                role: registryRoles,
-                mode: registryModes,
-            };
-
-            const firmwareInput = document.getElementById('cfg-firmware');
-            const firmwareOptions = document.getElementById('cfg-firmware-options');
-            if (firmwareInput && firmwareOptions) {
-                const firmwareValues = [...new Set(vendorAssets.map(asset => asset.firmware).filter(Boolean))].sort();
-                firmwareOptions.innerHTML = firmwareValues.map(value =>
-                    `<option value="${escapeHtml(value)}"></option>`
-                ).join('');
-                firmwareInput.value = configFilters.firmware || '';
-            }
-
-            for (const [field, emptyLabel] of fields) {
-                const select = document.getElementById(`cfg-${field}`);
-                if (!select) continue;
-                const values = [...new Set([
-                    ...vendorAssets.map(asset => asset[field]).filter(Boolean),
-                    ...(registryValues[field] || []),
-                ])].sort();
-                const current = configFilters[field];
-                select.innerHTML = `<option value="">${emptyLabel}</option>` + values.map(value =>
-                    `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`
-                ).join('');
-                if (values.includes(current)) select.value = current;
-                else configFilters[field] = '';
-            }
-        }
-
-        function updateConfigFilters() {
-            for (const field of Object.keys(configFilters)) {
-                const select = document.getElementById(`cfg-${field}`);
-                configFilters[field] = select ? select.value : '';
-            }
-            renderConfigList(configsData);
-        }
-
         function handleDragOver(e) {
             e.preventDefault();
             e.currentTarget.classList.add('dragover');
         }
-
         function handleDragLeave(e) {
             e.preventDefault();
             e.currentTarget.classList.remove('dragover');
         }
-
         function handleFirmwareDrop(e) {
             e.preventDefault();
             e.currentTarget.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
             if (file) uploadFirmwareFile(file);
         }
-
         function handleConfigDrop(e) {
             e.preventDefault();
             e.currentTarget.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
             if (file) uploadConfigFile(file);
         }
-
         async function loadReadiness() {
             try {
                 const response = await fetch('/api/setup/readiness');
@@ -531,32 +680,17 @@
                 setColumnHeader('credentials', 'error', '');
             }
         }
-
-        function updateVendorColumnHeaders() {
-            const credentials = vendorReadinessItem('credentials');
-            const configs = vendorReadinessItem('config_templates');
-            const firmware = vendorReadinessItem('firmware_inventory');
-            const summaryText = (item) => (item && item.summary) ? item.summary : '';
-            setColumnHeader('firmware', firmware ? firmware.status : 'warning', summaryText(firmware));
-            const sharedNote = activeVendor === 'cambium' && configs && !configs.shared_baseline
-                ? ' Shared SM baseline not uploaded.' : '';
-            setColumnHeader('config', configs ? configs.status : 'ready', summaryText(configs) + sharedNote);
-            setColumnHeader('credentials', credentials ? credentials.status : 'warning', summaryText(credentials));
-        }
-
         function setColumnHeader(prefix, status, meta) {
             const statusEl = document.getElementById(`${prefix}-column-status`);
             const metaEl = document.getElementById(`${prefix}-column-meta`);
             if (statusEl) statusEl.outerHTML = readinessBadge(status, `${prefix}-column-status`);
             if (metaEl) metaEl.textContent = meta;
         }
-
         function vendorReadinessItem(checkId) {
             const check = ((readinessData && readinessData.checks) || []).find(item => item.id === checkId);
             if (!check) return null;
             return (check.details || []).find(item => item.device_type === activeVendor) || null;
         }
-
         async function loadFirmware() {
             try {
                 const response = await fetch('/api/firmware');
@@ -567,7 +701,6 @@
             renderFirmwareList(firmwareData);
             updateVendorColumnHeaders();
         }
-
         function renderFirmwareList(firmware) {
             const list = document.getElementById('firmware-list');
             const filtered = firmware.filter(fw => fw.device_type === activeVendor);
@@ -594,7 +727,6 @@
                 </div>
             `).join('');
         }
-
         function uploadFirmwareFile(file) {
             if (!file) return;
             const formData = new FormData();
@@ -659,7 +791,6 @@
             xhr.onabort = () => finalize(false, 'Upload cancelled');
             xhr.send(formData);
         }
-
         async function downloadFirmwareFromUrl() {
             const url = document.getElementById('fw-url').value.trim();
             if (!url) {
@@ -685,9 +816,9 @@
                 showToast('Download failed', 'error');
             }
         }
-
         async function deleteFirmware(deviceType, filename) {
-            if (!confirm(`Delete ${vendorMeta(deviceType).label} firmware ${filename}?`)) return;
+            if (pendingDelete !== String(`Delete ${vendorMeta(deviceType).label} firmware ${filename}?`)) { pendingDelete = String(`Delete ${vendorMeta(deviceType).label} firmware ${filename}?`); showToast('Tap again to confirm', 'warning'); return; }
+            pendingDelete = null;
             try {
                 const response = await fetch(`/api/firmware/${encodeURIComponent(deviceType)}/${encodeURIComponent(filename)}`, {
                     method: 'DELETE',
@@ -703,97 +834,6 @@
                 showToast('Delete failed', 'error');
             }
         }
-
-        async function loadConfigs() {
-            try {
-                const response = await fetch('/api/config-assets');
-                configsData = await response.json();
-            } catch (error) {
-                configsData = [];
-            }
-            updateConfigFilterOptions();
-            renderConfigList(configsData);
-            updateVendorColumnHeaders();
-        }
-
-        function renderConfigList(configs) {
-            const list = document.getElementById('config-list');
-            const filtered = configs.filter(cfg =>
-                cfg.device_type === activeVendor &&
-                Object.entries(configFilters).every(([field, value]) => !value || cfg[field] === value)
-            );
-            if (filtered.length === 0) {
-                list.innerHTML = '<div class="text-gray-400 text-center py-4">None for this vendor.</div>';
-                return;
-            }
-
-            const sorted = sortRows(filtered, row => row.filename, row => row.modified);
-            list.innerHTML = sorted.map(cfg => `
-                <div class="bg-white rounded-lg p-3 flex flex-col gap-3 border border-gray-200 sm:flex-row sm:items-center">
-                    <div class="flex-1 min-w-0">
-                        <div class="flex flex-wrap items-center gap-2 mb-1">
-                            <span class="px-2 py-0.5 text-xs font-medium rounded ${cfg.config_type === 'template' ? 'bg-blue-500/20 text-blue-700' : 'bg-purple-500/20 text-purple-700'}">${escapeHtml(cfg.config_type)}</span>
-                            ${cfg.protected ? `<span class="px-2 py-0.5 text-xs font-medium rounded bg-amber-500/20 text-amber-700">${cfg.asset_kind === 'field_export' ? 'PROTECTED FIELD EXPORT' : (cfg.secret_present ? 'PROTECTED ASSET' : 'HOST-ONLY PTP')}</span>` : ''}
-                            <span class="font-medium break-all">${escapeHtml(cfg.filename)}</span>
-                        </div>
-                        <div class="text-xs text-gray-500 break-all">${escapeHtml(assetLocation(cfg))}</div>
-                        <div class="text-sm text-gray-600">${formatBytes(cfg.size)}${cfg.editable ? ' · editable' : ''}</div>
-                    </div>
-                    <div class="flex items-center gap-1 self-end sm:self-auto">
-                        ${cfg.editable ? `<button onclick="editConfig(${JSON.stringify(cfg.path)})"
-                            class="icon-btn text-blue-600 hover:text-blue-500 hover:bg-blue-50 rounded-lg" title="Edit" aria-label="Edit config">
-                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
-                            </svg>
-                        </button>` : ''}
-                        ${!cfg.protected ? `<button onclick="deleteConfig(${JSON.stringify(cfg.path)})"
-                            class="icon-btn text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg" title="Delete" aria-label="Delete config">
-                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                            </svg>
-                        </button>` : ''}
-                    </div>
-                </div>
-            `).join('');
-        }
-
-        function assetLocation(asset) {
-            const values = [asset.scope, asset.family, asset.firmware, asset.role, asset.link_profile, asset.mode, asset.profile].filter(Boolean);
-            return values.length ? values.join(' / ') : 'Legacy vendor asset';
-        }
-
-        async function uploadConfigFile(file) {
-            if (!file) return;
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('config_type', document.getElementById('cfg-type').value);
-            formData.append('device_type', activeVendor);
-            formData.append('family', document.getElementById('cfg-family').value);
-            formData.append('firmware', document.getElementById('cfg-firmware').value);
-            formData.append('role', document.getElementById('cfg-role').value);
-            formData.append('mode', document.getElementById('cfg-mode').value);
-            formData.append('profile', document.getElementById('cfg-profile').value);
-            formData.append('link_profile', document.getElementById('cfg-link-profile').value);
-            formData.append('scope', document.getElementById('cfg-scope').value);
-            formData.append('asset_kind', document.getElementById('cfg-asset-kind').value);
-            showToast(`Uploading ${vendorMeta(activeVendor).label} config...`, 'info');
-
-            try {
-                const response = await fetch('/api/config-assets/upload', { method: 'POST', body: formData });
-                const data = await response.json();
-                if (response.ok) {
-                    showToast(`Config uploaded: ${file.name}`, 'success');
-                    document.getElementById('cfg-file-input').value = '';
-                    await loadConfigs();
-                    await loadReadiness();
-                } else {
-                    showToast(data.detail || 'Upload failed', 'error');
-                }
-            } catch (error) {
-                showToast('Upload failed', 'error');
-            }
-        }
-
         async function editConfig(path) {
             try {
                 const response = await fetch(`/api/config-assets/content?path=${encodeURIComponent(path)}`);
@@ -807,12 +847,10 @@
                 showToast('Failed to load config', 'error');
             }
         }
-
         function closeEditor() {
             editingConfig = null;
             document.getElementById('editor-modal').classList.add('hidden');
         }
-
         async function saveConfig() {
             if (!editingConfig) return;
             const content = document.getElementById('editor-content').value;
@@ -825,7 +863,7 @@
                 if (response.ok) {
                     showToast('Config saved', 'success');
                     closeEditor();
-                    await loadConfigs();
+                    await loadBaselines();
                 } else {
                     const data = await response.json();
                     showToast(data.detail || 'Save failed', 'error');
@@ -834,16 +872,16 @@
                 showToast('Save failed', 'error');
             }
         }
-
         async function deleteConfig(path) {
-            if (!confirm(`Delete config asset ${path}?`)) return;
+            if (pendingDelete !== path) { pendingDelete = path; showToast('Tap delete again to confirm', 'warning'); return; }
+            pendingDelete = null;
             try {
                 const response = await fetch(`/api/config-assets/content?path=${encodeURIComponent(path)}`, {
                     method: 'DELETE',
                 });
                 if (response.ok) {
                     showToast('Config deleted', 'success');
-                    await loadConfigs();
+                    await loadBaselines();
                     await loadReadiness();
                 } else {
                     const data = await response.json();
@@ -853,100 +891,6 @@
                 showToast('Delete failed', 'error');
             }
         }
-
-        async function loadCredentials() {
-            try {
-                const response = await fetch('/api/default-credentials');
-                const data = await response.json();
-                credentialsData = Array.isArray(data) ? data : [];
-            } catch (error) {
-                credentialsData = [];
-            }
-            renderCredentialsList(credentialsData);
-            updateVendorColumnHeaders();
-        }
-
-        function renderCredentialsList(credentials) {
-            const list = document.getElementById('credentials-list');
-            const filtered = credentials.filter(cred => cred.device_type === activeVendor);
-            if (filtered.length === 0) {
-                list.innerHTML = '<div class="text-gray-400 text-center py-4">None for this vendor.</div>';
-                return;
-            }
-
-            const sorted = sortRows(filtered, row => row.username, () => '');
-            list.innerHTML = sorted.map(cred => `
-                <div class="bg-white rounded-lg p-3 flex flex-col gap-3 border border-gray-200 sm:flex-row sm:items-center ${cred.is_custom ? '' : 'opacity-70'}">
-                    <div class="flex-1 min-w-0">
-                        <div class="flex flex-wrap items-center gap-2 mb-1">
-                            <span class="px-2 py-0.5 text-xs font-medium rounded ${cred.is_custom ? 'badge-custom' : 'badge-default'}">${cred.is_custom ? 'CUSTOM' : 'DEFAULT'}</span>
-                        </div>
-                        <div class="flex flex-wrap items-center gap-4">
-                            <span class="font-mono text-sm">${escapeHtml(cred.username)}</span>
-                            <span class="text-gray-500 text-sm">${escapeHtml(cred.password_hint)}</span>
-                        </div>
-                    </div>
-                    ${cred.is_custom ? `
-                        <button onclick="deleteCredential('${jsString(cred.device_type)}', ${cred.index})"
-                            class="icon-btn self-end text-red-600 hover:text-red-500 hover:bg-red-50 rounded-lg sm:self-auto" title="Delete" aria-label="Delete credential">
-                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                            </svg>
-                        </button>
-                    ` : ''}
-                </div>
-            `).join('');
-        }
-
-        async function addCredential() {
-            const username = document.getElementById('cred-username').value.trim();
-            const password = document.getElementById('cred-password').value;
-            if (!username) {
-                showToast('Username is required', 'warning');
-                return;
-            }
-
-            showToast(`Adding ${vendorMeta(activeVendor).label} credential...`, 'info');
-            try {
-                const response = await fetch(`/api/default-credentials/${encodeURIComponent(activeVendor)}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password }),
-                });
-                const data = await response.json();
-                if (response.ok) {
-                    showToast(data.message || 'Credential added', 'success');
-                    document.getElementById('cred-username').value = '';
-                    document.getElementById('cred-password').value = '';
-                    await loadCredentials();
-                    await loadReadiness();
-                } else {
-                    showToast(data.detail || 'Failed to add credential', 'error');
-                }
-            } catch (error) {
-                showToast('Failed to add credential', 'error');
-            }
-        }
-
-        async function deleteCredential(deviceType, index) {
-            if (!confirm(`Delete this ${vendorMeta(deviceType).label} credential?`)) return;
-            try {
-                const response = await fetch(`/api/default-credentials/${encodeURIComponent(deviceType)}/${index}`, {
-                    method: 'DELETE',
-                });
-                const data = await response.json();
-                if (response.ok) {
-                    showToast(data.message || 'Credential deleted', 'success');
-                    await loadCredentials();
-                    await loadReadiness();
-                } else {
-                    showToast(data.detail || 'Failed to delete', 'error');
-                }
-            } catch (error) {
-                showToast('Failed to delete credential', 'error');
-            }
-        }
-
         function sortRows(rows, nameGetter, modifiedGetter) {
             const sorted = [...rows];
             if (currentSort === 'name') {
@@ -956,16 +900,13 @@
             }
             return sorted;
         }
-
         function vendorMeta(type) {
             return VENDORS.find(vendor => vendor.value === type) || { value: type, label: type || 'Unknown', full: type || 'Unknown', color: '#6b7280' };
         }
-
         function deviceBadge(type) {
             const vendor = vendorMeta(type);
             return `<span class="px-2 py-0.5 text-xs font-medium rounded badge-${type || 'unknown'}">${escapeHtml(vendor.label)}</span>`;
         }
-
         function readinessBadge(status, id = '') {
             const styles = {
                 ready: 'bg-green-500/15 text-green-700',
@@ -976,7 +917,6 @@
             const idAttr = id ? ` id="${id}"` : '';
             return `<span${idAttr} class="px-2 py-0.5 text-xs font-medium rounded ${styles[status] || styles.warning}">${escapeHtml(String(status || 'unknown').toUpperCase())}</span>`;
         }
-
         function showToast(message, type = 'info') {
             const container = document.getElementById('toast-container');
             const toast = document.createElement('div');
@@ -995,7 +935,6 @@
                 setTimeout(() => toast.remove(), 300);
             }, 3000);
         }
-
         function formatBytes(bytes) {
             if (!bytes || bytes === 0) return '0 B';
             const k = 1024;
@@ -1003,20 +942,17 @@
             const i = Math.floor(Math.log(bytes) / Math.log(k));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
         }
-
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text == null ? '' : String(text);
             return div.innerHTML;
         }
-
         function jsString(text) {
             return String(text == null ? '' : text)
                 .replace(/\\/g, '\\\\')
                 .replace(/'/g, "\\'")
                 .replace(/\r/g, '')
                 .replace(/\n/g, '\\n');
-        }
-    </script>
+        }    </script>
 </body>
 </html>
