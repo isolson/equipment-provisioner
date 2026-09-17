@@ -539,7 +539,8 @@ def test_port_configs_include_mikrotik_secondary_source_ip():
 
 
 @pytest.mark.asyncio
-async def test_ping_device_uses_arp_not_icmp_for_mikrotik_ip():
+@pytest.mark.parametrize("address", ["192.168.88.1", "192.168.10.1", "192.168.10.2"])
+async def test_ping_device_uses_arp_not_icmp_for_mikrotik_ip(address):
     """192.168.88.1 must use ARP-only detection, never ICMP.
 
     The pinned /32 management route sends ICMP to the switch (VLAN 1990),
@@ -558,15 +559,16 @@ async def test_ping_device_uses_arp_not_icmp_for_mikrotik_ip():
     manager._arp_probe = mock_arp_probe  # type: ignore[method-assign]
 
     # _ping_device for MikroTik IP should call _arp_probe, not spawn ping
-    result = await manager._ping_device("eth0.1992", DeviceLinkLocalIP.MIKROTIK)
+    result = await manager._ping_device("eth0.1992", address)
     assert result is True
     assert len(arp_calls) == 1
-    assert arp_calls[0]["ip"] == "192.168.88.1"
+    assert arp_calls[0]["ip"] == address
     assert arp_calls[0]["source_ip"] == "192.168.88.11"
 
 
 @pytest.mark.asyncio
-async def test_ping_device_arp_fallback_false_skips_mikrotik():
+@pytest.mark.parametrize("address", ["192.168.88.1", "192.168.10.1", "192.168.10.2"])
+async def test_ping_device_arp_fallback_false_skips_mikrotik(address):
     """With arp_fallback=False, 192.168.88.1 should return False immediately.
 
     Boot pings use arp_fallback=False for quick liveness checks.  Since
@@ -576,7 +578,7 @@ async def test_ping_device_arp_fallback_false_skips_mikrotik():
     manager = PortManager(num_ports=1)
     manager._generate_port_configs()
 
-    result = await manager._ping_device("eth0.1992", DeviceLinkLocalIP.MIKROTIK, arp_fallback=False)
+    result = await manager._ping_device("eth0.1992", address, arp_fallback=False)
     assert result is False
 
 
@@ -843,6 +845,8 @@ def test_probe_list_derivation_matches_historical_all():
         ("192.168.1.20", ["ubiquiti"]),
         ("169.254.100.1", ["tarana"]),
         ("192.168.88.1", ["mikrotik"]),
+        ("192.168.10.1", ["mikrotik"]),
+        ("192.168.10.2", ["mikrotik"]),
     ]
 
 
@@ -857,6 +861,8 @@ def test_boot_ping_derivation_matches_historical_order():
         "192.168.1.1",    # was DeviceLinkLocalIP.TACHYON_ALT
         "192.168.1.20",   # was DeviceLinkLocalIP.UBIQUITI
         "192.168.88.1",   # was DeviceLinkLocalIP.MIKROTIK
+        "192.168.10.1",   # Business router
+        "192.168.10.2",   # First business switch
         "169.254.100.1",  # was DeviceLinkLocalIP.TARANA
     ]
 

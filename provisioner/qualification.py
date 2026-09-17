@@ -26,7 +26,7 @@ MODE_REQUIREMENTS = {
     "ptp": frozenset((("sm", "ptp"), ("ptp", "sm"))),
 }  # type: Dict[str, FrozenSet[Transition]]
 BASELINE_TRANSITION = ("fresh", "sm")  # type: Transition
-TRANSITION_STATES = ("fresh", "sm", "ap", "ptp")
+TRANSITION_STATES = ("fresh", "sm", "ap", "ptp", "router", "switch")
 
 _ENV_ROOT = "PROVISIONER_QUALIFICATION_ROOT"
 _DEFAULT_ROOT = Path(__file__).resolve().parent.parent / "bench-evidence"
@@ -116,12 +116,13 @@ def qualified_modes(
     model: Optional[str],
     firmware: Optional[str],
     advertised: Iterable[str],
+    requirements: Optional[Dict[str, FrozenSet[Transition]]] = None,
 ) -> Tuple[str, ...]:
     """Intersect the handler's advertised modes with the bench evidence."""
     recorded = recorded_transitions(vendor, model, firmware)
     qualified = []  # type: List[str]
     for mode in advertised:
-        required = MODE_REQUIREMENTS.get(str(mode).lower())
+        required = (MODE_REQUIREMENTS if requirements is None else requirements).get(str(mode).lower())
         if required is None:
             continue
         if required <= recorded:

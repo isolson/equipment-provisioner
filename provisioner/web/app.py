@@ -13,6 +13,7 @@ from ..vendor_registry import config_family_metadata
 from .api import router as api_router
 from .api import vendor_ui_metadata
 from .snapshots import router as snapshots_router
+from .network_modes import router as network_modes_router
 from .websocket import router as ws_router
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ def create_app(
     # Include routers
     app.include_router(api_router, prefix="/api")
     app.include_router(snapshots_router, prefix="/api")
+    app.include_router(network_modes_router)
     app.include_router(ws_router, prefix="/ws")
     
     # Root route serves the dashboard

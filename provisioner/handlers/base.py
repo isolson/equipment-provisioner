@@ -122,6 +122,11 @@ class BaseHandler(ABC):
     #: verified. A template or theoretical capability alone is not enough.
     qualified_post_provision_modes = ()  # type: Tuple[str, ...]
 
+    @classmethod
+    def network_mode_labels_for_model(cls, model: Optional[str]) -> Dict[str, str]:
+        """Handler-owned wired deployment modes; empty unless implemented."""
+        return {}
+
     #: The handler's field ownership contract (see ``field_ownership.py``).
     #: Shared code lints templates and derives verification expectations from
     #: it. ``None`` means the vendor has not declared a contract yet; the flow

@@ -42,10 +42,10 @@ REPO_FILES = (
 #: as not proven.
 NO_CONFIG_MISSING = "missing"
 SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*$")
-CONFIG_ROLES = ("AP", "SM", "PTP")
+CONFIG_ROLES = ("AP", "SM", "PTP", "ROUTER", "SWITCH")
 ARTIFACT_PURPOSES = ("process-evidence", "hardware-validation")
 #: Bench transitions that the qualification matrix reads.
-TRANSITION_STATES = ("fresh", "sm", "ap", "ptp")
+TRANSITION_STATES = ("fresh", "sm", "ap", "ptp", "router", "switch")
 TRANSITION_RESULTS = ("success", "failure")
 
 
@@ -109,7 +109,7 @@ def check_manifest(path: Path) -> Optional[str]:
         return "%s must contain a YAML object" % path.name
     role = str(value.get("config_role", "")).upper()
     if role not in CONFIG_ROLES:
-        return "%s must declare config_role as AP, SM, or PTP" % path.name
+        return "%s must declare config_role as %s" % (path.name, ", ".join(CONFIG_ROLES))
     purpose = str(value.get("artifact_purpose", "")).strip().lower()
     if purpose not in ARTIFACT_PURPOSES:
         return "%s must declare artifact_purpose" % path.name

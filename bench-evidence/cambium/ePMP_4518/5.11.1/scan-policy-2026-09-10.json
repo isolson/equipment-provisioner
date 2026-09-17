@@ -1,0 +1,7 @@
+{
+  "model": "ePMP 4518",
+  "firmware": "5.11.1",
+  "scan_mask": "19",
+  "evidence": "fresh authenticated readback, 2026-09-10",
+  "hardware_readback": true
+}

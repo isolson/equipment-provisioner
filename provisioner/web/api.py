@@ -3665,6 +3665,8 @@ class HostCredentialUpdate(BaseModel):
     backup_password: Optional[str] = None
     wpa_key: Optional[str] = None
     snmp_community: Optional[str] = None
+    snmp_write_community: Optional[str] = None
+    installer_password: Optional[str] = None
 
 
 _host_config_restart_required = False
@@ -3795,10 +3797,12 @@ async def get_host_credentials(request: Request):
         creds = configured.get(device_type)
         handler_class = HandlerManager.handler_class_for(device_type)
         required = []
+        missing = []
         if handler_class is not None:
             try:
-                probe = handler_class(ip="0.0.0.0", credentials={k: getattr(creds, k, "") for k in ("username", "password", "wpa_key", "snmp_community")})
+                probe = handler_class(ip="0.0.0.0", credentials=creds.model_dump() if creds else {})
                 required = list(probe.required_secrets())
+                missing = list(probe.missing_required_secrets())
             except Exception:
                 required = []
         rows.append({
@@ -3806,7 +3810,7 @@ async def get_host_credentials(request: Request):
             "username": getattr(creds, "username", "") or "",
             "keys": {key: bool(getattr(creds, key, "")) for key in EDITABLE_KEYS if key != "username"},
             "required_secrets": required,
-            "missing_secrets": [key for key in required if not getattr(creds, key, "")],
+            "missing_secrets": missing,
         })
     return {"credentials": rows, "restart_required": _host_config_restart_required}
 

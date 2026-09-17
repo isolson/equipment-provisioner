@@ -1,0 +1,7 @@
+{
+  "model": "ePMP 4616",
+  "firmware": "5.11.1",
+  "scan_mask": "51",
+  "evidence": "historical known-good structure and HAR set_param entry 189; policy reconfirmed 2026-09-10",
+  "hardware_readback": false
+}

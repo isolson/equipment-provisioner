@@ -121,10 +121,12 @@ async def test_tachyon_apply_secrets_sets_every_profile_passphrase(monkeypatch):
         applied.update(config)
         return True
 
-    monkeypatch.setattr(handler, "_get_config_curl", get_live)
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(handler, "_read_config_after_apply", AsyncMock(side_effect=[live, applied]))
+    monkeypatch.setattr(handler, "set_password", AsyncMock(return_value=True))
     monkeypatch.setattr(handler, "apply_config", apply)
     handler._last_applied_config = {"keep": "me"}
-    assert await handler.apply_secrets({"wpa_key": "SHARED"}) is True
+    assert await handler.apply_secrets({"wpa_key": "SHARED", "management_password": "test-root-password"}) is True
     profiles = applied["wireless"]["radios"]["wlan0"]["vaps"][0]["sta_profiles"]["profiles"]
     assert [p["security"]["wpapsk"]["passphrase"] for p in profiles] == ["SHARED", "SHARED"]
     assert profiles[0]["security"]["mode"] == "wpapsk"

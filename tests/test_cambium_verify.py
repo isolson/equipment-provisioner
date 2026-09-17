@@ -1,3 +1,4 @@
+from unittest.mock import AsyncMock
 """Regression tests for Cambium config verification honesty."""
 
 import json
@@ -56,9 +57,8 @@ def test_cambium_shared_export_normalization_keeps_only_contract_owned_fields():
         assert props[key] == value
     # Device defaults are never written by a profile.
     assert "wirelessInterfaceTDDAntennaGain" not in props
-    assert "wirelessInterfaceScanFrequencyListEighty" not in props
-    # The scan mask is family fleet policy and survives from the export.
     assert props["wirelessInterfaceScanFrequencyBandwidth"] == "51"
+    assert "wirelessInterfaceScanFrequencyListEighty" not in props
     assert "cambiumGPSConfigPrioritizeUSB" not in props
     assert "mgmtIFVLAN" not in props
     # Secrets never ride in a profile.
@@ -116,10 +116,11 @@ async def test_cambium_full_export_never_uses_set_param(monkeypatch):
     assert called is False
 
 
-async def test_cambium_full_export_uses_native_import_and_skip_illegal(tmp_path, monkeypatch):
+@pytest.mark.parametrize("model,mask", [("Force 300-25", "19"), ("ePMP 4518", "19"), ("ePMP 4616", "51"), ("ePMP 4600C", "51")])
+async def test_cambium_full_export_uses_native_import_and_skip_illegal(tmp_path, monkeypatch, model, mask):
     h = _handler()
     h.interface = "eth0.1996"
-    h._device_info = DeviceInfo(device_type="cambium", model="Force 300-25")
+    h._device_info = DeviceInfo(device_type="cambium", model=model)
     config_path = tmp_path / "field-export.json"
     config_path.write_text(json.dumps(_full_export()))
     commands = []
@@ -149,8 +150,10 @@ async def test_cambium_full_export_uses_native_import_and_skip_illegal(tmp_path,
     assert "-F" in import_command
     assert "skipIllegal=1" in import_command
     assert "set_param" not in " ".join(import_command)
-    # The export is imported as-is: no per-model projection of device defaults.
-    assert uploaded["device_props"] == _full_export()["device_props"]
+    expected = _full_export()["device_props"]
+    expected["wirelessInterfaceScanFrequencyBandwidth"] = mask
+    assert uploaded["device_props"] == expected
+    assert h.applied_config_expectations()["wirelessInterfaceScanFrequencyBandwidth"] == mask
 
 
 async def test_cambium_connectorized_gain_requires_an_explicit_value(monkeypatch):
@@ -161,7 +164,10 @@ async def test_cambium_connectorized_gain_requires_an_explicit_value(monkeypatch
         seen.append(props)
         return True
 
-    monkeypatch.setattr(h, "_apply_config_settings_curl", fake_set)
+    monkeypatch.setattr(h, "_send_set_param", fake_set)
+    monkeypatch.setattr(h, "_verify_management_password", AsyncMock(return_value=True))
+    monkeypatch.setattr(h, "_get_config_curl", AsyncMock(side_effect=[{"snmpReadWriteCommunity":"test-long"}, {"wirelessInterfaceEncryptionKey":"k", "snmpReadOnlyCommunity":"c"}]))
+    monkeypatch.setattr("provisioner.handlers.cambium.asyncio.sleep", AsyncMock())
     assert await h.apply_antenna_gain(model="ePMP 4600C") is False
     assert await h.apply_antenna_gain(18, model="ePMP 4600C") is True
     assert seen == [{"wirelessInterfaceTDDAntennaGain": "18"}]
@@ -177,11 +183,15 @@ async def test_cambium_apply_secrets_writes_secret_fields_and_keeps_verify_basis
         h._last_applied_config = dict(props)
         return True
 
-    monkeypatch.setattr(h, "_apply_config_settings_curl", fake_set)
-    assert await h.apply_secrets({"wpa_key": "k", "snmp_community": "c"}) is True
+    monkeypatch.setattr(h, "_send_set_param", fake_set)
+    monkeypatch.setattr(h, "_verify_management_password", AsyncMock(return_value=True))
+    monkeypatch.setattr(h, "_get_config_curl", AsyncMock(side_effect=[{"snmpReadWriteCommunity":"test-long"}, {"wirelessInterfaceEncryptionKey":"k", "snmpReadOnlyCommunity":"c"}]))
+    monkeypatch.setattr("provisioner.handlers.cambium.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr(h, "_ensure_installer_account", AsyncMock(return_value=True))
+    assert await h.apply_secrets({"wpa_key": "k", "snmp_community": "c", "management_password":"test-admin", "installer_password":"test-installer"}) is True
     assert seen == [{"wirelessInterfaceEncryptionKey": "k", "snmpReadOnlyCommunity": "c"}]
     assert h._last_applied_config == {"mgmtVLANVID": "12"}
-    assert await h.apply_secrets({}) is True
+    assert await h.apply_secrets({}) is False
     assert h.applied_config_expectations() == {"mgmtVLANVID": "12"}
 
 
@@ -668,3 +678,62 @@ def test_explicit_upgrade_rule_reads_the_running_firmware():
     for version, expected in (("5.10.4", False), ("5.11.1", True), ("v5.12.0", True), ("5.9.0", False), (None, False), ("unknown", False)):
         h._device_info = DeviceInfo(device_type="cambium", model="ePMP 4518", firmware_version=version)
         assert h._running_firmware_uses_explicit_upgrade() is expected, version
+
+
+@pytest.mark.parametrize("model,mask", [
+    ("Force 300-25", "19"), ("Force 300-16", "19"),
+    ("ePMP 4518", "19"), ("ePMP 4600", "51"),
+    ("ePMP 4600C", "51"), ("ePMP 4616", "51"),
+    ("ePMP 4625", "51"), ("ePMP 4699", "51"),
+])
+async def test_sm_scan_policy_applies_and_verifies_model_widths(model, mask, monkeypatch):
+    h = _handler()
+    h._device_info = DeviceInfo(device_type="cambium", model=model)
+    captured = {}
+    async def apply(props):
+        captured.update(props)
+        h._last_applied_config = props
+        return True
+    monkeypatch.setattr(h, "_apply_config_settings_curl", apply)
+    props = dict(h.SM_ROLE_VALUES, wirelessInterfaceScanFrequencyBandwidth="3")
+    assert await h.apply_config(props)
+    assert props["wirelessInterfaceScanFrequencyBandwidth"] == "3"
+    assert captured["wirelessInterfaceScanFrequencyBandwidth"] == mask
+    assert h.applied_config_expectations()["wirelessInterfaceScanFrequencyBandwidth"] == mask
+    monkeypatch.setattr(h, "_get_config_curl", AsyncMock(return_value=dict(captured, wirelessInterfaceScanFrequencyBandwidth="3")))
+    assert await h.verify_config() is False
+
+
+@pytest.mark.parametrize("props", [
+    {"wirelessInterfaceMode": "1", "wirelessInterfacePTPMode": "0", "wirelessInterfaceProtocolMode": "1"},
+    {"wirelessInterfaceMode": "2", "wirelessInterfacePTPMode": "1", "wirelessInterfaceProtocolMode": "3"},
+    {"wirelessInterfaceSSID": "test-site"},
+])
+def test_scan_policy_preserves_explicit_modes_and_partial_updates(props):
+    h = _handler()
+    h._device_info = DeviceInfo(device_type="cambium", model="ePMP 4616")
+    assert h._with_sm_scan_policy(props) == props
+
+
+async def test_failed_legacy_upload_preserves_cookie_for_fallback(monkeypatch, tmp_path):
+    h = _handler()
+    h.interface = "eth0.1995"
+    h._device_info = DeviceInfo(device_type="cambium", model="ePMP 4625", firmware_version="5.9.0")
+    cookie = tmp_path / "session.txt"
+    cookie.write_text("test-session")
+    h._cookie_file = str(cookie)
+    firmware = tmp_path / "image.img"
+    firmware.write_bytes(b"test-image")
+    from types import SimpleNamespace
+    async def transfer_fails(args, url, form_data=None):
+        assert url.endswith("/admin/local_upload_image")
+        assert all(";stok=" not in arg for arg in args)
+        return SimpleNamespace(returncode=52), b"", b""
+    async def fallback(path):
+        assert cookie.read_text() == "test-session"
+        assert h._cookie_file == str(cookie)
+        return True
+    monkeypatch.setattr(h, "_run_curl_with_stdin_config", transfer_fails)
+    monkeypatch.setattr(h, "_upload_firmware_curl_alt_bank", fallback)
+    assert await h.upload_firmware(str(firmware), bank=1)
+    assert cookie.exists()
