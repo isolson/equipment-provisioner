@@ -2,6 +2,10 @@
 
 The provisioner runs on a Linux host that drives a MikroTik switch and (optionally) a touchscreen kiosk UI. This doc covers the recommended hardware, SSH access, and deployment workflow.
 
+The installer creates `/var/lib/provisioner/bench-evidence` with mode `700`.
+Store raw hardware captures there. See [Bench Evidence SOP](BENCH_EVIDENCE.md)
+for the required files and access procedure.
+
 ## Recommended hardware: Lenovo ThinkPad Yoga 11e
 
 The ThinkPad Yoga 11e is the canonical kiosk host:

@@ -4,6 +4,16 @@
 
 The provisioner detects devices, applies configuration, and updates firmware. It supports Cambium, MikroTik, Tachyon, Tarana, and Ubiquiti devices. It can provision up to six devices at the same time.
 
+## Provisioning North Star
+
+The system always starts a supported radio with the verified SM baseline. It
+then verifies firmware and configuration. AP or PTP is an explicit later
+elevation with its own approved profile. A model's AP capture must never become
+the default upload for another model in the same firmware family.
+
+See [docs/PROVISIONING_NORTH_STAR.md](docs/PROVISIONING_NORTH_STAR.md) for the
+model, family, role, and evidence rules.
+
 ---
 
 ## What It Does
@@ -247,7 +257,8 @@ again for an SM restore. The device can reboot during the config import.
 
 | Model | Config | Firmware | Modes |
 |-------|--------|----------|-------|
-| 30x series | ✓ | ✓ | SM, AP, PTP |
+| TNA-301, TNA-302, TNA-303X, TNA-303L | ✓ | ✓ | SM, AP, PTP |
+| TNA-305X, TNA-305A, TNS-100 | - | - | Out of scope |
 
 **What gets configured:**
 - Management IP: `192.168.88.10`

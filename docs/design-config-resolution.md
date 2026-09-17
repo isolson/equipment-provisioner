@@ -78,7 +78,7 @@ POST /api/provision  (ProvisionRequest)                    web/api.py:268
 
 | Vendor | File apply path | Semantics |
 |---|---|---|
-| Tachyon | `tachyon.py:1281` `apply_config_file` | `.tar` export or full-export-shaped JSON (`_is_full_config_export`, `tachyon.py:1025`) → applied **authoritatively (replace)**; partial JSON → GET live config, `_deep_merge(current, template)` (`tachyon.py:1271`), POST result |
+| Tachyon | `tachyon.py:1281` `apply_config_file` | `.tar` export or full-export-shaped JSON (`is_full_config_export`, `tachyon.py:1025`) → GET the live current-firmware document, deep-merge the export over it, then POST the complete document; partial JSON → the same live-config merge path |
 | Cambium | `cambium.py:1280` `apply_config_file` | JSON → `config_import` multipart upload + `applyFinished` poll; `.tar` → LuCI flashops restore; inline dict → `set_param` (small key sets only). All endpoints CONFIRMED in `docs/cambium-config.md` |
 | MikroTik | `mikrotik.py:263` `apply_config_file` | SFTP `.rsc` + `/import` over SSH. Inline dict `apply_config` is **rejected by design** (`mikrotik.py:254`) |
 | Ubiquiti | `ubiquiti.py:973` `apply_config` | **Wave only** (`_api_style == "wave"`): PUT full config JSON + fail-closed read-back. AirOS: no config apply exists. Feature flag `apply_config_ubiquiti` defaults **False** |
@@ -243,9 +243,10 @@ when interface binding is active — without `self.interface`,
 `apply_config_file` json-loads and falls through to `apply_config` → `set_param`
 (`cambium.py:1293-1299`). The provisioner always binds a VLAN interface in
 practice (STANDARDS.md §1); the resolver contract assumes it.
-Note for R1: the composed artifact for a Tachyon `.tar` base is a *JSON* file,
-which `apply_config_file` still treats as authoritative because the full-export
-key-set heuristic (`_is_full_config_export`) fires on the composed content.
+Note for R1: the composed artifact for a Tachyon `.tar` base is a *JSON* file.
+The full-export key-set heuristic (`is_full_config_export`) still identifies it
+as a non-composable base; the Tachyon handler then completes it from the live
+API schema before the device POST.
 
 ---
 
@@ -327,10 +328,20 @@ configs/templates/{vendor}/roles/{role}/{model|alias|default}.{json,...}
   would block provisioning of not-yet-covered vendors. Product may prefer
   fail-hard — open decision §7 (D3).
 
-### 2.4 Interaction with full-export templates (replace-not-merge)
+### 2.4 Interaction with full-export templates
 
-Tachyon `.tar` exports and full-export-shaped JSON are applied authoritatively
-(replace). Composition-wise, two distinct cases:
+Tachyon `.tar` exports and full-export-shaped JSON remain full-export inputs for
+resolver composition. The resolver must not treat them as ordinary role-delta
+bases. The Tachyon handler has a separate device-API compatibility step: its
+current 30x firmware rejects older sparse exports unless the POST contains the
+complete current-firmware document. The handler therefore reads the live
+`/cgi.lua/config` document, deep-merges the export over that document, and posts
+the result inside the UI's `{"data": ...}` envelope. Export values win at each
+path, while fields that the export omits come from the live schema. The
+Tachyon handler also preserves the live `services.remote_syslog.enabled` value
+because the captured firmware rejects the legacy export's disabled value.
+
+Composition-wise, two distinct cases still apply:
 
 - **Role overlays on a full-export base:** *forbidden in v1.* A full export is an
   interlocked complete config; a partial delta can produce combinations the
@@ -338,14 +349,14 @@ Tachyon `.tar` exports and full-export-shaped JSON are applied authoritatively
   the resolved base is a `.tar`/`.tar.gz`, or `handler_class.is_full_config_export(loaded)`
   is true for a JSON base, and a role overlay would apply, the resolver refuses
   the overlay, resolves base-only, and records a note. On paper, composition is
-  actually well-defined (merge into the export dict, replace-apply the result) —
+  actually well-defined (merge into the export dict, then let the handler
+  complete the device-specific POST) —
   bench may relax this later; until then the conservative rule holds.
 - **Replacement on a full-export vendor:** modeled as **snapshot-as-base**, not
-  as an overlay. The predecessor's snapshot `raw` export *becomes* the base
-  layer (replacing the template), because for a replace-not-merge vendor the
-  predecessor's full export *is* the correct authoritative config for the
-  successor — modulo per-unit fields (MAC-bound values, mismatched-model
-  exports), which is a bench question (§6.7 row H2).
+  as an overlay. The predecessor's snapshot `raw` export becomes the base
+  layer. For Tachyon, the handler still completes that raw export from the
+  successor's live schema before POST; whether per-unit fields are safe to
+  carry between units remains a bench question (§6.7 row H2).
 
 ### 2.5 Interaction with mode templates
 
@@ -673,7 +684,10 @@ this repo. **Empty/unknown cells are not guessed** — they appear in §6.7.
 | capture (read-back) | `get_param act=config_regular` → full `device_props` | CONFIRMED, `docs/cambium-config.md` |
 | apply | full: `config_import`; small sets: `set_param` | CONFIRMED; per STANDARDS.md §7, **any new endpoint must be hardware-confirmed first** |
 
-### 6.2 Tachyon (TNA / TNS) — nested JSON export
+### 6.2 Tachyon TNA — nested JSON export
+
+The current support scope covers TNA-301, TNA-302, TNA-303X, and TNA-303L.
+TNA-305X, TNA-305A, and TNS-100 require separate bench evidence.
 
 | Identity field | Config path | Evidence |
 |---|---|---|
@@ -697,6 +711,7 @@ this repo. **Empty/unknown cells are not guessed** — they appear in §6.7.
 | SSID | `wireless.interfaces[0].ssid` | → H8 |
 | PSK (secret) | **not in repo** | → H8 |
 | mgmt IP / routing | **not in repo** | → H8 |
+| management VLAN | `network.interfaces.data.mgmtVLAN`; Wave Nano standard target is VLAN 12, but the transition and reconnect are not verified | → H8 |
 | apply semantics | PUT full config + fail-closed read-back; whether PUT merges or replaces is **not established in-repo** | → H8 |
 | capture | Wave GET configuration exists (verify path) | → H8 for AirOS |
 
@@ -737,46 +752,38 @@ Out of scope by construction; the resolver is never invoked for it.
 | H5 | Tachyon | Static-mode `network.zones.wan` field set (address/prefix/gateway) — repo only shows `"mode": "dhcp"` | R6 | bench |
 | H6 | Cambium + Tachyon | PTP radio-role values remain in protected family profiles; the handler contract now requires those settings and the registry records certified family pairings | R6 | bench profile + hardware outcome |
 | H7 | all PTP vendors | OSPF parameter shape — **zero** OSPF-shaped fields exist anywhere in the repo; `identity.routing` beyond `{mode, area}` is reserved, not designed | R6 | bench + product (confirm OSPF is actually in scope per vendor) |
-| H8 | Ubiquiti | Wave PUT merge-vs-replace semantics; Wave PSK/mgmt-IP paths; capture + apply on **AirOS** (no apply path exists today); Wave-Nano pass | R4, R5, R6 | bench (epic follow-up #3) |
+| H8 | Ubiquiti | Wave PUT merge-vs-replace semantics; Wave PSK/mgmt-IP paths; capture + apply on **AirOS** (no apply path exists today); Wave-Nano pass. The Wave-Nano capture confirms `network.interfaces.data.mgmtVLAN`, but leaves it `null`; VLAN-12 transition and reconnect are still unverified | R4, R5, R6 | bench (epic follow-up #3) |
 | H9 | Tarana | Confirm replacement is a no-op (`operator_id` only) → formally descope | R5 | bench + product (epic follow-up #5) |
 | H10 | Tachyon | TNS switches use `config_after_all_firmware` (device leaves the provisioning network after config) — confirm capture-before-config ordering suffices for switch snapshots | R4 | bench |
 
 ---
 
-## 6.8 Cambium shared field-export profiles
+## 6.8 Cambium field-export profiles (family baselines)
 
-The canonical shared SM profile is resolved before a model-family fallback:
+The runtime-only shared SM profile is retired. It lived only on the host, so
+git and CI could not lint it, and it carried secrets and device defaults. The
+resolver now selects the model family SM baseline:
 
-`configs/templates/cambium/shared/5.11.1/SM/default.json`
+`configs/templates/cambium/ePMP-4K/5.11.1/SM/default.json` (and `ePMP-3K`)
 
-This path is also the active runtime path under:
+There is no cross-family fallback. A recognized model with no family baseline
+fails closed.
 
-`/var/lib/provisioner/repo/configs/templates/cambium/shared/5.11.1/SM/default.json`
-
-The resolver uses it for Force 300, ePMP 3K, ePMP 4K, 4600C, and unknown
-Cambium models when the file is present. Existing ePMP-3K and ePMP-4K files
-remain fallbacks.
-
-The `/files` upload API requires an explicit **Field deployment export** type
-and role. It recognizes the wrapped `device_props` plus `template_props`
-format. The selected role is authoritative. It does not infer role from SSID,
-model, or other text.
+The `/files` upload API requires an explicit **Field deployment export** type,
+family, firmware, and role. The selected role is authoritative. An export whose
+radio role fields do not match the selected role is refused.
 
 The exact export is stored in private runtime storage. The active copy is
-replaced with an atomic rename. Protected content endpoints return metadata
-only. The active shared SM copy removes captured identity, static management
-address, center-frequency, and SSID values. It keeps operational fields and
-secrets needed for deployment.
+reduced to the fields the field ownership contract lets a profile own
+(`docs/PROVISIONING_NORTH_STAR.md`): fleet policy and role for SM, plus
+site identity and RF for AP and PTP. Secrets, device defaults, unit identity,
+and captured addresses are dropped. The upload API refuses a copy that still
+breaks the contract and names the fields.
 
-The shared policy is management VLAN 12, DHCP management, DHCP-provided DNS,
-syslog `100.126.15.28:514` with mask `31`, internal cnMaestro, SSH on, Telnet
-off, scan mask `51`, and initial antenna gain `17` dBi. Full exports use native
-`config_import` with `skipIllegal=1`. Known 5 GHz devices receive mask `19`
-before import. AX and 6 GHz devices keep mask `51`.
-
-AP, PTP-A, and PTP-B exports remain separate family profiles. Their RF values,
-SSID, security, and other organization settings are not copied into the shared
-SM baseline.
+The SM policy values and the role field values trace to the known-good
+fixtures under `bench-evidence/cambium/`. Full exports use native
+`config_import` with `skipIllegal=1` and are imported as-is; there is no
+per-model projection of device defaults.
 
 ## 7. Open decisions
 
