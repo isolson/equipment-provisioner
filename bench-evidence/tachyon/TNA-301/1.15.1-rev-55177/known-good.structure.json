@@ -1,0 +1,27 @@
+{
+  "fixture_version": 1,
+  "source": "supplied TNA-301 with-config TAR; shape matches the second accepted UI config POST",
+  "config_role": "AP",
+  "profile_status": "directional profile not independently recorded",
+  "artifact_purpose": "process-evidence",
+  "reusable_template": false,
+  "identity_status": "tower/customer-specific values are present in the secure source",
+  "root_type": "object",
+  "top_level_keys": [
+    "ethernet",
+    "network",
+    "services",
+    "system",
+    "version",
+    "wireless"
+  ],
+  "leaf_count": 246,
+  "required_paths": {
+    "ethernet": "object",
+    "network.zones.wan": "object",
+    "services": "object",
+    "system": "object",
+    "version": "integer",
+    "wireless.radios.wlan0.vaps[0]": "object"
+  }
+}
