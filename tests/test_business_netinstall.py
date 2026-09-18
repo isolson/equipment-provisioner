@@ -43,11 +43,14 @@ def test_set_and_take_netinstall_class_is_consume_once():
     assert pm.take_netinstall_class(1) is None
 
 
-def test_disconnect_clears_pending_netinstall_class():
+def test_armed_class_survives_disconnect_powercycle():
+    # Entering BOOTP requires a power-cycle (disconnect). An armed selection
+    # must survive it so the ensuing BOOTP routes to the business flow; only
+    # the consume-once on the actual netinstall fire resets it.
     pm = _pm(1)
     pm.set_netinstall_class(1, "business_switch")
     pm._clear_port_state_on_disconnect(1)
-    assert pm.port_states[1].netinstall_class is None
+    assert pm.port_states[1].netinstall_class == "business_switch"
 
 
 def test_take_netinstall_class_unknown_port_is_none():

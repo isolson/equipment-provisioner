@@ -1805,8 +1805,11 @@ class PortManager:
         state.boot_wait_started = None
         state.mode_job = None
         state.device_ip = None
-        # Pre-run operator intent must not survive to a different device.
-        state.netinstall_class = None
+        # NOTE: netinstall_class is deliberately NOT cleared here. Entering
+        # BOOTP requires a power-cycle (a disconnect), so an armed business
+        # selection must survive the link drop to route the ensuing BOOTP. It
+        # is reset only by the consume-once in take_netinstall_class() when the
+        # netinstall actually fires.
         state.device_mac = None
         state.device_serial = None
         state.device_model = None
