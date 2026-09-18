@@ -110,7 +110,9 @@ class MikrotikHandler(BaseHandler):
     def _validate_network_mode_layout(state: Dict[str, Any]) -> None:
         """Refuse to repurpose an unknown model or overwrite a custom layout."""
         if state.get("profile") == "business-v1":
-            if (state.get("model"), state.get("architecture"), state.get("firmware")) != ("hEX S", "arm", "7.23.5") or not state.get("checks", {}).get("physical_ports"):
+            # Firmware version intentionally unpinned — fleet runs the latest
+            # long-term RouterOS release, so qualification is model+arch+layout.
+            if (state.get("model"), state.get("architecture")) != ("hEX S", "arm") or not state.get("checks", {}).get("physical_ports"):
                 raise ValueError("Unqualified business profile hardware")
             return
         expected = {

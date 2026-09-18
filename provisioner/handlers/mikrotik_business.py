@@ -146,8 +146,12 @@ async def apply(handler, mode):
     await ensure_source(handler)
     info=await handler.get_info()
     serial=info.serial_number
-    if not serial or info.model!='hEX S' or info.hardware_version!='arm' or info.firmware_version!='7.23.5':
-        raise ValueError('Unqualified business hardware or firmware')
+    # Qualify on model + architecture + (later) live layout readback only. The
+    # firmware version is deliberately NOT pinned: fleet security policy runs
+    # the latest long-term RouterOS release (CVE coverage), so the profile must
+    # apply against whatever long-term build was flashed, not a frozen version.
+    if not serial or info.model != 'hEX S' or info.hardware_version != 'arm':
+        raise ValueError('Unqualified business hardware')
     remote='business-profile.rsc'
     async with handler._ssh.start_sftp_client() as sftp:
         async with sftp.open(remote,'w') as f:

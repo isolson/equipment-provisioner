@@ -94,9 +94,19 @@ def test_switch_profile_has_no_routing_or_dhcp_server():
     assert "poe-out=forced-on" not in text
 
 
-def test_business_profile_rejects_other_firmware():
+def test_business_profile_accepts_newer_firmware():
+    # Firmware version is intentionally unpinned (fleet runs the latest
+    # long-term release for CVE coverage); a business-v1 profile on a newer
+    # RouterOS build with the right model/arch/layout must still qualify.
     before=state()
     before.update(profile="business-v1",firmware="7.24.2",checks={"physical_ports":True})
+    handler().validate_network_mode_layout(before)  # must not raise
+
+
+def test_business_profile_rejects_wrong_architecture():
+    before=state()
+    before.update(profile="business-v1",architecture="arm64",
+                  firmware="7.24.2",checks={"physical_ports":True})
     with pytest.raises(ValueError):
         handler().validate_network_mode_layout(before)
 
