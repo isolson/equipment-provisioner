@@ -132,11 +132,21 @@ class MikrotikHandler(BaseHandler):
     def validate_network_mode_layout(self, state: Dict[str, Any]) -> None:
         self._validate_network_mode_layout(state)
 
-    async def apply_network_mode(self, mode: str) -> Dict[str, Any]:
-        """Apply and verify the complete hardware-qualified business profile."""
+    async def apply_network_mode(self, mode: str, from_clean_flash: bool = False) -> Dict[str, Any]:
+        """Apply and verify the complete hardware-qualified business profile.
+
+        from_clean_flash: set by the business Netinstall pipeline right after it
+        flashed the device. Post-flash the provisioner authored the on-device
+        state, so the from-factory layout precondition (which guards an operator
+        repurposing an unknown *live* device from the network-modes UI) does not
+        apply and is skipped. The hardware qualification inside
+        ``mikrotik_business.apply`` still gates unsupported models.
+        """
         from . import mikrotik_business
         if mode not in mikrotik_business.MANAGEMENT_IPS:
             raise ValueError("Unknown network mode")
+        if from_clean_flash:
+            return await mikrotik_business.apply(self, mode)
         before = await self.network_mode_state()
         self._validate_network_mode_layout(before)
         if before.get("profile") == "business-v1" and before["mode"] == mode and all(before["checks"].values()):

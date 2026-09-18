@@ -80,6 +80,11 @@ class DummyPortManager:
         self.port_states[port_number].expecting_reboot = expecting
         self.expecting_reboot_calls.append(expecting)
 
+    def take_netinstall_class(self, port_number):
+        # No business class selected → dispatcher runs the gateway pipeline,
+        # which is what these tests exercise.
+        return None
+
     def reset_checklist(self, port_number):
         state = self.port_states[port_number]
         state.step_plan = []

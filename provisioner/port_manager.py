@@ -240,6 +240,7 @@ class PortState:
     last_provisioned_mac: Optional[str] = None  # MAC of the last successfully provisioned device — cooldown is bypassed when a different MAC appears
     last_bootp_fired_at: Optional[float] = None  # Timestamp of last BOOTP-triggered Netinstall fire — gates short retry cooldown regardless of outcome
     last_bootp_fired_mac: Optional[str] = None  # MAC from the last BOOTP-triggered Netinstall fire
+    netinstall_class: Optional[str] = None  # Operator-selected Netinstall target class (None/"gateway" = existing ZTP path; "business_router"/"business_switch" = business profile). Consumed per run so a stale selection can't re-route the next device.
     expecting_reboot: bool = False  # True during planned reboots (firmware updates)
     provisioning_task: Optional[asyncio.Task] = None  # Reference to active provisioning task for cancellation
     link_down_grace_task: Optional[asyncio.Task] = None  # Delayed cancel task for link flaps during provisioning
@@ -1752,6 +1753,28 @@ class PortManager:
             self.port_states[port_num].expecting_reboot = expecting
             logger.debug(f"Port {port_num} expecting_reboot={expecting}")
 
+    def set_netinstall_class(self, port_num: int, netinstall_class: Optional[str]) -> None:
+        """Set the operator-selected Netinstall target class for a port.
+
+        None or "gateway" keeps the existing WiFi-gateway/ZTP Netinstall path.
+        "business_router"/"business_switch" route a subsequent Netinstall (auto
+        BOOTP or manual) to the business-profile pipeline. The dispatcher
+        consumes this per run, so a stale selection cannot silently re-route the
+        next device that enters BOOTP on this port.
+        """
+        if port_num in self.port_states:
+            self.port_states[port_num].netinstall_class = netinstall_class
+            logger.info(f"Port {port_num} netinstall_class={netinstall_class!r}")
+
+    def take_netinstall_class(self, port_num: int) -> Optional[str]:
+        """Read and clear the port's selected Netinstall class (consume-once)."""
+        state = self.port_states.get(port_num)
+        if not state:
+            return None
+        selected = state.netinstall_class
+        state.netinstall_class = None
+        return selected
+
     def _clear_port_state_on_disconnect(self, port_num: int) -> None:
         """Reset transient port/device state after a disconnect."""
         import time
@@ -1782,6 +1805,8 @@ class PortManager:
         state.boot_wait_started = None
         state.mode_job = None
         state.device_ip = None
+        # Pre-run operator intent must not survive to a different device.
+        state.netinstall_class = None
         state.device_mac = None
         state.device_serial = None
         state.device_model = None

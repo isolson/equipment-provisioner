@@ -123,6 +123,15 @@ class ProvisionResponse(BaseModel):
 class NetinstallRequest(BaseModel):
     """Request to run Netinstall on a port (MikroTik BOOTP mode)."""
     port_number: int
+    # None/"gateway" = WiFi-gateway ZTP path (default, unchanged);
+    # "business_router"/"business_switch" = business-profile pipeline.
+    netinstall_class: Optional[str] = None
+
+
+class NetinstallClassRequest(BaseModel):
+    """Pre-select the Netinstall target class for a port's next auto-BOOTP run."""
+    port_number: int
+    netinstall_class: Optional[str] = None
 
 
 class ApplyModeRequest(BaseModel):
@@ -475,15 +484,45 @@ async def netinstall_device(
             detail="Netinstall requires a detected MikroTik MAC address",
         )
 
+    netinstall_class = _validated_netinstall_class(req.netinstall_class)
+
     background_tasks.add_task(
         _run_netinstall,
         provisioner,
         req.port_number,
+        netinstall_class,
     )
 
+    started = "business " + netinstall_class.split("_", 1)[1] if netinstall_class else "gateway"
     return ProvisionResponse(
         success=True,
-        message=f"Netinstall started for port {req.port_number}",
+        message=f"Netinstall ({started}) started for port {req.port_number}",
+    )
+
+
+@router.post("/netinstall-class", response_model=ProvisionResponse)
+async def set_netinstall_class_endpoint(req: NetinstallClassRequest, request: Request):
+    """Pre-select the Netinstall class for a port's next automatic BOOTP run.
+
+    The automatic BOOTP listener fires with only (port, MAC), so the operator
+    sets the intended class on the port here first. It is consumed once by the
+    next Netinstall dispatch, then reset to the default gateway path.
+    """
+    provisioner = request.app.state.provisioner
+    if not provisioner or not provisioner.port_manager:
+        raise HTTPException(status_code=503, detail="Provisioner not available")
+    port_manager = provisioner.port_manager
+    if req.port_number not in port_manager.get_port_status():
+        raise HTTPException(status_code=404, detail="Port not found")
+
+    netinstall_class = _validated_netinstall_class(req.netinstall_class)
+    port_manager.set_netinstall_class(req.port_number, netinstall_class)
+    return ProvisionResponse(
+        success=True,
+        message=(
+            f"Netinstall class for port {req.port_number} set to "
+            f"{netinstall_class or 'gateway'}"
+        ),
     )
 
 
@@ -535,8 +574,87 @@ def _mikrotik_netinstall_label_payload(config, info) -> Optional[Dict[str, Any]]
     }
 
 
-async def _run_netinstall(provisioner, port_number: int):
-    """Run Netinstall + served Configure-script pipeline in background."""
+# Operator-selected Netinstall classes that route to the business-profile
+# pipeline, mapped to the network-mode name the MikroTik handler already owns
+# (`mikrotik_business.MANAGEMENT_IPS` keys). This is not a new vendor/mode
+# registry — it maps the two UI class tokens onto the existing mode names.
+_BUSINESS_NETINSTALL_MODES = {
+    "business_router": "router",
+    "business_switch": "switch",
+}
+
+
+def _resolve_netinstall_class(netinstall_class: Optional[str]) -> Optional[str]:
+    """Normalize a selected class; None/"gateway" mean the default ZTP path."""
+    if not netinstall_class or netinstall_class == "gateway":
+        return None
+    return netinstall_class
+
+
+def _validated_netinstall_class(netinstall_class: Optional[str]) -> Optional[str]:
+    """Validate an operator-supplied class; return the normalized value.
+
+    None/"gateway" normalize to None (the default gateway path). Business
+    classes must be known keys of the mode map. Anything else is a 400.
+    """
+    resolved = _resolve_netinstall_class(netinstall_class)
+    if resolved is not None and resolved not in _BUSINESS_NETINSTALL_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown netinstall_class {netinstall_class!r}; expected one of "
+                f"gateway, {', '.join(sorted(_BUSINESS_NETINSTALL_MODES))}"
+            ),
+        )
+    return resolved
+
+
+# Sentinel: distinguishes "caller did not specify a class" (automatic BOOTP
+# path → consult the port's pre-selection) from an explicit request (manual
+# route → authoritative, even when it resolves to the gateway default).
+_NETINSTALL_CLASS_UNSET = object()
+
+
+async def _run_netinstall(
+    provisioner, port_number: int, netinstall_class=_NETINSTALL_CLASS_UNSET
+):
+    """Dispatch a Netinstall run by operator-selected device class.
+
+    Gateway (default) runs the unchanged WiFi-gateway/ZTP pipeline;
+    "business_router"/"business_switch" run the business-profile pipeline.
+
+    - Automatic BOOTP path calls this with no class, so the dispatcher consumes
+      the port's operator pre-selection (consume-once, so a stale pick can't
+      re-route the next device).
+    - The manual route passes the class explicitly; it is authoritative and any
+      stale port pre-selection is dropped — including an explicit gateway
+      request, which must not silently inherit a lingering business pick.
+    """
+    port_manager = provisioner.port_manager
+    if netinstall_class is _NETINSTALL_CLASS_UNSET:
+        selected = _resolve_netinstall_class(
+            port_manager.take_netinstall_class(port_number)
+        )
+    else:
+        port_manager.take_netinstall_class(port_number)
+        selected = _resolve_netinstall_class(netinstall_class)
+
+    mode = _BUSINESS_NETINSTALL_MODES.get(selected) if selected else None
+    if mode is not None:
+        await _run_business_netinstall(provisioner, port_number, mode)
+        return
+    await _run_gateway_netinstall(provisioner, port_number)
+
+
+async def _run_gateway_netinstall(provisioner, port_number: int):
+    """Run the WiFi-gateway Netinstall + served ZTP Configure-script pipeline.
+
+    This is the original, contract-compliant gateway path: it flashes the
+    served Mode + Configure scripts from the wifi-api, verifies phone-home /
+    device-mode / wifi-radio readiness, and registers the unit ship-ready.
+    Reached via the ``_run_netinstall`` dispatcher when the port has no business
+    Netinstall class selected (the default).
+    """
     from provisioner.handlers.mikrotik import MikrotikHandler
     from provisioner.web.websocket import (
         notify_port_change,
@@ -944,6 +1062,224 @@ async def _run_netinstall(provisioner, port_number: int):
 
     except Exception as exc:
         logger.error(f"Netinstall pipeline failed on port {port_number}: {exc}", exc_info=True)
+        await finish(False, str(exc)[:200])
+
+
+def _resolve_intended_business_credentials(config, serial: str, mode: str):
+    """Seam for the accepted per-device credential design (issue #167).
+
+    The accepted architecture delivers the intended per-device login (and RoMON
+    secret) transiently through the trusted Ops render contract
+    (``docs/ops-config-handoff.md``) — never a fleet bootstrap/onboarding secret,
+    and with no persistent per-device secret store on the bench. That backend is
+    not deployed yet (the doc is a proposal), so there is nothing to fetch and
+    this returns ``None`` — the business Netinstall then reports credential
+    acceptance as deferred and leaves the device on the bench bootstrap login.
+
+    When the Ops render endpoint exists, this is where the flow fetches the
+    render-bound credentials so the pipeline can replace-the-login and verify
+    (new works, old fails) before reporting acceptance. Deliberately does NOT
+    generate or store a substitute credential locally — that is the bench
+    secret-store pattern #167 retires.
+    """
+    return None
+
+
+async def _run_business_netinstall(provisioner, port_number: int, mode: str):
+    """Flash a MikroTik business router/switch, then apply the business profile.
+
+    Distinct from the gateway/ZTP pipeline: no served ZTP scripts, no
+    phone-home, no equipment registration. Clean-flashes RouterOS with an inline
+    bootstrap login (bench credential — bypasses the RouterOS 7.20+ admin
+    first-login lockout and brings up management reachability), then applies the
+    hardware-qualified business profile via the handler's already-verified
+    ``/import`` path. Per-device credentials are deferred behind the #167 seam.
+    """
+    from provisioner.handlers.mikrotik import MikrotikHandler
+    from provisioner.web.websocket import (
+        notify_port_change,
+        notify_provisioning_completed,
+    )
+
+    port_manager = provisioner.port_manager
+    port_manager.mark_port_provisioning(port_number, True)
+    port_manager.reset_checklist(port_number)
+
+    business_step_plan = [
+        {"key": "netinstall", "label": "Netinstall (clean flash)"},
+        {"key": "reboot", "label": "First boot"},
+        {"key": "login", "label": "Login"},
+        {"key": "model_confirmed", "label": "Device identity"},
+        {"key": "profile", "label": "Apply business profile"},
+        {"key": "verify", "label": "Policy readback"},
+        {"key": "credentials", "label": "Per-device credentials"},
+    ]
+    port_manager.set_step_plan(port_number, business_step_plan)
+
+    state = port_manager.port_states.get(port_number)
+    if state:
+        state.last_result = None
+        state.last_error = None
+
+    interface = port_manager.get_interface_for_port(port_number)
+    config = provisioner.config
+
+    async def on_progress(step, success, detail=None):
+        status = "loading" if success == "running" else success
+        if step != "device_info":
+            port_manager.update_checklist(port_number, step, status, detail)
+        port_status = port_manager._get_single_port_status(port_number)
+        await notify_port_change(port_number, port_status)
+
+    async def finish(success, error=None, detail=None, label=None):
+        port_manager.set_expecting_reboot(port_number, False)
+        port_manager.mark_port_provisioning(
+            port_number, False, success=success, error=error
+        )
+        port_status = port_manager._get_single_port_status(port_number)
+        await notify_port_change(port_number, port_status)
+        payload = {"message": detail or ("Complete" if success else error or "Failed")}
+        if error:
+            payload["error"] = error
+        if label:
+            payload["label"] = label
+        await notify_provisioning_completed(port_number, 0, success, payload)
+
+    mikrotik_fw_dir = provisioner.firmware_manager.firmware_path / "mikrotik"
+    npks = _select_latest_npk_per_arch(mikrotik_fw_dir)
+    if not npks:
+        logger.error(
+            f"No MikroTik firmware for business Netinstall on port {port_number} "
+            f"(looked in {mikrotik_fw_dir})"
+        )
+        await finish(False, "No MikroTik firmware available")
+        return
+
+    # Bench bootstrap login for post-flash reachability. This is the fleet-wide
+    # bench credential (not a per-device secret and not stored per device), used
+    # only to reach the device so the business profile can be imported. The
+    # intended per-device login is delivered later through the #167 seam.
+    bootstrap_pass = config.credentials["mikrotik"].bootstrap_password
+    if not bootstrap_pass:
+        await finish(
+            False,
+            "No bench bootstrap password (MIKROTIK_BOOTSTRAP_PASS unset) — "
+            "cannot reach the device after a clean flash",
+        )
+        return
+
+    try:
+        handler = MikrotikHandler(
+            ip="192.168.88.1",
+            credentials={
+                "username": MikrotikHandler.BOOTSTRAP_USER,
+                "password": bootstrap_pass,
+            },
+            interface=interface,
+        )
+
+        await on_progress("netinstall", "running", "Waiting for device in BOOTP mode...")
+        # Clean flash: no served ZTP Configure/Mode scripts. The inline bootstrap
+        # login (via bootstrap_password) gives management reachability and a
+        # full-access user, sidestepping the 7.20+ first-login lockout.
+        flashed = await handler.netinstall(
+            firmware_paths=npks,
+            interface=interface,
+            bootstrap_password=bootstrap_pass,
+            on_progress=on_progress,
+        )
+        if not flashed:
+            await finish(False, "Netinstall failed")
+            return
+
+        # Suppress the link-loss watchdog through the boot + profile-import
+        # windows (management IP moves to 192.168.10.x during the import).
+        port_manager.set_expecting_reboot(port_number, True)
+
+        await on_progress("reboot", "running", "Waiting for device to boot...")
+        await asyncio.sleep(10)
+        if not await handler.wait_for_reboot(timeout=240):
+            await finish(False, "Device did not boot after Netinstall")
+            return
+        await on_progress("reboot", True, "Device booted")
+
+        await on_progress("login", "running")
+        if not await handler.connect():
+            await on_progress("login", False, "Failed to connect after Netinstall")
+            await finish(False, "Failed to connect after Netinstall")
+            return
+        await on_progress("login", True)
+
+        info = await handler.get_info()
+        await on_progress(
+            "device_info", True,
+            f"mac:{info.mac_address or ''}|serial:{info.serial_number or ''}",
+        )
+        await on_progress("model_confirmed", True, info.model)
+        serial = info.serial_number
+        if not serial or serial.upper() == "UNKNOWN":
+            await on_progress("model_confirmed", False, "No serial")
+            await finish(False, "Could not read RouterBOARD serial")
+            return
+        if info.mac_address or info.serial_number:
+            port_manager.update_port_device_info(
+                port_number, mac=info.mac_address, serial=info.serial_number,
+                model=info.model,
+            )
+
+        # Apply the hardware-qualified business profile. from_clean_flash skips
+        # the from-factory layout precondition (we just authored the on-device
+        # state); the model qualification inside the handler still gates
+        # unsupported hardware with a clear error.
+        await on_progress("profile", "running", f"Applying business {mode} profile...")
+        try:
+            result = await handler.apply_network_mode(mode, from_clean_flash=True)
+        except Exception as exc:
+            await on_progress("profile", False, str(exc)[:120])
+            await finish(False, f"Business profile apply failed: {exc}")
+            return
+        await on_progress("profile", True, f"Business {mode} profile imported")
+
+        checks = result.get("checks", {}) if isinstance(result, dict) else {}
+        if not checks or not all(checks.values()):
+            failed = [k for k, v in checks.items() if not v] or ["unknown"]
+            await on_progress("verify", False, f"failed: {', '.join(failed)}")
+            await finish(False, f"Business profile readback failed: {', '.join(failed)}")
+            return
+        await on_progress("verify", True, "policy readback OK")
+
+        await handler.disconnect()
+
+        # Per-device credential leg (#167): deferred until the Ops render
+        # contract is deployed. The device is left on the bench bootstrap login
+        # and is NOT credential-accepted — reported loudly, not silently passed.
+        intended = _resolve_intended_business_credentials(config, serial, mode)
+        if intended is None:
+            await on_progress(
+                "credentials", True,
+                "DEFERRED — device on bench login, not credential-accepted (#167)",
+            )
+            detail = (
+                f"Business {mode} profile applied; per-device credentials "
+                f"deferred pending Ops render contract (#167)"
+            )
+        else:  # pragma: no cover - unreachable until the Ops render backend lands
+            await on_progress("credentials", False, "credential handoff not implemented")
+            await finish(False, "Per-device credential handoff not implemented")
+            return
+
+        label_payload = _mikrotik_netinstall_label_payload(config, info)
+        await on_progress("complete", True, detail)
+        await finish(True, detail=detail, label=label_payload)
+        logger.info(
+            f"Business Netinstall complete on port {port_number}: {serial} "
+            f"(mode={mode}, credentials deferred)"
+        )
+
+    except Exception as exc:
+        logger.error(
+            f"Business Netinstall failed on port {port_number}: {exc}", exc_info=True
+        )
         await finish(False, str(exc)[:200])
 
 

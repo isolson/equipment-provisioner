@@ -107,8 +107,8 @@ def test_netinstall_rejects_stale_device_type_with_wrong_oui(monkeypatch):
 def test_netinstall_accepts_capable_device_with_mikrotik_oui(monkeypatch):
     calls = []
 
-    async def fake_run(provisioner, port_number):
-        calls.append(port_number)
+    async def fake_run(provisioner, port_number, netinstall_class=None):
+        calls.append((port_number, netinstall_class))
 
     monkeypatch.setattr("provisioner.web.api._run_netinstall", fake_run)
     client = _client(
@@ -119,7 +119,8 @@ def test_netinstall_accepts_capable_device_with_mikrotik_oui(monkeypatch):
     response = client.post("/api/netinstall", json={"port_number": 4})
 
     assert response.status_code == 200
-    assert calls == [4]
+    # Default request (no class) resolves to the gateway path (None).
+    assert calls == [(4, None)]
 
 
 def test_mode_endpoint_rejects_unqualified_vendor_with_templates(monkeypatch):
