@@ -74,6 +74,13 @@ reconnects, checks identity and policy, then removes the uploaded file. Dynamic
 firewall counter rules survive cleanup; old static bridge VLAN rows are removed
 before rebuilding the profile. An import exit code alone never means success.
 
+MikroTik SSH login, command, and config-import errors omit device replies and
+command text from reported failures. RouterOS can echo a password-bearing line
+when it rejects an import. Successful read-back output remains available to
+the handler; callers must still keep secret reads out of job results and logs.
+Diagnose rejected imports in the protected bench evidence workflow described in
+[BENCH_EVIDENCE.md](BENCH_EVIDENCE.md), not by enabling raw response logging.
+
 This is an interim credentialed bench reconfiguration flow. It does not perform
 Netinstall, install the fleet reset-default state, derive KDF credentials, or
 implement the Ops claim/enrollment contract. A factory reset still uses the
