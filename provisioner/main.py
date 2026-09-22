@@ -40,6 +40,10 @@ console = Console()
 def _switch_management_credentials(config: Config) -> Tuple[str, str]:
     """(username, password) for the bench management switch.
 
+    Prefers the dedicated ``network.management.switch_password`` secret.
+    When it is unset, falls back to the historical source: the MikroTik
+    device credential.
+
     The switch is *infrastructure* — present regardless of which device
     vendors are enabled — so this must not assume a ``mikrotik`` entry
     exists in the credentials table: a ``PROVISIONER_VENDORS`` allowlist
@@ -48,6 +52,9 @@ def _switch_management_credentials(config: Config) -> Tuple[str, str]:
     which is exactly what the table's backfilled default holds in a full
     build.
     """
+    mgmt = config.network.management
+    if mgmt.switch_password:
+        return mgmt.switch_username, mgmt.switch_password
     creds = config.credentials.get("mikrotik")
     if creds is None:
         return "admin", ""
