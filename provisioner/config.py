@@ -36,6 +36,19 @@ class ManagementNetworkConfig(BaseModel):
     netmask: str = "255.255.255.0"
     switch_ip: Optional[str] = "192.168.88.1"  # Switch's IP on VLAN 1990 (for reference only)
     vlan: Optional[int] = 1990  # Management VLAN (tagged on trunk)
+    # Bench switch login. Kept apart from the MikroTik device credential,
+    # which is for the devices being provisioned. Empty password keeps the
+    # old fallback to credentials.mikrotik (main._switch_management_credentials).
+    switch_username: str = "admin"
+    switch_password: str = ""
+
+    @field_validator("switch_password", mode="before")
+    @classmethod
+    def expand_env_var(cls, v: str) -> str:
+        """Expand environment variables in the switch password."""
+        if v and v.startswith("${") and v.endswith("}"):
+            return os.getenv(v[2:-1], "")
+        return v
 
 
 class NetworkConfig(BaseModel):
