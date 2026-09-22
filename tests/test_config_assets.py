@@ -40,6 +40,8 @@ def test_registry_maps_approved_models_to_families():
     assert config_family_for_model("tachyon", "TNA-301").directory == "TNA-301-302"
     assert config_family_for_model("tachyon", "TNA-303X").directory == "TNA-303X"
     assert config_family_for_model("tachyon", "TNA-303L-65").directory == "TNA-303L-65"
+    assert config_family_for_model("tachyon", "TNA-303L").directory == "TNA-303L-65"
+    assert config_family_for_model("tachyon", "TNA-303L-LIB").directory == "TNA-303L-65"
     assert config_family_for_model("tachyon", "TNS-100") is None
 
 

@@ -555,7 +555,10 @@ register(VendorSpec(
         ConfigFamilySpec(
             name="TNA-303L-65",
             directory="TNA-303L-65",
-            model_patterns=("tna-303l-65*",),
+            # Some units report the bare model "TNA-303L" (same shell as the
+            # -65; the SM template sets no antenna fields), so the whole
+            # TNA-303L line shares this family.
+            model_patterns=("tna-303l*",),
             roles=("SM", "PTP"),
             ptp_compatible_families=(
                 "TNA-301-302", "TNA-303X", "TNA-303L-65",
