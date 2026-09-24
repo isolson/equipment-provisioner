@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, ClassVar, Optional, Dict
+from typing import Any, ClassVar, Optional, Dict, Tuple
 
 import yaml
 from pydantic import BaseModel, Field, create_model, field_validator
@@ -37,10 +37,15 @@ class ManagementNetworkConfig(BaseModel):
     switch_ip: Optional[str] = "192.168.88.1"  # Switch's IP on VLAN 1990 (for reference only)
     vlan: Optional[int] = 1990  # Management VLAN (tagged on trunk)
     # Bench switch login. Kept apart from the MikroTik device credential,
-    # which is for the devices being provisioned. Empty password keeps the
-    # old fallback to credentials.mikrotik (main._switch_management_credentials).
+    # which is for the devices being provisioned. Defaults to the
+    # PROVISIONER_SWITCH_PASSWORD env var (written by setup_switch.sh), so
+    # hosts whose config.yaml predates this field still pick it up. Empty
+    # keeps the old fallback to credentials.mikrotik
+    # (switch_management_credentials).
     switch_username: str = "admin"
-    switch_password: str = ""
+    switch_password: str = Field(
+        default_factory=lambda: os.getenv("PROVISIONER_SWITCH_PASSWORD", "")
+    )
 
     @field_validator("switch_password", mode="before")
     @classmethod
@@ -555,6 +560,34 @@ def _deep_merge_dict(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str,
         else:
             result[key] = value
     return result
+
+
+def switch_management_credentials(config: Any) -> Tuple[str, str]:
+    """(username, password) for the bench management switch.
+
+    Prefers the dedicated ``network.management.switch_password`` secret.
+    When it is unset, falls back to the historical source: the MikroTik
+    device credential.
+
+    The switch is *infrastructure* — present regardless of which device
+    vendors are enabled — so this must not assume a ``mikrotik`` entry
+    exists in the credentials table: a ``PROVISIONER_VENDORS`` allowlist
+    without mikrotik filters that entry out of the derived defaults.
+    Falls back to the MikroTik factory default (admin, empty password),
+    which is exactly what the table's backfilled default holds in a full
+    build.
+    """
+    mgmt = getattr(getattr(config, "network", None), "management", None)
+    if getattr(mgmt, "switch_password", ""):
+        return mgmt.switch_username, mgmt.switch_password
+    # config.credentials is a plain dict (Story 3 / #73) — .get(), not getattr.
+    credentials_table = getattr(config, "credentials", None)
+    if not isinstance(credentials_table, dict):
+        credentials_table = {}
+    creds = credentials_table.get("mikrotik")
+    if creds is None:
+        return "admin", ""
+    return creds.username, creds.password
 
 
 def load_config(config_path: str = "config.yaml", env_file: str = ".env") -> Config:

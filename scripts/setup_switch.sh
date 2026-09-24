@@ -433,15 +433,15 @@ save_password_to_env() {
         local found=false
         temp_file=$(mktemp "${ENV_FILE}.tmp.XXXXXX")
         while IFS= read -r line || [[ -n "$line" ]]; do
-            if [[ "$line" == MIKROTIK_PASSWORD=* ]]; then
-                printf 'MIKROTIK_PASSWORD=%s\n' "$new_pass" >> "$temp_file"
+            if [[ "$line" == PROVISIONER_SWITCH_PASSWORD=* ]]; then
+                printf 'PROVISIONER_SWITCH_PASSWORD=%s\n' "$new_pass" >> "$temp_file"
                 found=true
             else
                 printf '%s\n' "$line" >> "$temp_file"
             fi
         done < "$ENV_FILE"
         if [[ "$found" != true ]]; then
-            printf 'MIKROTIK_PASSWORD=%s\n' "$new_pass" >> "$temp_file"
+            printf 'PROVISIONER_SWITCH_PASSWORD=%s\n' "$new_pass" >> "$temp_file"
         fi
         chmod 600 "$temp_file"
         mv -f "$temp_file" "$ENV_FILE"
@@ -450,10 +450,11 @@ save_password_to_env() {
         cat > "$ENV_FILE" << EOF
 # Network Device Provisioner Environment Variables
 
-# MikroTik switch password (auto-generated)
-MIKROTIK_PASSWORD=${new_pass}
+# Bench switch login (auto-generated). Not the MikroTik device password.
+PROVISIONER_SWITCH_PASSWORD=${new_pass}
 
-# Other device passwords
+# Device passwords
+MIKROTIK_PASSWORD=
 CAMBIUM_PASSWORD=your_cambium_password
 TARANA_PASSWORD=your_tarana_password
 TACHYON_PASSWORD=your_tachyon_password
@@ -650,7 +651,7 @@ main() {
     echo "  3. Run: sudo ./scripts/install.sh install"
     echo ""
 
-    if [[ -f "$ENV_FILE" ]] && grep -q "MIKROTIK_PASSWORD=" "$ENV_FILE"; then
+    if [[ -f "$ENV_FILE" ]] && grep -q "^PROVISIONER_SWITCH_PASSWORD=." "$ENV_FILE"; then
         echo "The switch password has been saved to:"
         echo "  $ENV_FILE"
         echo ""

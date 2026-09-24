@@ -27,11 +27,22 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Read one key from the env file. Do not `source` it: the file uses systemd
+# syntax, and a bash syntax error prints the offending line (a secret).
+env_file_value() {
+    local value
+    value=$(sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1)
+    value=${value#\"}; value=${value%\"}
+    value=${value#\'}; value=${value%\'}
+    printf '%s' "$value"
+}
+
 # Load password from env file if it exists
 if [[ -f "$ENV_FILE" ]]; then
-    source "$ENV_FILE"
-    if [[ -n "$MIKROTIK_PASSWORD" ]]; then
-        PASSWORD="$MIKROTIK_PASSWORD"
+    PASSWORD=$(env_file_value PROVISIONER_SWITCH_PASSWORD)
+    # Hosts set up before the dedicated switch secret kept it here.
+    if [[ -z "$PASSWORD" ]]; then
+        PASSWORD=$(env_file_value MIKROTIK_PASSWORD)
     fi
 fi
 

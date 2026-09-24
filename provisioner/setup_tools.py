@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from .config import _default_credentials
+from .config import _default_credentials, switch_management_credentials
 from .config_assets import ConfigAssetCatalog
 from .handler_manager import HandlerManager, provisionable_device_types
 
@@ -86,7 +86,7 @@ def _interface_exists(interface_name: str) -> bool:
 # default ships with an empty password (the credential values themselves
 # derive from config._default_credentials — Story 3 / #73).
 _EMPTY_PASSWORD_HINTS = {
-    "mikrotik": "(empty until switch password is set)",
+    "mikrotik": "(factory default: empty)",
     "tarana": "(set your fleet password)",
 }
 
@@ -434,11 +434,7 @@ def probe_mikrotik_switch(config: Any) -> Dict[str, Any]:
     """Inspect the provisioning switch, preferring RouterOS API when available."""
     management = getattr(getattr(config, "network", None), "management", None)
     switch_ip = getattr(management, "switch_ip", None) or "192.168.88.1"
-    # config.credentials is a plain dict (Story 3 / #73) — .get(), not getattr.
-    credentials_table = getattr(config, "credentials", None)
-    if not isinstance(credentials_table, dict):
-        credentials_table = {}
-    configured_password = getattr(credentials_table.get("mikrotik"), "password", "")
+    switch_username, configured_password = switch_management_credentials(config)
     password_candidates = []
     for password in (configured_password, ""):
         if password not in password_candidates:
@@ -481,7 +477,7 @@ def probe_mikrotik_switch(config: Any) -> Dict[str, Any]:
         try:
             api = librouteros.connect(
                 host=switch_ip,
-                username="admin",
+                username=switch_username,
                 password=password,
                 timeout=3.0,
             )
