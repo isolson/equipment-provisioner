@@ -297,6 +297,12 @@ class MikrotikDeviceConfig(BaseModel):
 
     ztp_api_url: Optional[str] = DEFAULT_ZTP_API_URL  # ZTP API base URL (wifi-api ZTP service)
     ztp_api_key: Optional[str] = None  # API key for the ZTP GETs (credentials, bootstrap) + register
+    # Ops per-device render-credential contract (business-router localadmin
+    # login). Both must be set to enable transient credential acceptance;
+    # otherwise the feature stays dormant. The token is a short-lived bearer
+    # bound to an operator-approved bench job — keep it out of argv/logs.
+    render_credentials_url: Optional[str] = None
+    render_credentials_token: Optional[str] = None
 
     @field_validator("ztp_api_url", mode="before")
     @classmethod
@@ -311,7 +317,7 @@ class MikrotikDeviceConfig(BaseModel):
             return cls.DEFAULT_ZTP_API_URL
         return v
 
-    @field_validator("ztp_api_key", mode="before")
+    @field_validator("ztp_api_key", "render_credentials_token", mode="before")
     @classmethod
     def expand_env_var(cls, v: Optional[str]) -> Optional[str]:
         if v and v.startswith("${") and v.endswith("}"):
