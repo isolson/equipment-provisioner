@@ -29,16 +29,86 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Read one key from the env file. Do not `source` it: the file uses systemd
 # syntax, and a bash syntax error prints the offending line (a secret).
+# This follows the systemd EnvironmentFile= rules: text in single quotes
+# stays as is, double quotes decode \" \\ \` \$, a backslash outside quotes
+# escapes the next character, a backslash at the end of a line continues
+# the line, and unquoted trailing whitespace is removed. The last
+# assignment of the key wins.
 env_file_value() {
-    local value
-    value=$(sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1)
-    value=${value#\"}; value=${value%\"}
-    value=${value#\'}; value=${value%\'}
-    printf '%s' "$value"
+    local want=$1 content c state=pre_key key="" value="" keep=0 result="" i
+    content=$(<"$ENV_FILE")$'\n'
+    for (( i = 0; i < ${#content}; i++ )); do
+        c=${content:i:1}
+        case $state in
+            pre_key)
+                case $c in
+                    '#'|';') state=comment ;;
+                    [[:space:]]) ;;
+                    *) state=key; key=$c ;;
+                esac ;;
+            key)
+                case $c in
+                    $'\n') state=pre_key ;;
+                    '=')
+                        state=pre_value
+                        key=${key%"${key##*[![:space:]]}"}
+                        value=""; keep=0 ;;
+                    *) key+=$c ;;
+                esac ;;
+            pre_value)
+                case $c in
+                    $'\n')
+                        state=pre_key
+                        if [[ $key == "$want" ]]; then result=$value; fi ;;
+                    "'") state=single ;;
+                    '"') state=double ;;
+                    '\') state=value_escape ;;
+                    [[:space:]]) ;;
+                    *) state=value; value+=$c ;;
+                esac ;;
+            value)
+                case $c in
+                    $'\n')
+                        state=pre_key
+                        c=${value%"${value##*[![:space:]]}"}
+                        if (( ${#c} > keep )); then value=$c; else value=${value:0:keep}; fi
+                        if [[ $key == "$want" ]]; then result=$value; fi ;;
+                    '\') state=value_escape ;;
+                    *) value+=$c ;;
+                esac ;;
+            value_escape)
+                state=value
+                if [[ $c != $'\n' ]]; then value+=$c; keep=${#value}; fi ;;
+            single)
+                if [[ $c == "'" ]]; then state=pre_value; keep=${#value}; else value+=$c; fi ;;
+            double)
+                case $c in
+                    '"') state=pre_value; keep=${#value} ;;
+                    '\') state=double_escape ;;
+                    *) value+=$c ;;
+                esac ;;
+            double_escape)
+                state=double
+                case $c in
+                    '"'|'\'|'`'|'$') value+=$c ;;
+                    $'\n') ;;
+                    *) value+="\\$c" ;;
+                esac ;;
+            comment)
+                case $c in
+                    '\') state=comment_escape ;;
+                    $'\n') state=pre_key ;;
+                esac ;;
+            comment_escape) state=comment ;;
+        esac
+    done
+    printf '%s' "$result"
 }
 
-# Load password from env file if it exists
+# Load the switch login from the env file if it exists
 if [[ -f "$ENV_FILE" ]]; then
+    USERNAME=$(env_file_value PROVISIONER_SWITCH_USERNAME)
+    USERNAME=${USERNAME:-admin}
     PASSWORD=$(env_file_value PROVISIONER_SWITCH_PASSWORD)
     # Hosts set up before the dedicated switch secret kept it here.
     if [[ -z "$PASSWORD" ]]; then

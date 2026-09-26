@@ -38,22 +38,31 @@ class ManagementNetworkConfig(BaseModel):
     vlan: Optional[int] = 1990  # Management VLAN (tagged on trunk)
     # Bench switch login. Kept apart from the MikroTik device credential,
     # which is for the devices being provisioned. Defaults to the
-    # PROVISIONER_SWITCH_PASSWORD env var (written by setup_switch.sh), so
-    # hosts whose config.yaml predates this field still pick it up. Empty
-    # keeps the old fallback to credentials.mikrotik
+    # PROVISIONER_SWITCH_USERNAME and PROVISIONER_SWITCH_PASSWORD env vars
+    # (written by setup_switch.sh), so hosts whose config.yaml predates
+    # these fields still pick them up. An empty username means "admin". An
+    # empty password keeps the old fallback to credentials.mikrotik
     # (switch_management_credentials).
-    switch_username: str = "admin"
+    switch_username: str = Field(
+        default_factory=lambda: os.getenv("PROVISIONER_SWITCH_USERNAME", "") or "admin"
+    )
     switch_password: str = Field(
         default_factory=lambda: os.getenv("PROVISIONER_SWITCH_PASSWORD", "")
     )
 
-    @field_validator("switch_password", mode="before")
+    @field_validator("switch_username", "switch_password", mode="before")
     @classmethod
     def expand_env_var(cls, v: str) -> str:
-        """Expand environment variables in the switch password."""
+        """Expand environment variables in the switch login."""
         if v and v.startswith("${") and v.endswith("}"):
             return os.getenv(v[2:-1], "")
         return v
+
+    @field_validator("switch_username")
+    @classmethod
+    def default_switch_username(cls, v: str) -> str:
+        """Use the RouterOS default account when no username is set."""
+        return v or "admin"
 
 
 class NetworkConfig(BaseModel):

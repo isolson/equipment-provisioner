@@ -22,7 +22,7 @@ network:
     ip: 192.168.88.10       # Pi's management IP on VLAN 1990
     netmask: 255.255.255.0
     switch_ip: 192.168.88.1 # Switch's IP on VLAN 1990 (for reference only)
-    switch_username: admin
+    switch_username: "${PROVISIONER_SWITCH_USERNAME}" # Empty means admin
     switch_password: "${PROVISIONER_SWITCH_PASSWORD}" # Bench switch login (not the MikroTik device login)
     vlan: 1990              # Management VLAN (tagged on trunk)
 

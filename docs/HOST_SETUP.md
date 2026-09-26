@@ -73,9 +73,9 @@ ssh -i ~/.ssh/id_conductor -o IdentitiesOnly=yes serveradmin@<host> \
 
 ### Secrets: `/etc/provisioner/provisioner.env`
 
-Secret values live in `/etc/provisioner/provisioner.env` (root, `0600`), which the unit loads with `EnvironmentFile=`. `config.yaml` refers to them as `"${VAR}"`. This includes the bench switch login, `PROVISIONER_SWITCH_PASSWORD`. `scripts/setup_switch.sh` writes it, and `network.management.switch_password` reads it (also when `config.yaml` has no `switch_password` line). The switch reconcile loop and the setup readiness check use it. It is separate from `MIKROTIK_PASSWORD`, which is for the MikroTik devices being provisioned. If it is not set, the switch login falls back to the MikroTik device credential.
+Secret values live in `/etc/provisioner/provisioner.env` (root, `0600`), which the unit loads with `EnvironmentFile=`. `config.yaml` refers to them as `"${VAR}"`. This includes the bench switch login, `PROVISIONER_SWITCH_USERNAME` and `PROVISIONER_SWITCH_PASSWORD`. `scripts/setup_switch.sh` writes both. `network.management.switch_username` and `network.management.switch_password` read them (also when `config.yaml` has no line for them). An empty username means `admin`. The switch reconcile loop and the setup readiness check use it. It is separate from `MIKROTIK_PASSWORD`, which is for the MikroTik devices being provisioned. If it is not set, the switch login falls back to the MikroTik device credential.
 
-The file uses systemd syntax, not shell syntax. Do not `source` it with bash: an unquoted value can cause a syntax error, and bash prints the offending line (the secret) in the error.
+The file uses systemd syntax, not shell syntax. Do not `source` it with bash: an unquoted value can cause a syntax error, and bash prints the offending line (the secret) in the error. `scripts/update_switch_script.sh` reads the file with the systemd quoting and escape rules.
 
 ## systemd capabilities
 
