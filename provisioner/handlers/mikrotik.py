@@ -147,8 +147,8 @@ class MikrotikHandler(BaseHandler):
         from . import mikrotik_business
         state = await mikrotik_business.advanced_state(self)
         return {"options": [
-            {"key": "romon_enabled", "label": "Enable RoMON on Internal access port ether3", "checked": state["romon_enabled"], "description": "A per-device secret is stored privately on the provisioner. All other ports stay excluded."},
-            {"key": "prepare_wireguard", "label": "Prepare and store a WireGuard key", "checked": False, "description": "The interface remains disabled until a management concentrator peer is configured."},
+            {"key": "romon_enabled", "label": "Enable RoMON on Internal access port ether3", "checked": state["romon_enabled"], "description": "RoMON is limited to ether3; all other ports stay excluded. The per-device secret is supplied by the management contract and is never stored on the provisioner."},
+            {"key": "prepare_wireguard", "label": "Prepare on-device management access", "checked": False, "description": "Generates the disabled wg-management key on the device and shows only its public half. No private key is read or stored; the interface stays disabled until a concentrator peer is configured."},
         ], "status": state["wireguard_status"], "public_key": state["wireguard_public_key"]}
 
     @staticmethod
@@ -160,6 +160,58 @@ class MikrotikHandler(BaseHandler):
         from . import mikrotik_business
         self.validate_network_mode_advanced(options)
         return await mikrotik_business.apply_advanced(self, options.get("romon_enabled"), options.get("prepare_wireguard", False))
+
+    async def accept_business_credentials(
+        self,
+        client,
+        *,
+        job_id: str,
+        bench_upstream_sha: str,
+        render_sha256: str,
+        state: str = "unassigned-business-router",
+    ) -> Dict[str, Any]:
+        """Standardize the login through the Ops render-credential contract.
+
+        Releases the per-device ``localadmin`` password transiently, replaces
+        the consumed label login and verifies it (fresh works, old fails), then
+        reports verified completion. This is the credential/deployment
+        acceptance step, kept separate from network-policy verification. It
+        persists no secret and raises on any failure; the device always keeps a
+        working login (see ``mikrotik_business.accept_credentials``). ``client``
+        is a ``RenderCredentialClient`` built from config; when credential
+        acceptance is not configured the caller passes ``None`` and skips this.
+        """
+        from . import mikrotik_business
+        info = await self.get_info()
+        if not info.serial_number:
+            raise ValueError("Device serial is required for credential acceptance")
+        previous_credentials = dict(self.credentials) if isinstance(self.credentials, dict) else None
+        release = await client.release(
+            job_id=job_id,
+            serial=info.serial_number,
+            state=state,
+            board_name=info.model or "",
+            bench_upstream_sha=bench_upstream_sha,
+        )
+        result = await mikrotik_business.accept_credentials(
+            self, release, previous_credentials=previous_credentials
+        )
+        post = await self.network_mode_state()
+        readback_passed = post.get("profile") == "business-v1" and all(post.get("checks", {}).values())
+        await client.complete(
+            job_id=job_id,
+            serial=info.serial_number,
+            render_sha256=render_sha256,
+            readback_passed=readback_passed,
+            local_login_passed=result["local_login_verified"],
+            uploaded_file_removed=True,
+        )
+        return {
+            "credential_accepted": True,
+            "previous_login_disabled": result["previous_login_disabled"],
+            "seed_id": release.seed_id,
+            "secret_version": release.secret_version,
+        }
 
     # Try common MikroTik defaults before failing to UI prompt
     DEFAULT_CREDENTIALS = [

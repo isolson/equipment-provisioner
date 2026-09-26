@@ -34,18 +34,25 @@ profile before deployment.
 
 ## Advanced management
 
-**RoMON** is opt-in, limited to ether3. The wildcard entry forbids all other
-ports. The provisioner creates and stores a per-device secret before enabling
-it. A peer needs that same secret; it is not the fleet-wide RoMON domain secret.
-RoMON is off at the end of the bench tests.
+The provisioner keeps **no persistent per-device secret store**. There is no
+`/var/lib/provisioner/device-secrets/` directory, no 1Password token, and no KDF
+seed on the bench; any legacy copy is removed automatically when the business
+flow runs (see [issue #167](https://github.com/isolson/network-provisioner/issues/167)).
 
-**Prepare and store a WireGuard key** creates the disabled `wg-management`
-interface and stores its key pair. Repeating the operation retains the same
-key. The UI displays only the public key. The private key and RoMON secret
-live in `/var/lib/provisioner/device-secrets/mikrotik/`, in mode-0600 files under
-a mode-0700 directory, named by a hash of device serial. Back up that private
-store using the host's secret-handling process; never commit or include it in
-HAR exports.
+**RoMON** is opt-in, limited to ether3. The wildcard entry forbids all other
+ports. The per-device RoMON secret is supplied transiently by the management
+contract; the provisioner never generates, substitutes a fleet secret for, or
+stores one. Enabling RoMON without a supplied secret fails closed. A peer needs
+that same secret; it is not the fleet-wide RoMON domain secret. RoMON is off at
+the end of the bench tests.
+
+**Prepare on-device management access** creates the disabled `wg-management`
+interface on the device. The key pair is generated on-device and only the
+**public** half is ever read back — the private key never leaves the router and
+is never stored, logged, or exported. Repeating the operation keeps the same key
+(idempotent). A one-time rotation regenerates the key on the device for units
+whose private half was exported by the earlier interim flow; the new public half
+must then be re-published to any peer that held the old one.
 
 No tunnel peer, tunnel address, route or default-route change is created.
 Ops [issue #666](https://github.com/sixtyops/treehouse-architecture/issues/666)
@@ -75,10 +82,11 @@ firewall counter rules survive cleanup; old static bridge VLAN rows are removed
 before rebuilding the profile. An import exit code alone never means success.
 
 This is an interim credentialed bench reconfiguration flow. It does not perform
-Netinstall, install the fleet reset-default state, derive KDF credentials, or
-implement the Ops claim/enrollment contract. A factory reset still uses the
-unit's existing reset configuration. Those lifecycle features belong to the
-Ops epic and [configuration handoff](ops-config-handoff.md).
+Netinstall, install the fleet reset-default state, or derive KDF credentials —
+the provisioner is a pure consumer of the Ops render-credential contract and
+never holds a seed. A factory reset still uses the unit's existing reset
+configuration. Those lifecycle features belong to the Ops epic and
+[configuration handoff](ops-config-handoff.md).
 
 ## Provenance and validation
 
@@ -93,8 +101,11 @@ The [evidence record](../bench-evidence/mikrotik/hEX_S/7.23.5/capture-summary.md
 contains the initial flat-profile history and subsequent business-profile checks.
 Router passed 66 configuration checks; switch passed 48. All four router VLANs
 returned DHCP offers from their correct scopes. Only Internal replied to gateway
-ICMP; IoT, Guest and OpenRoam did not. RoMON enable/disable, private key storage,
-and router/key persistence across a software reboot passed.
+ICMP; IoT, Guest and OpenRoam did not. RoMON enable/disable and on-device
+WireGuard key persistence across a software reboot passed. That capture predates
+issue #167; the removal of the bench secret store, transient RoMON secret, and
+`localadmin` credential acceptance still need a fresh hEX S round trip before
+deployment sign-off.
 
 Browser-driven role changes and advanced controls passed without page errors.
 Synthetic UDP probes verified Internal → IoT forwarding and blocked IoT →
@@ -102,9 +113,19 @@ Internal, Guest → Internal/IoT, and OpenRoam → Internal/IoT. These probes do
 not qualify every client protocol or same-VLAN isolation. The full automated
 suite passed 983 tests, with 5 skipped (host Python 3.13).
 
-Login acceptance remains pending: the label login is retained, and the target
-standard credential source must be selected and verified with a fresh session.
-Do not mark this unit ready for deployment on the strength of role checks alone.
+Network-policy verification and credential/deployment acceptance are separate
+steps. Applying and verifying a role proves the network policy only; it does not
+accept the login. Credential acceptance runs through the trusted Ops
+render-credential contract (see
+[`ops-render-credentials.md`](https://github.com/sixtyops/treehouse-architecture/blob/master/docs/api-reference/ops-render-credentials.md)):
+the provisioner receives the per-device `localadmin` password transiently,
+replaces the consumed label login, verifies a fresh `localadmin` login works and
+the old login fails, then reports verified completion. It stores nothing and
+fails safe — the previous login is disabled only after the new one is proven, so
+a failure never strands the device. This step is dormant until
+`render_credentials_url` and `render_credentials_token` are configured and the
+Ops endpoint is deployed. Do not mark a unit ready for deployment on the strength
+of role checks alone.
 
 WAN Internet/NAT traffic (deferred by the operator), upstream switch forwarding, syslog receipt, NTP synchronization and a physical power cycle
 remain deployment acceptance checks. These are not inferred from configured
