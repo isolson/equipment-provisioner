@@ -98,7 +98,17 @@ class PortStatus(BaseModel):
     reprovision_wait: int = 0
 
 
-class ProvisionRequest(BaseModel):
+class TaranaSettingsRequest(BaseModel):
+    """Tarana operator ID accepted by the API."""
+    operator_id: Optional[int] = Field(default=None, ge=0, le=16383)
+
+
+class DeviceSettingsRequest(BaseModel):
+    """Device settings edited through the API."""
+    tarana: Optional[TaranaSettingsRequest] = None
+
+
+class ProvisionRequest(TaranaSettingsRequest):
     """Request to manually provision a device."""
     port_number: int
     custom_password: Optional[str] = None
@@ -106,7 +116,6 @@ class ProvisionRequest(BaseModel):
     skip_firmware: bool = False
     skip_config: bool = False
     config_override: Optional[Dict[str, Any]] = None
-    operator_id: Optional[int] = None
     # Site-role config overlay for this job (opaque string, e.g. "tower").
     # None falls back to config.yaml provisioning.default_role. Absent in
     # old clients, so requests are wire-compatible. UI exposure is R2.
@@ -262,7 +271,7 @@ async def get_device_settings(request: Request):
 
 
 @router.put("/device-settings")
-async def update_device_settings(settings: Dict[str, Any], request: Request):
+async def update_device_settings(settings: DeviceSettingsRequest, request: Request):
     """Update device-type-specific provisioning settings.
 
     Updates the in-memory config AND persists the change to
@@ -283,8 +292,8 @@ async def update_device_settings(settings: Dict[str, Any], request: Request):
 
     persisted_changes: Dict[str, Any] = {}
 
-    if "tarana" in settings:
-        tarana = settings["tarana"]
+    if settings.tarana is not None:
+        tarana = settings.tarana.model_dump(exclude_unset=True)
         if "operator_id" in tarana:
             provisioner.config.device_settings.tarana.operator_id = tarana["operator_id"]
             persisted_changes.setdefault("tarana", {})["operator_id"] = tarana["operator_id"]
