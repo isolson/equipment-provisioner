@@ -86,5 +86,6 @@ history.db
 *.har
 .context/
 
-# Claude Code workspace state
-.claude/
+# Claude Code workspace state (vendored skills are committed)
+.claude/*
+!.claude/skills/
