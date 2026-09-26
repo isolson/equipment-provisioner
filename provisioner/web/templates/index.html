@@ -1138,7 +1138,7 @@
                     ${port.device_type === 'tarana' ? `
                     <div>
                         <div class="text-sm font-medium text-gray-600 mb-2">Operator ID</div>
-                        <input type="number" id="operator-id" placeholder="Operator ID" value="${window.defaultOperatorId || ''}"
+                        <input type="number" id="operator-id" min="0" max="16383" placeholder="Operator ID" value="${window.defaultOperatorId || ''}"
                             class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900">
                     </div>
                     ` : ''}
@@ -1293,7 +1293,11 @@
             const skipFirmware = document.getElementById('skip-firmware')?.checked || false;
             const skipConfig = document.getElementById('skip-config')?.checked || false;
             const operatorIdEl = document.getElementById('operator-id');
-            const operatorId = operatorIdEl?.value ? parseInt(operatorIdEl.value) : null;
+            const operatorId = operatorIdEl?.value ? Number(operatorIdEl.value) : null;
+            if (operatorId !== null && (!Number.isInteger(operatorId) || operatorId < 0 || operatorId > 16383)) {
+                showToast('Operator ID must be an integer from 0 through 16383', 'warning');
+                return;
+            }
 
             try {
                 const body = {

@@ -116,7 +116,8 @@ Current behavior:
 
 ### 5. Optional but high-value runtime settings
 
-- `device_settings.tarana.operator_id`
+- `device_settings.tarana.operator_id`: integer from `0` through `16383`.
+  The settings and provision APIs reject values outside this range with HTTP 422.
 - `device_settings.mikrotik.ztp_api_url`
 - `equipment_registry.url` and API key
 - notification webhooks
