@@ -19,7 +19,7 @@ from typing import Dict, Optional, Tuple
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .config import load_config, set_config, Config
+from .config import load_config, set_config, Config, switch_management_credentials
 from .db import init_db, close_db, ProvisioningRecord, ProvisioningStatus
 from .fingerprint import identify_device, DeviceType
 from .firmware import FirmwareManager
@@ -37,21 +37,8 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def _switch_management_credentials(config: Config) -> Tuple[str, str]:
-    """(username, password) for the bench management switch.
-
-    The switch is *infrastructure* — present regardless of which device
-    vendors are enabled — so this must not assume a ``mikrotik`` entry
-    exists in the credentials table: a ``PROVISIONER_VENDORS`` allowlist
-    without mikrotik filters that entry out of the derived defaults.
-    Falls back to the MikroTik factory default (admin, empty password),
-    which is exactly what the table's backfilled default holds in a full
-    build.
-    """
-    creds = config.credentials.get("mikrotik")
-    if creds is None:
-        return "admin", ""
-    return creds.username, creds.password
+# Kept as a module attribute for existing callers and tests.
+_switch_management_credentials = switch_management_credentials
 
 
 class Provisioner:

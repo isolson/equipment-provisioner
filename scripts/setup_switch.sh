@@ -421,39 +421,52 @@ set_switch_password() {
     fi
 }
 
-# Save password to environment file
+# Set KEY=VALUE in the env file. Replace an existing line or append one.
+set_env_file_line() {
+    local key=$1
+    local value=$2
+    local temp_file
+    local found=false
+    temp_file=$(mktemp "${ENV_FILE}.tmp.XXXXXX")
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "${key}="* ]]; then
+            printf '%s=%s\n' "$key" "$value" >> "$temp_file"
+            found=true
+        else
+            printf '%s\n' "$line" >> "$temp_file"
+        fi
+    done < "$ENV_FILE"
+    if [[ "$found" != true ]]; then
+        printf '%s=%s\n' "$key" "$value" >> "$temp_file"
+    fi
+    chmod 600 "$temp_file"
+    mv -f "$temp_file" "$ENV_FILE"
+}
+
+# Save the switch login to the environment file. The username goes with the
+# password: network.management.switch_username reads it, so the provisioner
+# logs in as the account whose password this script set.
 save_password_to_env() {
-    local new_pass=$1
+    local user=$1
+    local new_pass=$2
 
     # Create config directory if needed
     mkdir -p "$CONFIG_DIR"
 
     if [[ -f "$ENV_FILE" ]]; then
-        local temp_file
-        local found=false
-        temp_file=$(mktemp "${ENV_FILE}.tmp.XXXXXX")
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            if [[ "$line" == MIKROTIK_PASSWORD=* ]]; then
-                printf 'MIKROTIK_PASSWORD=%s\n' "$new_pass" >> "$temp_file"
-                found=true
-            else
-                printf '%s\n' "$line" >> "$temp_file"
-            fi
-        done < "$ENV_FILE"
-        if [[ "$found" != true ]]; then
-            printf 'MIKROTIK_PASSWORD=%s\n' "$new_pass" >> "$temp_file"
-        fi
-        chmod 600 "$temp_file"
-        mv -f "$temp_file" "$ENV_FILE"
+        set_env_file_line PROVISIONER_SWITCH_USERNAME "$user"
+        set_env_file_line PROVISIONER_SWITCH_PASSWORD "$new_pass"
     else
         # Create new env file
         cat > "$ENV_FILE" << EOF
 # Network Device Provisioner Environment Variables
 
-# MikroTik switch password (auto-generated)
-MIKROTIK_PASSWORD=${new_pass}
+# Bench switch login (auto-generated). Not the MikroTik device password.
+PROVISIONER_SWITCH_USERNAME=${user}
+PROVISIONER_SWITCH_PASSWORD=${new_pass}
 
-# Other device passwords
+# Device passwords
+MIKROTIK_PASSWORD=
 CAMBIUM_PASSWORD=your_cambium_password
 TARANA_PASSWORD=your_tarana_password
 TACHYON_PASSWORD=your_tachyon_password
@@ -465,7 +478,7 @@ EOF
     fi
 
     chmod 600 "$ENV_FILE"
-    log_info "Password saved to $ENV_FILE"
+    log_info "Switch login saved to $ENV_FILE"
 }
 
 # Verify configuration was applied
@@ -554,6 +567,13 @@ main() {
         prompt_credentials
     fi
 
+    # The username goes into the env file and a RouterOS command. Allow
+    # only characters that need no quoting in either place.
+    if [[ ! "$USERNAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        log_error "Username can contain only letters, digits, '.', '_' and '-'."
+        exit 2
+    fi
+
     # Test connection
     local device_info
     device_info=$(test_credentials "$switch_ip" "$USERNAME" "$PASSWORD") || {
@@ -628,7 +648,7 @@ main() {
 
             if set_switch_password "$switch_ip" "$USERNAME" "$PASSWORD" "$new_pass"; then
                 log_info "New password set on switch"
-                save_password_to_env "$new_pass"
+                save_password_to_env "$USERNAME" "$new_pass"
                 current_pass="$new_pass"
             else
                 log_warn "Failed to set new password on switch"
@@ -650,7 +670,7 @@ main() {
     echo "  3. Run: sudo ./scripts/install.sh install"
     echo ""
 
-    if [[ -f "$ENV_FILE" ]] && grep -q "MIKROTIK_PASSWORD=" "$ENV_FILE"; then
+    if [[ -f "$ENV_FILE" ]] && grep -q "^PROVISIONER_SWITCH_PASSWORD=." "$ENV_FILE"; then
         echo "The switch password has been saved to:"
         echo "  $ENV_FILE"
         echo ""
