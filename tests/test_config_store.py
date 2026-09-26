@@ -51,6 +51,25 @@ def test_tachyon_301_role_hint_does_not_change_sm_provisioning_baseline(tmp_path
     assert store.get_config_template("tachyon", "TNA-301") == sm_template
 
 
+def test_tachyon_bare_303l_uses_303l_65_sm_baseline(tmp_path):
+    """A unit that reports the bare model "TNA-303L" gets the TNA-303L-65 SM template."""
+    store = ConfigStore(str(tmp_path))
+    sm_template = tmp_path / "configs/templates/tachyon/TNA-303L-65/SM/default.tar"
+    _write(sm_template)
+
+    assert store.get_config_template("tachyon", "TNA-303L") == sm_template
+
+
+def test_tachyon_bare_303l_uses_committed_303l_65_sm_baseline():
+    """The provisioning lookup finds the committed SM template for a bare TNA-303L."""
+    repo_root = Path(__file__).resolve().parents[1]
+    store = ConfigStore(str(repo_root))
+    expected = repo_root / "configs/templates/tachyon/TNA-303L-65/SM/default.tar"
+
+    assert expected.is_file()
+    assert store.get_config_template("tachyon", "TNA-303L") == expected
+
+
 def test_tachyon_305x_uses_tna305_family_template(tmp_path):
     store = ConfigStore(str(tmp_path))
     tna305_template = tmp_path / "configs" / "templates" / "tachyon" / "tna-305.tar"
