@@ -648,13 +648,16 @@ main() {
 
             if set_switch_password "$switch_ip" "$USERNAME" "$PASSWORD" "$new_pass"; then
                 log_info "New password set on switch"
-                save_password_to_env "$USERNAME" "$new_pass"
                 current_pass="$new_pass"
             else
                 log_warn "Failed to set new password on switch"
             fi
         fi
     fi
+
+    # Save the login that works now on every path (new, skipped, declined,
+    # or failed password change), so later probes use the same account.
+    save_password_to_env "$USERNAME" "$current_pass"
 
     # Verify configuration
     echo ""

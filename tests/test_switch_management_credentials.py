@@ -144,6 +144,38 @@ def test_setup_switch_saves_username_with_password(tmp_path, existing):
         assert "MIKROTIK_PASSWORD=device" in lines
 
 
+def test_setup_switch_skip_password_change_saves_username(tmp_path):
+    env_file = tmp_path / "provisioner.env"
+    env_file.write_text(
+        "PROVISIONER_SWITCH_USERNAME=admin\nPROVISIONER_SWITCH_PASSWORD=old\n"
+    )
+    rsc = tmp_path / "switch.rsc"
+    rsc.write_text("")
+    script = (SCRIPTS / "setup_switch.sh").read_text()
+    assert script.rstrip().endswith('main "$@"')
+    script = script.rstrip()[: -len('main "$@"')]
+    stubs = (
+        "check_root() { :; }\ncheck_dependencies() { :; }\n"
+        "test_credentials() { echo 'name: sw'; }\nupload_config() { :; }\n"
+        "apply_config() { :; }\nverify_config() { :; }\nsleep() { :; }\n"
+        "set_switch_password() { exit 99; }\n"
+        f"CONFIG_DIR='{tmp_path}'\nENV_FILE='{env_file}'\n"
+    )
+    subprocess.run(
+        [
+            "bash", "-c", script + stubs + 'main "$@"', "bash",
+            "--ip", "192.0.2.1", "--username", "bench", "--config", str(rsc),
+            "--skip-password-change", "--yes",
+        ],
+        env={"PATH": "/usr/bin:/bin", "PROVISIONER_SWITCH_PASSWORD": "current"},
+        check=True,
+        capture_output=True,
+    )
+    lines = env_file.read_text().splitlines()
+    assert lines.count("PROVISIONER_SWITCH_USERNAME=bench") == 1
+    assert lines.count("PROVISIONER_SWITCH_PASSWORD=current") == 1
+
+
 @pytest.mark.parametrize(
     "line, expected",
     [
