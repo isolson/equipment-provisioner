@@ -120,7 +120,8 @@ def test_setup_switch_saves_username_with_password(tmp_path, existing):
             "MIKROTIK_PASSWORD=device\n"
         )
     script = _bash_functions(
-        "setup_switch.sh", "set_env_file_line", "save_password_to_env"
+        "setup_switch.sh", "env_file_quote", "set_env_file_line",
+        "save_password_to_env",
     )
     subprocess.run(
         [
@@ -137,8 +138,8 @@ def test_setup_switch_saves_username_with_password(tmp_path, existing):
         capture_output=True,
     )
     lines = env_file.read_text().splitlines()
-    assert lines.count("PROVISIONER_SWITCH_USERNAME=bench") == 1
-    assert lines.count("PROVISIONER_SWITCH_PASSWORD=newpass") == 1
+    assert lines.count('PROVISIONER_SWITCH_USERNAME="bench"') == 1
+    assert lines.count('PROVISIONER_SWITCH_PASSWORD="newpass"') == 1
     assert not any(line.endswith("=old") for line in lines)
     if existing:
         assert "MIKROTIK_PASSWORD=device" in lines
@@ -172,8 +173,43 @@ def test_setup_switch_skip_password_change_saves_username(tmp_path):
         capture_output=True,
     )
     lines = env_file.read_text().splitlines()
-    assert lines.count("PROVISIONER_SWITCH_USERNAME=bench") == 1
-    assert lines.count("PROVISIONER_SWITCH_PASSWORD=current") == 1
+    assert lines.count('PROVISIONER_SWITCH_USERNAME="bench"') == 1
+    assert lines.count('PROVISIONER_SWITCH_PASSWORD="current"') == 1
+
+
+@pytest.mark.parametrize("existing", [True, False])
+@pytest.mark.parametrize(
+    "password", ['pa"ss', "a\\b", "a$b`c", "trail\\", " spaced ", "semi;#x", ""]
+)
+def test_setup_switch_saved_login_reads_back_unchanged(tmp_path, existing, password):
+    # env_file_value in update_switch_script.sh follows the systemd
+    # EnvironmentFile= rules, so it shows what the service reads.
+    env_file = tmp_path / "provisioner.env"
+    if existing:
+        env_file.write_text("PROVISIONER_SWITCH_PASSWORD=old\n")
+    script = _bash_functions(
+        "setup_switch.sh", "env_file_quote", "set_env_file_line",
+        "save_password_to_env",
+    ) + _bash_functions("update_switch_script.sh", "env_file_value")
+    result = subprocess.run(
+        [
+            "bash", "-c",
+            "log_info() { :; }\n" + script
+            + 'save_password_to_env "$1" "$2"\n'
+            + "env_file_value PROVISIONER_SWITCH_USERNAME; printf '\\0'\n"
+            + "env_file_value PROVISIONER_SWITCH_PASSWORD",
+            "bash", "bench", password,
+        ],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "CONFIG_DIR": str(tmp_path),
+            "ENV_FILE": str(env_file),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.split("\0") == ["bench", password]
 
 
 @pytest.mark.parametrize(

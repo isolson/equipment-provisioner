@@ -421,10 +421,26 @@ set_switch_password() {
     fi
 }
 
+# Quote one value for a systemd EnvironmentFile= line. Put a non-empty value
+# in double quotes and escape \ " ` $ in it, so that systemd reads the value
+# back without changes. An empty value stays empty.
+env_file_quote() {
+    local value=$1
+    if [[ -z "$value" ]]; then
+        return
+    fi
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//\`/\\\`}
+    value=${value//\$/\\\$}
+    printf '"%s"' "$value"
+}
+
 # Set KEY=VALUE in the env file. Replace an existing line or append one.
 set_env_file_line() {
     local key=$1
-    local value=$2
+    local value
+    value=$(env_file_quote "$2")
     local temp_file
     local found=false
     temp_file=$(mktemp "${ENV_FILE}.tmp.XXXXXX")
@@ -449,6 +465,7 @@ set_env_file_line() {
 save_password_to_env() {
     local user=$1
     local new_pass=$2
+    local quoted_user quoted_pass
 
     # Create config directory if needed
     mkdir -p "$CONFIG_DIR"
@@ -457,13 +474,15 @@ save_password_to_env() {
         set_env_file_line PROVISIONER_SWITCH_USERNAME "$user"
         set_env_file_line PROVISIONER_SWITCH_PASSWORD "$new_pass"
     else
+        quoted_user=$(env_file_quote "$user")
+        quoted_pass=$(env_file_quote "$new_pass")
         # Create new env file
         cat > "$ENV_FILE" << EOF
 # Network Device Provisioner Environment Variables
 
 # Bench switch login (auto-generated). Not the MikroTik device password.
-PROVISIONER_SWITCH_USERNAME=${user}
-PROVISIONER_SWITCH_PASSWORD=${new_pass}
+PROVISIONER_SWITCH_USERNAME=${quoted_user}
+PROVISIONER_SWITCH_PASSWORD=${quoted_pass}
 
 # Device passwords
 MIKROTIK_PASSWORD=
