@@ -101,6 +101,25 @@ changing a device endpoint or request shape, read the capture summary next to
 the HAR (`bench-evidence/<vendor>/<model>/<firmware>/capture-summary.md`) and
 cite it.
 
+---
+
+### 11. Write GitHub text and code comments plainly
+
+Load the `ai-copywriter` skill (`~/.claude/skills/ai-copywriter`) before you
+write any of the text below. Use plain words, put the bottom line first, and
+cut filler and AI tells. An agent that starts a worker puts this rule in the
+worker's prompt.
+
+The rule covers:
+
+- issue and PR titles and bodies;
+- PR comments, issue comments, and review-thread replies;
+- commit messages, because GitHub shows them;
+- sign-off packets and bot status comments;
+- code comments and docstrings in new or changed code.
+
+It does not require a rewrite of existing comments.
+
 ## Anti-patterns (do not do)
 
 - Taking a config value from a chat, a screenshot, or a single field export instead of a committed fixture; or writing a field the contract classifies as a device default
