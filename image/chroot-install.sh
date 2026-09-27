@@ -127,6 +127,9 @@ cat > "${CONFIG_DIR}/provisioner.env" << 'EOF'
 # Network Device Provisioner Environment Variables
 # Populated during first-boot setup
 
+# Bench switch login (written by setup_switch.sh)
+PROVISIONER_SWITCH_PASSWORD=
+
 # Device passwords
 CAMBIUM_PASSWORD=
 MIKROTIK_PASSWORD=

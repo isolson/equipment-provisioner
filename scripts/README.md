@@ -119,6 +119,12 @@ sudo PROVISIONER_SWITCH_PASSWORD='<switch-password>' ./scripts/setup_switch.sh -
 Do not pass a password as a command-line argument. The script accepts an
 interactive prompt or the `PROVISIONER_SWITCH_PASSWORD` environment variable.
 
+When the script sets a new switch password, it saves it as
+`PROVISIONER_SWITCH_PASSWORD` in `/etc/provisioner/provisioner.env`. It also
+saves the `--username` value as `PROVISIONER_SWITCH_USERNAME`. It does
+not change `MIKROTIK_PASSWORD`, which is for the MikroTik devices being
+provisioned. Restart `provisioner-web` to load the new value.
+
 The RouterOS template is at `configs/templates/mikrotik_switch_provisioner.rsc`.
 
 ## update_switch_script.sh
