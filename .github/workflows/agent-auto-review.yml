@@ -1,13 +1,13 @@
 name: Auto-review PRs from trusted authors
 
-# Auto-labels a new PR `agent:review` so the timer-driven Codex review loop on
-# llm01 picks it up — but ONLY when the author is the repo owner, an org member,
-# or an invited collaborator. PRs from anyone else are never labeled, so they
-# never enter the autonomous pipeline (no review, no fix loop, nothing).
+# Auto-labels a new PR `agent:review`, then sends one wake message, so the
+# Codex review loop on llm01 starts now instead of on its next tick. This runs
+# ONLY when the author is the repo owner, an org member, or an invited
+# collaborator. PRs from anyone else never enter the autonomous pipeline.
 #
 # Safe use of pull_request_target: this workflow NEVER checks out or runs PR
-# code. It only reads the event payload and sets a label; the review itself runs
-# on the timer-driven loop, not here. See docs/security-model.md § 9.
+# code. It reads the event payload, sets a label, and sends a fixed wake
+# message. The review itself runs on llm01, not here. See docs/security-model.md § 9.
 
 on:
   pull_request_target:
@@ -30,6 +30,9 @@ jobs:
       # pull_request_target job with write access, so the action is a
       # supply-chain-sensitive dependency.
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+        env:
+          WAKE_URL: ${{ secrets.AGENT_WAKE_URL }}
+          WAKE_TOKEN: ${{ secrets.AGENT_WAKE_TOKEN }}
         with:
           script: |
             const pr = context.payload.pull_request;
@@ -46,3 +49,31 @@ jobs:
             // leaving the PR unlabeled and never reviewed.
             await github.rest.issues.addLabels({ ...repo, issue_number: pr.number, labels: [label] });
             core.info(`Labeled PR #${pr.number} ${label} (author_association=${pr.author_association})`);
+
+            // A label that GITHUB_TOKEN sets starts no other workflow, so
+            // agent-wake.yml never sees it. Send the wake here, after the
+            // label exists.
+            const wakeUrl = process.env.WAKE_URL;
+            if (!wakeUrl) {
+              core.info('AGENT_WAKE_URL secret not set; timer loop remains active');
+              return;
+            }
+            const headers = { 'Content-Type': 'text/plain', 'Title': 'agent-wake' };
+            if (process.env.WAKE_TOKEN) {
+              headers.Authorization = `Bearer ${process.env.WAKE_TOKEN}`;
+            }
+            try {
+              const response = await fetch(wakeUrl, {
+                method: 'POST',
+                headers,
+                body: `repo=${context.repo.owner}/${context.repo.repo} kind=codex-review`,
+                signal: AbortSignal.timeout(10000),
+              });
+              if (!response.ok) {
+                core.warning(`Wake publish returned HTTP ${response.status}; timer loop remains active`);
+              } else {
+                core.info('Published wake: kind=codex-review');
+              }
+            } catch (error) {
+              core.warning(`Wake publish failed: ${error.message}; timer loop remains active`);
+            }
