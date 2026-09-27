@@ -1,0 +1,22 @@
+vendor: tachyon
+model: TNA-303L-65
+firmware: unknown
+config_role: PTP
+role_status: "Link A side: wlan0 VAP mode ap with ptp true. The station side of the link is not captured."
+artifact_purpose: process-evidence
+reusable_template: false
+canonical_template_status: not-included
+fixture_witness: role
+unit: field-unit
+captured_utc: 2026-09-27T16:44:50Z
+operations:
+  - export
+result: process-captured
+evidence_scope: "One config export of a working customer-network PTP link radio, supplied by the operator as the target config for PTP setup support. The export does not record the firmware version. The schema carries the 1.15 management VLAN flags."
+baseline_status: "no-config backup not captured"
+no_config_backup: missing
+transitions: []
+raw_files:
+  known-good.device-backup.tar: "20260927.164450.TNA-303L-65.tar (CONTROL + config.json). The operator holds it. It is not yet in the secure bench directory."
+reference: "ptp-reference.md lists the PTP settings and names the source of every secret."
+notes: "The raw export holds wireless keys, account passwords, and SNMP communities. Keep it out of git. Do not promote it to a template."
