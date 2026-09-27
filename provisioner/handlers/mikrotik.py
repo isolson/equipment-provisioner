@@ -271,14 +271,16 @@ class MikrotikHandler(BaseHandler):
                 conn.close()
                 await conn.wait_closed()
                 if probe.stderr:
-                    last_error = probe.stderr.strip()
+                    last_error = "SSH login probe failed"
 
             except Exception as exc:
-                last_error = str(exc)
-                err = last_error.lower()
+                # SSH errors and server replies can echo credentials. Classify
+                # locally, but never put their text into logs or kiosk state.
+                err = str(exc).lower()
+                last_error = "SSH connection failed"
                 if any(x in err for x in ("permission denied", "authentication", "invalid password")):
                     saw_auth_error = True
-                logger.debug(f"MikroTik connect attempt failed for {self.ip}: {exc}")
+                logger.debug("MikroTik SSH connection attempt failed for %s", self.ip)
 
         if saw_auth_error:
             self.login_error = "Invalid credentials - please enter correct password"
@@ -454,13 +456,14 @@ class MikrotikHandler(BaseHandler):
             result = await self._ssh.run(f"/import file-name={remote_name}", check=False)
             output = ((result.stdout or "") + "\n" + (result.stderr or "")).lower()
             if result.exit_status != 0 or "failure" in output or "error" in output:
-                logger.error(f"Config import failed on {self.ip}: {output.strip()}")
+                # RouterOS can echo a credential-bearing line on import failure.
+                logger.error("Config import failed on %s; device output withheld", self.ip)
                 return False
 
             logger.info(f"Config file applied to {self.ip}")
             return True
-        except Exception as exc:
-            logger.error(f"Failed to apply config file: {exc}")
+        except Exception:
+            logger.error("Failed to apply MikroTik config file; error details withheld")
             return False
 
     async def upload_firmware(self, firmware_path: str, bank: Optional[int] = None) -> bool:
@@ -709,14 +712,20 @@ class MikrotikHandler(BaseHandler):
         return addrs[0]
 
     async def _run_command(self, command: str, allow_failure: bool = False) -> str:
-        """Run a RouterOS CLI command over SSH."""
-        await self._ensure_ssh()
-        result = await self._ssh.run(command, check=False)
+        """Return successful output; never expose failed commands or replies."""
+        try:
+            await self._ensure_ssh()
+            result = await self._ssh.run(command, check=False)
+        except Exception:
+            # Do not chain a transport exception: its message may contain the
+            # command or response and reach a job result or formatted traceback.
+            raise RuntimeError("MikroTik SSH command could not complete") from None
 
         stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
-        if result.exit_status != 0 and not allow_failure:
-            raise RuntimeError(stderr or stdout or f"Command failed: {command}")
+        if result.exit_status != 0:
+            if allow_failure:
+                return ""
+            raise RuntimeError("MikroTik SSH command failed; device output withheld")
         return stdout
 
     # ------------------------------------------------------------------
