@@ -207,22 +207,24 @@ def cleanup_bench_secret_store() -> int:
     Deletes the legacy directory and its files without reading or printing any
     value, and returns how many files were removed. Idempotent: returns 0 when
     nothing is present. This is the inventory-and-remove step required by #167.
+    Fails closed: raises ``RuntimeError`` when the legacy directory is still
+    present after the attempt, so the business flow does not continue.
     """
     root = LEGACY_SECRET_ROOT
     if not root.exists():
         return 0
     removed = 0
-    for child in sorted(root.glob("*")):
-        try:
-            if child.is_file():
+    try:
+        for child in sorted(root.glob("*")):
+            if child.is_file() or child.is_symlink():
                 child.unlink()
                 removed += 1
-        except OSError:
-            pass
-    try:
         root.rmdir()
     except OSError:
+        # Do not chain the OS error: keep file names out of the message.
         pass
+    if root.exists():
+        raise RuntimeError("Legacy per-device secret store could not be removed")
     return removed
 
 
@@ -291,22 +293,41 @@ async def apply_advanced(handler, romon_enabled=None, prepare_wireguard=False,
     return result
 
 
-async def _login_works(handler, username: str, password: str) -> bool:
-    """Return True when ``username``/``password`` opens a working session.
+# Same name that apply() uploads and removes.
+UPLOADED_PROFILE = "business-profile.rsc"
+
+
+async def uploaded_profile_removed(handler):
+    """Return True when the uploaded profile file is absent on the device."""
+    async with handler._ssh.start_sftp_client() as sftp:
+        return not await sftp.exists(UPLOADED_PROFILE)
+
+
+async def _login_result(handler, username: str, password: str) -> str:
+    """Return ``"accepted"`` or ``"rejected"`` for ``username``/``password``.
 
     Opens an independent SSH connection so it tests the login itself, not the
-    already-open provisioning session. Never logs the password.
+    already-open provisioning session. ``"rejected"`` means the device refused
+    the authentication. Any other failure (transport error, failed probe after
+    login) raises ``RuntimeError``, because it proves nothing about the login.
+    Never logs the password.
     """
+    import asyncssh
     try:
         conn = await handler._open_ssh_connection(username=username, password=password)
+    except asyncssh.PermissionDenied:
+        return "rejected"
     except Exception:
-        return False
+        # Do not chain: SSH error text can echo credentials.
+        raise RuntimeError("Login check could not reach the device") from None
     try:
         probe = await conn.run("/system identity print", check=False)
-        return probe.exit_status == 0
     finally:
         conn.close()
         await conn.wait_closed()
+    if probe.exit_status != 0:
+        raise RuntimeError("Login check probe failed")
+    return "accepted"
 
 
 async def accept_credentials(handler, release_result, *, previous_credentials: Optional[Dict[str, str]] = None):
@@ -329,7 +350,11 @@ async def accept_credentials(handler, release_result, *, previous_credentials: O
     else:
         await handler._ssh.run('/user set [find name="localadmin"] group=full disabled=no password="%s"' % esc, check=False)
 
-    if not await _login_works(handler, "localadmin", new_password):
+    try:
+        new_login = await _login_result(handler, "localadmin", new_password)
+    except RuntimeError:
+        new_login = None
+    if new_login != "accepted":
         raise RuntimeError("localadmin login was not verified; previous login left intact")
 
     previous = previous_credentials or {}
@@ -340,7 +365,9 @@ async def accept_credentials(handler, release_result, *, previous_credentials: O
             '/user set [find name="%s"] disabled=yes' % handler._escape_routeros_string(previous_user),
             check=False,
         )
-        if await _login_works(handler, previous_user, previous.get("password", "")):
+        # Only a confirmed authentication rejection proves the old login is
+        # disabled. A transport or probe failure raises from _login_result.
+        if await _login_result(handler, previous_user, previous.get("password", "")) != "rejected":
             raise RuntimeError("Previous login still accepted after replacement")
         previous_disabled = True
 

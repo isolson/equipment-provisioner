@@ -1,8 +1,11 @@
 """Adapter for the Ops per-device render-credential contract.
 
 This is the one place that knows the wire shape of the trusted Ops
-render-credential service (sixtyops/treehouse-architecture:
-``docs/api-reference/ops-render-credentials.md``). The MikroTik business flow
+render-credential service. The source of the paths and fields is
+sixtyops/treehouse-architecture ``docs/api-reference/ops-render-credentials.md``
+at commit ``af890d2a6fb7dd3f88e1d7b1a04c65b9e95864af`` ("Provisioner API" and
+"Verified completion" sections). That document has the status "proposed
+release contract". The MikroTik business flow
 consumes per-device login credentials transiently through this adapter and
 never persists them. When Ops finalizes a field, update the mapping here and
 nowhere else.
@@ -17,6 +20,9 @@ Contract facts this adapter encodes:
   fails closed: an unconfigured URL/token means no credential acceptance runs,
   and a non-2xx response raises without exposing a body that could carry a
   secret.
+- The contract requires TLS. The client refuses a base URL that is not
+  ``https://``, so the bearer token and the released password never go over
+  plain HTTP.
 - RoMON and WireGuard are out of this contract's scope (remote-management,
   sixtyops #666); this adapter deals only with the ``localadmin`` login.
 """
@@ -69,6 +75,9 @@ class RenderCredentialClient:
     """
 
     def __init__(self, base_url: str, token: str):
+        # The contract requires TLS. Refuse plain HTTP before any request.
+        if not base_url.lower().startswith("https://"):
+            raise RenderCredentialError("The render-credential URL must use https://")
         self._base = base_url.rstrip("/")
         # Bound to an operator-approved bench job; never logged.
         self._token = token

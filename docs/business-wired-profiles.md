@@ -35,16 +35,20 @@ profile before deployment.
 ## Advanced management
 
 The provisioner keeps **no persistent per-device secret store**. There is no
-`/var/lib/provisioner/device-secrets/` directory, no 1Password token, and no KDF
-seed on the bench; any legacy copy is removed automatically when the business
-flow runs (see [issue #167](https://github.com/isolson/network-provisioner/issues/167)).
+1Password token and no KDF seed on the bench. The advanced-management and
+credential-acceptance steps first remove the legacy
+`/var/lib/provisioner/device-secrets/mikrotik/` directory. If that directory is
+still present after the attempt, the step stops with an error and makes no
+device change (see [issue #167](https://github.com/isolson/network-provisioner/issues/167)).
 
 **RoMON** is opt-in, limited to ether3. The wildcard entry forbids all other
 ports. The per-device RoMON secret is supplied transiently by the management
 contract; the provisioner never generates, substitutes a fleet secret for, or
-stores one. Enabling RoMON without a supplied secret fails closed. A peer needs
-that same secret; it is not the fleet-wide RoMON domain secret. RoMON is off at
-the end of the bench tests.
+stores one. Enabling RoMON without a supplied secret fails closed. No caller
+supplies that secret yet, so the UI does not offer to enable RoMON. The UI shows
+the RoMON option only while RoMON is on, so that the operator can turn it off. A
+peer needs that same secret; it is not the fleet-wide RoMON domain secret. RoMON
+is off at the end of the bench tests.
 
 **Prepare on-device management access** creates the disabled `wg-management`
 interface on the device. The key pair is generated on-device and only the
@@ -122,16 +126,26 @@ suite passed 983 tests, with 5 skipped (host Python 3.13).
 
 Network-policy verification and credential/deployment acceptance are separate
 steps. Applying and verifying a role proves the network policy only; it does not
-accept the login. Credential acceptance runs through the trusted Ops
-render-credential contract (see
-[`ops-render-credentials.md`](https://github.com/sixtyops/treehouse-architecture/blob/master/docs/api-reference/ops-render-credentials.md)):
-the provisioner receives the per-device `localadmin` password transiently,
-replaces the consumed label login, verifies a fresh `localadmin` login works and
-the old login fails, then reports verified completion. It stores nothing and
+accept the login. Credential acceptance uses the Ops render-credential contract
+in
+[`ops-render-credentials.md` at commit `af890d2`](https://github.com/sixtyops/treehouse-architecture/blob/af890d2a6fb7dd3f88e1d7b1a04c65b9e95864af/docs/api-reference/ops-render-credentials.md).
+That document has the status "proposed release contract". The client uses only
+its two routes, `POST /provisioning/render-credentials/v1` (release) and
+`POST /provisioning/render-credentials/v1/complete` (completion), and their
+documented request and response fields. The contract requires TLS, so the
+client refuses a URL that is not `https://`. The provisioner receives the
+per-device `localadmin` password transiently and replaces the consumed label
+login. It verifies that a fresh `localadmin` login works and that the device
+rejects the old login. It then reads back the profile and confirms that the
+uploaded profile file is absent. It sends completion only when all of these
+checks pass. It stores nothing and
 fails safe — the previous login is disabled only after the new one is proven, so
-a failure never strands the device. This step is dormant until
-`render_credentials_url` and `render_credentials_token` are configured and the
-Ops endpoint is deployed. Do not mark a unit ready for deployment on the strength
+a failure never strands the device. This step is not yet wired to the UI or to
+any provisioning flow: no caller runs `accept_business_credentials()` and no
+caller builds a `RenderCredentialClient`. Until a follow-up adds an explicit
+acceptance action, the label login stays active and no completion is sent. That
+follow-up also needs `render_credentials_url`, `render_credentials_token`, and a
+deployed Ops endpoint. Do not mark a unit ready for deployment on the strength
 of role checks alone.
 
 WAN Internet/NAT traffic (deferred by the operator), upstream switch forwarding, syslog receipt, NTP synchronization and a physical power cycle

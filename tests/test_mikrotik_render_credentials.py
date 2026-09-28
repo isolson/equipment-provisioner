@@ -28,6 +28,14 @@ def test_from_config_requires_url_and_token():
         SimpleNamespace(render_credentials_url="https://x", render_credentials_token="t")) is not None
 
 
+def test_client_requires_https():
+    with pytest.raises(rc.RenderCredentialError):
+        rc.RenderCredentialClient("http://x", "tok")
+    with pytest.raises(rc.RenderCredentialError):
+        rc.RenderCredentialClient.from_config(
+            SimpleNamespace(render_credentials_url="http://x", render_credentials_token="t"))
+
+
 @pytest.mark.asyncio
 async def test_release_returns_transient_password():
     c = rc.RenderCredentialClient("https://x", "tok")

@@ -122,6 +122,15 @@ def test_cleanup_bench_secret_store_removes_files(tmp_path, monkeypatch):
     assert business.cleanup_bench_secret_store() == 0
 
 
+def test_cleanup_bench_secret_store_fails_closed(tmp_path, monkeypatch):
+    from provisioner.handlers import mikrotik_business as business
+    root = tmp_path / "device-secrets" / "mikrotik"
+    (root / "unexpected-dir").mkdir(parents=True)
+    monkeypatch.setattr(business, "LEGACY_SECRET_ROOT", root)
+    with pytest.raises(RuntimeError):
+        business.cleanup_bench_secret_store()
+
+
 @pytest.mark.asyncio
 async def test_unknown_advanced_option_never_contacts_device():
     h=handler()
@@ -146,6 +155,7 @@ def test_management_discovery_uses_existing_isolated_source(ip):
 
 
 # --- #167: transient credentials, no persistent secret store ----------------
+import asyncssh
 from types import SimpleNamespace
 
 
@@ -245,7 +255,9 @@ async def test_accept_credentials_replaces_and_verifies(monkeypatch):
     h._run_command = AsyncMock(return_value="0")  # localadmin absent
     h._ssh = SimpleNamespace(run=AsyncMock())
     async def open_conn(username, password):
-        return _FakeConn(ok=(username == "localadmin"))
+        if username != "localadmin":
+            raise asyncssh.PermissionDenied("denied")
+        return _FakeConn(ok=True)
     h._open_ssh_connection = open_conn
     res = await mikrotik_business.accept_credentials(
         h, ReleaseResult(password="new-localadmin-pw", seed_id="s1", secret_version="3"),
@@ -253,6 +265,30 @@ async def test_accept_credentials_replaces_and_verifies(monkeypatch):
     assert res["local_login_verified"] and res["previous_login_disabled"]
     assert h.credentials["username"] == "localadmin"
     assert any("disabled=yes" in c.args[0] for c in h._ssh.run.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_login_failure", ["transport", "probe"])
+async def test_accept_credentials_needs_confirmed_old_login_rejection(monkeypatch, old_login_failure):
+    from provisioner.handlers import mikrotik_business
+    from provisioner.handlers.mikrotik_render_credentials import ReleaseResult
+    h = handler()
+    monkeypatch.setattr(mikrotik_business, "cleanup_bench_secret_store", lambda: 0)
+    h._run_command = AsyncMock(return_value="1")
+    h._ssh = SimpleNamespace(run=AsyncMock())
+    async def open_conn(username, password):
+        if username == "localadmin":
+            return _FakeConn(ok=True)
+        if old_login_failure == "transport":
+            raise OSError("unreachable")
+        return _FakeConn(ok=False)
+    h._open_ssh_connection = open_conn
+    # A transport or probe failure is not proof that the old login is disabled.
+    with pytest.raises(RuntimeError):
+        await mikrotik_business.accept_credentials(
+            h, ReleaseResult(password="pw", seed_id="s", secret_version="1"),
+            previous_credentials={"username": "admin", "password": "label-pw"})
+    assert h.credentials.get("username") != "localadmin"
 
 
 @pytest.mark.asyncio
@@ -284,6 +320,7 @@ async def test_accept_business_credentials_release_apply_complete(monkeypatch):
     h.network_mode_state = AsyncMock(return_value={"profile": "business-v1", "checks": {"ok": True}})
     monkeypatch.setattr(mikrotik_business, "accept_credentials",
                         AsyncMock(return_value={"local_login_verified": True, "previous_login_disabled": True}))
+    monkeypatch.setattr(mikrotik_business, "uploaded_profile_removed", AsyncMock(return_value=True))
     client = SimpleNamespace(
         release=AsyncMock(return_value=ReleaseResult(password="pw", seed_id="sid", secret_version="1")),
         complete=AsyncMock())
@@ -293,3 +330,42 @@ async def test_accept_business_credentials_release_apply_complete(monkeypatch):
     _, kwargs = client.complete.await_args
     assert kwargs["serial"] == "SER123"
     assert kwargs["readback_passed"] and kwargs["local_login_passed"]
+    assert kwargs["uploaded_file_removed"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checks,removed", [
+    ({"ok": False}, True),
+    ({}, True),
+    ({"ok": True}, False),
+])
+async def test_accept_business_credentials_no_completion_when_unverified(monkeypatch, checks, removed):
+    from provisioner.handlers import mikrotik_business
+    from provisioner.handlers.mikrotik_render_credentials import ReleaseResult
+    h = handler()
+    h.get_info = AsyncMock(return_value=SimpleNamespace(serial_number="SER123", model="hEX S"))
+    h.network_mode_state = AsyncMock(return_value={"profile": "business-v1", "checks": checks})
+    monkeypatch.setattr(mikrotik_business, "accept_credentials",
+                        AsyncMock(return_value={"local_login_verified": True, "previous_login_disabled": True}))
+    monkeypatch.setattr(mikrotik_business, "uploaded_profile_removed", AsyncMock(return_value=removed))
+    client = SimpleNamespace(
+        release=AsyncMock(return_value=ReleaseResult(password="pw", seed_id="sid", secret_version="1")),
+        complete=AsyncMock())
+    with pytest.raises(RuntimeError):
+        await h.accept_business_credentials(client, job_id="J", bench_upstream_sha="SHA", render_sha256="R")
+    client.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("romon_on", [False, True])
+async def test_advanced_ui_offers_romon_only_to_disable(monkeypatch, romon_on):
+    from provisioner.handlers import mikrotik_business
+    monkeypatch.setattr(mikrotik_business, "advanced_state", AsyncMock(return_value={
+        "romon_enabled": romon_on, "romon_port": "ether3",
+        "wireguard_public_key": None, "wireguard_status": "not prepared"}))
+    state = await handler().network_mode_advanced_state()
+    keys = [o["key"] for o in state["options"]]
+    assert ("romon_enabled" in keys) is romon_on
+    MikrotikHandler.validate_network_mode_advanced({"romon_enabled": False})
+    with pytest.raises(ValueError):
+        MikrotikHandler.validate_network_mode_advanced({"romon_enabled": True})
