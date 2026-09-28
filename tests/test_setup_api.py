@@ -1247,7 +1247,7 @@ def test_read_primary_credentials_reads_the_dict_table():
     assert rows["cambium"]["recommended"] == "admin/admin"
     assert rows["tachyon"]["recommended"] == "root/admin"
     assert rows["ubiquiti"]["recommended"] == "ubnt/ubnt"
-    assert rows["mikrotik"]["recommended"] == "admin/(empty until switch password is set)"
+    assert rows["mikrotik"]["recommended"] == "admin/(factory default: empty)"
     assert rows["tarana"]["recommended"] == "admin/(set your fleet password)"
 
 
