@@ -125,3 +125,84 @@ def test_wired_requirements_do_not_change_radio_transition_report(evidence_root)
                     for mode in ("router", "switch")}
     assert qualification.qualified_modes("mikrotik", "hEX S", "7.23.5", requirements, requirements) == ("router", "switch")
     assert not any("router" in key or "switch" in key for key in qualification.transition_report("cambium", "ePMP 4518", "5.11.1"))
+
+
+# --- time-boxed bench override -------------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+_ADVERTISED = ("ap", "ptp")
+
+
+@pytest.fixture
+def override_file(tmp_path, monkeypatch, evidence_root):
+    path = tmp_path / "override" / "qualification-override.json"
+    monkeypatch.setenv("PROVISIONER_QUALIFICATION_OVERRIDE", str(path))
+    return path
+
+
+def test_override_opens_only_its_modes_for_the_exact_device(override_file):
+    qualification.write_override("tachyon", "TNA-303L-65", "1.15.1 rev 8541", ["ptp"], "isaac", 2)
+    assert qualification.qualified_modes("tachyon", "TNA-303L-65", "1.15.1-rev-8541", _ADVERTISED) == ("ptp",)
+    assert qualification.qualified_modes("tachyon", "TNA-303L-65", "1.15.0", _ADVERTISED) == ()
+    assert qualification.qualified_modes("tachyon", "TNA-303X", "1.15.1 rev 8541", _ADVERTISED) == ()
+    # A mode the handler does not advertise stays closed.
+    assert qualification.qualified_modes("tachyon", "TNA-303L-65", "1.15.1 rev 8541", ("ap",)) == ()
+
+
+def test_override_records_who_and_when_and_is_private(override_file):
+    record = qualification.write_override(
+        "tachyon", "TNA-303L-65", "1.15.1 rev 8541", ["ptp"], "isaac", 3,
+        now=datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc),
+    )
+    assert record["set_by"] == "isaac"
+    assert record["set_utc"] == "2026-09-28T12:00:00Z"
+    assert record["expires_utc"] == "2026-09-28T15:00:00Z"
+    assert oct(override_file.stat().st_mode & 0o777) == "0o600"
+
+
+def test_expired_override_deletes_itself_and_relocks(override_file):
+    qualification.write_override(
+        "tachyon", "TNA-303L-65", "1.15.1 rev 8541", ["ptp"], "isaac", 1,
+        now=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    assert override_file.exists()
+    assert qualification.qualified_modes("tachyon", "TNA-303L-65", "1.15.1 rev 8541", _ADVERTISED) == ()
+    assert not override_file.exists()
+
+
+@pytest.mark.parametrize("hours", [0, -1, 24.5])
+def test_override_rejects_hours_outside_the_box(override_file, hours):
+    with pytest.raises(ValueError):
+        qualification.write_override("tachyon", "TNA-303L-65", "1.15.1", ["ptp"], "isaac", hours)
+    assert not override_file.exists()
+
+
+def test_override_requires_a_name_and_known_modes(override_file):
+    with pytest.raises(ValueError):
+        qualification.write_override("tachyon", "TNA-303L-65", "1.15.1", ["ptp"], " ", 1)
+    with pytest.raises(ValueError):
+        qualification.write_override("tachyon", "TNA-303L-65", "1.15.1", ["router"], "isaac", 1)
+
+
+def test_hand_edited_expiry_past_the_limit_relocks(override_file):
+    override_file.parent.mkdir(parents=True)
+    override_file.write_text(
+        '{"vendor": "tachyon", "model": "TNA-303L-65", "firmware": "1.15.1", "modes": ["ptp"],'
+        ' "set_by": "isaac", "set_utc": "2026-09-28T00:00:00Z", "expires_utc": "2099-01-01T00:00:00Z"}'
+    )
+    assert qualification.active_override() is None
+    assert not override_file.exists()
+
+
+def test_unreadable_override_relocks(override_file):
+    override_file.parent.mkdir(parents=True)
+    override_file.write_text("not json")
+    assert qualification.override_modes("tachyon", "TNA-303L-65", "1.15.1") == frozenset()
+    assert not override_file.exists()
+
+
+def test_dry_run_writes_nothing(override_file):
+    record = qualification.write_override("tachyon", "TNA-303L-65", "1.15.1", ["ptp"], "isaac", 1, dry_run=True)
+    assert record["modes"] == ["ptp"]
+    assert not override_file.exists()
