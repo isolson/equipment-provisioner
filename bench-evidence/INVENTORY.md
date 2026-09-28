@@ -19,7 +19,7 @@ apply (`_normalize_config_for_apply`). An export without them is pre-migration.
 | `20260804.122037`, `20260901.150330` | 1.15 | 0 | **Re-check.** Post-migration exports with an empty profile list. An SM with no profiles cannot associate. Confirm whether the migration or the operator cleared them. |
 | host `firmware-transition/*` (7 backups, 2026-08-31) | 1.15 | see host | Process evidence for the transition run. `before-next-change` differs (cloud, ssh password login). Not fixture sources until each is labeled. |
 | tracked `TNA-303L-65/SM/default.tar` | 1.15, rebuilt 2026-09-02 | 4 | **Good.** Rebuilt from the 15:26 working export with `scripts/build_baseline.py`: fleet policy, role, the full management VLAN set, and the 4-profile list without passphrases. |
-| `20260927.164450` (operator, PTP) | 1.15 | 4, off | **Good.** Customer-network PTP link radio, side A (`ap`, `ptp: true`). Target config for PTP setup. Record `TNA-303L-65/unknown/` with `ptp-reference.md`. Firmware unknown; side B and the no-config backup not captured. |
+| `20260927.164450` (operator, PTP) | 1.15 | 4, off | **Good.** Customer-network PTP link radio, side A (`ap`, `ptp: true`). Target config for PTP setup. Record `TNA-303L-65/unknown/` with `ptp-reference.md`. Firmware unknown; side B and the no-config backup not captured. The export's VLAN 101 is not part of the target: these links are untagged. |
 
 Firmware images on hand for this family: `tna-303l-1.15.0-r8516`, `-r8520`,
 `-v1.15.1-r8541` (target).

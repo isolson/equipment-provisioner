@@ -26,18 +26,22 @@ The export still holds the 4 fleet SM profiles, with profile use turned off.
 
 ## Network
 
-| Setting | Value |
-|---|---|
-| Network mode | `bridge` |
-| WAN zone address | DHCP |
-| Management VLAN 12 | off (`network.zones.wan.management.enabled: false`), management uses the zone address |
-| Data VLAN (`dataVlan`) | off |
-| `eth0` | trunk, VLAN 101, `mgmt_vlan_enabled: true` |
-| `eth1` to `eth4` | access, VLAN 101, PoE out on |
-| `eth5` (SFP) | trunk, VLAN 101 |
-| WLAN VAP | zone `wan`, `mgmt_vlan_enabled: true`, MTU 1500 |
+Customer-outbuilding and business PTP links use no VLAN. Isaac decided this on 2026-09-28. The link is untagged. Each radio gets its management address by DHCP on that untagged network.
 
-The management VLAN is off here. The SM baseline turns it on. VLAN 101 carries the customer network on every port.
+| Setting | Target value | Value in the export |
+|---|---|---|
+| Network mode | `bridge` | `bridge` |
+| WAN zone address | DHCP, untagged: the management address | DHCP |
+| Management VLAN 12 (`network.zones.wan.management.enabled`) | off | off |
+| Data VLAN (`dataVlan`) | off | off |
+| Port VLANs | none | VLAN 101 on every port |
+| WLAN VAP | zone `wan`, MTU 1500 | zone `wan`, MTU 1500 |
+
+The export carries VLAN 101 on every port. A PTP profile for these links does not copy it.
+
+169.254.1.1 is the local LAN address of each radio. It does not pass across the PTP link, so it is not a field management address. Use the DHCP address.
+
+The export lists six Ethernet ports (`eth0` to `eth5`). A TNA-303L-65 has one physical port, `eth0`. Two bench units with the same model, board (`tam-110-prs`), and firmware (1.15.1 rev 8541) both show one port in the live status (`/cgi.lua/status?type=ethernet`). One of them had the six ports in its saved config only. The extra ports are config state, not hardware. A profile sets `eth0` only.
 
 ## Secrets and identity
 
@@ -64,4 +68,3 @@ A template never holds these values. The placeholder names the source that must 
 - What does the station side (side B) look like?
 - Where does the per-link PTP key come from?
 - What is `wlan1` for? It runs as a station on an automatic channel, with its own key.
-- Is VLAN 101 the same for every customer link, or set per customer?
