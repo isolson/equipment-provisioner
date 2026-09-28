@@ -194,6 +194,9 @@ create_env_file() {
 # Network Device Provisioner Environment Variables
 # Edit this file with your actual credentials
 
+# Bench switch login (written by setup_switch.sh)
+PROVISIONER_SWITCH_PASSWORD=
+
 # Device passwords
 CAMBIUM_PASSWORD=
 MIKROTIK_PASSWORD=
