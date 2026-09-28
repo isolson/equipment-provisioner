@@ -105,10 +105,13 @@ cite it.
 
 ### 11. Write GitHub text and code comments plainly
 
-Load the `ai-copywriter` skill (`~/.claude/skills/ai-copywriter`) before you
-write any of the text below. Use plain words, put the bottom line first, and
-cut filler and AI tells. An agent that starts a worker puts this rule in the
-worker's prompt.
+Every contributor, human or agent, follows these writing rules for the text
+below. Use plain words. Put the bottom line first. Cut filler and AI tells.
+An agent that starts a worker puts this rule in the worker's prompt.
+
+Claude agents load the `ai-copywriter` skill before they write this text.
+Other agents do not need that skill. They apply the rules in this section
+directly.
 
 The rule covers:
 
