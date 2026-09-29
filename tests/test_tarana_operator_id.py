@@ -96,3 +96,50 @@ def test_operator_id_input_limits(template, input_id):
     assert 'min="0"' in input_tag
     assert 'max="16383"' in input_tag
     assert "operatorId < 0 || operatorId > 16383" in text
+
+
+@pytest.mark.parametrize("saved_id", [-1, 16384])
+def test_provision_rejects_invalid_saved_operator_id(monkeypatch, saved_id):
+    client = _client(monkeypatch, _status("tarana", "00:11:22:33:44:55"))
+    client.app.state.provisioner.config.device_settings.tarana.operator_id = saved_id
+    run = AsyncMock()
+    monkeypatch.setattr("provisioner.web.api._run_provisioning", run)
+
+    response = client.post("/api/provision", json={"port_number": 4})
+
+    assert response.status_code == 422
+    assert "0 through 16383" in response.json()["detail"]
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("saved_id", [None, 0, 16383])
+def test_provision_accepts_valid_saved_operator_id(monkeypatch, saved_id):
+    client = _client(monkeypatch, _status("tarana", "00:11:22:33:44:55"))
+    client.app.state.provisioner.config.device_settings.tarana.operator_id = saved_id
+    run = AsyncMock()
+    monkeypatch.setattr("provisioner.web.api._run_provisioning", run)
+
+    assert client.post("/api/provision", json={"port_number": 4}).status_code == 200
+    run.assert_awaited_once()
+
+
+def test_provision_request_id_replaces_invalid_saved_operator_id(monkeypatch):
+    client = _client(monkeypatch, _status("tarana", "00:11:22:33:44:55"))
+    client.app.state.provisioner.config.device_settings.tarana.operator_id = 16384
+    run = AsyncMock()
+    monkeypatch.setattr("provisioner.web.api._run_provisioning", run)
+
+    response = client.post("/api/provision", json={"port_number": 4, "operator_id": 42})
+
+    assert response.status_code == 200
+    run.assert_awaited_once()
+
+
+def test_provision_ignores_saved_operator_id_for_other_vendors(monkeypatch):
+    client = _client(monkeypatch, _status("tachyon", "78:5E:E8:D0:4C:38"))
+    client.app.state.provisioner.config.device_settings.tarana.operator_id = 16384
+    run = AsyncMock()
+    monkeypatch.setattr("provisioner.web.api._run_provisioning", run)
+
+    assert client.post("/api/provision", json={"port_number": 4}).status_code == 200
+    run.assert_awaited_once()

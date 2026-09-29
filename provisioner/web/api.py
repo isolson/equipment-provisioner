@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 import aiohttp
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.background import BackgroundTask
 
 from ..config_assets import (
@@ -353,6 +353,18 @@ async def provision_device(
     
     if status["provisioning"]:
         raise HTTPException(status_code=409, detail="Port already provisioning")
+
+    # The provision flow uses the saved operator ID when the request has none.
+    # Check the saved value against the same range before work starts.
+    if status["device_type"] == "tarana" and req.operator_id is None:
+        saved_id = getattr(provisioner.config.device_settings.tarana, "operator_id", None)
+        try:
+            TaranaSettingsRequest(operator_id=saved_id)
+        except ValidationError:
+            raise HTTPException(
+                status_code=422,
+                detail="Saved Tarana operator ID must be an integer from 0 through 16383",
+            )
     
     # Store custom credentials if provided
     if req.custom_password:

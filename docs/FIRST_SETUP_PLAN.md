@@ -118,6 +118,8 @@ Current behavior:
 
 - `device_settings.tarana.operator_id`: integer from `0` through `16383`.
   The settings and provision APIs reject values outside this range with HTTP 422.
+  The provision API also rejects a Tarana job with HTTP 422 when the request
+  has no operator ID and the saved value is outside this range.
 - `device_settings.mikrotik.ztp_api_url`
 - `equipment_registry.url` and API key
 - notification webhooks
