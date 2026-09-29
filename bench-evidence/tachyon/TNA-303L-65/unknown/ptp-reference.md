@@ -39,7 +39,7 @@ Customer-outbuilding and business PTP links use no VLAN. Isaac decided this on 2
 
 The export carries VLAN 101 on every port. A PTP profile for these links does not copy it.
 
-169.254.1.1 is the local LAN address of each radio. It does not pass across the PTP link, so it is not a field management address. Use the DHCP address.
+The local LAN address (`network.zones.wan.alt_local_ip.ipaddr`) is the same on each radio. It does not pass across the PTP link, so it is not a field management address. Use the DHCP address.
 
 The export lists six Ethernet ports (`eth0` to `eth5`). A TNA-303L-65 has one physical port, `eth0`. Two bench units with the same model, board (`tam-110-prs`), and firmware (1.15.1 rev 8541) both show one port in the live status (`/cgi.lua/status?type=ethernet`). One of them had the six ports in its saved config only. The extra ports are config state, not hardware. A profile sets `eth0` only.
 
@@ -61,6 +61,7 @@ A template never holds these values. The placeholder names the source that must 
 | `wireless.radios.wlan0.vaps[0].ssid` | `<identity: link SSID from the PTP workflow>` |
 | `system.hostname`, `system.name`, `system.description`, `system.location`, `system.latitude`, `system.longitude` | `<identity: site values from the PTP workflow>` |
 | `network.zones.wan.custom_mac.address`, `wireless.radios.wlan0.vaps[0].bssid.mac` | `<identity: unit value, never copied>` |
+| `network.zones.wan.ip.ipaddr`, `.gateway`, `.alt_local_ip.ipaddr`, `.dataBridgeStaticIp.ipaddr`, `services.ping_watchdog.addresses[0]`, `services.remote_syslog.server` | `<address: masked>`. The DHCP address and the site network supply these. |
 
 ## Open questions
 
