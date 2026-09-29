@@ -7,7 +7,8 @@ name: Auto-review PRs from trusted authors
 #
 # Safe use of pull_request_target: this workflow NEVER checks out or runs PR
 # code. It reads the event payload, sets a label, and sends a fixed wake
-# message. The review itself runs on llm01, not here. See docs/security-model.md § 9.
+# message. The review itself runs on llm01, not here. See docs/security-model.md § 9 in the
+# isolson/personal-processes hub repository.
 
 on:
   pull_request_target:
