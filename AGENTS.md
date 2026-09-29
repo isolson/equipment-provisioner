@@ -6,6 +6,7 @@ This file is the **tool-agnostic** statement of how this codebase is structured 
 - For the **current isolation state** and the exhaustive vendor-touchpoint map, see `docs/ARCHITECTURE_ISOLATION_REVIEW.md`.
 - For the **refactor status and remaining work**, see `docs/epic-vendor-isolation-refactor.md`.
 - For the **handler property reference**, see `docs/HANDLER_DEVELOPMENT.md`; for interface binding / VLAN / UI, see `STANDARDS.md`.
+- For **UI work** (the pages in `provisioner/web/templates/`), load the `frontend-design` skill in `.claude/skills/frontend-design/`. It covers general design craft. The UI standards in `STANDARDS.md` §3 take precedence over it.
 
 ---
 
