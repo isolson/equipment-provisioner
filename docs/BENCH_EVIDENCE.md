@@ -202,7 +202,8 @@ Run it once with `--dry-run`, then again without it. The file
 `/var/lib/provisioner/qualification-override.json` (mode 600) records who set
 the override and when it expires. The provisioner logs both each time the
 override opens a mode. At the first check after the expiry, it deletes the file
-and logs the re-lock. `status` shows the active override. `clear` ends it early.
+and logs the re-lock. It also deletes a file with a set time in the future or
+an expiry more than 24 hours after the set time. `status` shows the active override. `clear` ends it early.
 Record the transitions in the manifest after the run. The override is not
 evidence.
 

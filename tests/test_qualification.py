@@ -195,6 +195,16 @@ def test_hand_edited_expiry_past_the_limit_relocks(override_file):
     assert not override_file.exists()
 
 
+def test_hand_edited_future_set_time_relocks(override_file):
+    override_file.parent.mkdir(parents=True)
+    override_file.write_text(
+        '{"vendor": "tachyon", "model": "TNA-303L-65", "firmware": "1.15.1", "modes": ["ptp"],'
+        ' "set_by": "isaac", "set_utc": "2099-01-01T00:00:00Z", "expires_utc": "2099-01-01T01:00:00Z"}'
+    )
+    assert qualification.active_override() is None
+    assert not override_file.exists()
+
+
 def test_unreadable_override_relocks(override_file):
     override_file.parent.mkdir(parents=True)
     override_file.write_text("not json")

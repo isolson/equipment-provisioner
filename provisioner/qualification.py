@@ -194,9 +194,10 @@ def active_override(now: Optional[datetime] = None) -> Optional[Dict[str, object
     """Return the unexpired override record, or None.
 
     An expired, unreadable, or malformed override is deleted, which re-locks
-    the matrix. An expiry more than ``OVERRIDE_MAX_HOURS`` after the set time
-    counts as malformed.
+    the matrix. A set time in the future, or an expiry more than
+    ``OVERRIDE_MAX_HOURS`` after the set time, counts as malformed.
     """
+    current = now or datetime.now(timezone.utc)
     path = override_path()
     if not path.is_file():
         return None
@@ -214,11 +215,12 @@ def active_override(now: Optional[datetime] = None) -> Optional[Dict[str, object
         set_at is None
         or expires is None
         or not str(record.get("set_by") or "").strip()
+        or set_at > current
         or expires - set_at > timedelta(hours=OVERRIDE_MAX_HOURS)
     ):
         clear_override("malformed file")
         return None
-    if (now or datetime.now(timezone.utc)) >= expires:
+    if current >= expires:
         clear_override("expired at %s, set by %s" % (record["expires_utc"], record["set_by"]))
         return None
     return record
