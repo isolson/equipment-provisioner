@@ -84,6 +84,9 @@
         .status-icon svg { width: 60px; height: 60px; }
         .status-headline { font-size: 30px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; line-height: 1.1; }
         .status-detail { font-size: 17px; color: var(--fg-muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        /* The reset action line must show in full, so it wraps. */
+        .status-headline.compact { font-size: 22px; }
+        .status-detail.action { color: var(--fg); font-weight: 700; white-space: normal; }
         .tone-idle .status-headline, .tone-idle .status-icon { color: var(--tone-idle); }
         .tone-active .status-headline, .tone-active .status-icon { color: var(--tone-active); }
         .tone-success .status-headline, .tone-success .status-icon { color: var(--tone-success); }
@@ -692,7 +695,8 @@
             const status = document.getElementById(`card-status-${n}`);
             status.className = `card-status tone-${p.tone}`;
             const bar = p.progress && p.progress.total ? `<div class="progress-track"><div class="progress-fill" style="width:${Math.round(100 * p.progress.done / p.progress.total)}%"></div></div>` : '';
-            status.innerHTML = `<div class="status-icon">${statusIconSVG(p.icon)}</div><div class="status-headline">${escapeHtml(p.headline)}</div>${p.detail ? `<div class="status-detail">${escapeHtml(p.detail)}</div>` : ''}${bar}`;
+            const isAction = p.phase === 'login_failed';
+            status.innerHTML = `<div class="status-icon">${statusIconSVG(p.icon)}</div><div class="status-headline${isAction ? ' compact' : ''}">${escapeHtml(p.headline)}</div>${p.detail ? `<div class="status-detail${isAction ? ' action' : ''}">${escapeHtml(p.detail)}</div>` : ''}${bar}`;
 
             const footer = document.getElementById(`card-footer-${n}`);
             if (p.mode_chip && p.mode_chip.mode) {
@@ -794,6 +798,8 @@
         function renderStatusNotice(port, p, workflow) {
             if (p.phase === 'failed') {
                 showModalNotice({ tone: 'error', title: 'Provisioning failed', body: escapeHtml(port.last_error || p.detail || 'See the timeline below.') });
+            } else if (p.phase === 'login_failed') {
+                showModalNotice({ tone: 'warning', title: p.headline, body: escapeHtml(p.detail || '') });
             } else if (p.phase === 'needs_credentials') {
                 showModalNotice({ tone: 'warning', title: 'Credentials required', body: escapeHtml(port.last_error || 'The device rejected the default login.') });
             } else if (p.phase === 'config_required') {

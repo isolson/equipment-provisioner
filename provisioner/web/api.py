@@ -81,6 +81,10 @@ class PortStatus(BaseModel):
     last_result: Optional[str] = None
     last_error: Optional[str] = None
     needs_credentials: bool = False
+    # "login_failed" when the device refused every login, else None.
+    result_reason: Optional[str] = None
+    # Resolved factory-reset action line for a login_failed port.
+    reset_instruction: Optional[str] = None
     checklist: Dict[str, Any] = Field(default_factory=dict)
     step_plan: List[Dict[str, str]] = Field(default_factory=list)
     step_status: Dict[str, Any] = Field(default_factory=dict)

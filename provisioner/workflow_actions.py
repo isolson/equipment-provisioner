@@ -10,6 +10,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .handler_manager import HandlerManager
+from .port_manager import RESULT_LOGIN_FAILED
 
 
 _MODE_ACTIONS = {
@@ -168,6 +169,7 @@ _PHASE_TONE = {
     "mode_changing": "active",
     "qualifying": "active",
     "needs_credentials": "warning",
+    "login_failed": "warning",
     "config_required": "warning",
     "config_unverified": "warning",
     "action_required": "warning",
@@ -194,6 +196,7 @@ _PHASE_HEADLINE = {
     "mode_changing": "MODE CHANGE",
     "qualifying": "QUALIFYING",
     "needs_credentials": "NEEDS CREDENTIALS",
+    "login_failed": "Login failed: reset may resolve",
     "config_required": "SM CONFIG MISSING",
     "config_unverified": "SM CONFIG UNVERIFIED",
     "action_required": "ACTION REQUIRED",
@@ -206,6 +209,18 @@ _PHASE_HEADLINE = {
 }
 #: Seconds a device may sit in the boot wait before the card suggests a reset.
 BOOT_RESET_HINT_AFTER = 300.0
+
+
+def result_reason_for(result: Any) -> Optional[str]:
+    """Return the port result reason for a failed provisioning result.
+
+    ``needs_credentials`` is set only when the connection failure kind is
+    ``authentication``. The device refused every login, so the result is
+    ``login_failed``. Other failures have no reason.
+    """
+    if getattr(result, "needs_credentials", False):
+        return RESULT_LOGIN_FAILED
+    return None
 
 
 def _progress(state: Any) -> Optional[Dict[str, Any]]:
@@ -328,6 +343,11 @@ def presentation_for_port(
         else:
             phase = "complete"
         progress = _progress(state)
+    elif getattr(state, "result_reason", None) == RESULT_LOGIN_FAILED:
+        # The device refused every login. This outranks no_link, so the
+        # instruction stays on the card while the operator resets the device.
+        phase = "login_failed"
+        detail = getattr(state, "reset_instruction", None)
     elif getattr(state, "needs_credentials", False):
         # A login failure sets both needs_credentials and a failed result.
         # The credential prompt is the useful state.
