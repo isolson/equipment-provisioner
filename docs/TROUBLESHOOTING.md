@@ -81,11 +81,19 @@ journalctl -u provisioner-web -f | grep -i "login\|auth\|credential"
 
 ## Login failed: reset may resolve
 
-**Symptom:** The port card shows "Login failed: reset may resolve" and one
-action line. The device refused every login, for example the stored
+**Symptom:** The port card shows "Login failed: reset may resolve", an
+action line, and a caution line. The device refused every login, for example the stored
 credential and the factory credential.
 
-**Fix:** Do the action line on the card. Do not disconnect the cable. In the
+**Before you reset:** Make sure that you have a saved export of this device
+and approval for the reset. A reset can remove the only working recovery path.
+Refer to `docs/hardware-provisioning-sop.md`, section 7. If you do not have a
+saved export, do not reset the device. Tap the card and enter the correct
+credentials, or stop and ask for approval. The card and the modal show this
+caution.
+
+**Fix:** When you have the saved export and the approval, do the action line
+on the card. Do not disconnect the cable. In the
 default case the device also stays powered. The kiosk monitors the port. The reset reboots the device, so the link goes down
 and up, or the device stops and starts to reply to ping. The kiosk then
 starts a new run. The 30-minute reprovision cooldown does not apply. The new
