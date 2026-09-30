@@ -1,0 +1,16 @@
+{
+  "source": "Bench log, 2026-09-29 14:25:27 CDT. Redacted: no credential value is in this record.",
+  "port": 6,
+  "device_type": "cambium",
+  "device_model": "ePMP 4625",
+  "sku": "53561",
+  "device_ip": "169.254.1.1",
+  "connection_failure_kind": "authentication",
+  "login_error": "Invalid credentials - please enter correct password",
+  "log_lines": [
+    "Credentials rejected by 169.254.1.1: auth_failed",
+    "[CREDS] Not retrying - auth/lockout error: Invalid credentials - please enter correct password",
+    "[SESSION] Connection failed for initial login: kind=authentication",
+    "Provisioning failed for cambium on port 6: Invalid credentials - please enter correct password"
+  ]
+}

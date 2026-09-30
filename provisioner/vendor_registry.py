@@ -130,6 +130,10 @@ class ConfigFamilySpec:
     # possible asset role.  Directory names are used because they are the
     # stable on-disk family identifiers.
     ptp_compatible_families: Tuple[str, ...] = ()
+    # Factory-reset action line for this family. None uses the vendor
+    # value, then DEFAULT_RESET_ACTION. Set it only from vendor
+    # documentation, and put the source URL next to the value.
+    reset_action: Optional[str] = None
 
     def matches(self, model: Optional[str]) -> bool:
         if not model:
@@ -209,6 +213,15 @@ class VendorSpec:
     # entry (defaultUser, icon) is derived in web/api.py.
     ui_style: Optional[Dict[str, str]] = None
 
+    # Factory-reset action line for this vendor. None uses
+    # DEFAULT_RESET_ACTION. A config family value overrides it. Set it only
+    # from vendor documentation, and put the source URL next to the value.
+    reset_action: Optional[str] = None
+
+
+#: Factory-reset action line when no vendor or family declares its own.
+#: The device stays connected and powered.
+DEFAULT_RESET_ACTION = "Hold the reset button 10 s while the device stays powered."
 
 # device-type value -> VendorSpec, in registration order. Private:
 # consumers go through specs()/all_specs() and the derivation functions.
@@ -311,6 +324,22 @@ def ptp_families_compatible(
         peer_family.directory in family.ptp_compatible_families
         and family.directory in peer_family.ptp_compatible_families
     )
+
+
+def reset_action(device_type: Optional[str], model: Optional[str]) -> str:
+    """Return the factory-reset action line for a device.
+
+    The config family value comes first, then the vendor value, then
+    DEFAULT_RESET_ACTION.
+    """
+    if device_type:
+        family = config_family_for_model(device_type, model)
+        if family is not None and family.reset_action is not None:
+            return family.reset_action
+        spec = spec_for(device_type)
+        if spec is not None and spec.reset_action is not None:
+            return spec.reset_action
+    return DEFAULT_RESET_ACTION
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +482,12 @@ register(VendorSpec(
     # No config_template_dir: configured via netinstall/ZTP .rsc scripts,
     # not deep-merge templates (documented exception).
     ui_style={"name": "MikroTik", "color": "#0E0E10"},
+    # Power-on reset: hold the button while power is applied.
+    # Source: https://help.mikrotik.com/docs/spaces/ROS/pages/24805498/Reset+Button
+    reset_action=(
+        "Remove power, then hold the reset button while you apply power "
+        "until the LED flashes."
+    ),
 ))
 
 register(VendorSpec(
@@ -566,6 +601,10 @@ register(VendorSpec(
         ),
     ),
     ui_style={"name": "Tachyon", "color": "#a855f7"},
+    # The TNA-301/302, TNA-303X, TNA-303L, TNA-305 and TNS-100 manuals all
+    # specify 20 s or more on a fully booted unit.
+    # Source: https://tachyon-networks.freshdesk.com/support/solutions/articles/67000670226-tna-301-tna-302-operating-manual
+    reset_action="Hold the reset button 20 s while the device stays powered.",
 ))
 
 register(VendorSpec(
