@@ -6,6 +6,7 @@ This file is the **tool-agnostic** statement of how this codebase is structured 
 - For the **current isolation state** and the exhaustive vendor-touchpoint map, see `docs/ARCHITECTURE_ISOLATION_REVIEW.md`.
 - For the **refactor status and remaining work**, see `docs/epic-vendor-isolation-refactor.md`.
 - For the **handler property reference**, see `docs/HANDLER_DEVELOPMENT.md`; for interface binding / VLAN / UI, see `STANDARDS.md`.
+- For **UI work** (the pages in `provisioner/web/templates/`), load the `frontend-design` skill in `.claude/skills/frontend-design/`. It covers general design craft. The UI standards in `STANDARDS.md` §3 take precedence over it.
 
 ---
 
@@ -100,6 +101,28 @@ Never write a device default. Never put a secret in a template. Before
 changing a device endpoint or request shape, read the capture summary next to
 the HAR (`bench-evidence/<vendor>/<model>/<firmware>/capture-summary.md`) and
 cite it.
+
+---
+
+### 11. Write GitHub text and code comments plainly
+
+Every contributor, human or agent, follows these writing rules for the text
+below. Use plain words. Put the bottom line first. Cut filler and AI tells.
+An agent that starts a worker puts this rule in the worker's prompt.
+
+Claude agents load the `ai-copywriter` skill before they write this text.
+Other agents do not need that skill. They apply the rules in this section
+directly.
+
+The rule covers:
+
+- issue and PR titles and bodies;
+- PR comments, issue comments, and review-thread replies;
+- commit messages, because GitHub shows them;
+- sign-off packets and bot status comments;
+- code comments and docstrings in new or changed code.
+
+It does not require a rewrite of existing comments.
 
 ## Anti-patterns (do not do)
 
