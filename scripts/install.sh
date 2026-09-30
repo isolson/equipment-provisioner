@@ -507,7 +507,9 @@ Restart=always
 RestartSec=10
 
 [Install]
-WantedBy=multi-user.target
+# provisioner-web.service pulls the watchdog in, so every start of the web
+# service also starts the browser. PartOf covers stop and restart only.
+WantedBy=multi-user.target provisioner-web.service
 SERVICE
 
     systemctl daemon-reload
