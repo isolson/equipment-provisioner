@@ -13,7 +13,8 @@ name: Wake the llm01 agent loops
 # code. It only reads the event payload and POSTs a fixed-format string.
 # agent-auto-review.yml sends the initial PR wake after it adds the label.
 
-on:
+# This trigger is safe here. The job does not check out or run PR code.
+on: # zizmor: ignore[dangerous-triggers]
   pull_request_target:
     types: [labeled]
   issues:

@@ -1,0 +1,23 @@
+# gitleaks configuration. Use the default rules, and allow only the
+# findings below. Each finding below is not a secret of this project.
+
+[extend]
+useDefault = true
+
+# The Brady Web SDK is a third-party browser bundle. Its Firebase web API key
+# is a public client identifier that Brady serves from sdk.bradyid.com.
+[[allowlists]]
+description = "Public Firebase web key in the vendored Brady Web SDK bundle"
+targetRules = ["gcp-api-key", "generic-api-key"]
+condition = "AND"
+paths = ['''^provisioner/web/static/vendor/brady-web-sdk/bundle\.js$''']
+regexes = ['''^AIza[\w-]{35}$''']
+
+# The validation report records SHA-256 hashes of source files. A 64-character
+# hex hash is not a credential.
+[[allowlists]]
+description = "SHA-256 source-file hashes in the Cambium validation report"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^docs/cambium-validation-2026-09-10\.md$''']
+regexes = ['''^[0-9a-f]{64}$''']

@@ -10,7 +10,8 @@ name: Auto-review PRs from trusted authors
 # message. The review itself runs on llm01, not here. See docs/security-model.md § 9 in the
 # isolson/personal-processes hub repository.
 
-on:
+# This trigger is safe here. The job does not check out or run PR code.
+on: # zizmor: ignore[dangerous-triggers]
   pull_request_target:
     types: [opened, reopened, ready_for_review]
 
@@ -30,7 +31,7 @@ jobs:
       # Pinned to a full commit SHA, not the floating @v7 tag: this is a
       # pull_request_target job with write access, so the action is a
       # supply-chain-sensitive dependency.
-      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           WAKE_URL: ${{ secrets.AGENT_WAKE_URL }}
           WAKE_TOKEN: ${{ secrets.AGENT_WAKE_TOKEN }}
