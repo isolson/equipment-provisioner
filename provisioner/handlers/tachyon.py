@@ -19,7 +19,7 @@ from copy import deepcopy
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import aiohttp
 
@@ -62,9 +62,6 @@ class TachyonHandler(BaseHandler):
 
     # Default credentials (factory default)
     DEFAULT_CREDENTIALS = {"username": "root", "password": "admin"}
-
-    # wlan1 is for management access only, when a USB interface is plugged in (Isaac, 2026-09-29).
-    WLAN1_ZONE = "lan"
 
     # Template/preflight traits (see BaseHandler). Tachyon templates are
     # full device exports per product family, so an arbitrary-file fallback
@@ -1271,16 +1268,6 @@ class TachyonHandler(BaseHandler):
         Args:
             config: Configuration dictionary to apply
         """
-        wlan1_violations = self._wlan1_zone_violations(config)
-        if wlan1_violations:
-            logger.error(
-                "Refusing config on %s: wlan1 VAP outside zone %s at %s",
-                self.ip,
-                self.WLAN1_ZONE,
-                ", ".join(wlan1_violations),
-            )
-            return False
-
         # Firmware 1.15 rejects new secured station profiles without their
         # passphrase. Populate secret-owned fields from host credentials before
         # the first config POST; a later secrets phase is too late for a fresh
@@ -1445,31 +1432,6 @@ class TachyonHandler(BaseHandler):
                     )
 
         return {}
-
-    @classmethod
-    def _wlan1_zone_violations(cls, config: Dict[str, Any]) -> List[str]:
-        """Return the paths of wlan1 VAPs that are not in WLAN1_ZONE.
-
-        A VAP without a zone is a violation. A config without wlan1 VAPs
-        has no violations.
-        """
-        try:
-            wlan1 = config["wireless"]["radios"]["wlan1"]
-        except (KeyError, TypeError):
-            return []
-        prefix = "wireless.radios.wlan1.vaps"
-        vaps = wlan1.get("vaps") if isinstance(wlan1, dict) else None
-        if vaps is None:
-            return []
-        if not isinstance(vaps, list):
-            return [prefix]
-        violations = []
-        for index, vap in enumerate(vaps):
-            network = vap.get("network") if isinstance(vap, dict) else None
-            zone = network.get("zone") if isinstance(network, dict) else None
-            if zone != cls.WLAN1_ZONE:
-                violations.append("%s[%d].network.zone" % (prefix, index))
-        return violations
 
     def _normalize_config_for_apply(self, config: Dict[str, Any]) -> None:
         """Fill Tachyon API-required defaults omitted by older config exports."""

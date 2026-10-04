@@ -50,7 +50,7 @@ All other settings are the same as side A.
 
 wlan1 is the 2.4 GHz radio. It is for management access only, and only when a USB interface is plugged in. It never carries customer traffic. In the export and on both bench units, the wlan1 VAP is in zone `lan` with management on. Zone `wan` is the customer bridge.
 
-A PTP profile changes wlan0 only. The provisioner refuses a config that puts a wlan1 VAP in a zone other than `lan`, or that gives it no zone.
+A PTP profile changes wlan0 only. No committed fixture records `wireless.radios.wlan1.vaps[0].network.zone`. The provisioner does not check the wlan1 zone until a redacted fixture records that value.
 
 ## Network
 
