@@ -155,6 +155,13 @@ class ModeConfigManager:
                 # below the family directory.
                 containers = version_dirs if matched_version_only else [family_dir] + version_dirs
                 family_profile = profile or "default"
+                scoped_dir = self._model_profile_dir(device_type, model, mode)
+                if scoped_dir:
+                    # A model-scoped profile traces to that model's own
+                    # evidence. Never fall back to the family-wide profile.
+                    return self._find_scoped_profile(
+                        containers, role, scoped_dir, family_profile
+                    )
                 if mode in MODE_TO_PTP_SIDE:
                     side = MODE_TO_PTP_SIDE[mode]
                     link_names = []
@@ -260,6 +267,57 @@ class ModeConfigManager:
                 return p
 
         logger.warning(f"No {mode} config template found for {device_type}")
+        return None
+
+    @staticmethod
+    def _model_profile_dir(
+        device_type: str, model: Optional[str], mode: str
+    ) -> Optional[str]:
+        """Ask the handler whether this model has a model-scoped profile."""
+        from .handler_manager import HandlerManager
+
+        handler_class = HandlerManager.handler_class_for(device_type)
+        if handler_class is None:
+            return None
+        return handler_class.model_mode_profile_dir(model, mode)
+
+    @staticmethod
+    def _find_scoped_profile(
+        containers: List[Path], role: str, scoped_dir: str, profile: str
+    ) -> Optional[Path]:
+        """Resolve ``{ROLE}/{scoped_dir}/{profile}/default`` then ``{ROLE}/{scoped_dir}/default``."""
+
+        def child(parent: Path, name: str) -> Optional[Path]:
+            return next(
+                (
+                    entry for entry in parent.iterdir()
+                    if entry.is_dir() and entry.name.lower() == name.lower()
+                ),
+                None,
+            )
+
+        for version_dir in containers:
+            role_dir = child(version_dir, role)
+            if role_dir is None:
+                continue
+            model_dir = child(role_dir, scoped_dir)
+            if model_dir is None:
+                continue
+            candidates = []
+            if profile.lower() != "default":
+                profile_dir = child(model_dir, profile)
+                if profile_dir is not None:
+                    candidates.append(profile_dir)
+            candidates.append(model_dir)
+            for directory in candidates:
+                for extension in (".json", ".tar", ".tar.gz"):
+                    candidate = directory / ("default" + extension)
+                    if candidate.is_file():
+                        return candidate
+        logger.warning(
+            "No model-scoped %s profile %s/%s; refusing the family-wide profile",
+            role, scoped_dir, profile,
+        )
         return None
 
     def load_template(

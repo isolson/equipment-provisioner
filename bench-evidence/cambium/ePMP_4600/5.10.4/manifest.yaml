@@ -15,5 +15,17 @@ raw_files:
   known-good.device-backup.json: "Operator-supplied config export of a working field ePMP 4600 AP at tw20, firmware 5.10.4, with secret values replaced before handoff; stored as field-ap-export.redacted.device-backup.json (secure bench directory only)"
 transitions: []
 fixture_witness: role
+#: AP sector settings read from the field export (mode_action fields, so the
+#: structure fixture does not carry them). The ePMP 4600 AP profile traces its
+#: fixed mode values to this map; site identity, frequency, TX power, and gain
+#: are excluded.
+ap_profile_witness:
+  wirelessStaIsolate: "1"
+  networkLLDP: "1"
+  networkLLDPMode: "1"
+  wirelessInterfaceSyncSource: "3"
+  wirelessInterfaceTDDFrameSize: "5000"
+  wirelessInterfaceTDDRatio: "4"
+  wirelessInterfaceRateMaxMCS: "255"
 evidence_scope: "Field AP reference for the ePMP 4600 only. It is a config export from a working field radio, not a bench transition capture: no upgrade, no config-apply HAR, no no-config backup, and no sm->ap or ap->sm run. It witnesses the 4600 AP role set (wirelessInterfaceMode 1, wirelessInterfacePTPMode 0, wirelessInterfaceProtocolMode 1) and the fleet values the field AP carried. It does not qualify AP mode, and it is not evidence for any other ePMP model."
 notes: "Fleet values that match the SM baseline: management VLAN 12 (enabled, priority 0), networkMode 2 (bridge), DHCP management address, syslog 100.126.15.28:514 mask 31, cnMaestro URL and device agent on, SSH on, telnet off, US country code, encryption 2. AP-only values seen on this radio: wirelessStaIsolate 1, networkLLDP 1 / networkLLDPMode 1, wirelessInterfaceSyncSource 3, TDD frame 5000 / ratio 4, max MCS 255, max cell size 3, HT mode 2, antenna type 2. Site and sector values (device name, SSID, center frequency, sysLocation, coordinates, TX power 25, antenna gain 10) are site identity and are not recorded here. Differs from the SM baseline: NTP mode 2 (the SM baseline sets 1 with explicit servers), watchdog on with target 8.8.8.8. Security items for operator review, not copied into any template: SNMP v1 with a read-write community and remote access on; the RADIUS password field holds the factory value; watchdog pings 8.8.8.8; cnMaestro zero-touch on. Compared with a 5.11.1 config export of the bench 4600: 5.11.1 adds wirelessSecurityMethod, wirelessTXPowerManualLimit, wirelessInterfaceReconnectPrimaryAP*, wirelessAcceptableAPRSSIThreshold/SNRThreshold, NTP server fields, and other keys; cambiumCNSDeviceAgentPassword is not exported on 5.11.1; no common key changed type."
