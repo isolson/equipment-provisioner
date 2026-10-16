@@ -1,0 +1,191 @@
+{
+  "profile": "business-switch",
+  "authority": "treehouse-architecture architecture/48-business-switch.md (Business Switch Standard)",
+  "model": "TSW202",
+  "firmware": {
+    "version": "TSW2_R_00.01.10.2",
+    "file": "TSW2_R_00.01.10.2_WEBUI.bin",
+    "md5": "258169b80677b41e592e944c87874937",
+    "url": "https://firmware.teltonika-networks.com/1.10.2/TSW2/TSW2_R_00.01.10.2_WEBUI.bin",
+    "keep_settings": "1"
+  },
+  "factory_address": "192.168.1.2",
+  "factory_netns_address": "192.168.1.250/24",
+  "management": {
+    "vlan": 10,
+    "network_prefix": "192.168.10.",
+    "host_offset": 1,
+    "netmask": "255.255.255.0",
+    "gateway": "192.168.10.1",
+    "dns": [
+      "100.126.15.20",
+      "9.9.9.9"
+    ],
+    "netns_address": "192.168.10.250/24",
+    "disable_interfaces": [
+      "dhcp",
+      "dhcp6"
+    ]
+  },
+  "hostname_pattern": "th.{site}.sw{unit:02d}",
+  "vlans": {
+    "10": {
+      "name": "Internal",
+      "native": true
+    },
+    "20": {
+      "name": "IoT"
+    },
+    "40": {
+      "name": "Guest"
+    },
+    "70": {
+      "name": "OpenRoam"
+    }
+  },
+  "ports": {
+    "port1": {
+      "role": "AP trunk",
+      "untagged": 10,
+      "tagged": [
+        20,
+        40,
+        70
+      ],
+      "poe": "1",
+      "stp_edge": "1",
+      "loop_detect": "0"
+    },
+    "port2": {
+      "role": "AP trunk",
+      "untagged": 10,
+      "tagged": [
+        20,
+        40,
+        70
+      ],
+      "poe": "1",
+      "stp_edge": "1",
+      "loop_detect": "0"
+    },
+    "port3": {
+      "role": "AP trunk",
+      "untagged": 10,
+      "tagged": [
+        20,
+        40,
+        70
+      ],
+      "poe": "1",
+      "stp_edge": "1",
+      "loop_detect": "0"
+    },
+    "port4": {
+      "role": "AP trunk",
+      "untagged": 10,
+      "tagged": [
+        20,
+        40,
+        70
+      ],
+      "poe": "1",
+      "stp_edge": "1",
+      "loop_detect": "0"
+    },
+    "port5": {
+      "role": "IoT access",
+      "untagged": 20,
+      "tagged": [],
+      "poe": "1",
+      "stp_edge": "1",
+      "loop_detect": "1"
+    },
+    "port6": {
+      "role": "Internal access",
+      "untagged": 10,
+      "tagged": [],
+      "poe": "1",
+      "stp_edge": "1",
+      "loop_detect": "1"
+    },
+    "port7": {
+      "role": "Internal access",
+      "untagged": 10,
+      "tagged": [],
+      "poe": "1",
+      "stp_edge": "1",
+      "loop_detect": "1"
+    },
+    "port8": {
+      "role": "Copper uplink trunk",
+      "untagged": 10,
+      "tagged": [
+        20,
+        40,
+        70
+      ],
+      "poe": "1",
+      "stp_edge": "0",
+      "loop_detect": "0"
+    },
+    "sfp1": {
+      "role": "SFP uplink trunk",
+      "untagged": 10,
+      "tagged": [
+        20,
+        40,
+        70
+      ],
+      "stp_edge": "0",
+      "loop_detect": "0"
+    },
+    "sfp2": {
+      "role": "SFP uplink trunk",
+      "untagged": 10,
+      "tagged": [
+        20,
+        40,
+        70
+      ],
+      "stp_edge": "0",
+      "loop_detect": "0"
+    }
+  },
+  "storm_control": "disabled",
+  "management_move_port": "port1",
+  "hardening": {
+    "rms_enable": "0",
+    "redirect_https": "1",
+    "web_cli_enabled": "0",
+    "ssh_auth_mode": "1",
+    "lldp_enabled": "1",
+    "lldp_filter": "1",
+    "snmp_agent": {
+      "enabled": "1",
+      "v1mode": "0",
+      "v2cmode": "0",
+      "v3mode": "1"
+    },
+    "snmp_agent_note": "Firmware 10.2 refuses to disable the SNMP agent while LLDP is enabled (error 117). The agent stays enabled but inert: v1/v2c off, v3 only with no users, no communities.",
+    "snmp_trap_enabled": "0",
+    "remove_snmp_communities": true,
+    "loop_detection_enabled": "1",
+    "ntp_servers": [
+      "129.6.15.28",
+      "129.6.15.29"
+    ],
+    "remote_syslog": [
+      "100.126.15.28:514,udp"
+    ]
+  },
+  "deviations_from_standard": [
+    "Port counts: the TSW202 has 8 copper and 2 SFP ports, so the standard's ranges map to port1-4 AP trunk, port5 IoT access, port6-7 Internal access, port8 copper uplink trunk, sfp1-2 SFP uplink trunk.",
+    "BPDU guard: not supported on the TSW202. Access ports use STP edge plus loop detection instead.",
+    "Storm control 5%: not supported. The lowest TSW202 preset is 240 Mbit/s, which is below the 1 Gbit/s link rate, so storm control is left disabled.",
+    "Access-port frame filtering: the TSW202 has no admit-only-untagged setting. Access ports are members of a single untagged VLAN only.",
+    "NTP: the operator specified 129.6.15.28 and 129.6.15.29. The standard names dh1 (100.126.15.28).",
+    "RADIUS login authentication (100.126.15.28:1812): not configured. It needs a RADIUS secret, which is a separate credential step.",
+    "Management restriction: the TSW202 has no source-address ACL. Management is reachable only through the VLAN 10 interface address. IPv6 link-local remains on the management VLAN.",
+    "SNMP: the standard's read-only community for LibreNMS is set per device in NetBox and is not available on the 192.168.10.0/24 island. The factory communities are removed. Firmware 10.2 requires the SNMP agent while LLDP is on, so the agent runs with v1/v2c off, v3 only and no users, which answers no request."
+  ]
+}
