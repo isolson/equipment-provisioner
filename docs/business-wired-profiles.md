@@ -28,6 +28,15 @@ reporting success.
 - Current device credentials are retained. Identity is serial-bound and
   unassigned; no customer, site slot or inventory claim is created.
 
+**Business router (SFP WAN)** (`router-sfp`) is the same router policy with
+WAN on sfp1: ether1 takes sfp1's Internal access role, and ether5 PoE-out is
+set to `auto-on`. The handler derives it from `business-router.rsc` with
+asserted line edits, so the policy keeps one source. It reads back like the
+router plus the sfp1 WAN, the moved access port, and the PoE state. It is not
+offered on the Wired modes page yet. The page requires evidence for every role
+transition, and adding the label without evidence would un-qualify the existing
+router/switch roles.
+
 The switch address is the first-switch default. Do not install two units at
 192.168.10.2 on one business LAN. Additional switch addressing needs an explicit
 profile before deployment.

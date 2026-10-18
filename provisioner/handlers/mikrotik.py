@@ -25,6 +25,7 @@ class MikrotikHandler(BaseHandler):
     supports_network_modes = True
     network_mode_descriptions = {
         "router": "ether1 WAN; ether2/4/5 trunks; ether3/SFP Internal access. VLANs 10/20/40/70 with DHCP, NAT and isolation. Management: 192.168.10.1.",
+        "router-sfp": "SFP WAN; ether2/4/5 trunks; ether1/ether3 Internal access; ether5 PoE-out auto-on. Same VLANs, DHCP, NAT and isolation as Business router. Management: 192.168.10.1.",
         "switch": "ether1 uplink; ether2/4/5 trunks; ether3/SFP Internal access. VLANs 10/20/40/70; no routing or DHCP server. Management: 192.168.10.2.",
     }
     network_mode_management_note = "Internal VLAN 10 is native/untagged; 20/40/70 are tagged on trunks. Current login is retained. Syslog and NTP: 100.126.15.28. Applying replaces this bench profile."
@@ -44,6 +45,8 @@ class MikrotikHandler(BaseHandler):
     def network_mode_labels_for_model(cls, model: Optional[str]) -> Dict[str, str]:
         """Wired role choices; exact hardware is checked again before writing."""
         if (model or "").strip().lower() == "hex s":
+            # router-sfp is applied/read back by the handler but not offered
+            # here yet: the UI requires bench evidence for every label pair.
             return {"router": "Business router", "switch": "Business switch"}
         return {}
 

@@ -94,6 +94,38 @@ def test_switch_profile_has_no_routing_or_dhcp_server():
     assert "poe-out=forced-on" not in text
 
 
+def test_sfp_wan_router_moves_only_the_wan_port():
+    from provisioner.handlers.mikrotik_business import profile_text
+    router, sfp = profile_text("router").splitlines(), profile_text("router-sfp").splitlines()
+    changed = [line for line in sfp if line not in router]
+    assert changed == [
+        'add bridge=bridge interface=ether1 pvid=10 ingress-filtering=yes frame-types=admit-only-untagged-and-priority-tagged comment="Internal access"',
+        'add bridge=bridge vlan-ids=10 tagged=bridge untagged=ether1,ether2,ether3,ether4,ether5',
+        'add interface=sfp1        list=WAN',
+        'add interface=sfp1 disabled=no comment="WAN"',
+        '/interface ethernet poe set [find where name="ether5"] poe-out=auto-on',
+        '/system note set note="treehouse-business-v1:router-sfp"',
+    ]
+    assert not any("interface=sfp1 " in line and "bridge" in line for line in sfp)
+
+
+def test_sfp_wan_router_readback_checks_the_sfp_wan():
+    from provisioner.handlers.mikrotik_business import check_expressions
+    checks = check_expressions("router-sfp")
+    assert 'interface="sfp1"' in checks["wan_bridge"] and checks["wan_bridge"].endswith("= 0")
+    assert 'interface="sfp1"' in checks["dhcp_clients"] and checks["dhcp_clients"].endswith("= 1")
+    assert "access_ether1" in checks and "access_sfp1" not in checks
+    assert "auto-on" in checks["poe_ether5"]
+    assert checks["profile_marker"].endswith('"treehouse-business-v1:router-sfp"')
+    # The existing router readback is unchanged by the variant.
+    assert "poe_ether5" not in check_expressions("router")
+    assert "wan_list" not in check_expressions("router")
+
+
+def test_sfp_wan_router_is_not_offered_without_evidence():
+    assert "router-sfp" not in MikrotikHandler.network_mode_labels_for_model("hEX S")
+
+
 def test_business_profile_rejects_other_firmware():
     before=state()
     before.update(profile="business-v1",firmware="7.24.2",checks={"physical_ports":True})
