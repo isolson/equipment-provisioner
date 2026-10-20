@@ -149,12 +149,12 @@ treehouse-architecture). The file lists each TSW202 deviation from it.
 ```bash
 # Plan only (no device writes)
 sudo /opt/provisioner/venv/bin/python scripts/tsw202_business_switch.py \
-    --cred-file /root/tsw202-unit2.env --unit 2 --site business \
+    --cred-file /root/tsw202-unit2.env --unit 2 --site lakeview \
     --firmware-dir /var/tmp/tsw202 --dry-run
 
 # Apply
 sudo /opt/provisioner/venv/bin/python scripts/tsw202_business_switch.py \
-    --cred-file /root/tsw202-unit2.env --unit 2 --site business \
+    --cred-file /root/tsw202-unit2.env --unit 2 --site lakeview \
     --firmware-dir /var/tmp/tsw202
 ```
 

@@ -23,7 +23,7 @@ passed on a command line.
 
 Example (unit 2, site placeholder):
     sudo /opt/provisioner/venv/bin/python scripts/tsw202_business_switch.py \\
-        --cred-file /root/tsw202-unit2.env --unit 2 --site business \\
+        --cred-file /root/tsw202-unit2.env --unit 2 --site lakeview \\
         --firmware-dir /var/tmp/tsw202
 """
 
@@ -610,10 +610,18 @@ class Runner(object):
                     timeout=20, tolerate_drop=True)
             self._wait_for(self.mgmt_ip)
         log("move: management answers at %s on interface %s" % (self.mgmt_ip, holder["id"]))
-        # F4: every other interface off and off VLAN 1; 802.1X references re-homed; VLAN 1 left empty.
+        # F4: remove every other interface (DHCP clients, factory static). On
+        # firmware 10.4 a PUT {"enabled": "0"} on an interface returns 200 but
+        # does not persist, so the interface is deleted. If a delete is refused,
+        # fall back to disable + re-home and verify that it stuck.
         for iface in self.api.get("/api/interfaces/config"):
             if iface["id"] == holder["id"]:
                 continue
+            try:
+                self._w("DELETE", "/api/interfaces/config/%s" % iface["id"], None, "remove interface %s" % iface["id"])
+                continue
+            except StepError as exc:
+                log("  delete refused (%s); disabling instead" % exc)
             d = {}
             if iface.get("enabled") != "0":
                 d["enabled"] = "0"
@@ -621,6 +629,8 @@ class Runner(object):
                 d["vlan_id"] = mv
             if d:
                 self._w("PUT", "/api/interfaces/config/%s" % iface["id"], d, "interface %s off on VLAN %s" % (iface["id"], mv))
+                if self.api.get("/api/interfaces/config/%s" % iface["id"]).get("enabled") != "0":
+                    raise StepError("interface %s cannot be removed or disabled" % iface["id"])
         for entry in self.api.get("/api/dot1x/ports/config") or []:
             d = {k: mv for k in ("accept_vlan", "fallback_vlan", "guest_vlan", "reject_vlan") if entry.get(k) == "1"}
             if d:
@@ -703,7 +713,7 @@ class Runner(object):
         chk("management interface", ok, "%s vlan %s %s/%s gw %s" % (holder.get("id"), holder.get("vlan_id"), holder.get("ipaddr"),
                                                                holder.get("netmask"), holder.get("gateway")))
         others = [i["id"] for i in ifaces if i is not holder and i.get("enabled") != "0"]
-        chk("all other interfaces disabled (no DHCP client)", not others, ",".join(others))
+        chk("no other interfaces (no DHCP client)", not others, ",".join(others))
         return checks
 
     # -- driver -------------------------------------------------------------
