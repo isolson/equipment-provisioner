@@ -45,91 +45,103 @@
   },
   "ports": {
     "port1": {
-      "role": "AP trunk",
+      "role": "Universal trunk",
       "untagged": 10,
       "tagged": [
         20,
         40,
         70
       ],
-      "poe": "1",
-      "stp_edge": "1",
-      "loop_detect": "0"
+      "stp_edge": "0",
+      "loop_detect": "1",
+      "poe": "1"
     },
     "port2": {
-      "role": "AP trunk",
+      "role": "Universal trunk",
       "untagged": 10,
       "tagged": [
         20,
         40,
         70
       ],
-      "poe": "1",
-      "stp_edge": "1",
-      "loop_detect": "0"
+      "stp_edge": "0",
+      "loop_detect": "1",
+      "poe": "1"
     },
     "port3": {
-      "role": "AP trunk",
+      "role": "Universal trunk",
       "untagged": 10,
       "tagged": [
         20,
         40,
         70
       ],
-      "poe": "1",
-      "stp_edge": "1",
-      "loop_detect": "0"
+      "stp_edge": "0",
+      "loop_detect": "1",
+      "poe": "1"
     },
     "port4": {
-      "role": "AP trunk",
+      "role": "Universal trunk",
       "untagged": 10,
       "tagged": [
         20,
         40,
         70
       ],
-      "poe": "1",
-      "stp_edge": "1",
-      "loop_detect": "0"
+      "stp_edge": "0",
+      "loop_detect": "1",
+      "poe": "1"
     },
     "port5": {
-      "role": "IoT access",
-      "untagged": 20,
-      "tagged": [],
-      "poe": "1",
-      "stp_edge": "1",
-      "loop_detect": "1"
+      "role": "Universal trunk",
+      "untagged": 10,
+      "tagged": [
+        20,
+        40,
+        70
+      ],
+      "stp_edge": "0",
+      "loop_detect": "1",
+      "poe": "1"
     },
     "port6": {
-      "role": "Internal access",
+      "role": "Universal trunk",
       "untagged": 10,
-      "tagged": [],
-      "poe": "1",
-      "stp_edge": "1",
-      "loop_detect": "1"
+      "tagged": [
+        20,
+        40,
+        70
+      ],
+      "stp_edge": "0",
+      "loop_detect": "1",
+      "poe": "1"
     },
     "port7": {
-      "role": "Internal access",
+      "role": "Universal trunk",
       "untagged": 10,
-      "tagged": [],
-      "poe": "1",
-      "stp_edge": "1",
-      "loop_detect": "1"
+      "tagged": [
+        20,
+        40,
+        70
+      ],
+      "stp_edge": "0",
+      "loop_detect": "1",
+      "poe": "1"
     },
     "port8": {
-      "role": "Copper uplink trunk",
+      "role": "Universal trunk",
       "untagged": 10,
       "tagged": [
         20,
         40,
         70
       ],
-      "poe": "1",
       "stp_edge": "0",
-      "loop_detect": "0"
+      "loop_detect": "1",
+      "poe": "1"
     },
     "sfp1": {
-      "role": "SFP uplink trunk",
+      "role": "Universal trunk",
       "untagged": 10,
       "tagged": [
         20,
@@ -137,10 +149,10 @@
         70
       ],
       "stp_edge": "0",
-      "loop_detect": "0"
+      "loop_detect": "1"
     },
     "sfp2": {
-      "role": "SFP uplink trunk",
+      "role": "Universal trunk",
       "untagged": 10,
       "tagged": [
         20,
@@ -148,7 +160,7 @@
         70
       ],
       "stp_edge": "0",
-      "loop_detect": "0"
+      "loop_detect": "1"
     }
   },
   "storm_control": "disabled",
@@ -187,5 +199,6 @@
     "RADIUS login authentication (100.126.15.28:1812): not configured. It needs a RADIUS secret, which is a separate credential step.",
     "Management restriction: the TSW202 has no source-address ACL. Management is reachable only through the VLAN 10 interface address. IPv6 link-local remains on the management VLAN.",
     "SNMP: the standard's read-only community for LibreNMS is set per device in NetBox and is not available on the 192.168.10.0/24 island. The factory communities are removed. Firmware 10.2 requires the SNMP agent while LLDP is on, so the agent runs with v1/v2c off, v3 only and no users, which answers no request."
-  ]
+  ],
+  "port_policy": "Every port is the same: VLAN 10 untagged (Internal and management), VLANs 20, 40 and 70 tagged, PoE on every copper port, STP edge off, loop detection on with automatic recovery. Any port takes an AP, the uplink, or a wired Internal device. Deviation from 48-business-switch.md, which assigns port roles: there is no wired IoT port by default; set one port to untagged 20 on site when a customer needs it."
 }
