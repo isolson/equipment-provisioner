@@ -332,7 +332,6 @@ raw HAR files, raw exports, or customer identity values in the pull request.
 Run these commands from the repository root:
 
 ```bash
-python3 scripts/check_py39.py
 python3 scripts/check_templates.py configs/templates
 python3 scripts/check_docs.py
 python3 -m pytest -q
