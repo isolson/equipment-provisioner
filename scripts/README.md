@@ -136,3 +136,13 @@ sudo ./scripts/update_switch_script.sh
 ```
 
 This is a smaller, targeted update — it does not reconfigure VLANs or bridge settings.
+
+## mikrotik_business_bench.py
+
+Interim bench tool for MikroTik business routers and switches (hEX S, hEX PoE).
+Probes a bench port, clears the RouterOS first-login flag, updates RouterOS and
+RouterBOOT, applies a business role (`router`, `router-sfp`, `switch`) and reads
+back every check. Profiles and checks come from
+`provisioner/handlers/mikrotik_business.py`. The password is read from
+`MIKROTIK_PASS`, never from the command line. Procedure:
+[docs/business-bench-sop.md](../docs/business-bench-sop.md).
