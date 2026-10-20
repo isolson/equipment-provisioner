@@ -153,6 +153,10 @@ jobs:
             PYSEC-2026-3040      # python-multipart 0.0.20: fix 0.0.31 needs Python 3.10+.
             PYSEC-2026-3039      # python-multipart 0.0.20: fix 0.0.27 needs Python 3.10+.
             PYSEC-2026-2132      # click 8.1.8: fix 8.3.3 needs Python 3.10+.
+            GHSA-54p9-h82j-f925  # multidict 6.7.1: fix 6.9.1 needs Python 3.10+.
+            GHSA-5wr8-gcqf-gqf3  # aiohttp 3.13.5: fix 3.14.4 needs Python 3.10+. Server-side; the provisioner runs no aiohttp server.
+            GHSA-2g87-pp6c-29x5  # aiohttp 3.13.5: fix 3.14.4 needs Python 3.10+.
+            GHSA-494j-54xm-rwp3  # aiohttp 3.13.5: fix 3.14.4 needs Python 3.10+.
           )
           ignore_args=()
           for id in "${accepted[@]}"; do
