@@ -3,10 +3,10 @@
   "authority": "treehouse-architecture architecture/48-business-switch.md (Business Switch Standard)",
   "model": "TSW202",
   "firmware": {
-    "version": "TSW2_R_00.01.10.2",
-    "file": "TSW2_R_00.01.10.2_WEBUI.bin",
-    "md5": "258169b80677b41e592e944c87874937",
-    "url": "https://firmware.teltonika-networks.com/1.10.2/TSW2/TSW2_R_00.01.10.2_WEBUI.bin",
+    "version": "TSW2_R_00.01.10.4",
+    "file": "TSW2_R_00.01.10.4_WEBUI.bin",
+    "md5": "b2a4da07cb055ed198434d3e60c62fef",
+    "url": "https://firmware.teltonika-networks.com/1.10.4/TSW2/TSW2_R_00.01.10.4_WEBUI.bin",
     "keep_settings": "1"
   },
   "factory_address": "192.168.1.2",
