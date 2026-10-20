@@ -421,10 +421,30 @@ class Runner(object):
             self.ensure("/api/ports_settings/config/%s" % port, desired, port_cfg.get(port, {}), label=port)
             self.ensure("/api/loopback/config/%s" % port, {"enabled": spec["loop_detect"]}, loop_cfg.get(port, {}), label="%s loop" % port)
 
-    def _desired_vlans(self, final: bool) -> Dict[str, Dict[str, str]]:
-        """VID -> {port: 'u'|'t'|'off'}; before the move, the move port stays untagged in VLAN 1."""
-        move_port = self.p["management_move_port"]
-        ports = list(self.p["ports"])
+    # -- VLAN and management stages ----------------------------------------
+    #
+    # Device rules learned on the bench (firmware 10.2):
+    # - /api/bulk is NOT atomic; a failed item does not roll back earlier ones.
+    # - A port can be untagged in only one VLAN (error 103).
+    # - The factory VLAN 1 section is read-only: it cannot be deleted
+    #   (error 113) and its VID cannot change. It is left empty at the end.
+    # - An interface can only use an existing bridge VLAN.
+    # - 802.1X port settings reference VLAN 1 (accept_vlan) even when 802.1X
+    #   is off; they are re-homed to the management VLAN.
+    #
+    # Factory flow (management answers at the factory address):
+    #   F1 build the profile on every port except the single linked (bench)
+    #      port, which keeps untagged VLAN 1 and gains its tagged VLANs;
+    #   F2 add a second static interface "mgmt" on the management VLAN, so the
+    #      switch answers both on the bench port (VLAN 1) and on every other
+    #      port (VLAN 10);
+    #   F3 swap the bench port's untagged VLAN 1 -> 10 and verify the new
+    #      address; a partial failure is recovered by moving the cable to any
+    #      other copper port, never by a reset;
+    #   F4 disable the factory interfaces, leaving VLAN 1 empty.
+
+    def _target(self) -> Dict[str, Dict[str, str]]:
+        """VID -> {port: 'u'|'t'|'off'} for the profile."""
         table: Dict[str, Dict[str, str]] = {}
         for vid in self.p["vlans"]:
             table[vid] = {}
@@ -435,101 +455,186 @@ class Runner(object):
                 elif int(vid) in spec["tagged"]:
                     mode = "t"
                 table[vid][port] = mode
-        if not final:
-            table[str(self.p["management"]["vlan"])][move_port] = "off"
-            table["1"] = {p: ("u" if p == move_port else "off") for p in ports}
         return table
 
     def _vlan_sections(self) -> Dict[str, Dict[str, Any]]:
         assert self.api is not None
         return {str(s["vlan"]): s for s in self.api.get("/api/port_based_vlan/config")}
 
-    def vlans(self) -> None:
-        """Build the business VLANs while management stays on VLAN 1 via the move port."""
+    def _linked_ports(self) -> List[str]:
         assert self.api is not None
-        current = self._vlan_sections()
-        if str(self.p["management"]["vlan"]) in current and "1" not in current:
-            log("vlans: management already moved")
-            return
-        desired = self._desired_vlans(final=False)
-        ops = []
-        # Remove ports from VLAN 1 first so no port is untagged twice.
-        if "1" in current:
-            diff = {p: m for p, m in desired["1"].items() if current["1"].get(p) != m}
-            if diff:
-                ops.append({"method": "PUT", "endpoint": "/api/port_based_vlan/config/%s" % current["1"]["id"], "data": diff})
-        for vid in self.p["vlans"]:
-            want = desired[vid]
-            if vid in current:
-                diff = {p: m for p, m in want.items() if current[vid].get(p) != m}
-                if diff:
-                    ops.append({"method": "PUT", "endpoint": "/api/port_based_vlan/config/%s" % current[vid]["id"], "data": diff})
-            else:
-                data = {"vlan": vid}
-                data.update(want)
-                ops.append({"method": "POST", "endpoint": "/api/port_based_vlan/config", "data": data})
-        if not ops:
-            log("vlans: already built")
-            return
-        self.changes.append("vlan build (%d ops)" % len(ops))
+        return [e["id"] for e in self.api.get("/api/ports_settings/status") if str(e.get("link")) == "1"]
+
+    def _at_factory(self) -> bool:
+        assert self.api is not None
+        return self.api.base.endswith("//" + self.p["factory_address"])
+
+    def _w(self, method: str, path: str, data: Any, why: str, timeout: float = 60,
+           tolerate_drop: bool = False) -> Any:
+        assert self.api is not None
+        self.changes.append(why)
         if self.dry:
-            for op in ops:
-                log("  [dry-run] bulk %s %s" % (op["method"], op["endpoint"]))
-            return
-        self.api.write("POST", "/api/bulk", ops, timeout=120)
-        time.sleep(5)
+            log("  [dry-run] %s %s %s  (%s)" % (method, path, json.dumps(data) if data is not None else "", why))
+            return None
+        log("  %s %s  (%s)" % (method, path, why))
+        try:
+            return self.api.write(method, path, data, timeout=timeout)
+        except StepError as exc:
+            raise StepError("%s failed: %s" % (why, exc))
+        except (OSError, socket.timeout) as exc:
+            if not tolerate_drop:
+                raise StepError("%s: no response (%s)" % (why, type(exc).__name__))
+            log("  response dropped (%s); verifying by reachability" % type(exc).__name__)
+            return None
+
+    def _reconcile(self, target: Dict[str, Dict[str, str]], protected: List[str]) -> None:
+        """Bring bridge VLAN membership to target with single-item writes (release, then claim)."""
+        cur = self._vlan_sections()
+        moves = []
+        for port in self.p["ports"]:
+            tgt = [v for v in target if target[v].get(port) == "u"]
+            have = [v for v in cur if cur[v].get(port) == "u"]
+            if have != tgt:
+                moves.append((port, have, tgt))
+        blocked = [m[0] for m in moves if m[0] in protected]
+        if blocked:
+            raise StepError("refusing to change the untagged VLAN of %s here (management path)" % blocked)
+        for vid in target:
+            if vid not in cur:
+                data = {"vlan": vid}
+                data.update({p: ("t" if m == "t" else "off") for p, m in target[vid].items()})
+                self._w("POST", "/api/port_based_vlan/config", data, "create VLAN %s" % vid)
+        if not self.dry:
+            cur = self._vlan_sections()
+        for port, have, tgt in moves:
+            for v in have:
+                if v in cur:
+                    new = target.get(v, {}).get(port, "off")
+                    self._w("PUT", "/api/port_based_vlan/config/%s" % cur[v]["id"], {port: "off" if new == "u" else new},
+                            "release %s from untagged VLAN %s" % (port, v))
+            for v in tgt:
+                sec_id = cur[v]["id"] if v in cur else "(new VLAN %s)" % v
+                self._w("PUT", "/api/port_based_vlan/config/%s" % sec_id, {port: "u"},
+                        "set %s untagged in VLAN %s" % (port, v))
+        if not self.dry:
+            cur = self._vlan_sections()
+        for vid, want in target.items():
+            if vid not in cur:
+                continue
+            diff = {p: m for p, m in want.items() if cur[vid].get(p) != m and m != "u"}
+            if diff:
+                self._w("PUT", "/api/port_based_vlan/config/%s" % cur[vid]["id"], diff, "VLAN %s membership" % vid)
+
+    def _bench_port(self) -> str:
+        linked = self._linked_ports()
+        if len(linked) != 1:
+            raise StepError("expected exactly one linked port (the bench port) at the factory address, found %s" % linked)
+        return linked[0]
+
+    def vlans(self) -> None:
+        assert self.api is not None
+        mv = str(self.p["management"]["vlan"])
+        target = self._target()
+        if self._at_factory():
+            bench = self._bench_port()
+            log("vlans: factory address; bench port %s keeps untagged VLAN 1 until the swap" % bench)
+            target[mv][bench] = "off"
+            target["1"] = {p: ("u" if p == bench else "off") for p in self.p["ports"]}
+            self._reconcile(target, protected=[bench])
+        else:
+            log("vlans: management address; full profile")
+            if "1" in self._vlan_sections():
+                target["1"] = {p: "off" for p in self.p["ports"]}
+            # The reach port is already untagged in the management VLAN, so it is not moved.
+            self._reconcile(target, protected=[])
+        if not self.dry:
+            time.sleep(3)
+            self.connect(quiet=True)
+
+    def _wait_for(self, host: str, seconds: int = 180) -> None:
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            time.sleep(8)
+            info = probe(host)
+            if info and info.get("device_model") == self.p["model"]:
+                self.api = Api(host, self.user, self.password)
+                self.api.login()
+                return
+        raise StepError("switch not reachable at %s within %ds" % (host, seconds))
+
+    def _mgmt_fields(self) -> Dict[str, Any]:
+        mgmt = self.p["management"]
+        return {"vlan_id": str(mgmt["vlan"]), "proto": "static", "ipaddr": self.mgmt_ip, "netmask": mgmt["netmask"],
+                "gateway": mgmt["gateway"], "dns": mgmt["dns"], "enabled": "1"}
 
     def move(self) -> None:
-        """Atomic move: VLAN 1 removed, move port untagged in VLAN 10, management interface to VLAN 10."""
         assert self.api is not None
         mgmt = self.p["management"]
-        vid = str(mgmt["vlan"])
-        current = self._vlan_sections()
-        iface = self.api.get("/api/interfaces/config/static")
-        target_iface = {"vlan_id": vid, "proto": "static", "ipaddr": self.mgmt_ip, "netmask": mgmt["netmask"],
-                        "gateway": mgmt["gateway"], "dns": mgmt["dns"], "enabled": "1"}
-        iface_diff = {k: v for k, v in target_iface.items() if iface.get(k) != v}
-        ops = []
-        if "1" in current:
-            ops.append({"method": "DELETE", "endpoint": "/api/port_based_vlan/config/%s" % current["1"]["id"]})
-        move_port = self.p["management_move_port"]
-        if vid in current and current[vid].get(move_port) != "u":
-            ops.append({"method": "PUT", "endpoint": "/api/port_based_vlan/config/%s" % current[vid]["id"], "data": {move_port: "u"}})
-        if iface_diff:
-            ops.append({"method": "PUT", "endpoint": "/api/interfaces/config/static", "data": iface_diff})
-        for name in mgmt["disable_interfaces"]:
-            cfg = self.api.get("/api/interfaces/config/%s" % name)
-            if cfg.get("enabled") != "0":
-                ops.append({"method": "PUT", "endpoint": "/api/interfaces/config/%s" % name, "data": {"enabled": "0"}})
-        if not ops:
-            log("move: management already on VLAN %s at %s" % (vid, self.mgmt_ip))
-            return
-        self.changes.append("management move (%d ops)" % len(ops))
-        if self.dry:
-            for op in ops:
-                log("  [dry-run] bulk %s %s %s" % (op["method"], op["endpoint"], sorted((op.get("data") or {}).keys())))
-            return
-        log("move: applying %d operations; the session will drop" % len(ops))
-        # /api/bulk is NOT atomic: items apply in order and a failed item does
-        # not roll back earlier ones. Log every item result before probing.
-        try:
-            self.api.write("POST", "/api/bulk", ops, timeout=30)
-        except StepError as exc:
-            log("move: bulk reported a failure: %s" % exc)
-            raise StepError("management move partially applied; see the bulk failure above. "
-                            "Recover by connecting the bench to another VLAN 10 untagged port and re-running.")
-        except (OSError, socket.timeout) as exc:
-            log("move: request ended (%s); checking the new address" % type(exc).__name__)
-        deadline = time.time() + 180
-        while time.time() < deadline:
-            time.sleep(10)
-            info = probe(self.mgmt_ip)
-            if info and info.get("device_model") == self.p["model"]:
-                self.api = Api(self.mgmt_ip, self.user, self.password)
-                self.api.login()
-                log("move: reached management at %s" % self.mgmt_ip)
+        mv = str(mgmt["vlan"])
+        want = self._mgmt_fields()
+        if self._at_factory():
+            bench = self._bench_port()
+            # F2: second management interface on VLAN 10 (inert on the bench port until the swap).
+            ifaces = self.api.get("/api/interfaces/config")
+            if not any(i.get("ipaddr") == self.mgmt_ip for i in ifaces):
+                data = {"id": "mgmt"}
+                data.update(want)
+                self._w("POST", "/api/interfaces/config", data, "F2: add management interface %s on VLAN %s" % (self.mgmt_ip, mv))
+            # F3: swap the bench port's untagged VLAN; both items in one request, verified by reachability.
+            cur = self._vlan_sections()
+            ops = [{"method": "PUT", "endpoint": "/api/port_based_vlan/config/%s" % cur["1"]["id"], "data": {bench: "off"}},
+                   {"method": "PUT", "endpoint": "/api/port_based_vlan/config/%s" % cur[mv]["id"], "data": {bench: "u"}}]
+            if self.dry:
+                log("  [dry-run] F3: swap %s untagged VLAN 1 -> %s, then reach %s" % (bench, mv, self.mgmt_ip))
                 return
-        raise StepError("management address %s not reachable after the move" % self.mgmt_ip)
+            try:
+                self._w("POST", "/api/bulk", ops, "F3: swap %s untagged VLAN 1 -> %s" % (bench, mv), timeout=30,
+                        tolerate_drop=True)
+            except StepError as exc:
+                raise StepError("%s. If the switch no longer answers on the bench port, move the cable to any other "
+                                "copper port (untagged VLAN %s) and re-run." % (exc, mv))
+            self._wait_for(self.mgmt_ip)
+            log("move: F3 verified; management answers at %s" % self.mgmt_ip)
+        if self.dry:
+            log("  [dry-run] then: management interface %s on VLAN %s, other interfaces off, VLAN 1 empty" % (self.mgmt_ip, mv))
+            return
+        if self._at_factory():
+            raise StepError("still at the factory address after the swap")
+        # Management interface fields (the interface that holds the address, else 'static').
+        ifaces = self.api.get("/api/interfaces/config")
+        holder = next((i for i in ifaces if i.get("ipaddr") == self.mgmt_ip), None) or \
+            next(i for i in ifaces if i["id"] == "static")
+        diff = {k: v for k, v in want.items() if holder.get(k) != v}
+        if diff:
+            self._w("PUT", "/api/interfaces/config/%s" % holder["id"], diff, "management interface %s" % holder["id"],
+                    timeout=20, tolerate_drop=True)
+            self._wait_for(self.mgmt_ip)
+        log("move: management answers at %s on interface %s" % (self.mgmt_ip, holder["id"]))
+        # F4: every other interface off and off VLAN 1; 802.1X references re-homed; VLAN 1 left empty.
+        for iface in self.api.get("/api/interfaces/config"):
+            if iface["id"] == holder["id"]:
+                continue
+            d = {}
+            if iface.get("enabled") != "0":
+                d["enabled"] = "0"
+            if iface.get("vlan_id") != mv:
+                d["vlan_id"] = mv
+            if d:
+                self._w("PUT", "/api/interfaces/config/%s" % iface["id"], d, "interface %s off on VLAN %s" % (iface["id"], mv))
+        for entry in self.api.get("/api/dot1x/ports/config") or []:
+            d = {k: mv for k in ("accept_vlan", "fallback_vlan", "guest_vlan", "reject_vlan") if entry.get(k) == "1"}
+            if d:
+                self._w("PUT", "/api/dot1x/ports/config/%s" % entry["id"], d,
+                        "802.1X %s VLAN references to VLAN %s" % (entry["id"], mv))
+        cur = self._vlan_sections()
+        if "1" in cur:
+            members = [p for p in self.p["ports"] if cur["1"].get(p) in ("u", "t")]
+            if members:
+                raise StepError("VLAN 1 still has members %s" % members)
+            log("move: VLAN 1 is empty (the factory section is read-only and stays)")
+        time.sleep(3)
+        self._wait_for(self.mgmt_ip, seconds=60)
+        log("move: verified; management answers at %s" % self.mgmt_ip)
 
     def readback(self) -> List[Tuple[str, bool, str]]:
         assert self.api is not None
@@ -566,7 +671,7 @@ class Runner(object):
         logcfg = a.get("/api/logging/config")[0]
         chk("remote syslog", (logcfg.get("remote_logger") or []) == h["remote_syslog"], ",".join(logcfg.get("remote_logger") or []))
         chk("lldp enabled", a.get("/api/lldp/config/general").get("enabled") == h["lldp_enabled"])
-        chk("lldp filter off", a.get("/api/ports_settings/global").get("lldp_filter") == h["lldp_filter"])
+        chk("lldp filter (locked to 1 while LLDP is on)", a.get("/api/ports_settings/global").get("lldp_filter") == h["lldp_filter"])
         chk("loop detection on", a.get("/api/loopback/global").get("enabled") == h["loop_detection_enabled"])
         ports = {e["id"]: e for e in a.get("/api/ports_settings/config")}
         loops = {e["id"]: e for e in a.get("/api/loopback/config")}
@@ -584,18 +689,21 @@ class Runner(object):
             if loops.get(port, {}).get("enabled") != spec["loop_detect"]:
                 bad.append("%s loop" % port)
         chk("per-port poe/edge/storm/loop", not bad, ", ".join(bad))
-        want = self._desired_vlans(final=True)
+        want = self._target()
         have = self._vlan_sections()
         vbad = [vid for vid in want if vid not in have or any(have[vid].get(pt) != m for pt, m in want[vid].items())]
-        extra = [vid for vid in have if vid not in want]
-        chk("vlan table", not vbad and not extra, "mismatch=%s extra=%s" % (vbad, extra))
-        iface = a.get("/api/interfaces/config/static")
-        ok = (iface.get("vlan_id") == str(mgmt["vlan"]) and iface.get("ipaddr") == self.mgmt_ip and
-              iface.get("netmask") == mgmt["netmask"] and iface.get("gateway") == mgmt["gateway"] and
-              iface.get("dns") == mgmt["dns"])
-        chk("management interface", ok, "vlan %s %s gw %s" % (iface.get("vlan_id"), iface.get("ipaddr"), iface.get("gateway")))
-        for name in mgmt["disable_interfaces"]:
-            chk("%s client disabled" % name, a.get("/api/interfaces/config/%s" % name).get("enabled") == "0")
+        extra = [vid for vid in have if vid not in want and
+                 not (vid == "1" and all(have[vid].get(pt) in (None, "off") for pt in p["ports"]))]
+        chk("vlan table (per port: untagged 10, tagged 20/40/70; VLAN 1 empty)", not vbad and not extra,
+            "mismatch=%s extra=%s" % (vbad, extra))
+        ifaces = a.get("/api/interfaces/config")
+        holder = next((i for i in ifaces if i.get("ipaddr") == self.mgmt_ip), {})
+        wantf = self._mgmt_fields()
+        ok = bool(holder) and all(holder.get(k) == v for k, v in wantf.items())
+        chk("management interface", ok, "%s vlan %s %s/%s gw %s" % (holder.get("id"), holder.get("vlan_id"), holder.get("ipaddr"),
+                                                               holder.get("netmask"), holder.get("gateway")))
+        others = [i["id"] for i in ifaces if i is not holder and i.get("enabled") != "0"]
+        chk("all other interfaces disabled (no DHCP client)", not others, ",".join(others))
         return checks
 
     # -- driver -------------------------------------------------------------

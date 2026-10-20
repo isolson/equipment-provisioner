@@ -170,8 +170,14 @@ sudo /opt/provisioner/venv/bin/python scripts/tsw202_business_switch.py \
    `/root/tsw202-backups/` (mode 0600).
 4. Upgrades to the profile firmware if needed. The image in `--firmware-dir`
    must match the profile MD5.
-5. Applies the hardening, builds the VLANs with `/api/bulk`, then moves
-   management to VLAN 10 last (`192.168.10.{1+unit}`).
+5. Applies the hardening and builds the VLANs with single-item requests
+   (`/api/bulk` is not atomic on this firmware). On a factory unit the bench
+   port keeps untagged VLAN 1 while every other port is built; a second
+   management interface is added on VLAN 10 (`192.168.10.{1+unit}`); only then
+   is the bench port swapped to VLAN 10 and the new address verified. The
+   factory interfaces are then disabled. The factory VLAN 1 section is
+   read-only on the device and stays, empty. If the swap fails partway, move
+   the cable to any other copper port and re-run; no reset is needed.
 6. Reads the configuration back twice from the management address and prints
    a PASS/FAIL list.
 
