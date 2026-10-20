@@ -86,6 +86,9 @@ add chain=input action=accept in-interface=vlan10-internal src-address=192.168.1
 add chain=input action=accept protocol=udp dst-port=67 in-interface-list=LAN comment="DHCP from all LAN VLANs"
 add chain=input action=accept protocol=udp dst-port=53 in-interface=vlan20-iot comment="IoT DNS via router"
 add chain=input action=accept protocol=tcp dst-port=53 in-interface=vlan20-iot
+# Interim operator exception until the wghub01 WireGuard aggregator exists
+# (treehouse-architecture #666): SSH only, only from server VLAN 15, over WAN.
+add chain=input action=accept protocol=tcp dst-port=22 in-interface-list=WAN src-address=100.126.15.0/24 comment="SSH from server VLAN 15 via WAN"
 add chain=input action=drop comment="drop everything else (WAN + untrusted VLANs)"
 
 # ---- Firewall: forward (segmentation) ----
@@ -132,7 +135,7 @@ add chain=srcnat action=masquerade out-interface-list=WAN ipsec-policy=out,none 
  :delay 15s
 }
 
-# ---- Services: management on Internal only; no Winbox/SSH from WAN ----
+# ---- Services: management on Internal; SSH also from server VLAN 15 (interim) ----
 /ip service
 set telnet  disabled=yes
 set ftp     disabled=yes
@@ -140,7 +143,7 @@ set api     disabled=yes
 set api-ssl disabled=yes
 set www     disabled=yes
 set www-ssl disabled=no certificate=webfig-local address=192.168.10.0/24
-set ssh     disabled=no address=192.168.10.0/24
+set ssh     disabled=no address=192.168.10.0/24,100.126.15.0/24
 set winbox  disabled=no address=192.168.10.0/24
 /ip neighbor discovery-settings
 set discover-interface-list=MGMT
