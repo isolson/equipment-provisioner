@@ -52,7 +52,7 @@ The tool refuses an unlisted board unless you pass `--allow-unqualified-board`.
 - Put the firmware for the target version in `/var/lib/provisioner/repo/firmware/mikrotik/`
   as `routeros-<arch>-<version>.npk`. The fleet channel is set in
   `/etc/provisioner/config.yaml` (`firmware.checker.sources.mikrotik.channel`).
-  It is `stable` today.
+  Business routers use the `stable` channel (operator decision, 2026-10-20).
 - Read the label password into the environment. Do not type it into a command
   line or chat, and do not paste a photo of the label into a shared channel.
 
@@ -195,8 +195,8 @@ Record the unit in the run log below. Then hand it off with:
 
 | Date | Serial | Board | Role | Firmware | Result |
 |---|---|---|---|---|---|
-| 2026-10-18 | HMG0BE209PD | hEX S | `router-sfp` | 7.24.5 | 68/68. Applied before the WAN SSH exception; add it on the next bench visit. |
-| 2026-10-19 | HMN0B81ATRT | hEX S | — | 7.20.8 | Label password and blank password rejected. Needs a configuration reset. |
+| 2026-10-18 | HMG0BE209PD | hEX S | `router-sfp` | 7.24.5 | 68/68. Applied before the WAN SSH exception. |
+| 2026-10-19 | HMN0B81ATRT | hEX S | — | 7.20.8 | Label password and blank password rejected. Not configured. |
 | 2026-10-20 | HMG0B8X4XQ5 | hEX S | `router` + WAN SSH | 7.24.5 | All `router` checks pass, including the WAN SSH checks (read-only re-check). |
 | 2026-10-20 | HMS0BQFM19K | hEX PoE | `router` + WAN SSH, `--pin-poe ether5` | 7.24.5 | 69/69. Software LAN switching accepted. |
 
