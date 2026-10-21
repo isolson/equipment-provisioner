@@ -2,7 +2,7 @@
 
 This is the target config for customer-network PTP setup on a TNA-303L-65. It comes from one export of a working link radio. `known-good.structure.json` holds the redacted values. This page lists the settings that make the radio a PTP link, and it names where each secret must come from. No secret or site identity value is in this record.
 
-The export covers one side of the link: the radio that runs the access point (side A). The station side is not captured.
+The export covers one side of the link: the radio that runs the access point (side A). Side B has no export. Its target is in "Side B" below.
 
 ## Link
 
@@ -23,6 +23,34 @@ The export covers one side of the link: the radio that runs the access point (si
 The channel is per link, not fleet policy. Two links in sight of each other need different channels.
 
 The export still holds the 4 fleet SM profiles, with profile use turned off.
+
+## Side A apply
+
+Two bench findings from 2026-09-28 (two TNA-303L-65 units, firmware 1.15.1 rev 8541) apply to side A:
+
+- Rogue-DHCP blocking must be off. The radio rejects `network.zones.wan.dhcp_snooping.block_rogue_servers_enabled: true` while wlan0 runs as an AP (HTTP 400). The export also has `false`. The provisioner sets `false` for side A.
+- The radio needs a reboot after the PTP apply. Without a reboot, the saved config had PTP on, but the radio ran without PTP and had no peer for 4 minutes. The provisioner reboots the radio after the apply and then reads the config back again.
+
+## Side B
+
+Isaac approved this target on 2026-09-29. No side B export exists.
+
+| Setting | Target value |
+|---|---|
+| wlan0 VAP mode (`wireless.radios.wlan0.vaps[0].mode`) | `sta` |
+| PTP mode (`wireless.radios.wlan0.vaps[0].ptp`) | `true` |
+| SSID | the same as side A |
+| Link key | the same as side A |
+| VLAN | none |
+| Management address | DHCP |
+
+All other settings are the same as side A.
+
+## Second radio (wlan1)
+
+wlan1 is the 2.4 GHz radio. It is for management access only, and only when a USB interface is plugged in. It never carries customer traffic. In the export and on both bench units, the wlan1 VAP is in zone `lan` with management on. Zone `wan` is the customer bridge.
+
+A PTP profile changes wlan0 only. No committed fixture records `wireless.radios.wlan1.vaps[0].network.zone`. The provisioner does not check the wlan1 zone until a redacted fixture records that value.
 
 ## Network
 
@@ -49,9 +77,9 @@ A template never holds these values. The placeholder names the source that must 
 
 | Path | Placeholder |
 |---|---|
-| `wireless.radios.wlan0.vaps[0].security.wpapsk.passphrase` | `<secret: per-link PTP key, source not decided>` |
+| `wireless.radios.wlan0.vaps[0].security.wpapsk.passphrase` | `<secret: per-link PTP key, HMAC of link data with the KDF seed (#184)>` |
 | `wireless.radios.wlan0.vaps[0].sta_profiles.profiles[].security.wpapsk.passphrase` | `<secret: host credentials.tachyon.wpa_key>` |
-| `wireless.radios.wlan1.vaps[0].security.wpapsk.passphrase` | `<secret: wlan1 key, purpose not confirmed>` |
+| `wireless.radios.wlan1.vaps[0].security.wpapsk.passphrase` | `<secret: wlan1 management-access key>` |
 | `system.users[].password` (2 accounts) | `<secret: device login from the Ops render-credential contract (sixtyops/treehouse-architecture docs/api-reference/ops-render-credentials.md)>` |
 | `services.snmp.v2.ro.community` | `<secret: host credentials.tachyon.snmp_community>` |
 | `services.snmp.v2.rw.community` | `<secret: host credentials.tachyon.snmp_write_community>` |
@@ -66,6 +94,3 @@ A template never holds these values. The placeholder names the source that must 
 ## Open questions
 
 - Which firmware did the unit run? The export does not say.
-- What does the station side (side B) look like?
-- Where does the per-link PTP key come from?
-- What is `wlan1` for? It runs as a station on an automatic channel, with its own key.
