@@ -1,5 +1,7 @@
 # Business wired profiles — hEX S bench release
 
+Operator procedure and run log: [Business router and switch bench SOP](business-bench-sop.md).
+
 The Business router and Business switch profiles implement the business VLAN
 policy on the E60iUGS ARM hEX S running RouterOS 7.23.5. Other boards remain
 unqualified in this provisioner. Select **Wired modes**, inspect the device,
