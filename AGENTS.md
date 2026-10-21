@@ -124,6 +124,19 @@ The rule covers:
 
 It does not require a rewrite of existing comments.
 
+## Worker models
+
+When you start a worker agent for a small or medium coding task, use Codex Luna (`codex/gpt-6-luna`) at `high` thinking. Use `xhigh` for a harder task: more files, subtle logic, or a failed first attempt. Small and medium tasks include a bug fix, a bounded feature, tests, a script change, docs, and configuration.
+
+Use `codex/gpt-6.1-sol` at `high` for design, architecture, and safety or security work. Split a large task before you start a worker.
+
+```
+paseo run -d --provider codex/gpt-6-luna --thinking high --mode full-access \
+  --title "<repo> #<n>: <task> (luna)" --cwd <worktree> "<prompt>"
+```
+
+The hub policy is in [lead-agent.md](https://github.com/isolson/personal-processes/blob/master/docs/lead-agent.md#worker-models).
+
 ## Anti-patterns (do not do)
 
 - Taking a config value from a chat, a screenshot, or a single field export instead of a committed fixture; or writing a field the contract classifies as a device default
