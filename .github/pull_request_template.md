@@ -9,7 +9,6 @@
 ## Verification
 
 - [ ] `python scripts/check_docs.py`
-- [ ] `python scripts/check_py39.py`
 - [ ] `python scripts/check_templates.py`
 - [ ] `python scripts/check_bench_evidence.py --all --repo-only`
 - [ ] `pytest`

@@ -36,7 +36,6 @@ Run these commands from the repository root:
 ```bash
 git status --short
 git rev-parse --short HEAD
-python3 scripts/check_py39.py
 python3 scripts/check_templates.py configs/templates
 python3 scripts/check_docs.py
 git diff --check
