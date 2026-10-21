@@ -58,8 +58,8 @@ workflow checks. Do not make a technician remember a required setting or enter
 it as an optional site value. Keep customer, tower, IP, and credential values
 outside the baseline.
 
-### 5. Python 3.9 target
-No `match`/`case`, no `X | Y` unions (use `Optional[...]` / `Dict[...]`), no `str.removeprefix`, no `datetime.UTC`. CI runs on 3.9; there is no transpile step.
+### 5. Python 3.11 floor
+The bench host runs Python 3.13. Code must run on 3.11, the supported floor: no PEP 695 `type`/generic syntax, no `itertools.batched`, no `typing.override`. CI runs the tests on 3.11 and 3.13; there is no transpile step.
 
 ### 6. Respect the two-path deploy and config migration
 Code deploys to `/opt/provisioner/`; data lives in `/var/lib/provisioner/repo/`; runtime config is `/etc/provisioner/config.yaml`. `scripts/deploy.sh` syncs **code only** — not templates in the repo dir, not `config.yaml`. Pydantic uses default `extra=ignore` (no `extra="forbid"`), so schema changes are migration-safe: stale vendor keys in an existing `config.yaml` parse harmlessly and defaults backfill. Still, note any required host config change in your PR.
@@ -131,7 +131,7 @@ It does not require a rewrite of existing comments.
 - Vendor branching in `base.py` / shared modules instead of a handler property.
 - Introducing another place that enumerates vendors instead of deriving from an existing registry.
 - `{{placeholder}}` syntax in config templates.
-- Python 3.10+ syntax.
+- Python 3.12+ features (the floor is 3.11).
 - Removing a vendor by deleting its handler or firmware-source file but leaving its import / `SOURCE_MAP` / credentials / fingerprint / setup-tools per-vendor dict entries (S1 crash or S2 silent breakage).
 - Generalizing the Evolution Digital side-door or MikroTik netinstall/OUI gating.
 - Reordering fingerprint probes or changing confidence weights without fixture-backed verification.
@@ -143,6 +143,6 @@ It does not require a rewrite of existing comments.
 
 The spec and enum agree, derived consumers update without manual vendor lists,
 resolver and detection tests cover the new hardware and existing siblings, and
-the full suite plus docs/Python 3.9/template/evidence gates pass. Record actual
+the full suite (on 3.11 and 3.13) plus docs/template/evidence gates pass. Record actual
 hardware qualification separately. Adding a model never automatically validates
 its family or authorizes copying captured secrets into a template.

@@ -55,7 +55,7 @@ The default order is preferred for most devices. Only use `config_after_all_firm
   configuration shape. Keep raw HAR files and device backups outside git;
   record redacted facts and regression tests in the repository.
 - Read `docs/mikrotik-netinstall.md` before touching MikroTik Netinstall / BOOTP auto-trigger code — covers the RouterOS 7.20+ quirks (device-mode, `-s` replacing default-config, admin first-login lockout) that took multiple iterations to discover
-- The host runs **Python 3.9** — do not use 3.10+ features (match/case, `X | Y` union types, `datetime.UTC`, `str.removeprefix`)
+- The host runs **Python 3.13** (Debian 13). The supported floor is **3.11**: do not use 3.12+ features (PEP 695 `type`/generic syntax, `itertools.batched`, `typing.override`). CI tests 3.11 and 3.13
 - Test on real hardware when possible. There is no simulator for most vendors.
 
 ## Adding New Vendors or Hardware
@@ -99,7 +99,7 @@ Minimize the chance of leaking credentials, keys, or other private data — espe
 - Echoing/printing a secret value, or passing one as a CLI arg (`sshpass -p`, secrets in argv) instead of via env/stdin — see **Secrets & Private Data** above
 - Adding vendor branching to `base.py` instead of using handler properties
 - Adding a *new* place that enumerates vendors (another hardcoded list/dict or `if device_type == "..."`) instead of deriving from an existing registry — vendor metadata now derives from VendorSpec; do not add a duplicate
-- Using Python 3.10+ syntax (Pi runs 3.9)
+- Using Python 3.12+ features (the floor is 3.11)
 - Forgetting to add new device IPs to the VendorSpec address entry (`provisioner/vendor_registry.py` — `vendor_ips.py` and the boot-ping list derive from it; a missing IP causes 120s detection delay)
 - Putting `{{placeholders}}` in config templates (no substitution engine exists)
 - Only deploying code without copying templates to the repo dir on the Pi
