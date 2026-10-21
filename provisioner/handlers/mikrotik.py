@@ -146,20 +146,84 @@ class MikrotikHandler(BaseHandler):
     async def network_mode_advanced_state(self):
         from . import mikrotik_business
         state = await mikrotik_business.advanced_state(self)
-        return {"options": [
-            {"key": "romon_enabled", "label": "Enable RoMON on Internal access port ether3", "checked": state["romon_enabled"], "description": "A per-device secret is stored privately on the provisioner. All other ports stay excluded."},
-            {"key": "prepare_wireguard", "label": "Prepare and store a WireGuard key", "checked": False, "description": "The interface remains disabled until a management concentrator peer is configured."},
-        ], "status": state["wireguard_status"], "public_key": state["wireguard_public_key"]}
+        options = []
+        # No caller supplies the transient per-device RoMON secret yet, so the
+        # UI cannot enable RoMON. Show the option only while RoMON is on, so the
+        # operator can turn it off.
+        if state["romon_enabled"]:
+            options.append({"key": "romon_enabled", "label": "RoMON on Internal access port ether3", "checked": True, "description": "Clear to disable RoMON. Enabling RoMON needs a per-device secret from the management contract; that path is not available yet."})
+        options.append({"key": "prepare_wireguard", "label": "Prepare on-device management access", "checked": False, "description": "Generates the disabled wg-management key on the device and shows only its public half. No private key is read or stored; the interface stays disabled until a concentrator peer is configured."})
+        return {"options": options, "status": state["wireguard_status"], "public_key": state["wireguard_public_key"]}
 
     @staticmethod
     def validate_network_mode_advanced(options):
         if set(options) - {"romon_enabled", "prepare_wireguard"}:
             raise ValueError("Unknown advanced management option")
+        if options.get("romon_enabled"):
+            # Reject before any device write: no per-device secret source exists.
+            raise ValueError("Enabling RoMON requires a per-device secret from the management contract")
 
     async def apply_network_mode_advanced(self, options):
         from . import mikrotik_business
         self.validate_network_mode_advanced(options)
         return await mikrotik_business.apply_advanced(self, options.get("romon_enabled"), options.get("prepare_wireguard", False))
+
+    async def accept_business_credentials(
+        self,
+        client,
+        *,
+        job_id: str,
+        bench_upstream_sha: str,
+        render_sha256: str,
+        state: str = "unassigned-business-router",
+    ) -> Dict[str, Any]:
+        """Standardize the login through the Ops render-credential contract.
+
+        Releases the per-device ``localadmin`` password transiently, replaces
+        the consumed label login and verifies it (fresh works, old fails), then
+        reports verified completion. This is the credential/deployment
+        acceptance step, kept separate from network-policy verification. It
+        persists no secret and raises on any failure; the device always keeps a
+        working login (see ``mikrotik_business.accept_credentials``). ``client``
+        is a ``RenderCredentialClient`` built from config; when credential
+        acceptance is not configured the caller passes ``None`` and skips this.
+        """
+        from . import mikrotik_business
+        info = await self.get_info()
+        if not info.serial_number:
+            raise ValueError("Device serial is required for credential acceptance")
+        previous_credentials = dict(self.credentials) if isinstance(self.credentials, dict) else None
+        release = await client.release(
+            job_id=job_id,
+            serial=info.serial_number,
+            state=state,
+            board_name=info.model or "",
+            bench_upstream_sha=bench_upstream_sha,
+        )
+        result = await mikrotik_business.accept_credentials(
+            self, release, previous_credentials=previous_credentials
+        )
+        post = await self.network_mode_state()
+        readback_passed = post.get("profile") == "business-v1" and bool(post.get("checks")) and all(post["checks"].values())
+        uploaded_file_removed = await mikrotik_business.uploaded_profile_removed(self)
+        # Attest only verified facts. Send no completion when a check fails;
+        # Ops then keeps the version pending.
+        if not (readback_passed and result["local_login_verified"] and uploaded_file_removed):
+            raise RuntimeError("Credential acceptance checks did not pass; completion not sent")
+        await client.complete(
+            job_id=job_id,
+            serial=info.serial_number,
+            render_sha256=render_sha256,
+            readback_passed=readback_passed,
+            local_login_passed=result["local_login_verified"],
+            uploaded_file_removed=uploaded_file_removed,
+        )
+        return {
+            "credential_accepted": True,
+            "previous_login_disabled": result["previous_login_disabled"],
+            "seed_id": release.seed_id,
+            "secret_version": release.secret_version,
+        }
 
     # Try common MikroTik defaults before failing to UI prompt
     DEFAULT_CREDENTIALS = [
