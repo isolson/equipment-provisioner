@@ -301,6 +301,26 @@ the selected AP or PTP profile, then injects the generated site identity. A
 mode is offered only after the bench recorded both transition directions
 (`provisioner/qualification.py`).**
 
+## ePMP 4600 AP profile (model-scoped)
+
+AP mode is advertised for the **ePMP 4600 only** (not the 4600C or any other
+ePMP model). Its profile is `configs/templates/cambium/ePMP-4K/5.11.1/AP/ePMP_4600/default.json`.
+The resolver uses only that directory for the 4600 and never the family-wide
+`AP/default.json` or `AP/<Direction>/` templates. Apply-mode refuses with
+`409` when the profile is missing from the runtime template directory.
+
+The profile writes the AP role (`wirelessInterfaceMode` 1,
+`wirelessInterfacePTPMode` 0, `wirelessInterfaceProtocolMode` 1), management
+VLAN 12, bridge mode, and the AP sector settings `wirelessStaIsolate`,
+`networkLLDP`/`networkLLDPMode`, `wirelessInterfaceSyncSource`, TDD frame and
+ratio, and maximum MCS. Values trace to the field AP reference
+`bench-evidence/cambium/ePMP_4600/5.10.4` (`ap_profile_witness`). The mode
+workflow injects the SSID and device name (`tw<NN>-<direction>`). Frequency,
+TX power, and antenna gain are per-site and are not in the profile.
+
+AP stays gated until the 4600 5.11.1 manifest records `sm->ap` and `ap->sm`.
+Use the bench override (`docs/BENCH_EVIDENCE.md`) for the first run.
+
 ## Certified ePMP PTP family link profiles
 
 The PTP workflow certifies ePMP 3K and ePMP 4K family pairings. This includes
