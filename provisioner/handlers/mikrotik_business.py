@@ -13,7 +13,25 @@ from pathlib import Path
 
 PROFILE_MARKER = "treehouse-business-v1:"
 PROFILE_ROOT = Path(__file__).resolve().parents[2] / "configs/templates/mikrotik/modes"
-MANAGEMENT_IPS = {"router": "192.168.10.1", "switch": "192.168.10.2"}
+MANAGEMENT_IPS = {"router": "192.168.10.1", "router-sfp": "192.168.10.1", "switch": "192.168.10.2"}
+ROUTER_MODES = ("router", "router-sfp")
+
+# router-sfp is the business router with WAN moved to sfp1: ether1 takes the
+# SFP's Internal access role and ether5 PoE-out is pinned to auto-on. It is
+# derived from business-router.rsc so the VLAN/firewall policy has one source.
+SFP_WAN_EDITS = [
+    ('add bridge=bridge interface=sfp1  pvid=10 ingress-filtering=yes frame-types=admit-only-untagged-and-priority-tagged comment="Internal access"',
+     'add bridge=bridge interface=ether1 pvid=10 ingress-filtering=yes frame-types=admit-only-untagged-and-priority-tagged comment="Internal access"'),
+    ('untagged=ether2,ether3,ether4,ether5,sfp1', 'untagged=ether1,ether2,ether3,ether4,ether5'),
+    ('add interface=ether1      list=WAN', 'add interface=sfp1        list=WAN'),
+    ('add interface=ether1 disabled=no comment="WAN"', 'add interface=sfp1 disabled=no comment="WAN"'),
+    ('/system note set note="treehouse-business-v1:router"', '/interface ethernet poe set [find where name="ether5"] poe-out=auto-on\n'
+     '/system note set note="treehouse-business-v1:router-sfp"'),
+]
+
+
+def wan_port(mode):
+    return "sfp1" if mode == "router-sfp" else "ether1"
 
 # Full import replaces only the preflight-approved bench layout. Users and
 # certificates survive. No reset or factory-default claim is made by this flow.
@@ -43,6 +61,13 @@ CLEANUP = """
 def profile_text(mode):
     if mode not in MANAGEMENT_IPS:
         raise ValueError("Unknown business role")
+    if mode == "router-sfp":
+        text = (PROFILE_ROOT / "business-router.rsc").read_text()
+        for old, new in SFP_WAN_EDITS:
+            if text.count(old) != 1:
+                raise ValueError("business-router.rsc no longer matches the SFP WAN edits")
+            text = text.replace(old, new)
+        return CLEANUP + text
     return CLEANUP + (PROFILE_ROOT / ("business-%s.rsc" % mode)).read_text()
 
 
@@ -70,7 +95,8 @@ async def connect(handler):
 
 def check_expressions(mode):
     """Independent live contract checks, not an import exit-code proxy."""
-    router = mode == "router"
+    router = mode in ROUTER_MODES
+    wan = wan_port(mode)
     checks = {}
     def count(name, path, where, n):
         checks[name] = '[:len [%s find%s]] = %d' % (path, ' where '+where if where else '', n)
@@ -79,9 +105,9 @@ def check_expressions(mode):
     count('bridge_ports', '/interface bridge port', 'bridge="bridge" and pvid=10 and ingress-filtering=yes', 5 if router else 6)
     for port in ['ether2', 'ether4', 'ether5'] + ([] if router else ['ether1']):
         count('trunk_'+port, '/interface bridge port', 'interface="%s" and frame-types=admit-all' % port, 1)
-    for port in ['ether3', 'sfp1']:
+    for port in ['ether3', 'ether1' if mode == 'router-sfp' else 'sfp1']:
         count('access_'+port, '/interface bridge port', 'interface="%s" and frame-types=admit-only-untagged-and-priority-tagged' % port, 1)
-    count('wan_bridge', '/interface bridge port', 'interface="ether1"', 0 if router else 1)
+    count('wan_bridge', '/interface bridge port', 'interface="%s"' % wan, 0 if router else 1)
     for vlan in [10,20,40,70]:
         tagged = 'bridge' if vlan == 10 else ('bridge,ether2,ether4,ether5' if router else 'ether1,ether2,ether4,ether5')
         checks['vlan_%s_tagged'%vlan] = '[:tostr [/interface bridge vlan get [find where dynamic=no and vlan-ids=%d] tagged]] = "%s"' % (vlan,tagged.replace(',', ';'))
@@ -91,7 +117,7 @@ def check_expressions(mode):
     count('nat_count','/ip firewall nat','disabled!=yes',2 if router else 0)
     count('dhcp_servers','/ip dhcp-server','disabled!=yes',4 if router else 0)
     count('dhcp_networks','/ip dhcp-server network','',4 if router else 0)
-    count('dhcp_clients','/ip dhcp-client','disabled!=yes and interface="ether1"',1 if router else 0)
+    count('dhcp_clients','/ip dhcp-client','disabled!=yes and interface="%s"' % wan,1 if router else 0)
     if router:
         for name,vlan,prefix,lease in [('internal',10,24,'12h'),('iot',20,24,'12h'),('guest',40,22,'2h'),('openroam',70,23,'2h')]:
             count('scope_'+name,'/ip dhcp-server network','address="192.168.%d.0/%d" and gateway="192.168.%d.1"'%(vlan,prefix,vlan),1)
@@ -100,6 +126,8 @@ def check_expressions(mode):
         count('unifi_inform','/ip firewall nat','chain=dstnat and action=dst-nat and comment="UniFi controller inform 8080->8089"',1)
         for field,value in [('dst-address','172.233.208.174'),('dst-port','8080'),('to-ports','8089'),('protocol','tcp')]:
             checks['unifi_'+field] = '[:tostr [/ip firewall nat get [find where comment="UniFi controller inform 8080->8089"] %s]] = "%s"' % (field,value)
+        if mode == 'router-sfp':
+            count('wan_list','/interface list member','list="WAN" and interface="%s"' % wan,1)
         count('masquerade','/ip firewall nat','chain=srcnat and action=masquerade and out-interface-list="WAN"',1)
         for name in ['Guest: internet only','OpenRoam: internet only','IoT !-> Internal','IoT !-> Guest','IoT !-> OpenRoam','drop unsolicited WAN']:
             count('isolation_'+name,'/ip firewall filter','comment="%s" and chain=forward and action=drop and disabled!=yes'%name,1)
@@ -118,6 +146,8 @@ def check_expressions(mode):
     checks['ipv6_forwarding'] = '[/ipv6 settings get forward] = false'
     checks['dns'] = '[:tostr [/ip dns get servers]] = "100.126.15.20;9.9.9.9"'
     checks['dns_service'] = '[/ip dns get allow-remote-requests] = %s' % ('true' if router else 'false')
+    if mode == 'router-sfp':
+        checks['poe_ether5'] = '[/interface ethernet poe get [find where name="ether5"] poe-out] = "auto-on"'
     checks['ntp_enabled'] = '[/system ntp client get enabled] = true'
     count('ntp_server','/system ntp client servers','address="100.126.15.28"',1)
     checks['syslog_target'] = '[/system logging action get [find where name="remote"] remote] = 100.126.15.28'
