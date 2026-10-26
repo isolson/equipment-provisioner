@@ -181,8 +181,15 @@ class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
             lambda host, **kwargs: _PinnedHTTPSConnection(host, self.fingerprint, **kwargs), req)
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Do not follow a redirect. A redirect to http:// skips the TLS pin."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
 def _pinned_opener(fingerprint: str) -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(_PinnedHTTPSHandler(fingerprint))
+    return urllib.request.build_opener(_PinnedHTTPSHandler(fingerprint), _RefuseRedirect)
 
 
 # --------------------------------------------------------------------------

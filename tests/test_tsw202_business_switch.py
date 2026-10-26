@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import sys
+import urllib.request
 from argparse import Namespace
 
 import pytest
@@ -249,3 +250,13 @@ def test_https_pin_mismatch_blocks_login_request(monkeypatch, capsys):
         api.login()
     assert password not in capsys.readouterr().out
 
+
+
+def test_pinned_opener_does_not_follow_redirect_to_plain_http():
+    opener = tsw202_business_switch._pinned_opener("a" * 64)
+    handler = next(h for h in opener.handlers
+                   if isinstance(h, urllib.request.HTTPRedirectHandler))
+    request = urllib.request.Request("https://192.0.2.1/api/login",
+                                     headers={"Authorization": "Bearer token"})
+
+    assert handler.redirect_request(request, None, 302, "Found", {}, "http://192.0.2.9/") is None
