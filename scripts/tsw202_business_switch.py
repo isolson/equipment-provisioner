@@ -582,11 +582,11 @@ class Runner(object):
                 self._w("POST", "/api/interfaces/config", data, "F2: add management interface %s on VLAN %s" % (self.mgmt_ip, mv))
             # F3: swap the bench port's untagged VLAN; both items in one request, verified by reachability.
             cur = self._vlan_sections()
-            ops = [{"method": "PUT", "endpoint": "/api/port_based_vlan/config/%s" % cur["1"]["id"], "data": {bench: "off"}},
-                   {"method": "PUT", "endpoint": "/api/port_based_vlan/config/%s" % cur[mv]["id"], "data": {bench: "u"}}]
             if self.dry:
                 log("  [dry-run] F3: swap %s untagged VLAN 1 -> %s, then reach %s" % (bench, mv, self.mgmt_ip))
                 return
+            ops = [{"method": "PUT", "endpoint": "/api/port_based_vlan/config/%s" % cur["1"]["id"], "data": {bench: "off"}},
+                   {"method": "PUT", "endpoint": "/api/port_based_vlan/config/%s" % cur[mv]["id"], "data": {bench: "u"}}]
             try:
                 self._w("POST", "/api/bulk", ops, "F3: swap %s untagged VLAN 1 -> %s" % (bench, mv), timeout=30,
                         tolerate_drop=True)
