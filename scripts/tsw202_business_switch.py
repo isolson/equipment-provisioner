@@ -23,11 +23,13 @@ passed on a command line.
 
 Example (unit 2, site placeholder):
     sudo /opt/provisioner/venv/bin/python scripts/tsw202_business_switch.py \\
-        --cred-file /root/tsw202-unit2.env --unit 2 --site lakeview \\
+        --cred-file /root/tsw202-unit2.env --serial DEVICE_SERIAL --unit 2 --site lakeview \\
+        --trust-new-cert \\
         --firmware-dir /var/tmp/tsw202
 """
 
 import argparse
+import http.client
 import hashlib
 import json
 import os
@@ -37,6 +39,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -47,11 +50,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PROFILE = os.path.join(HERE, "tsw202_business_switch_profile.json")
 NETNS = "tsw202bs"
 MACVLAN = "tsw202mv"
+DEFAULT_PIN_FILE = "/var/lib/provisioner/tsw202-pins.json"
 STAGES = ("backup", "firmware", "hardening", "vlans", "move", "readback")
 
 
 class StepError(Exception):
     """A write or check failed; the run stops and reports the state."""
+
+
+class CertificatePinError(StepError):
+    """TLS peer certificate does not match the approved device pin."""
 
 
 def log(msg: str) -> None:
@@ -71,6 +79,110 @@ def load_env(path: str) -> Dict[str, str]:
             parts = shlex.split(value)
             env[key] = parts[0] if parts else ""
     return env
+
+
+def normalize_fingerprint(value: str) -> str:
+    fingerprint = value.replace(":", "").strip().lower()
+    if len(fingerprint) != 64 or any(c not in "0123456789abcdef" for c in fingerprint):
+        raise StepError("certificate fingerprint must be 64 hexadecimal characters")
+    return fingerprint
+
+
+def peer_fingerprint(host: str, timeout: float = 5) -> str:
+    """Read a TLS peer certificate without sending an HTTP request."""
+    context = ssl._create_unverified_context()
+    with socket.create_connection((host, 443), timeout=timeout) as raw_sock:
+        with context.wrap_socket(raw_sock, server_hostname=host) as tls_sock:
+            cert = tls_sock.getpeercert(binary_form=True)
+    if not cert:
+        raise StepError("switch did not present a TLS certificate")
+    return hashlib.sha256(cert).hexdigest()
+
+
+def _read_pins(path: str) -> Dict[str, str]:
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return {}
+    if st.st_uid != os.geteuid() or st.st_mode & 0o077:
+        raise StepError("TLS pin file must be owned by the current user and mode 600")
+    try:
+        with open(path) as fh:
+            pins = json.load(fh)
+    except (OSError, ValueError):
+        raise StepError("TLS pin file is unreadable or invalid")
+    if not isinstance(pins, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in pins.items()):
+        raise StepError("TLS pin file has an invalid structure")
+    return {serial: normalize_fingerprint(pin) for serial, pin in pins.items()}
+
+
+def _write_pins(path: str, pins: Dict[str, str]) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".tsw202-pins-", dir=parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump(pins, fh, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def pin_peer(host: str, serial: str, pin_file: str, trust_new_cert: bool = False,
+             expected_fingerprint: Optional[str] = None) -> str:
+    fingerprint = peer_fingerprint(host)
+    expected = normalize_fingerprint(expected_fingerprint) if expected_fingerprint else None
+    if expected and expected != fingerprint:
+        raise CertificatePinError("TLS certificate does not match --cert-sha256 for serial %s" % serial)
+    pins = _read_pins(pin_file)
+    current = pins.get(serial)
+    if current == fingerprint:
+        return fingerprint
+    if current and not (trust_new_cert or expected):
+        raise CertificatePinError(
+            "TLS certificate pin mismatch for serial %s; refusing credentials. Verify the device and "
+            "re-run with --trust-new-cert on the direct bench link if approved" % serial)
+    if not current and not (trust_new_cert or expected):
+        raise StepError("no TLS pin for serial %s; use --trust-new-cert or --cert-sha256" % serial)
+    pins[serial] = fingerprint
+    _write_pins(pin_file, pins)
+    log("tls: recorded SHA-256 pin for serial %s" % serial)
+    return fingerprint
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, fingerprint: str, **kwargs: Any) -> None:
+        self.fingerprint = fingerprint
+        context = kwargs.pop("context", None) or ssl._create_unverified_context()
+        super().__init__(host, context=context, **kwargs)
+
+    def connect(self) -> None:
+        super().connect()
+        cert = self.sock.getpeercert(binary_form=True) if self.sock else None
+        actual = hashlib.sha256(cert).hexdigest() if cert else ""
+        if actual != self.fingerprint:
+            self.close()
+            raise CertificatePinError("TLS certificate pin mismatch; refusing request")
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, fingerprint: str) -> None:
+        self.fingerprint = fingerprint
+        super().__init__(context=ssl._create_unverified_context())
+
+    def https_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(
+            lambda host, **kwargs: _PinnedHTTPSConnection(host, self.fingerprint, **kwargs), req)
+
+
+def _pinned_opener(fingerprint: str) -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_PinnedHTTPSHandler(fingerprint))
 
 
 # --------------------------------------------------------------------------
@@ -102,22 +214,27 @@ def netns_down() -> None:
 # --------------------------------------------------------------------------
 
 class Api(object):
-    def __init__(self, host: str, username: str, password: str) -> None:
+    def __init__(self, host: str, username: str, password: str, fingerprint: str) -> None:
         self.base = "https://%s" % host
         self._user = username
         self._pass = password
         self._token: Optional[str] = None
         self._token_time = 0.0
-        self.ctx = ssl._create_unverified_context()
+        self.fingerprint = fingerprint
+        self.opener = _pinned_opener(fingerprint)
 
     def _raw(self, method: str, path: str, body: Optional[bytes], headers: Dict[str, str],
              timeout: float = 30) -> Tuple[int, bytes]:
         req = urllib.request.Request(self.base + path, data=body, headers=headers, method=method)
         try:
-            resp = urllib.request.urlopen(req, context=self.ctx, timeout=timeout)
+            resp = self.opener.open(req, timeout=timeout)
             return resp.status, resp.read()
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read()
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, CertificatePinError):
+                raise exc.reason
+            raise StepError("HTTPS request failed (%s)" % type(exc.reason).__name__)
 
     def login(self) -> None:
         body = json.dumps({"username": self._user, "password": self._pass}).encode()
@@ -202,11 +319,15 @@ class Api(object):
         return raw
 
 
-def probe(host: str, timeout: float = 4) -> Optional[Dict[str, Any]]:
-    ctx = ssl._create_unverified_context()
+def probe(host: str, fingerprint: str, timeout: float = 4) -> Optional[Dict[str, Any]]:
     try:
-        resp = urllib.request.urlopen("https://%s/api/unauthorized/status" % host, context=ctx, timeout=timeout)
+        opener = _pinned_opener(fingerprint)
+        resp = opener.open("https://%s/api/unauthorized/status" % host, timeout=timeout)
         return (json.loads(resp.read()) or {}).get("data")
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, CertificatePinError):
+            raise exc.reason
+        return None
     except Exception:
         return None
 
@@ -263,14 +384,30 @@ class Runner(object):
         self.password = env["TSW202_LABEL_PASSWORD"]
         self.api: Optional[Api] = None
         self.changes: List[str] = []
+        self._allow_pin_update = bool(args.trust_new_cert or args.cert_sha256)
 
     # -- helpers ----------------------------------------------------------
     def connect(self, quiet: bool = False) -> str:
         for host in (self.mgmt_ip, self.p["factory_address"]):
-            info = probe(host)
+            try:
+                fingerprint = pin_peer(host, self.args.serial, self.args.pin_file,
+                                       self._allow_pin_update and self.args.trust_new_cert,
+                                       self.args.cert_sha256 if self._allow_pin_update else None)
+            except CertificatePinError:
+                raise
+            except (OSError, socket.timeout):
+                continue
+            info = probe(host, fingerprint)
             if info and info.get("device_model") == self.p["model"]:
-                self.api = Api(host, self.user, self.password)
+                observed_serial = info.get("serial") or (info.get("mnfinfo") or {}).get("serial")
+                if observed_serial and str(observed_serial) != self.args.serial:
+                    raise StepError("device serial does not match the requested TLS pin serial")
+                self.api = Api(host, self.user, self.password, fingerprint)
                 self.api.login()
+                serial = self.api.get("/api/system/device/status")["mnfinfo"]["serial"]
+                if str(serial) != self.args.serial:
+                    raise StepError("authenticated device serial does not match the requested TLS pin serial")
+                self._allow_pin_update = False
                 if not quiet:
                     log("reached %s at %s" % (info.get("device_model"), host))
                 return host
@@ -447,6 +584,9 @@ class Runner(object):
                 if version == fw["version"]:
                     log("firmware: now %s" % version)
                     return
+            except CertificatePinError as exc:
+                raise StepError("TLS certificate changed after firmware reboot; %s. Re-run with "
+                                "--trust-new-cert on the direct bench link after verifying the device." % exc)
             except Exception:
                 pass
             time.sleep(15)
@@ -632,10 +772,23 @@ class Runner(object):
         deadline = time.time() + seconds
         while time.time() < deadline:
             time.sleep(8)
-            info = probe(host)
+            try:
+                fingerprint = pin_peer(host, self.args.serial, self.args.pin_file,
+                                       False, None)
+            except CertificatePinError:
+                raise
+            except (OSError, socket.timeout):
+                continue
+            info = probe(host, fingerprint)
             if info and info.get("device_model") == self.p["model"]:
-                self.api = Api(host, self.user, self.password)
+                observed_serial = info.get("serial") or (info.get("mnfinfo") or {}).get("serial")
+                if observed_serial and str(observed_serial) != self.args.serial:
+                    raise StepError("device serial does not match the requested TLS pin serial")
+                self.api = Api(host, self.user, self.password, fingerprint)
                 self.api.login()
+                serial = self.api.get("/api/system/device/status")["mnfinfo"]["serial"]
+                if str(serial) != self.args.serial:
+                    raise StepError("authenticated device serial does not match the requested TLS pin serial")
                 return
         raise StepError("switch not reachable at %s within %ds" % (host, seconds))
 
@@ -830,9 +983,13 @@ class Runner(object):
 def parse_args(argv: List[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Apply the business-switch profile to a Teltonika TSW202 (bench tool).")
     ap.add_argument("--cred-file", required=True, help="root-only env file with TSW202_LABEL_USERNAME/TSW202_LABEL_PASSWORD")
+    ap.add_argument("--serial", required=True, help="expected device serial used to select its TLS certificate pin")
     ap.add_argument("--unit", type=int, required=True, help="switch number at the site (1 -> 192.168.10.2)")
     ap.add_argument("--site", default="business", help="site name for the th.{site}.swNN hostname")
     ap.add_argument("--dry-run", action="store_true", help="read and plan only; no writes")
+    ap.add_argument("--pin-file", default=DEFAULT_PIN_FILE, help="root-only JSON file for per-serial TLS pins")
+    ap.add_argument("--trust-new-cert", action="store_true", help="explicitly trust and record this serial's current certificate")
+    ap.add_argument("--cert-sha256", help="expected TLS certificate SHA-256 fingerprint")
     ap.add_argument("--profile", default=DEFAULT_PROFILE)
     ap.add_argument("--iface", default="enp3s0.1993", help="host provisioning VLAN interface for the switch port")
     ap.add_argument("--firmware-dir", default="/var/tmp/tsw202")

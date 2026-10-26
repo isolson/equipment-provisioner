@@ -1,3 +1,11 @@
+import json
+import os
+import stat
+import sys
+from argparse import Namespace
+
+import pytest
+
 from scripts import tsw202_business_switch
 from scripts.tsw202_business_switch import Runner
 
@@ -142,4 +150,102 @@ def test_snmp_community_validation_error_does_not_echo_generated_value(monkeypat
         assert "details withheld" in str(exc)
     else:
         raise AssertionError("SNMP validation failure should stop the run")
+
+
+def test_tls_pin_match_passes(tmp_path, monkeypatch):
+    serial = "1234567890"
+    fingerprint = "a" * 64
+    pin_file = str(tmp_path / "pins.json")
+    tsw202_business_switch._write_pins(pin_file, {serial: fingerprint})
+    monkeypatch.setattr(tsw202_business_switch, "peer_fingerprint", lambda host: fingerprint)
+
+    assert tsw202_business_switch.pin_peer("192.0.2.1", serial, pin_file) == fingerprint
+
+
+def test_tls_pin_mismatch_stops_before_login_or_credentials(monkeypatch, tmp_path, capsys):
+    serial = "1234567890"
+    tsw202_business_switch._write_pins(str(tmp_path / "pins.json"), {serial: "a" * 64})
+    monkeypatch.setattr(tsw202_business_switch, "peer_fingerprint", lambda host: "b" * 64)
+    monkeypatch.setattr(tsw202_business_switch, "probe", lambda host, fingerprint: pytest.fail("probe must not run"))
+    monkeypatch.setattr(tsw202_business_switch, "Api", lambda *args: pytest.fail("credentials must not be sent"))
+    runner = Runner.__new__(Runner)
+    runner.args = Namespace(serial=serial, pin_file=str(tmp_path / "pins.json"),
+                             trust_new_cert=False, cert_sha256=None)
+    runner.mgmt_ip = "192.0.2.1"
+    runner.p = {"factory_address": "192.0.2.2"}
+    runner.user = "label-user"
+    runner.password = "test-password-value"
+    runner._allow_pin_update = False
+
+    with pytest.raises(tsw202_business_switch.CertificatePinError):
+        runner.connect()
+    output = capsys.readouterr().out
+    assert "test-password-value" not in output
+
+
+def test_tls_without_pin_or_explicit_trust_stops_before_request(monkeypatch, tmp_path):
+    monkeypatch.setattr(tsw202_business_switch, "peer_fingerprint", lambda host: "c" * 64)
+
+    with pytest.raises(tsw202_business_switch.StepError, match="no TLS pin"):
+        tsw202_business_switch.pin_peer("192.0.2.1", "1234567890", str(tmp_path / "pins.json"))
+
+
+def test_trust_new_certificate_records_root_only_pin(tmp_path, monkeypatch, capsys):
+    serial = "1234567890"
+    fingerprint = "d" * 64
+    pin_file = str(tmp_path / "pins.json")
+    monkeypatch.setattr(tsw202_business_switch, "peer_fingerprint", lambda host: fingerprint)
+
+    assert tsw202_business_switch.pin_peer("192.0.2.1", serial, pin_file, trust_new_cert=True) == fingerprint
+    assert tsw202_business_switch._read_pins(pin_file) == {serial: fingerprint}
+    assert stat.S_IMODE(os.stat(pin_file).st_mode) == 0o600
+    assert "test-password-value" not in capsys.readouterr().out
+
+
+def test_explicit_trust_can_replace_a_changed_pin(tmp_path, monkeypatch):
+    serial = "1234567890"
+    pin_file = str(tmp_path / "pins.json")
+    tsw202_business_switch._write_pins(pin_file, {serial: "d" * 64})
+    monkeypatch.setattr(tsw202_business_switch, "peer_fingerprint", lambda host: "e" * 64)
+
+    assert tsw202_business_switch.pin_peer("192.0.2.1", serial, pin_file, trust_new_cert=True) == "e" * 64
+    assert tsw202_business_switch._read_pins(pin_file) == {serial: "e" * 64}
+
+
+def test_login_password_is_not_in_argv_or_logs(monkeypatch, capsys):
+    password = "test-password-value"
+
+    class Response:
+        status = 200
+
+        def read(self):
+            return b'{"data":{"token":"test-token"}}'
+
+    class Opener:
+        def open(self, request, timeout):
+            assert json.loads(request.data.decode())["password"] == password
+            return Response()
+
+    api = tsw202_business_switch.Api("192.0.2.1", "label-user", password, "e" * 64)
+    api.opener = Opener()
+    monkeypatch.setattr(sys, "argv", ["tsw202_business_switch.py"])
+
+    api.login()
+
+    assert password not in sys.argv
+    assert password not in capsys.readouterr().out
+
+
+def test_https_pin_mismatch_blocks_login_request(monkeypatch, capsys):
+    password = "test-password-value"
+
+    def reject_connection(self):
+        raise tsw202_business_switch.CertificatePinError("pin mismatch")
+
+    monkeypatch.setattr(tsw202_business_switch._PinnedHTTPSConnection, "connect", reject_connection)
+    api = tsw202_business_switch.Api("192.0.2.1", "label-user", password, "f" * 64)
+
+    with pytest.raises(tsw202_business_switch.CertificatePinError):
+        api.login()
+    assert password not in capsys.readouterr().out
 

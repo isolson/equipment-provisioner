@@ -149,14 +149,24 @@ treehouse-architecture). The file lists each TSW202 deviation from it.
 ```bash
 # Plan only (no device writes)
 sudo /opt/provisioner/venv/bin/python scripts/tsw202_business_switch.py \
-    --cred-file /root/tsw202-unit2.env --unit 2 --site lakeview \
+    --cred-file /root/tsw202-unit2.env --serial DEVICE_SERIAL --unit 2 --site lakeview \
+    --trust-new-cert \
     --firmware-dir /var/tmp/tsw202 --dry-run
 
 # Apply
 sudo /opt/provisioner/venv/bin/python scripts/tsw202_business_switch.py \
-    --cred-file /root/tsw202-unit2.env --unit 2 --site lakeview \
+    --cred-file /root/tsw202-unit2.env --serial DEVICE_SERIAL --unit 2 --site lakeview \
     --firmware-dir /var/tmp/tsw202
 ```
+
+Before it sends a credential or API request, the tool reads the TLS peer
+certificate and checks its SHA-256 pin for --serial. The pin file defaults to
+/var/lib/provisioner/tsw202-pins.json and is mode 0600. Use --trust-new-cert
+on the direct bench link for first use or after an approved certificate
+change. The tool records the pin before login. Every HTTPS request checks the
+same pin. A mismatch during a run stops the tool; it does not accept a changed
+certificate automatically. --cert-sha256 can pin a fingerprint that the
+operator has verified out of band.
 
 **What it does:**
 1. Creates a temporary network namespace with a macvlan on `--iface`
