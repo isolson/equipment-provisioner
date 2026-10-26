@@ -34,3 +34,42 @@ def test_factory_dry_run_plans_swap_when_management_vlan_is_new(capsys):
 
     assert "F3: swap port1 untagged VLAN 1 -> 10" in capsys.readouterr().out
 
+
+class NtpApi:
+    def __init__(self):
+        self.servers = [
+            {"id": "ntp1", "hostname": "time1.google.com"},
+            {"id": "ntp2", "hostname": "time2.google.com"},
+            {"id": "ntp3", "hostname": "time3.google.com"},
+            {"id": "ntp4", "hostname": "time4.google.com"},
+        ]
+        self.operations = []
+        self.max_entries = len(self.servers)
+
+    def get(self, path):
+        assert path == "/api/date_time/ntp/time_servers/config"
+        return list(self.servers)
+
+    def write(self, method, path, data=None):
+        assert path.startswith("/api/date_time/ntp/time_servers/config")
+        if method == "DELETE":
+            self.servers = [server for server in self.servers if server["id"] != path.rsplit("/", 1)[1]]
+        elif method == "POST":
+            assert len(self.servers) < 4
+            self.servers.append({"id": "new%d" % len(self.servers), "hostname": data["hostname"]})
+        else:
+            raise AssertionError("unexpected method %s" % method)
+        self.operations.append(method)
+        self.max_entries = max(self.max_entries, len(self.servers))
+
+
+def test_ntp_reconcile_frees_slots_before_adding():
+    runner = Runner.__new__(Runner)
+    runner.api = NtpApi()
+
+    runner._reconcile_ntp_servers(["129.6.15.28", "129.6.15.29"])
+
+    assert [server["hostname"] for server in runner.api.servers] == ["129.6.15.28", "129.6.15.29"]
+    assert runner.api.max_entries == 4
+    assert runner.api.operations[:2] == ["DELETE", "POST"]
+

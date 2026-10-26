@@ -291,6 +291,31 @@ class Runner(object):
             return
         self.api.write("PUT", path, diff)
 
+    def _reconcile_ntp_servers(self, wanted: List[str]) -> None:
+        assert self.api is not None
+        path = "/api/date_time/ntp/time_servers/config"
+        for host in wanted:
+            servers = self.api.get(path) or []
+            if any(server.get("hostname") == host for server in servers):
+                continue
+            while len(servers) >= 4:
+                extra = next((server for server in servers if server.get("hostname") not in wanted), None)
+                if extra is None:
+                    raise StepError("no slot available for NTP server %s" % host)
+                self.api.write("DELETE", "%s/%s" % (path, extra["id"]))
+                servers = self.api.get(path) or []
+            self.api.write("POST", path, {"hostname": host})
+
+        for _ in range(32):
+            remaining = self.api.get(path) or []
+            extra = next((server for server in remaining if server.get("hostname") not in wanted), None)
+            if not extra:
+                return
+            if len(remaining) <= 1:
+                raise StepError("cannot remove the last NTP server")
+            self.api.write("DELETE", "%s/%s" % (path, extra["id"]))
+        raise StepError("could not remove extra NTP servers")
+
     # -- stages -------------------------------------------------------------
     def backup(self) -> None:
         assert self.api is not None
@@ -384,16 +409,7 @@ class Runner(object):
             if self.dry:
                 log("  [dry-run] NTP servers %s -> %s" % (have, wanted))
             else:
-                # The device refuses to delete its last server: add first, then prune.
-                for host in wanted:
-                    if host not in have:
-                        self.api.write("POST", "/api/date_time/ntp/time_servers/config", {"hostname": host})
-                for _ in range(32):
-                    remaining = self.api.get("/api/date_time/ntp/time_servers/config") or []
-                    extra = [s for s in remaining if s.get("hostname") not in wanted]
-                    if not extra:
-                        break
-                    self.api.write("DELETE", "/api/date_time/ntp/time_servers/config/%s" % extra[0]["id"])
+                self._reconcile_ntp_servers(wanted)
         self.ensure("/api/date_time/ntp/client/config/ntpclient", {"enabled": "1"}, label="ntp client")
         logging_cfg = self.api.get("/api/logging/config")[0]
         if (logging_cfg.get("remote_logger") or []) != h["remote_syslog"]:
