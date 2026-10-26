@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import shlex
 import socket
 import ssl
@@ -316,6 +317,83 @@ class Runner(object):
             self.api.write("DELETE", "%s/%s" % (path, extra["id"]))
         raise StepError("could not remove extra NTP servers")
 
+    def _reconcile_snmp(self, desired: Dict[str, Any], remove_communities: bool = True) -> None:
+        """Set SNMP modes and restrict communities to loopback when firmware requires one."""
+        assert self.api is not None
+        agent_path = "/api/snmp/agent/config/general"
+        v4_path = "/api/snmp/communities/config"
+        v6_path = "/api/snmp/communities_v6/config"
+        current = self.api.get(agent_path)
+        diff = {k: v for k, v in desired.items() if current.get(k) != v}
+        communities = (self.api.get(v4_path) or []) + (self.api.get(v6_path) or [])
+        def loopback_ro(entry: Dict[str, Any]) -> bool:
+            return (entry.get("secname") == "ro" and entry.get("ipaddr") == "127.0.0.1" and
+                    entry.get("netmask") in ("32", "255.255.255.255"))
+        v4_entries = self.api.get(v4_path) or []
+        safe_entries = [entry for entry in v4_entries if loopback_ro(entry)]
+
+        if (diff or communities) and not safe_entries:
+            self.changes.append("temporary localhost-only SNMP community")
+            if self.dry:
+                log("  [dry-run] would add a localhost-only SNMP community, set agent modes, then remove remote communities")
+            else:
+                # RutOS 10.4 rejects an agent update when enabled and no community
+                # exists. Add a random, loopback-only entry for the transition.
+                # Keep the generated value out of logs and error messages.
+                try:
+                    temp_community = secrets.token_hex(15)
+                    self.api.write("POST", v4_path, {
+                        "community": temp_community,
+                        "secname": "ro",
+                        "ipaddr": "127.0.0.1",
+                        "netmask": "32",
+                    })
+                    entries = self.api.get(v4_path) or []
+                    if not any(loopback_ro(entry) for entry in entries):
+                        for entry in entries:
+                            if entry.get("community") != temp_community:
+                                continue
+                            self.api.write("DELETE", "%s/%s" % (v4_path, entry["id"]))
+                        raise StepError("temporary SNMP community did not read back as loopback-only")
+                except StepError:
+                    # Validation responses may echo the community field.
+                    raise StepError("temporary SNMP community creation failed (details withheld)")
+
+        self.ensure(agent_path, desired, label="snmp agent after lldp")
+
+        # Remove communities only after the agent modes are set. This ordering
+        # also leaves the intended enabled-but-inert profile on firmware 10.4.
+        if remove_communities:
+            # Firmware 10.4 rejects deletion of the last IPv4 community while
+            # the agent is enabled. Keep only a read-only entry bound to loopback.
+            for _ in range(16):
+                entries = self.api.get(v4_path) or []
+                extra = next((entry for entry in entries if not loopback_ro(entry)), None)
+                if not extra:
+                    break
+                if self.dry:
+                    for entry in entries:
+                        if not loopback_ro(entry):
+                            log("  [dry-run] DELETE %s/%s" % (v4_path, entry["id"]))
+                    break
+                self.api.write("DELETE", "%s/%s" % (v4_path, extra["id"]))
+            else:
+                raise StepError("could not remove non-loopback SNMP communities")
+            for _ in range(16):
+                entries = self.api.get(v6_path) or []
+                if not entries:
+                    break
+                if self.dry:
+                    for entry in entries:
+                        log("  [dry-run] DELETE %s/%s" % (v6_path, entry["id"]))
+                    break
+                self.api.write("DELETE", "%s/%s" % (v6_path, entries[0]["id"]))
+            else:
+                raise StepError("could not empty %s" % v6_path)
+            remaining = self.api.get(v4_path) or []
+            if remaining:
+                log("snmp: kept %d loopback-only read-only community entry/entries; firmware requires one while enabled" % len(remaining))
+
     # -- stages -------------------------------------------------------------
     def backup(self) -> None:
         assert self.api is not None
@@ -383,23 +461,6 @@ class Runner(object):
         self.ensure("/api/access_control/cli/config/general", {"enabled": h["web_cli_enabled"]}, label="web shell")
         self.ensure("/api/access_control/ssh/config/general", {"enable_key_ssh": h["ssh_auth_mode"]}, label="ssh auth")
         self.ensure("/api/snmp/trap/global", {"enabled": h["snmp_trap_enabled"]}, label="snmp traps")
-        if h.get("remove_snmp_communities"):
-            # Anonymous UCI sections (cfgNNxxxx) renumber after each delete, so
-            # re-read the list before every delete instead of iterating a stale one.
-            for ep in ("/api/snmp/communities/config", "/api/snmp/communities_v6/config"):
-                for _ in range(16):
-                    entries = self.api.get(ep) or []
-                    if not entries:
-                        break
-                    entry = entries[0]
-                    self.changes.append("delete %s/%s" % (ep, entry["id"]))
-                    if self.dry:
-                        for e in entries:
-                            log("  [dry-run] DELETE %s/%s" % (ep, e["id"]))
-                        break
-                    self.api.write("DELETE", "%s/%s" % (ep, entry["id"]))
-                else:
-                    raise StepError("could not empty %s" % ep)
         # NTP servers
         servers = self.api.get("/api/date_time/ntp/time_servers/config") or []
         wanted = list(h["ntp_servers"])
@@ -424,7 +485,7 @@ class Runner(object):
         if not self.dry:
             time.sleep(3)
         # Firmware 10.2 keeps the SNMP agent on while LLDP is on; the profile sets it inert.
-        self.ensure("/api/snmp/agent/config/general", h["snmp_agent"], label="snmp agent after lldp")
+        self._reconcile_snmp(h["snmp_agent"], h.get("remove_snmp_communities", False))
         self.ensure("/api/ports_settings/global", {"lldp_filter": h["lldp_filter"]}, label="lldp filter")
         # Per-port settings
         port_cfg = {e["id"]: e for e in self.api.get("/api/ports_settings/config")}
@@ -690,7 +751,11 @@ class Runner(object):
         chk("snmp traps disabled", a.get("/api/snmp/trap/global").get("enabled") == h["snmp_trap_enabled"])
         v4 = a.get("/api/snmp/communities/config") or []
         v6 = a.get("/api/snmp/communities_v6/config") or []
-        chk("snmp communities removed", not v4 and not v6, "v4=%d v6=%d" % (len(v4), len(v6)))
+        communities_safe = not v6 and all(
+            entry.get("secname") == "ro" and entry.get("ipaddr") == "127.0.0.1" and
+            entry.get("netmask") in ("32", "255.255.255.255") for entry in v4)
+        chk("snmp communities absent or loopback-only", communities_safe,
+            "v4=%d v6=%d" % (len(v4), len(v6)))
         chk("snmp v2c factory community unanswered (probe)", snmp_v2c_unanswered(self.mgmt_ip, "public"))
         ntp = [s.get("hostname") for s in a.get("/api/date_time/ntp/time_servers/config") or []]
         chk("ntp servers", ntp == h["ntp_servers"], ",".join(ntp))

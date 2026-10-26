@@ -1,3 +1,4 @@
+from scripts import tsw202_business_switch
 from scripts.tsw202_business_switch import Runner
 
 
@@ -72,4 +73,73 @@ def test_ntp_reconcile_frees_slots_before_adding():
     assert [server["hostname"] for server in runner.api.servers] == ["129.6.15.28", "129.6.15.29"]
     assert runner.api.max_entries == 4
     assert runner.api.operations[:2] == ["DELETE", "POST"]
+
+
+class SnmpApi:
+    def __init__(self):
+        self.agent = {"enabled": "1", "v1mode": "1", "v2cmode": "1", "v3mode": None}
+        self.communities = []
+        self.operations = []
+
+    def get(self, path):
+        if path == "/api/snmp/agent/config/general":
+            return dict(self.agent)
+        if path == "/api/snmp/communities/config":
+            return list(self.communities)
+        if path == "/api/snmp/communities_v6/config":
+            return []
+        raise AssertionError("unexpected GET %s" % path)
+
+    def write(self, method, path, data=None):
+        if method == "POST" and path == "/api/snmp/communities/config":
+            self.communities.append(dict(data, id="temporary"))
+        elif method == "PUT" and path == "/api/snmp/agent/config/general":
+            self.agent.update(data)
+        elif method == "DELETE" and path == "/api/snmp/communities/config/temporary":
+            self.communities = []
+        else:
+            raise AssertionError("unexpected write %s %s" % (method, path))
+        self.operations.append((method, path, data))
+
+
+def test_snmp_reconcile_keeps_loopback_community_as_firmware_requires(monkeypatch):
+    runner = Runner.__new__(Runner)
+    runner.api = SnmpApi()
+    runner.dry = False
+    runner.changes = []
+    monkeypatch.setattr(tsw202_business_switch.secrets, "token_hex", lambda size: "a" * (size * 2))
+
+    runner._reconcile_snmp({"enabled": "1", "v1mode": "0", "v2cmode": "0", "v3mode": "1"})
+
+    assert [op[0] for op in runner.api.operations] == ["POST", "PUT"]
+    temporary = runner.api.operations[0][2]
+    assert temporary["secname"] == "ro"
+    assert temporary["ipaddr"] == "127.0.0.1"
+    assert temporary["netmask"] == "32"
+    assert len(temporary["community"]) == 30
+    assert runner.api.agent == {"enabled": "1", "v1mode": "0", "v2cmode": "0", "v3mode": "1"}
+    assert len(runner.api.communities) == 1
+
+
+def test_snmp_community_validation_error_does_not_echo_generated_value(monkeypatch):
+    class RejectingApi(SnmpApi):
+        def write(self, method, path, data=None):
+            if method == "POST":
+                raise tsw202_business_switch.StepError(
+                    'POST failed: [{"value":"test-community-secret","error":"invalid"}]')
+            return super().write(method, path, data)
+
+    runner = Runner.__new__(Runner)
+    runner.api = RejectingApi()
+    runner.dry = False
+    runner.changes = []
+    monkeypatch.setattr(tsw202_business_switch.secrets, "token_hex", lambda size: "b" * (size * 2))
+
+    try:
+        runner._reconcile_snmp({"enabled": "1", "v1mode": "0", "v2cmode": "0", "v3mode": "1"})
+    except tsw202_business_switch.StepError as exc:
+        assert "test-community-secret" not in str(exc)
+        assert "details withheld" in str(exc)
+    else:
+        raise AssertionError("SNMP validation failure should stop the run")
 
