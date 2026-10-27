@@ -10,16 +10,22 @@ reporting success.
 
 | Network | VLAN | Router gateway | Switch behavior |
 | --- | --- | --- | --- |
-| Internal / management | 10, native untagged | 192.168.10.1/24 | Management 192.168.10.2/24; gateway 192.168.10.1 |
+| Internal / management | 10, native untagged | 192.168.10.1/24 | Management address by DHCP from the router |
 | IoT | 20, tagged | 192.168.20.1/24 | Bridged on trunks |
 | Guest | 40, tagged | 192.168.40.1/22 | Bridged on trunks |
 | OpenRoam | 70, tagged | 192.168.70.1/23 | Bridged on trunks |
 
-- Router: ether1 is WAN. Switch: ether1 is the trusted uplink trunk.
-- ether2, ether4 and ether5 are trunks: native 10, tagged 20/40/70.
-- ether3 and SFP are Internal access ports. No forced PoE changes are made.
+- Router: ether1 is WAN. ether2, ether4 and ether5 are trunks: native 10,
+  tagged 20/40/70. ether3 and SFP are Internal access ports.
+- Switch: every port is the same. ether1 to ether5 and SFP carry native 10
+  and tagged 20/40/70. An uplink, an AP, a UniFi switch or a PC can use any
+  port. The switch has no WAN interface list.
+- No forced PoE changes are made.
 - Router supplies DHCP on all four networks, WAN NAT and the standard
   inter-network firewall. Switch has no DHCP server, NAT or IP forwarding.
+- The router keeps DHCP snooping. The switch turns it off: with any port as
+  the uplink, no single port can be the trusted one, and snooping would drop
+  the router's DHCP replies to clients behind the switch.
 - SSH, HTTPS and Winbox are restricted to Internal. HTTP, FTP, Telnet and API
   services are disabled. IPv6 forwarding and input are blocked until a
   business IPv6 policy is defined.
@@ -28,9 +34,16 @@ reporting success.
 - Current device credentials are retained. Identity is serial-bound and
   unassigned; no customer, site slot or inventory claim is created.
 
-The switch address is the first-switch default. Do not install two units at
-192.168.10.2 on one business LAN. Additional switch addressing needs an explicit
-profile before deployment.
+The switch takes its management address on VLAN 10 by DHCP from the business
+router, with the default route from the lease. DNS and NTP stay on the fixed
+servers above (`use-peer-dns=no`, `use-peer-ntp=no`). There is no static
+address or route, so any number of switches can share one business LAN with
+the same profile. Find a switch's address in the router's DHCP leases. The
+management firewall still accepts input only from 192.168.10.0/24 on
+`vlan10-internal`.
+
+This differs from the business switch standard, which gives each switch a
+fixed address (sw01 = .2, sw02 = .3) and a fixed uplink port.
 
 ## Advanced management
 
@@ -60,8 +73,12 @@ The business subnet overlaps the host LAN. Device connections bind both the
 isolated interface and a 192.168.10.254/32 source. No host LAN route is replaced.
 The MikroTik handler selects ARP discovery using the existing bench source;
 the shared detection flow consumes that capability. Previous vendor probe
-ordering is retained; the two business addresses are appended to MikroTik's
-registered address list.
+ordering is retained; the business addresses are appended to MikroTik's
+registered address list. 192.168.10.2 stays in that list so a switch with the
+older fixed-address profile can still be detected and re-applied. A switch with
+the current profile is found by its DHCP address after an apply. A fresh
+detection finds it only at a registered address. The port presence check uses
+the same ARP source for any business LAN address.
 
 For tagged traffic, bench switch port 1 uses PVID 1991, `tag-stacking=yes` and
 `frame-types=admit-all`. This carries inner customer VLANs inside that port's
@@ -70,7 +87,16 @@ verify equivalent isolation before testing tagged traffic on another port.
 
 The executor imports a complete bench profile over SFTP/SSH. It runs RouterOS
 syntax dry-run first, applies on-device across the management-address change,
-reconnects, checks identity and policy, then removes the uploaded file. Dynamic
+reconnects, checks identity and policy, then removes the uploaded file.
+
+The router comes back at 192.168.10.1. The switch comes back at an address
+from the router's DHCP pool. Before import, the executor reads the serial and
+the MAC address of every switch port. After import, it sends ARP from
+192.168.10.254 on the bench interface to each 192.168.10.x address, except the
+router and the bench source. It connects only to an address that replies with
+one of those MACs. It then refuses the result unless the serial matches. The
+switch needs a DHCP server on its Internal VLAN, so a switch alone on a bench
+port without a business router fails readback. Dynamic
 firewall counter rules survive cleanup; old static bridge VLAN rows are removed
 before rebuilding the profile. An import exit code alone never means success.
 
@@ -91,14 +117,17 @@ Ops epic and [configuration handoff](ops-config-handoff.md).
 
 The router asset is adapted from the [canonical business router configuration](https://github.com/sixtyops/treehouse-architecture/blob/0121b9ccc7a13fc2627a8f5deaa091b241465552/docs/operations/business-router-canonical.rsc)
 and [business router standard](https://github.com/sixtyops/treehouse-architecture/blob/0121b9ccc7a13fc2627a8f5deaa091b241465552/docs/operations/business-router-standard.md).
-The switch applies the VLAN, addressing and L2 policy from the [business switch standard](https://github.com/sixtyops/treehouse-architecture/blob/0121b9ccc7a13fc2627a8f5deaa091b241465552/architecture/48-business-switch.md),
-adapted to the verified E60iUGS ports. These code-owned mode assets are under
+The switch applies the VLAN and L2 policy from the [business switch standard](https://github.com/sixtyops/treehouse-architecture/blob/0121b9ccc7a13fc2627a8f5deaa091b241465552/architecture/48-business-switch.md),
+adapted to the verified E60iUGS ports. Its DHCP management address and
+any-port layout differ from that standard's fixed addresses and fixed uplink. These code-owned mode assets are under
 `configs/templates/mikrotik/modes/`; they are not standard deep-merge templates
 or site renderers. Their deployment includes these assets under `/opt/provisioner`.
 
 The [evidence record](../bench-evidence/mikrotik/hEX_S/7.23.5/capture-summary.md)
 contains the initial flat-profile history and subsequent business-profile checks.
-Router passed 66 configuration checks; switch passed 48. All four router VLANs
+Router passed 66 configuration checks. The switch passed 48 with the earlier
+fixed-address profile (192.168.10.2, ether1 trusted uplink). The current
+any-port DHCP switch profile is not yet verified on hardware. All four router VLANs
 returned DHCP offers from their correct scopes. Only Internal replied to gateway
 ICMP; IoT, Guest and OpenRoam did not. RoMON enable/disable, private key storage,
 and router/key persistence across a software reboot passed.

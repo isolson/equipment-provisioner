@@ -478,6 +478,8 @@ register(VendorSpec(
     # MikroTik default subnet; devices often use DHCP instead. The
     # post-miss fallback subnets (192.168.0.1, 10.0.0.1) are probe
     # *behavior* and stay in port_manager.DeviceLinkLocalIP.MIKROTIK_FALLBACKS.
+    # 192.168.10.1 is the business router. 192.168.10.2 is the older
+    # fixed-address business switch profile; current switches use DHCP.
     link_local_ips=("192.168.88.1", "192.168.10.1", "192.168.10.2"),
     # No config_template_dir: configured via netinstall/ZTP .rsc scripts,
     # not deep-merge templates (documented exception).
