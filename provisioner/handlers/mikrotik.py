@@ -110,7 +110,11 @@ class MikrotikHandler(BaseHandler):
     def _validate_network_mode_layout(state: Dict[str, Any]) -> None:
         """Refuse to repurpose an unknown model or overwrite a custom layout."""
         if state.get("profile") == "business-v1":
-            if (state.get("model"), state.get("architecture"), state.get("firmware")) != ("hEX S", "arm", "7.23.5") or not state.get("checks", {}).get("physical_ports"):
+            from .mikrotik_business import firmware_refusal
+            refusal = firmware_refusal(state.get("firmware"))
+            if refusal:
+                raise ValueError(refusal)
+            if (state.get("model"), state.get("architecture")) != ("hEX S", "arm") or not state.get("checks", {}).get("physical_ports"):
                 raise ValueError("Unqualified business profile hardware")
             return
         expected = {
@@ -131,6 +135,18 @@ class MikrotikHandler(BaseHandler):
 
     def validate_network_mode_layout(self, state: Dict[str, Any]) -> None:
         self._validate_network_mode_layout(state)
+
+    @staticmethod
+    def network_mode_firmware_refusal(firmware: Optional[str]) -> Optional[str]:
+        """Return why wired modes refuse *firmware*, or None if it is allowed."""
+        from .mikrotik_business import firmware_refusal
+        return firmware_refusal(firmware)
+
+    @staticmethod
+    def network_mode_evidence_firmware(firmware: Optional[str]) -> Optional[str]:
+        """Return the release whose bench evidence covers *firmware*."""
+        from .mikrotik_business import evidence_firmware
+        return evidence_firmware(firmware)
 
     async def apply_network_mode(self, mode: str) -> Dict[str, Any]:
         """Apply and verify the complete hardware-qualified business profile."""

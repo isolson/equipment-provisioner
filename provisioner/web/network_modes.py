@@ -70,13 +70,20 @@ async def _operate(request, port_number, change: Optional[NetworkModeRequest] = 
         pm.update_port_device_info(port_number, serial=info.serial_number,
                                    model=info.model, firmware_version=info.firmware_version)
         state = await handler.network_mode_state()
+        refusal = getattr(handler, "network_mode_firmware_refusal", None)
+        reason = refusal(state.get("firmware")) if refusal else None
+        if reason:
+            raise HTTPException(409, reason)
         handler.validate_network_mode_layout(state)
         model = state.get("model")
         firmware = str(state.get("firmware") or "").split()[0]
+        # The handler can map an allowed release to the bench record that covers it.
+        evidence = getattr(handler, "network_mode_evidence_firmware", None)
+        evidence_firmware = (evidence(firmware) or "") if evidence else firmware
         labels = handler.network_mode_labels_for_model(model)
         transitions = frozenset((source, target) for source in labels for target in labels if source != target)
         requirements = {mode: transitions for mode in labels}
-        choices = qualified_modes(status["device_type"], model, firmware, labels, requirements)
+        choices = qualified_modes(status["device_type"], model, evidence_firmware, labels, requirements)
         if change:
             if change.device_token != token:
                 raise HTTPException(409, "Device or firmware changed; inspect the port again")

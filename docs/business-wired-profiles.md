@@ -1,10 +1,33 @@
 # Business wired profiles — hEX S bench release
 
 The Business router and Business switch profiles implement the business VLAN
-policy on the E60iUGS ARM hEX S running RouterOS 7.23.5. Other boards remain
-unqualified in this provisioner. Select **Wired modes**, inspect the device,
-choose its role, and apply. The executor reads the configuration back before
-reporting success.
+policy on the E60iUGS ARM hEX S. Other boards remain unqualified in this
+provisioner. Select **Wired modes**, inspect the device, choose its role, and
+apply. The executor reads the configuration back before reporting success.
+
+## Allowed RouterOS releases
+
+The profiles accept two RouterOS releases:
+
+- 7.23.5, the bench-qualified release.
+- The latest long-term release that the firmware checker knows.
+
+The MikroTik firmware source reads the latest long-term release from
+`upgrade.mikrotik.com` on each firmware check, whatever channel the host
+config selects. The value lives in memory only. After a service start, the
+first check runs about 10 seconds later. The firmware checker and its
+`mikrotik` source must be enabled in `/etc/provisioner/config.yaml`.
+
+If the checker has not reached MikroTik (offline, disabled, or not run yet),
+the latest long-term release is unknown. Then only 7.23.5 is allowed, and the
+refusal message says so. Any other release is refused. A suffix such as
+`7.23.8 (long-term)` is read as `7.23.8`.
+
+Allowing a release is not hardware qualification. A unit on the latest
+long-term release uses the 7.23.5 bench record to decide which roles it is
+offered. No bench capture exists for that release. The
+[evidence record](../bench-evidence/mikrotik/hEX_S/7.23.5/capture-summary.md)
+stays at 7.23.5 until a new capture is committed.
 
 ## Policy and port map
 

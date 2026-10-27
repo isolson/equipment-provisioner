@@ -31,8 +31,8 @@ async def test_mikrotik_source_includes_wifi_qcom_for_ax_architectures(monkeypat
     source = MikrotikFirmwareSource({"channel": "stable", "models": ["arm", "mipsbe"]})
 
     async def fake_fetch(_session, channel):
-        assert channel == "stable"
-        return "7.22.2", "2026-05-01"
+        assert channel in ("stable", "long-term")
+        return ("7.22.2" if channel == "stable" else "7.20.8"), "2026-05-01"
 
     async def fake_exists(_session, url):
         return (
@@ -86,8 +86,8 @@ async def test_mikrotik_source_maps_release_alias_to_stable(monkeypatch):
     source = MikrotikFirmwareSource({"channel": "release", "models": ["all"]})
 
     async def fake_fetch(_session, channel):
-        assert channel == "stable"
-        return "7.21.2", "2026-02-07"
+        assert channel in ("stable", "long-term")
+        return ("7.21.2" if channel == "stable" else "7.20.8"), "2026-02-07"
 
     async def fake_exists(_session, url):
         return "routeros-arm64-7.21.2.npk" in url

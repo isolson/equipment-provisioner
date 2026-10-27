@@ -46,6 +46,47 @@ def profile_text(mode):
     return CLEANUP + (PROFILE_ROOT / ("business-%s.rsc" % mode)).read_text()
 
 
+# RouterOS releases with a bench evidence record for these profiles.
+QUALIFIED_FIRMWARE = ("7.23.5",)
+
+
+def _version(value):
+    """Return the bare release: "7.23.8 (long-term)" becomes "7.23.8"."""
+    parts = str(value or "").split()
+    return parts[0] if parts else ""
+
+
+def firmware_refusal(firmware):
+    """Return why the profiles refuse *firmware*, or None if it is allowed.
+
+    Allowed: a bench-qualified release, or the latest long-term release the
+    firmware checker knows. Allowing a release does not qualify it on hardware.
+    """
+    from ..firmware_sources.mikrotik import latest_known_version
+    version = _version(firmware)
+    latest = _version(latest_known_version("long-term"))
+    if version and (version in QUALIFIED_FIRMWARE or version == latest):
+        return None
+    qualified = ", ".join(QUALIFIED_FIRMWARE)
+    if not latest:
+        return ("RouterOS %s is not allowed for business profiles. The latest long-term "
+                "release is unknown because the firmware checker has not reached MikroTik, "
+                "so only bench-qualified %s is allowed." % (version or "unknown", qualified))
+    return ("RouterOS %s is not allowed for business profiles. Allowed: latest long-term "
+            "%s or bench-qualified %s." % (version or "unknown", latest, qualified))
+
+
+def evidence_firmware(firmware):
+    """Return the release whose bench evidence covers *firmware*, or None.
+
+    A unit on the latest long-term release uses the newest bench record.
+    """
+    if firmware_refusal(firmware):
+        return None
+    version = _version(firmware)
+    return version if version in QUALIFIED_FIRMWARE else QUALIFIED_FIRMWARE[-1]
+
+
 async def ensure_source(handler):
     """Use an interface-only /32; never install a route to the host's LAN."""
     if not handler.interface:
@@ -146,7 +187,10 @@ async def apply(handler, mode):
     await ensure_source(handler)
     info=await handler.get_info()
     serial=info.serial_number
-    if not serial or info.model!='hEX S' or info.hardware_version!='arm' or info.firmware_version!='7.23.5':
+    refusal=firmware_refusal(info.firmware_version)
+    if refusal:
+        raise ValueError(refusal)
+    if not serial or info.model!='hEX S' or info.hardware_version!='arm':
         raise ValueError('Unqualified business hardware or firmware')
     remote='business-profile.rsc'
     async with handler._ssh.start_sftp_client() as sftp:
