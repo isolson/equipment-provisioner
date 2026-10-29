@@ -16,7 +16,8 @@ Follow `AGENTS.md` and its `CLAUDE.md` symlink. Your scope is source code, redac
 
 ### Must not do
 
-- Do not run `scripts/deploy.sh` or SSH commands. Deploys, host access, and real-hardware tests are operator work.
+- Do not run `scripts/deploy.sh`. Deploys and real-hardware tests are operator work.
+- Loop agents do not run SSH commands. An interactive agent may SSH to the provisioner host only when the operator asks for it in that session. Read the current state first, and read it back after each change.
 - Never merge a PR or cancel a CI run.
 - Never echo, log, commit, or pass as a command-line argument a secret: device passwords, `MIKROTIK_ZTP_API_KEY`, the bootstrap password or onboarding passphrase, RADIUS secrets, keys, tokens, or PSKs. Inject via environment or stdin. Extract only the field needed from a credential response; confirm presence by length or mask.
 - Store a shared or fetched secret only in a gitignored `.context/*.env` file with mode `600`. Never store secrets in memory or the transcript. If one leaks, scrub reachable artifacts (task outputs, `/tmp`, history) and report what leaked and where without repeating its value. Never rotate fleet-wide MikroTik bootstrap or onboarding secrets.
