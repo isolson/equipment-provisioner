@@ -1075,7 +1075,7 @@ class PortManager:
         if ports_to_ping:
             async def ping_check(port_num: int, config: PortConfig, state: PortState) -> None:
                 """Ping a device and update state."""
-                if await self._ping_device(config.interface_name, state.device_ip):
+                if await self._device_present(config.interface_name, state):
                     # Device responded - reset failure counter
                     state.ping_failures = 0
                     state.last_seen = time.time()
@@ -1546,6 +1546,23 @@ class PortManager:
         except Exception as e:
             logger.debug(f"Neighbor lookup failed for {ip} on {interface}: {e}")
         return None
+
+    async def _device_present(self, interface: str, state: "PortState") -> bool:
+        """Check that a detected device still answers at its current address.
+
+        A device can move off its registered default, for example to a DHCP
+        management lease after a wired-mode change. Its handler can still
+        require ARP from a given source for that address.
+        """
+        ip = state.device_ip
+        if not any(known_ip == ip for known_ip, _ in DeviceLinkLocalIP.ALL):
+            from .handler_manager import HandlerManager
+            handler_cls = HandlerManager.handler_class_for(state.device_type)
+            source_hook = getattr(handler_cls, "discovery_arp_source", None)
+            source_ip = source_hook(ip) if source_hook else None
+            if source_ip is not None:
+                return await self._arp_probe(interface, ip, source_ip=source_ip)
+        return await self._ping_device(interface, ip)
 
     async def _ping_device(self, interface: str, ip: str, arp_fallback: bool = True) -> bool:
         """Ping a device through a specific interface."""

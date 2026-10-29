@@ -1,38 +1,42 @@
 # E60iUGS ARM bench profile; see docs/business-wired-profiles.md for provenance.
-# ---- Bridge + VLAN interfaces (Internal is untagged on access/trunk ports) ----
+# ---- Bridge + VLAN interfaces (Internal is untagged on every port) ----
 /interface bridge
-# dhcp-snooping blocks rogue DHCP server replies from LAN ports (the router is the only
-# legit DHCP server). VLAN filtering keeps Guest and OpenRoam off the untagged LAN.
-add name=bridge auto-mac=yes dhcp-snooping=yes vlan-filtering=yes comment="LAN bridge (untagged = Internal VLAN 10)"
+# Any port can be the uplink, so no single port can be the trusted one. With
+# snooping on, the switch would drop the router's DHCP replies to clients
+# behind it. The router keeps its own DHCP snooping.
+# VLAN filtering keeps Guest and OpenRoam off the untagged LAN.
+add name=bridge auto-mac=yes dhcp-snooping=no vlan-filtering=yes comment="LAN bridge (untagged = Internal VLAN 10)"
 /interface vlan
 add interface=bridge name=vlan10-internal vlan-id=10
 
 # ---- Ports ----
-# Exact E60iUGS port map. PoE settings are retained; no forced power.
+# Every port is the same: native Internal VLAN 10, tagged 20/40/70. An uplink,
+# AP, UniFi switch or PC can use any port. PoE settings are retained; no forced power.
 /interface bridge port
-add bridge=bridge interface=ether1 pvid=10 ingress-filtering=yes frame-types=admit-all trusted=yes comment="Business switch uplink"
-add bridge=bridge interface=ether2 pvid=10 ingress-filtering=yes frame-types=admit-all comment="UniFi switch uplink (trunk)"
-add bridge=bridge interface=ether3 pvid=10 ingress-filtering=yes frame-types=admit-only-untagged-and-priority-tagged comment="Internal access"
-add bridge=bridge interface=ether4 pvid=10 ingress-filtering=yes frame-types=admit-all comment="AP trunk"
-add bridge=bridge interface=ether5 pvid=10 ingress-filtering=yes frame-types=admit-all comment="AP trunk"
-add bridge=bridge interface=sfp1  pvid=10 ingress-filtering=yes frame-types=admit-only-untagged-and-priority-tagged comment="Internal access"
+add bridge=bridge interface=ether1 pvid=10 ingress-filtering=yes frame-types=admit-all comment="Any role"
+add bridge=bridge interface=ether2 pvid=10 ingress-filtering=yes frame-types=admit-all comment="Any role"
+add bridge=bridge interface=ether3 pvid=10 ingress-filtering=yes frame-types=admit-all comment="Any role"
+add bridge=bridge interface=ether4 pvid=10 ingress-filtering=yes frame-types=admit-all comment="Any role"
+add bridge=bridge interface=ether5 pvid=10 ingress-filtering=yes frame-types=admit-all comment="Any role"
+add bridge=bridge interface=sfp1  pvid=10 ingress-filtering=yes frame-types=admit-all comment="Any role"
 /interface bridge vlan
 add bridge=bridge vlan-ids=10 tagged=bridge untagged=ether1,ether2,ether3,ether4,ether5,sfp1
-add bridge=bridge vlan-ids=20 tagged=ether1,ether2,ether4,ether5
-add bridge=bridge vlan-ids=40 tagged=ether1,ether2,ether4,ether5
-add bridge=bridge vlan-ids=70 tagged=ether1,ether2,ether4,ether5
+add bridge=bridge vlan-ids=20 tagged=ether1,ether2,ether3,ether4,ether5,sfp1
+add bridge=bridge vlan-ids=40 tagged=ether1,ether2,ether3,ether4,ether5,sfp1
+add bridge=bridge vlan-ids=70 tagged=ether1,ether2,ether3,ether4,ether5,sfp1
+# A switch has no WAN, so there is no WAN interface list.
 /interface list
-add name=WAN
 add name=LAN
 add name=MGMT
 /interface list member
-add interface=ether1      list=WAN
 add interface=vlan10-internal list=LAN
 add interface=vlan10-internal list=MGMT
 
-# ---- Switch management: first switch on the business LAN ----
-/ip address add address=192.168.10.2/24 interface=vlan10-internal
-/ip route add dst-address=0.0.0.0/0 gateway=192.168.10.1 comment="business management gateway"
+# ---- Switch management: DHCP lease from the business router ----
+# No fixed address, so any number of switches can share one business LAN.
+# DNS and NTP stay on the fixed servers below, not the router's.
+/ip dhcp-client
+add interface=vlan10-internal add-default-route=yes use-peer-dns=no use-peer-ntp=no disabled=no comment="business management lease"
 
 # ---- DNS (numeric resolver addresses support RouterOS field limitations) ----
 /ip dns
