@@ -88,4 +88,5 @@ history.db
 
 # Claude Code workspace state (vendored skills are committed)
 .claude/*
+!.claude/settings.json
 !.claude/skills/
