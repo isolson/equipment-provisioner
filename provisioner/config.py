@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, ClassVar, Optional, Dict
+from typing import Any, ClassVar, Optional, Dict, List
 
 import yaml
 from pydantic import BaseModel, Field, create_model, field_validator
@@ -83,6 +83,10 @@ class PortsConfig(BaseModel):
     """Port/VLAN configuration for multi-device provisioning."""
     vlan_start: int = Field(default=1991, ge=1, le=4094)
     num_ports: int = Field(default=6, ge=1, le=48)  # 6 ports for 8-port switch (7=WAN, 8=trunk)
+    # Switch ports the provisioner leaves alone: no VLAN interface, no
+    # detection, no provisioning, no reset. Use for a port that carries
+    # something else, such as an out-of-band device.
+    disabled: List[int] = Field(default_factory=list)
     local_ip: str = "169.254.1.2"
     device_ips: DeviceIPsConfig = Field(default_factory=DeviceIPsConfig)
 
