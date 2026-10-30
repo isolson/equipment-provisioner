@@ -187,6 +187,31 @@ Returns the status of one port.
 
 **Response:** Same shape as one element of the `/ports` array.
 
+### Result reason
+
+`result_reason` is `"login_failed"` when the device refused every login. The
+connection failure kind was `authentication`. Otherwise it is `null`.
+`reset_instruction` is the factory-reset action line for the device. The
+server resolves it from the vendor registry when the run fails.
+
+```json
+{
+  "port_number": 6,
+  "result_reason": "login_failed",
+  "reset_instruction": "Hold the reset button 10 s while the device stays powered.",
+  "presentation": {
+    "phase": "login_failed",
+    "tone": "warning",
+    "headline": "Login failed: reset may resolve",
+    "detail": "Hold the reset button 10 s while the device stays powered."
+  }
+}
+```
+
+The fields stay set while the device reboots after the reset. The next
+provisioning run clears them. The model table is in
+[Troubleshooting](TROUBLESHOOTING.md#login-failed-reset-may-resolve).
+
 ### GET /ports/{port_number}/events
 
 Return the server-owned timeline for one port, oldest first. Query

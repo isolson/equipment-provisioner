@@ -31,6 +31,7 @@ from .handler_manager import HandlerManager
 from .notifier import init_notifier, get_notifier
 from .firmware_checker import init_firmware_checker, get_firmware_checker
 from .port_manager import PortManager, init_port_manager, DeviceLinkLocalIP, ManagementConfig
+from .workflow_actions import result_reason_for
 from . import telemetry
 
 logger = logging.getLogger(__name__)
@@ -826,6 +827,9 @@ class Provisioner:
                 self._run_errors[port_num] = result.error_message
                 self.port_manager.set_needs_credentials(
                     port_num, result.needs_credentials
+                )
+                self.port_manager.set_result_reason(
+                    port_num, result_reason_for(result)
                 )
 
                 # If credentials failed, send special notification to prompt UI

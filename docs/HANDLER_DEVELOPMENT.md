@@ -397,6 +397,10 @@ Each port card shows two zones:
    - `COMPLETE` (green check) — all steps passed
    - `FAILED` (red X) — error with truncated message
    - `NEEDS CREDENTIALS` (red alert) — tap to enter password
+   - `LOGIN FAILED: RESET MAY RESOLVE` (amber alert) — the device refused
+     every login. The detail line is the reset action for the model. A
+     caution line tells the operator to reset only with a saved export and
+     approval. The kiosk retries after the reset reboots the device.
 
 ### Modal (tap a card)
 

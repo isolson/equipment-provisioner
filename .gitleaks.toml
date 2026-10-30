@@ -1,0 +1,16 @@
+# gitleaks configuration. The default rules apply. Each allowlist below
+# covers one finding that is not a secret. Keep each entry narrow: one path
+# and only the rules that match, with the reason.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "SHA-256 source hashes. The line label contains 'credential', so generic-api-key matches a file hash."
+targetRules = ["generic-api-key"]
+paths = ['''^docs/cambium-validation-2026-09-10\.md$''']
+
+[[allowlists]]
+description = "Vendored Brady Web SDK bundle. The match is the public Firebase web config of the Brady SDK, not a key of this project. Two rules match the same value."
+targetRules = ["gcp-api-key", "generic-api-key"]
+paths = ['''^provisioner/web/static/vendor/brady-web-sdk/bundle\.js$''']

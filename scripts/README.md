@@ -136,3 +136,61 @@ sudo ./scripts/update_switch_script.sh
 ```
 
 This is a smaller, targeted update — it does not reconfigure VLANs or bridge settings.
+
+## tsw202_business_switch.py
+
+Bench tool that applies the Treehouse business-switch profile to a Teltonika
+TSW202. It runs ahead of a real handler and is vendor-isolated: it uses no
+provisioner module, registry entry or template. The profile is the data file
+`scripts/tsw202_business_switch_profile.json`. Its authority is the Business
+Switch Standard (`architecture/48-business-switch.md` in
+treehouse-architecture). The file lists each TSW202 deviation from it.
+
+```bash
+# Plan only (no device writes)
+sudo /opt/provisioner/venv/bin/python scripts/tsw202_business_switch.py \
+    --cred-file /root/tsw202-unit2.env --serial DEVICE_SERIAL --unit 2 --site lakeview \
+    --trust-new-cert \
+    --firmware-dir /var/tmp/tsw202 --dry-run
+
+# Apply
+sudo /opt/provisioner/venv/bin/python scripts/tsw202_business_switch.py \
+    --cred-file /root/tsw202-unit2.env --serial DEVICE_SERIAL --unit 2 --site lakeview \
+    --firmware-dir /var/tmp/tsw202
+```
+
+Before it sends a credential or API request, the tool reads the TLS peer
+certificate and checks its SHA-256 pin for --serial. The pin file defaults to
+/var/lib/provisioner/tsw202-pins.json and is mode 0600. Use --trust-new-cert
+on the direct bench link for first use or after an approved certificate
+change. The tool records the pin before login. Every HTTPS request checks the
+same pin. A mismatch during a run stops the tool; it does not accept a changed
+certificate automatically. --cert-sha256 can pin a fingerprint that the
+operator has verified out of band.
+
+**What it does:**
+1. Creates a temporary network namespace with a macvlan on `--iface`
+   (default `enp3s0.1993`, provisioner port 3) holding 192.168.1.250/24 and
+   192.168.10.250/24. Neither address is added to the host namespace. The
+   namespace is removed on exit.
+2. Logs in with the label credentials from `--cred-file`, a root-only env file
+   with the shell-quoted keys `TSW202_LABEL_USERNAME` and
+   `TSW202_LABEL_PASSWORD`. No secret is printed or passed as an argument.
+3. Saves a pre-change configuration backup once per serial under
+   `/root/tsw202-backups/` (mode 0600).
+4. Upgrades to the profile firmware if needed. The image in `--firmware-dir`
+   must match the profile MD5.
+5. Applies the hardening and builds the VLANs with single-item requests
+   (`/api/bulk` is not atomic on this firmware). On a factory unit the bench
+   port keeps untagged VLAN 1 while every other port is built; a second
+   management interface is added on VLAN 10 (`192.168.10.{1+unit}`); only then
+   is the bench port swapped to VLAN 10 and the new address verified. The
+   factory interfaces are then disabled. The factory VLAN 1 section is
+   read-only on the device and stays, empty. If the swap fails partway, move
+   the cable to any other copper port and re-run; no reset is needed.
+6. Reads the configuration back twice from the management address and prints
+   a PASS/FAIL list.
+
+Every write compares the current value first, so a rerun changes only what
+differs. `--stop-after` ends the run after a named stage. The label password
+is not changed; production credentials are a separate step.

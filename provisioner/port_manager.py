@@ -28,6 +28,9 @@ from typing import Any, Deque, Dict, List, Optional, Callable, Awaitable, Tuple,
 from .fingerprint import is_mikrotik_oui
 from .vendor_ips import boot_ping_ips, probe_ip_candidates, registered_vendor_ips
 
+#: PortState.result_reason when the device refused every login.
+RESULT_LOGIN_FAILED = "login_failed"
+
 logger = logging.getLogger(__name__)
 
 
@@ -227,6 +230,11 @@ class PortState:
     last_result: Optional[str] = None  # "success" or "failed"
     last_error: Optional[str] = None  # Error message if failed
     needs_credentials: bool = False  # Last failure needs an operator login
+    # Typed reason for the last failed run (RESULT_LOGIN_FAILED or None).
+    # It stays through the reset reboot (link loss or ping loss), so the
+    # card keeps the reset instruction. The next run start clears it.
+    result_reason: Optional[str] = None
+    reset_instruction: Optional[str] = None  # Resolved reset action line
     checklist: ProvisioningChecklist = field(default_factory=ProvisioningChecklist)  # Step-by-step progress
     # Ordered, run-specific validation plan plus generic status/detail maps.
     # The legacy checklist remains the compatibility surface for existing API
@@ -1232,6 +1240,10 @@ class PortManager:
                             or current_mac is None
                             or current_mac.lower() == state.last_provisioned_mac.lower()
                         )
+                        # A refused login is not a successful provision. The
+                        # device returns after a reset, so do not wait.
+                        if state.result_reason == RESULT_LOGIN_FAILED:
+                            in_cooldown = False
                         if in_cooldown and same_device:
                             elapsed = int(_time.time() - state.last_provisioned_at)
                             remaining = int(self.REPROVISION_COOLDOWN - elapsed)
@@ -1715,6 +1727,8 @@ class PortManager:
             state.provisioning = provisioning
             if provisioning:
                 state.needs_credentials = False
+                state.result_reason = None
+                state.reset_instruction = None
                 state.run_id = "%d-%d" % (port_num, int(time.time()))
                 self.record_event(port_num, "run_started", "Provisioning started", detail=state.device_type)
             if not provisioning:
@@ -1741,6 +1755,28 @@ class PortManager:
             state.needs_credentials = required
             if required:
                 self.record_event(port_num, "credentials_required", "Credentials required")
+
+    def set_result_reason(self, port_num: int, reason: Optional[str]) -> None:
+        """Record why the last run failed and resolve the reset instruction.
+
+        The instruction is resolved now, because a link down clears the
+        device type and model.
+        """
+        from .vendor_registry import reset_action
+
+        state = self.port_states.get(port_num)
+        if not state:
+            return
+        state.result_reason = reason
+        state.reset_instruction = None
+        if reason == RESULT_LOGIN_FAILED:
+            state.reset_instruction = reset_action(
+                state.device_type, state.device_model
+            )
+            self.record_event(
+                port_num, "login_failed", "Login failed",
+                detail=state.reset_instruction,
+            )
 
     def set_expecting_reboot(self, port_num: int, expecting: bool) -> None:
         """Set whether a port is expecting a planned reboot (firmware update).
@@ -2183,6 +2219,8 @@ class PortManager:
             "last_result": state.last_result,
             "last_error": state.last_error,
             "needs_credentials": state.needs_credentials,
+            "result_reason": state.result_reason,
+            "reset_instruction": state.reset_instruction,
             "checklist": state.checklist.to_dict(),
             "step_plan": state.step_plan,
             "step_status": state.step_status,
@@ -2203,6 +2241,8 @@ class PortManager:
     def _reprovision_wait(self, state: PortState, current_time: float) -> int:
         """Seconds until auto-provisioning may run again for the same unit."""
         if not state.last_provisioned_at or state.provisioning or state.last_result:
+            return 0
+        if state.result_reason == RESULT_LOGIN_FAILED:
             return 0
         if state.device_mac and state.last_provisioned_mac and state.device_mac != state.last_provisioned_mac:
             return 0

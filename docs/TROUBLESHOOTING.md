@@ -79,6 +79,39 @@ The provisioner tries credentials in this order:
 journalctl -u provisioner-web -f | grep -i "login\|auth\|credential"
 ```
 
+## Login failed: reset may resolve
+
+**Symptom:** The port card shows "Login failed: reset may resolve", an
+action line, and a caution line. The device refused every login, for example the stored
+credential and the factory credential.
+
+**Before you reset:** Make sure that you have a saved export of this device
+and approval for the reset. A reset can remove the only working recovery path.
+Refer to `docs/hardware-provisioning-sop.md`, section 7. If you do not have a
+saved export, do not reset the device. Tap the card and enter the correct
+credentials, or stop and ask for approval. The card and the modal show this
+caution.
+
+**Fix:** When you have the saved export and the approval, do the action line
+on the card. Do not disconnect the cable. In the
+default case the device also stays powered. The kiosk monitors the port. The reset reboots the device, so the link goes down
+and up, or the device stops and starts to reply to ping. The kiosk then
+starts a new run. The 30-minute reprovision cooldown does not apply. The new
+run clears the message.
+
+The kiosk does not retry while the device stays up and reachable. This
+prevents repeated failed logins and an account lockout. To retry without a
+reset, tap the card and enter the correct credentials.
+
+| Model or family | Action line | Source |
+| --- | --- | --- |
+| Default (all models without a variant, including Cambium ePMP) | Hold the reset button 10 s while the device stays powered. | [Cambium ePMP reset](https://community.cambiumnetworks.com/t/how-can-i-reset-the-epmp-radio-to-default-configuration/37438) |
+| MikroTik (all models) | Remove power, then hold the reset button while you apply power until the LED flashes. | [MikroTik Reset Button](https://help.mikrotik.com/docs/spaces/ROS/pages/24805498/Reset+Button) |
+| Tachyon (TNA-301, TNA-302, TNA-303X, TNA-303L, TNA-305, TNS-100) | Hold the reset button 20 s while the device stays powered. | [TNA-301 and TNA-302 manual](https://tachyon-networks.freshdesk.com/support/solutions/articles/67000670226-tna-301-tna-302-operating-manual) |
+
+Each value is `reset_action` on the vendor or config family entry in
+`provisioner/vendor_registry.py`. Add a row only from vendor documentation.
+
 ## Provisioning Stuck / Never Completes
 
 **Symptom:** Status shows a blue spinner indefinitely on one step.

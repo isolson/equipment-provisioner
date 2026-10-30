@@ -186,6 +186,27 @@ before any `transitions:` row is written:
 5. Run `check_bench_evidence.py` on the host, `redact_bench_fixture.py`, and
    commit the manifest and fixtures.
 
+### Bench override for the first run
+
+A mode stays locked until its transitions are recorded, so the first bench run
+needs a bench override. The override opens named modes for one exact model and
+firmware, for at most 24 hours:
+
+```bash
+sudo python scripts/qualification_override.py set --vendor tachyon \
+  --model TNA-303L-65 --firmware "1.15.1 rev 8541" --modes ptp \
+  --hours 4 --by <name> --reason "<why>" --dry-run
+```
+
+Run it once with `--dry-run`, then again without it. The file
+`/var/lib/provisioner/qualification-override.json` (mode 600) records who set
+the override and when it expires. The provisioner logs both each time the
+override opens a mode. At the first check after the expiry, it deletes the file
+and logs the re-lock. It also deletes a file with a set time in the future or
+an expiry more than 24 hours after the set time. `status` shows the active override. `clear` ends it early.
+Record the transitions in the manifest after the run. The override is not
+evidence.
+
 ## Manifest
 
 The manifest is versioned. It identifies the evidence without storing a device
