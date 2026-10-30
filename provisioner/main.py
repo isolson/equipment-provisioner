@@ -162,6 +162,7 @@ class Provisioner:
             base_interface=self.config.network.interface,
             vlan_start=self.config.ports.vlan_start,
             num_ports=self.config.ports.num_ports,
+            disabled_ports=self.config.ports.disabled,
             local_ip_base=self.config.ports.local_ip,
             management=mgmt_config,
             setup_vlans=self._use_vlan_mode,
