@@ -56,6 +56,16 @@ Production deploys run from a checkout of the `production` branch — the script
 
 The script auto-detects `~/.ssh/id_conductor` and passes `-i KEY -o IdentitiesOnly=yes` to both rsync and the inline ssh calls, so the 1Password-agent issue above doesn't affect it. Override with `SSH_KEY=/path/to/other_key` or set `SSH_OPTS=` to use whatever your `~/.ssh/config` provides.
 
+### Copying config templates (operator only)
+
+The deploy script syncs code, not the active data repo. After deploying code,
+the operator copies changed templates separately. Connect with the SSH access
+settings above, then run on the host:
+
+```bash
+sudo -n cp /opt/provisioner/configs/templates/{vendor}/{file} /var/lib/provisioner/repo/configs/templates/{vendor}/{file}
+```
+
 ## Config files: `/etc` vs `/opt`
 
 `provisioner-web.service` reads its config from `/etc/provisioner/config.yaml` (set in the unit's `ExecStart`). The deploy script rsyncs the repo to `/opt/provisioner/`, which means **`/opt/provisioner/config.yaml` is NOT read at runtime**.
