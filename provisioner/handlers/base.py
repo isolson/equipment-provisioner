@@ -201,6 +201,20 @@ class BaseHandler(ABC):
         """
         return cls.qualified_post_provision_modes
 
+    @classmethod
+    def model_mode_profile_dir(
+        cls, model: Optional[str], mode: str
+    ) -> Optional[str]:
+        """Return the model-scoped profile directory a mode must use.
+
+        A mode profile traced to one model's evidence must not cross-apply
+        to other models of the same family. When this returns a directory
+        name, the mode template resolver looks only under
+        ``{family}/{firmware}/{ROLE}/{dir}/`` and never falls back to the
+        family-wide profile. ``None`` keeps the family-wide resolution.
+        """
+        return None
+
     #: Baseline deployment mode that must be applied and verified during the
     #: standard provisioning run before the unit is deployable or eligible
     #: for a post-provision mode conversion. ``None`` means the handler has no
