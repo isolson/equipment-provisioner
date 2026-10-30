@@ -29,10 +29,10 @@ reporting success.
   unassigned; no customer, site slot or inventory claim is created.
 
 **Business router (SFP WAN)** (`router-sfp`) is the same router policy with
-WAN on sfp1: ether1 takes sfp1's Internal access role, and ether5 PoE-out is
-set to `auto-on`. The handler derives it from `business-router.rsc` with
+WAN on sfp1: ether1 takes sfp1's Internal access role. It makes no PoE
+change. The handler derives it from `business-router.rsc` with
 asserted line edits, so the policy keeps one source. It reads back like the
-router plus the sfp1 WAN, the moved access port, and the PoE state. It is not
+router plus the sfp1 WAN and the moved access port. It is not
 offered on the Wired modes page yet. The page requires evidence for every role
 transition, and adding the label without evidence would un-qualify the existing
 router/switch roles.

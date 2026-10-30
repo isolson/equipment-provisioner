@@ -103,10 +103,10 @@ def test_sfp_wan_router_moves_only_the_wan_port():
         'add bridge=bridge vlan-ids=10 tagged=bridge untagged=ether1,ether2,ether3,ether4,ether5',
         'add interface=sfp1        list=WAN',
         'add interface=sfp1 disabled=no comment="WAN"',
-        '/interface ethernet poe set [find where name="ether5"] poe-out=auto-on',
         '/system note set note="treehouse-business-v1:router-sfp"',
     ]
     assert not any("interface=sfp1 " in line and "bridge" in line for line in sfp)
+    assert not any("poe" in line for line in changed)
 
 
 def test_sfp_wan_router_readback_checks_the_sfp_wan():
@@ -115,10 +115,9 @@ def test_sfp_wan_router_readback_checks_the_sfp_wan():
     assert 'interface="sfp1"' in checks["wan_bridge"] and checks["wan_bridge"].endswith("= 0")
     assert 'interface="sfp1"' in checks["dhcp_clients"] and checks["dhcp_clients"].endswith("= 1")
     assert "access_ether1" in checks and "access_sfp1" not in checks
-    assert "auto-on" in checks["poe_ether5"]
+    assert not any("poe" in check for check in checks.values())
     assert checks["profile_marker"].endswith('"treehouse-business-v1:router-sfp"')
     # The existing router readback is unchanged by the variant.
-    assert "poe_ether5" not in check_expressions("router")
     assert "wan_list" not in check_expressions("router")
 
 

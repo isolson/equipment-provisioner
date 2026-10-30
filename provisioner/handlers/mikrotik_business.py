@@ -17,16 +17,15 @@ MANAGEMENT_IPS = {"router": "192.168.10.1", "router-sfp": "192.168.10.1", "switc
 ROUTER_MODES = ("router", "router-sfp")
 
 # router-sfp is the business router with WAN moved to sfp1: ether1 takes the
-# SFP's Internal access role and ether5 PoE-out is pinned to auto-on. It is
-# derived from business-router.rsc so the VLAN/firewall policy has one source.
+# SFP's Internal access role. It is derived from business-router.rsc so the
+# VLAN/firewall policy has one source. It makes no PoE change.
 SFP_WAN_EDITS = [
     ('add bridge=bridge interface=sfp1  pvid=10 ingress-filtering=yes frame-types=admit-only-untagged-and-priority-tagged comment="Internal access"',
      'add bridge=bridge interface=ether1 pvid=10 ingress-filtering=yes frame-types=admit-only-untagged-and-priority-tagged comment="Internal access"'),
     ('untagged=ether2,ether3,ether4,ether5,sfp1', 'untagged=ether1,ether2,ether3,ether4,ether5'),
     ('add interface=ether1      list=WAN', 'add interface=sfp1        list=WAN'),
     ('add interface=ether1 disabled=no comment="WAN"', 'add interface=sfp1 disabled=no comment="WAN"'),
-    ('/system note set note="treehouse-business-v1:router"', '/interface ethernet poe set [find where name="ether5"] poe-out=auto-on\n'
-     '/system note set note="treehouse-business-v1:router-sfp"'),
+    ('/system note set note="treehouse-business-v1:router"', '/system note set note="treehouse-business-v1:router-sfp"'),
 ]
 
 
@@ -146,8 +145,6 @@ def check_expressions(mode):
     checks['ipv6_forwarding'] = '[/ipv6 settings get forward] = false'
     checks['dns'] = '[:tostr [/ip dns get servers]] = "100.126.15.20;9.9.9.9"'
     checks['dns_service'] = '[/ip dns get allow-remote-requests] = %s' % ('true' if router else 'false')
-    if mode == 'router-sfp':
-        checks['poe_ether5'] = '[/interface ethernet poe get [find where name="ether5"] poe-out] = "auto-on"'
     checks['ntp_enabled'] = '[/system ntp client get enabled] = true'
     count('ntp_server','/system ntp client servers','address="100.126.15.28"',1)
     checks['syslog_target'] = '[/system logging action get [find where name="remote"] remote] = 100.126.15.28'
