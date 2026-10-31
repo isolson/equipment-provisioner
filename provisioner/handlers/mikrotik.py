@@ -142,12 +142,6 @@ class MikrotikHandler(BaseHandler):
         from .mikrotik_business import firmware_refusal
         return firmware_refusal(firmware)
 
-    @staticmethod
-    def network_mode_evidence_firmware(firmware: Optional[str]) -> Optional[str]:
-        """Return the release whose bench evidence covers *firmware*."""
-        from .mikrotik_business import evidence_firmware
-        return evidence_firmware(firmware)
-
     async def apply_network_mode(self, mode: str) -> Dict[str, Any]:
         """Apply and verify the complete hardware-qualified business profile."""
         from . import mikrotik_business

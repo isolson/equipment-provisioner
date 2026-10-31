@@ -22,13 +22,11 @@ def known(version):
 def test_latest_long_term_is_allowed():
     known("7.23.8")
     assert mikrotik_business.firmware_refusal("7.23.8") is None
-    assert mikrotik_business.evidence_firmware("7.23.8") == "7.23.5"
 
 
 def test_qualified_release_is_still_allowed():
     known("7.23.8")
     assert mikrotik_business.firmware_refusal("7.23.5") is None
-    assert mikrotik_business.evidence_firmware("7.23.5") == "7.23.5"
 
 
 @pytest.mark.parametrize("firmware", ["7.23.7", "7.24.1", "", None])
@@ -36,7 +34,6 @@ def test_other_release_is_refused(firmware):
     known("7.23.8")
     reason = mikrotik_business.firmware_refusal(firmware)
     assert "latest long-term 7.23.8" in reason and "7.23.5" in reason
-    assert mikrotik_business.evidence_firmware(firmware) is None
 
 
 def test_unknown_latest_falls_back_to_qualified_list():
@@ -50,7 +47,6 @@ def test_version_suffix_is_parsed():
     known("7.23.8")
     assert mikrotik_business.firmware_refusal("7.23.8 (long-term)") is None
     assert mikrotik_business.firmware_refusal("7.23.5 (long-term)") is None
-    assert mikrotik_business.evidence_firmware("7.23.8 (long-term)") == "7.23.5"
 
 
 def business_state(firmware):
@@ -73,16 +69,14 @@ def test_layout_validation_follows_the_gate():
 def test_handler_exposes_the_gate_to_the_web_flow():
     known("7.23.8")
     assert MikrotikHandler.network_mode_firmware_refusal("7.23.8") is None
-    assert MikrotikHandler.network_mode_evidence_firmware("7.23.8") == "7.23.5"
     assert "not allowed" in MikrotikHandler.network_mode_firmware_refusal("7.24.1")
 
 
-def test_web_flow_shows_the_refusal_and_uses_the_bench_record(monkeypatch):
+def test_web_flow_shows_the_refusal_and_checks_the_detected_firmware(monkeypatch):
     from test_network_mode_api import setup_client
     from provisioner.web import network_modes
     client, handler, _ = setup_client(monkeypatch)
     handler.network_mode_firmware_refusal = MikrotikHandler.network_mode_firmware_refusal
-    handler.network_mode_evidence_firmware = MikrotikHandler.network_mode_evidence_firmware
     looked_up = []
     monkeypatch.setattr(network_modes, "qualified_modes",
                         lambda kind, model, firmware, *a: looked_up.append(firmware) or ("router", "switch"))
@@ -92,7 +86,8 @@ def test_web_flow_shows_the_refusal_and_uses_the_bench_record(monkeypatch):
     response = client.get("/api/network-modes/1")
     assert response.status_code == 200
     assert response.json()["firmware"] == "7.23.8"
-    assert looked_up == ["7.23.5"]
+    # Mode choices come from the bench record of the detected release only.
+    assert looked_up == ["7.23.8"]
 
     source_module._latest_known.clear()
     response = client.get("/api/network-modes/1")

@@ -23,10 +23,13 @@ the latest long-term release is unknown. Then only 7.23.5 is allowed, and the
 refusal message says so. Any other release is refused. A suffix such as
 `7.23.8 (long-term)` is read as `7.23.8`.
 
-Allowing a release is not hardware qualification. A unit on the latest
-long-term release uses the 7.23.5 bench record to decide which roles it is
-offered. No bench capture exists for that release. The
-[evidence record](../bench-evidence/mikrotik/hEX_S/7.23.5/capture-summary.md)
+Allowing a release is not hardware qualification. The page offers a role
+only when a bench manifest for the exact model and release records the
+transition. No bench capture exists for a release after 7.23.5, so the page
+offers no role on it. To run the first transitions at the bench, the operator
+sets a bench override for that exact release (see
+[Bench override for the first run](BENCH_EVIDENCE.md#bench-override-for-the-first-run)).
+The [evidence record](../bench-evidence/mikrotik/hEX_S/7.23.5/capture-summary.md)
 stays at 7.23.5 until a new capture is committed.
 
 ## Policy and port map

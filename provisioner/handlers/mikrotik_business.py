@@ -76,17 +76,6 @@ def firmware_refusal(firmware):
             "%s or bench-qualified %s." % (version or "unknown", latest, qualified))
 
 
-def evidence_firmware(firmware):
-    """Return the release whose bench evidence covers *firmware*, or None.
-
-    A unit on the latest long-term release uses the newest bench record.
-    """
-    if firmware_refusal(firmware):
-        return None
-    version = _version(firmware)
-    return version if version in QUALIFIED_FIRMWARE else QUALIFIED_FIRMWARE[-1]
-
-
 async def ensure_source(handler):
     """Use an interface-only /32; never install a route to the host's LAN."""
     if not handler.interface:
