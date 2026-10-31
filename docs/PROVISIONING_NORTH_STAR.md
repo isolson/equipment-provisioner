@@ -83,7 +83,7 @@ groups. A field that no contract names is a device default.
 | `role` | The SM baseline writes it. Read-back verifies the exact value. These fields define the radio role. |
 | `secret` | Only the handler secret path writes it, from the host credentials. Never in a template. Never logged. Presence only. |
 | `device_default` | Never written. Optionally verified unchanged against the no-config fixture. |
-| `mode_action` | Never in the SM baseline. Only the explicit AP or PTP workflow writes it. |
+| `mode_action` | Never in the SM baseline. Only the explicit AP or PTP workflow writes it. Exception: the Cambium handler writes the detected model as the device name in a standard SM run (see `docs/cambium-config.md`). |
 
 Each handler declares one table (`FIELD_OWNERSHIP`). The shared module
 `provisioner/field_ownership.py` lints templates, derives verification, and
