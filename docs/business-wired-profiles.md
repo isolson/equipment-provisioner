@@ -1,10 +1,36 @@
 # Business wired profiles — hEX S bench release
 
 The Business router and Business switch profiles implement the business VLAN
-policy on the E60iUGS ARM hEX S running RouterOS 7.23.5. Other boards remain
-unqualified in this provisioner. Select **Wired modes**, inspect the device,
-choose its role, and apply. The executor reads the configuration back before
-reporting success.
+policy on the E60iUGS ARM hEX S. Other boards remain unqualified in this
+provisioner. Select **Wired modes**, inspect the device, choose its role, and
+apply. The executor reads the configuration back before reporting success.
+
+## Allowed RouterOS releases
+
+The profiles accept two RouterOS releases:
+
+- 7.23.5, the bench-qualified release.
+- The latest long-term release that the firmware checker knows.
+
+The MikroTik firmware source reads the latest long-term release from
+`upgrade.mikrotik.com` on each firmware check, whatever channel the host
+config selects. The value lives in memory only. After a service start, the
+first check runs about 10 seconds later. The firmware checker and its
+`mikrotik` source must be enabled in `/etc/provisioner/config.yaml`.
+
+If the checker has not reached MikroTik (offline, disabled, or not run yet),
+the latest long-term release is unknown. Then only 7.23.5 is allowed, and the
+refusal message says so. Any other release is refused. A suffix such as
+`7.23.8 (long-term)` is read as `7.23.8`.
+
+Allowing a release is not hardware qualification. The page offers a role
+only when a bench manifest for the exact model and release records the
+transition. No bench capture exists for a release after 7.23.5, so the page
+offers no role on it. To run the first transitions at the bench, the operator
+sets a bench override for that exact release (see
+[Bench override for the first run](BENCH_EVIDENCE.md#bench-override-for-the-first-run)).
+The [evidence record](../bench-evidence/mikrotik/hEX_S/7.23.5/capture-summary.md)
+stays at 7.23.5 until a new capture is committed.
 
 ## Policy and port map
 
