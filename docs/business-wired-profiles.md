@@ -20,7 +20,14 @@ reporting success.
 - ether3 and SFP are Internal access ports. No forced PoE changes are made.
 - Router supplies DHCP on all four networks, WAN NAT and the standard
   inter-network firewall. Switch has no DHCP server, NAT or IP forwarding.
-- SSH, HTTPS and Winbox are restricted to Internal. HTTP, FTP, Telnet and API
+- **Interim exception (router roles):** until the wghub01 WireGuard
+  aggregator exists ([Ops issue #666](https://github.com/sixtyops/treehouse-architecture/issues/666)),
+  SSH is also accepted from server VLAN 15 (`100.126.15.0/24`) over the WAN.
+  The input rule sits before the final drop, and the SSH service lists both
+  `192.168.10.0/24` and `100.126.15.0/24`. Winbox and HTTPS stay Internal-only.
+  This deviates from the business standard's "no management from WAN" by
+  operator decision; remove it when the aggregator is live.
+- Otherwise, SSH, HTTPS and Winbox are restricted to Internal. HTTP, FTP, Telnet and API
   services are disabled. IPv6 forwarding and input are blocked until a
   business IPv6 policy is defined.
 - Syslog and NTP target **100.126.15.28**. DNS uses 100.126.15.20 and 9.9.9.9.
