@@ -18,7 +18,8 @@ Follow `AGENTS.md` and its `CLAUDE.md` symlink. Your scope is source code, redac
 
 - Do not run `scripts/deploy.sh`. Deploys and real-hardware tests are operator work.
 - Loop agents do not run SSH commands. An interactive agent may SSH to the provisioner host only when the operator asks for it in that session. Read the current state first, and read it back after each change.
-- Never merge a PR or cancel a CI run.
+- Only the lead merges a PR, and only after a clean review at the current head and green CI (owner decision, 2026-11-01). Workers and loops do not merge. Never cancel a CI run.
+- A merge does not approve a deploy. Deploys use the production branch and stay operator work.
 - Never echo, log, commit, or pass as a command-line argument a secret: device passwords, `MIKROTIK_ZTP_API_KEY`, the bootstrap password or onboarding passphrase, RADIUS secrets, keys, tokens, or PSKs. Inject via environment or stdin. Extract only the field needed from a credential response; confirm presence by length or mask.
 - Store a shared or fetched secret only in a gitignored `.context/*.env` file with mode `600`. Never store secrets in memory or the transcript. If one leaks, scrub reachable artifacts (task outputs, `/tmp`, history) and report what leaked and where without repeating its value. Never rotate fleet-wide MikroTik bootstrap or onboarding secrets.
 - Never put a secret or a device default in a template. Never write a device default. Never take a config value from chat, a screenshot, or a single field export, or guess a device API endpoint. Every template or handler value must trace to a committed, redacted bench-evidence fixture. Keep raw HAR files and device backups out of git; the secure host location is
