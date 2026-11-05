@@ -1,12 +1,14 @@
 """Handler-driven wired mode inspection and application."""
 import asyncio
 import hashlib
+import os
 from typing import Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from ..equipment_registry import post_factory_login
 from ..fingerprint import DeviceFingerprint, DeviceType
 from ..handler_manager import HandlerManager
 from ..qualification import qualified_modes
@@ -87,7 +89,11 @@ async def _operate(request, port_number, change: Optional[NetworkModeRequest] = 
                 if not validate_options:
                     raise HTTPException(409, "Advanced management is unavailable for this device")
                 validate_options(change.advanced_options)
-            pm.begin_mode_job(port_number, change.mode, [{"key": "apply", "label": "Apply and verify wired mode"}])
+            business_mode = status["device_type"] == "mikrotik" and change.mode in {"router", "switch"}
+            steps = [{"key": "apply", "label": "Apply and verify wired mode"}]
+            if business_mode:
+                steps.append({"key": "factory_login", "label": "Store factory label login"})
+            pm.begin_mode_job(port_number, change.mode, steps)
             job_started = True
             pm.update_mode_job(port_number, "apply", "loading")
             state = await handler.apply_network_mode(change.mode)
@@ -102,6 +108,35 @@ async def _operate(request, port_number, change: Optional[NetworkModeRequest] = 
                 raise HTTPException(409, "The connected device changed during the operation")
             slot.device_ip = handler.ip
             pm.set_device_mode(port_number, state["mode"], {"mode": state["mode"], "verified": True})
+            if business_mode:
+                if not override:
+                    pm.update_mode_job(port_number, "factory_login", True, "no operator login to store")
+                else:
+                    pm.update_mode_job(port_number, "factory_login", "loading")
+                    mac_first = getattr(info, "mac_first", None)
+                    mac_last = getattr(info, "mac_last", None)
+                    intake_result = await post_factory_login(
+                        os.getenv("FACTORY_LOGIN_OPS_URL"),
+                        os.getenv("FACTORY_LOGIN_PROVISIONER_API_KEY"),
+                        info.serial_number,
+                        change.mode,
+                        info.model,
+                        override.username,
+                        override.password,
+                        mac_first,
+                        mac_last,
+                    )
+                    intake_ok = intake_result in {"stored", "already stored"}
+                    pm.update_mode_job(
+                        port_number,
+                        "factory_login",
+                        intake_ok,
+                        intake_result,
+                    )
+                    if not intake_ok:
+                        success = False
+                        http_status = 503 if intake_result == "intake not configured" else 502
+                        raise HTTPException(http_status, "Factory-login intake failed")
             if status.get("needs_credentials"):
                 # This explicit login/role operation resolved the old login
                 # failure, but does not claim a full provisioning run passed.

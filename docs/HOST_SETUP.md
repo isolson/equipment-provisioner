@@ -87,6 +87,8 @@ Secret values live in `/etc/provisioner/provisioner.env` (root, `0600`), which t
 
 The file uses systemd syntax, not shell syntax. Do not `source` it with bash: an unquoted value can cause a syntax error, and bash prints the offending line (the secret) in the error. `scripts/update_switch_script.sh` reads the file with the systemd quoting and escape rules.
 
+Verified business router and switch mode jobs send an operator-supplied factory label login to Ops. Set `FACTORY_LOGIN_OPS_URL` to the Ops API base URL and `FACTORY_LOGIN_PROVISIONER_API_KEY` to the provisioner-only factory-login key in this file. The job reports `intake not configured` and stays incomplete when the key is missing.
+
 ## systemd capabilities
 
 `provisioner-web.service` runs as `root` but with a restrictive `CapabilityBoundingSet`. Two non-obvious capabilities are required:
