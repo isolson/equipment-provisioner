@@ -108,6 +108,7 @@ async def _operate(request, port_number, change: Optional[NetworkModeRequest] = 
                 raise HTTPException(409, "The connected device changed during the operation")
             slot.device_ip = handler.ip
             pm.set_device_mode(port_number, state["mode"], {"mode": state["mode"], "verified": True})
+            pm.update_mode_job(port_number, "apply", True)
             if business_mode:
                 if not override:
                     pm.update_mode_job(port_number, "factory_login", True, "no operator login to store")
@@ -143,7 +144,6 @@ async def _operate(request, port_number, change: Optional[NetworkModeRequest] = 
                 slot.needs_credentials = False
                 slot.last_result = None
                 slot.last_error = None
-            pm.update_mode_job(port_number, "apply", True)
             success = True
         advanced_reader = getattr(handler, "network_mode_advanced_state", None)
         advanced_state = await advanced_reader() if advanced_reader else None

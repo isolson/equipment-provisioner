@@ -120,6 +120,33 @@ def test_factory_login_intake_controls_business_job_completion(
     assert state.mode_finishes[-1][1] is job_success
 
 
+def test_intake_502_marks_apply_complete_and_factory_login_failed(monkeypatch):
+    from types import SimpleNamespace
+
+    client, _, state = setup_client(monkeypatch)
+    monkeypatch.setenv("FACTORY_LOGIN_OPS_URL", "https://ops.example")
+    monkeypatch.setenv("FACTORY_LOGIN_PROVISIONER_API_KEY", "route-key")
+    monkeypatch.setattr(
+        network_modes,
+        "get_credential_override",
+        lambda port: SimpleNamespace(
+            username="label-user", password="label-password", device_type="mikrotik"
+        ),
+    )
+    monkeypatch.setattr(network_modes, "post_factory_login", AsyncMock(return_value="502"))
+    token = client.get("/api/network-modes/1").json()["device_token"]
+
+    response = client.post(
+        "/api/network-modes/1",
+        json={"mode": "switch", "device_token": token},
+    )
+
+    assert response.status_code == 502
+    apply_done = next(update for update in state.mode_updates if update[1:3] == ("apply", True))
+    intake_failed = next(update for update in state.mode_updates if update[1:3] == ("factory_login", False))
+    assert state.mode_updates.index(apply_done) < state.mode_updates.index(intake_failed)
+
+
 def test_private_device_error_is_not_returned(monkeypatch):
     client, handler, state = setup_client(monkeypatch)
     data = client.get('/api/network-modes/1').json()
