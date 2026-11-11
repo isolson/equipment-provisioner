@@ -243,7 +243,12 @@ GPS USB 1 or 0).
 
 Site identity and RF (SSID, hostname, device name, center frequency, TX power,
 TDD frame and ratio, preferred AP list) belong to the AP and PTP workflow.
-They never appear in the SM baseline.
+They never appear in the SM baseline template. One exception is written by
+the handler, not a template: the standard SM run sets `systemConfigDeviceName`
+and `snmpSystemName` to the detected model (`ePMP 4616` becomes `ePMP-4616`),
+so a unit that arrives carrying another model's name (a 4616 named "4518")
+leaves the bench labelled correctly. Unknown SKUs (`ePMP AX (SKU …)`) keep
+their existing name. AP and PTP naming replaces it.
 
 Secrets (admin password, `wirelessInterfaceEncryptionKey`, SNMP community,
 RADIUS) never appear in a template. The handler writes them through

@@ -152,6 +152,9 @@ async def test_cambium_full_export_uses_native_import_and_skip_illegal(tmp_path,
     assert "set_param" not in " ".join(import_command)
     expected = _full_export()["device_props"]
     expected["wirelessInterfaceScanFrequencyBandwidth"] = mask
+    # The captured unit's name is replaced by this unit's model.
+    expected["systemConfigDeviceName"] = model.replace(" ", "-")
+    expected["snmpSystemName"] = model.replace(" ", "-")
     assert uploaded["device_props"] == expected
     assert h.applied_config_expectations()["wirelessInterfaceScanFrequencyBandwidth"] == mask
 
@@ -702,6 +705,49 @@ async def test_sm_scan_policy_applies_and_verifies_model_widths(model, mask, mon
     assert h.applied_config_expectations()["wirelessInterfaceScanFrequencyBandwidth"] == mask
     monkeypatch.setattr(h, "_get_config_curl", AsyncMock(return_value=dict(captured, wirelessInterfaceScanFrequencyBandwidth="3")))
     assert await h.verify_config() is False
+
+
+@pytest.mark.parametrize("model,name", [
+    ("ePMP 4616", "ePMP-4616"), ("ePMP 4518", "ePMP-4518"),
+    ("ePMP 4600C", "ePMP-4600C"), ("Force 300-25", "Force-300-25"),
+])
+async def test_sm_device_name_matches_the_detected_model(model, name, monkeypatch):
+    h = _handler()
+    h._device_info = DeviceInfo(device_type="cambium", model=model)
+    captured = {}
+    async def apply(props):
+        captured.update(props)
+        h._last_applied_config = props
+        return True
+    monkeypatch.setattr(h, "_apply_config_settings_curl", apply)
+    assert await h.apply_config(dict(h.SM_ROLE_VALUES))
+    assert captured["systemConfigDeviceName"] == name
+    assert captured["snmpSystemName"] == name
+    expected = h.applied_config_expectations()
+    assert expected["systemConfigDeviceName"] == name
+    # A unit still carrying another model's name fails verification.
+    monkeypatch.setattr(h, "_get_config_curl", AsyncMock(return_value=dict(captured, systemConfigDeviceName="4518")))
+    assert await h.verify_config() is False
+
+
+@pytest.mark.parametrize("model", [None, "", "ePMP AX (SKU 53999)", "Cambium ePMP (SKU 12)"])
+def test_sm_device_name_is_not_guessed_for_unknown_models(model):
+    h = _handler()
+    h._device_info = DeviceInfo(device_type="cambium", model=model)
+    props = h._with_sm_policy(dict(h.SM_ROLE_VALUES))
+    assert "systemConfigDeviceName" not in props
+    assert "snmpSystemName" not in props
+
+
+@pytest.mark.parametrize("props", [
+    {"wirelessInterfaceMode": "1", "wirelessInterfacePTPMode": "0", "wirelessInterfaceProtocolMode": "1"},
+    {"wirelessInterfaceMode": "2", "wirelessInterfacePTPMode": "1", "wirelessInterfaceProtocolMode": "3"},
+    {"wirelessInterfaceSSID": "test-site", "systemConfigDeviceName": "tw24-north"},
+])
+def test_sm_device_name_leaves_modes_and_partial_updates_alone(props):
+    h = _handler()
+    h._device_info = DeviceInfo(device_type="cambium", model="ePMP 4616")
+    assert h._with_sm_policy(props) == props
 
 
 @pytest.mark.parametrize("props", [

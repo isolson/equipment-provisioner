@@ -145,7 +145,9 @@ class CambiumHandler(BaseHandler):
             + [
                 (key, Owner.MODE_ACTION)
                 for key in (
-                    # Site identity written by the AP/PTP workflow only.
+                    # Site identity written by the AP/PTP workflow. The
+                    # standard SM run writes only the model-derived device
+                    # name (``_with_sm_policy``), never a template value.
                     "wirelessInterfaceSSID",
                     "snmpSystemName",
                     "systemConfigDeviceName",
@@ -306,6 +308,38 @@ class CambiumHandler(BaseHandler):
         else:
             return result
         result["wirelessInterfaceScanFrequencyBandwidth"] = mask
+        return result
+
+    #: Detected model names that are safe to write as a device name. Unknown
+    #: SKU placeholders ("ePMP AX (SKU 53999)") are refused.
+    _MODEL_DEVICE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .-]*\d[A-Za-z0-9 .-]*$")
+
+    @classmethod
+    def sm_device_name_for_model(cls, model: Optional[str]) -> Optional[str]:
+        """Return the standard SM device name for *model* ("ePMP 4616" -> "ePMP-4616")."""
+        model = str(model or "").strip()
+        if not cls._MODEL_DEVICE_NAME_RE.match(model):
+            return None
+        return re.sub(r"\s+", "-", model)
+
+    def _with_sm_policy(self, props: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply the standard SM scan policy and model-derived device name.
+
+        A unit can arrive carrying another model's name (a 4616 named
+        "4518"), which misleads installers. The standard SM run names the
+        unit after its detected model. AP and PTP mode operations and partial
+        updates keep the names they carry.
+        """
+        result = self._with_sm_scan_policy(props)
+        if any(str(props.get(key, "")).strip() != value
+               for key, value in self.SM_ROLE_VALUES.items()):
+            return result
+        name = self.sm_device_name_for_model(
+            self._device_info.model if self._device_info else None
+        )
+        if name:
+            result["systemConfigDeviceName"] = name
+            result["snmpSystemName"] = name
         return result
 
     @classmethod
@@ -1883,7 +1917,7 @@ class CambiumHandler(BaseHandler):
                 logger.warning(f"No config properties to apply on {self.ip}")
                 return True
 
-            return await self._apply_config_settings_curl(self._with_sm_scan_policy(props))
+            return await self._apply_config_settings_curl(self._with_sm_policy(props))
 
         except Exception as e:
             logger.error(f"Failed to apply config: {e}")
@@ -2055,9 +2089,9 @@ class CambiumHandler(BaseHandler):
                     config_data = json.load(config_file)
                 original_config = copy.deepcopy(config_data)
                 if isinstance(config_data.get("device_props"), dict):
-                    config_data["device_props"] = self._with_sm_scan_policy(config_data["device_props"])
+                    config_data["device_props"] = self._with_sm_policy(config_data["device_props"])
                 else:
-                    config_data = self._with_sm_scan_policy(config_data)
+                    config_data = self._with_sm_policy(config_data)
                 if self.is_full_config_export(config_data) or config_data != original_config:
                     if not self.interface:
                         logger.error(
