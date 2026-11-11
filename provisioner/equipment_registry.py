@@ -8,6 +8,53 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 
+FACTORY_LOGIN_PATH = "/internal/factory-logins"
+
+
+async def post_factory_login(
+    url: str | None,
+    api_key: str | None,
+    serial: str,
+    role: str,
+    model: str,
+    username: str,
+    password: str,
+    mac_first: str | None = None,
+    mac_last: str | None = None,
+) -> str:
+    """Send a verified business-device login to the Ops intake once."""
+    if not url or not api_key:
+        return "intake not configured"
+
+    payload = {
+        "serial": serial,
+        "role": role,
+        "model": model,
+        "username": username,
+        "password": password,
+    }
+    if mac_first:
+        payload["mac_first"] = mac_first
+    if mac_last:
+        payload["mac_last"] = mac_last
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                url.rstrip("/") + FACTORY_LOGIN_PATH,
+                json=payload,
+                headers={"X-API-Key": api_key},
+            ) as response:
+                if response.status == 201:
+                    return "stored"
+                if response.status == 409:
+                    return "already stored"
+                return str(response.status)
+    except Exception:
+        return "request failed"
+
+
 async def register_equipment(
     url: str,
     api_key: Optional[str],

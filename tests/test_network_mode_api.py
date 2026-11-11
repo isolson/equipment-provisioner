@@ -1,15 +1,17 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
 import pytest
 from fastapi.testclient import TestClient
-from provisioner.web.app import create_app
+
 from provisioner.web import network_modes
+from provisioner.web.app import create_app
 
 
 def setup_client(monkeypatch, busy=False, qualified=True):
-    state = SimpleNamespace(provisioning=busy, provisioning_task=None, device_mac="00:00:00:00:00:01", device_mode=None, mode_config=None)
+    state = SimpleNamespace(provisioning=busy, provisioning_task=None, device_mac="00:00:00:00:00:01", device_mode=None, mode_config=None, mode_updates=[], mode_finishes=[])
     status = {"device_detected": True, "device_type": "mikrotik", "device_ip": "192.0.2.1", "device_mac": state.device_mac, "device_model": "hEX S", "provisioning": busy, "needs_credentials": True}
-    pm = SimpleNamespace(port_states={1: state}, get_port_status=lambda: {1: dict(status, provisioning=state.provisioning)}, get_interface_for_port=lambda n: "test1", begin_mode_job=lambda *a: "job", update_mode_job=lambda *a: None, finish_mode_job=lambda *a: None)
+    pm = SimpleNamespace(port_states={1: state}, get_port_status=lambda: {1: dict(status, provisioning=state.provisioning)}, get_interface_for_port=lambda n: "test1", begin_mode_job=lambda *a: "job", update_mode_job=lambda *a: state.mode_updates.append(a), finish_mode_job=lambda *a: state.mode_finishes.append(a))
     pm.update_port_device_info = lambda *a, **kw: None
     pm.set_device_mode = lambda port, mode, config: setattr(state, "device_mode", mode)
     handler = SimpleNamespace(ip="192.0.2.1", supports_network_modes=True, connect=AsyncMock(return_value=True), disconnect=AsyncMock(), get_info=AsyncMock(return_value=SimpleNamespace(serial_number="TEST-UNIT", firmware_version="7.23.5", model="hEX S")), network_mode_state=AsyncMock(return_value={"model":"hEX S","firmware":"7.23.5","mode":"router"}), validate_network_mode_layout=lambda s: None, network_mode_labels_for_model=lambda model: {"router":"Router","switch":"Switch"}, apply_network_mode=AsyncMock(return_value={"model":"hEX S","firmware":"7.23.5","mode":"switch"}))
@@ -63,6 +65,86 @@ def test_verified_mode_and_cleanup(monkeypatch):
     assert state.last_result is None
     assert not state.provisioning
     assert state.provisioning_task is None
+    assert (1, "factory_login", True, "no operator login to store") in state.mode_updates
+    assert state.mode_finishes[-1][1] is True
+
+
+@pytest.mark.parametrize(
+    ("intake_result", "http_status", "job_success", "step_status", "detail"),
+    [
+        ("stored", 200, True, True, "stored"),
+        ("already stored", 200, True, True, "already stored"),
+        ("intake not configured", 503, False, False, "intake not configured"),
+        ("503", 502, False, False, "503"),
+    ],
+)
+def test_factory_login_intake_controls_business_job_completion(
+    monkeypatch, intake_result, http_status, job_success, step_status, detail
+):
+    from types import SimpleNamespace
+
+    client, handler, state = setup_client(monkeypatch)
+    monkeypatch.setenv("FACTORY_LOGIN_OPS_URL", "https://ops.example")
+    monkeypatch.setenv("FACTORY_LOGIN_PROVISIONER_API_KEY", "route-key")
+    monkeypatch.setattr(
+        network_modes,
+        "get_credential_override",
+        lambda port: SimpleNamespace(
+            username="label-user", password="label-password", device_type="mikrotik"
+        ),
+    )
+    post = AsyncMock(return_value=intake_result)
+    monkeypatch.setattr(network_modes, "post_factory_login", post)
+    token = client.get("/api/network-modes/1").json()["device_token"]
+    response = client.post(
+        "/api/network-modes/1",
+        json={"mode": "switch", "device_token": token},
+    )
+    assert response.status_code == http_status
+    post.assert_awaited_once_with(
+        "https://ops.example",
+        "route-key",
+        "TEST-UNIT",
+        "switch",
+        "hEX S",
+        "label-user",
+        "label-password",
+        None,
+        None,
+    )
+    factory_login_update = next(
+        update for update in state.mode_updates
+        if update[1] == "factory_login" and update[2] != "loading"
+    )
+    assert factory_login_update[1:] == ("factory_login", step_status, detail)
+    assert state.mode_finishes[-1][1] is job_success
+
+
+def test_intake_502_marks_apply_complete_and_factory_login_failed(monkeypatch):
+    from types import SimpleNamespace
+
+    client, _, state = setup_client(monkeypatch)
+    monkeypatch.setenv("FACTORY_LOGIN_OPS_URL", "https://ops.example")
+    monkeypatch.setenv("FACTORY_LOGIN_PROVISIONER_API_KEY", "route-key")
+    monkeypatch.setattr(
+        network_modes,
+        "get_credential_override",
+        lambda port: SimpleNamespace(
+            username="label-user", password="label-password", device_type="mikrotik"
+        ),
+    )
+    monkeypatch.setattr(network_modes, "post_factory_login", AsyncMock(return_value="502"))
+    token = client.get("/api/network-modes/1").json()["device_token"]
+
+    response = client.post(
+        "/api/network-modes/1",
+        json={"mode": "switch", "device_token": token},
+    )
+
+    assert response.status_code == 502
+    apply_done = next(update for update in state.mode_updates if update[1:3] == ("apply", True))
+    intake_failed = next(update for update in state.mode_updates if update[1:3] == ("factory_login", False))
+    assert state.mode_updates.index(apply_done) < state.mode_updates.index(intake_failed)
 
 
 def test_private_device_error_is_not_returned(monkeypatch):
