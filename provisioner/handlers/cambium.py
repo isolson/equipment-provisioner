@@ -3747,12 +3747,32 @@ class CambiumHandler(BaseHandler):
             return False
 
     async def _check_web_server(self) -> bool:
-        """Check if web server is responding using curl with interface binding."""
+        """Check if the web server is responding, and re-pick the URL scheme.
+
+        A firmware upgrade can change the scheme the device serves. ePMP-AX
+        5.3.x serves HTTP only, so ``connect()`` falls back to ``http://``.
+        After the upgrade to 5.11.x, HTTP answers every request, including
+        the login POST, with an empty ``307`` redirect to HTTPS. A stale
+        ``http://`` base URL makes ``_check_login_ready()`` read that empty
+        body as ``no_response`` until the reboot wait times out. Probe HTTPS
+        first, the same order as ``connect()``, and keep the scheme that
+        answered.
+        """
+        for base_url in (f"https://{self.ip}", f"http://{self.ip}"):
+            if await self._probe_http_status(f"{base_url}/"):
+                if base_url != self._base_url:
+                    logger.info(f"{self.ip} web server now answers on {base_url}")
+                    self._base_url = base_url
+                return True
+        return False
+
+    async def _probe_http_status(self, url: str) -> bool:
+        """Return whether *url* gives any HTTP status (interface-bound curl)."""
         try:
             cmd = ["curl", "-s", "-k", "-m", "5", "-o", "/dev/null", "-w", "%{http_code}"]
             if self.interface:
                 cmd.extend(["--interface", self.interface])
-            cmd.append(f"{self._base_url}/")
+            cmd.append(url)
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
