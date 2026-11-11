@@ -320,6 +320,7 @@ class PortManager:
         setup_vlans: bool = True,
         mode_config_enabled: bool = False,
         events_path: Optional[str] = None,
+        disabled_ports: Optional[List[int]] = None,
     ):
         """Initialize port manager.
 
@@ -334,12 +335,16 @@ class PortManager:
                 When False, treat the base interface as the single provisioning
                 port (no VLANs, no management subinterface) — the no-switch
                 single-port deployment. num_ports is forced to 1 in this mode.
+            disabled_ports: Port numbers to skip entirely in VLAN mode. A
+                disabled port gets no VLAN interface and no port state, so
+                switch events and detection ignore it.
         """
         self.base_interface = base_interface
         self.vlan_start = vlan_start
         self.setup_vlans = setup_vlans
         # Single-port mode collapses to one port on the base interface.
         self.num_ports = num_ports if setup_vlans else 1
+        self.disabled_ports = set(disabled_ports or ()) if setup_vlans else set()
         self.local_ip_base = local_ip_base
         self.management = management or ManagementConfig()
         self.mode_config_enabled = mode_config_enabled
@@ -397,6 +402,9 @@ class PortManager:
 
         for i in range(self.num_ports):
             port_num = i + 1
+            if port_num in self.disabled_ports:
+                logger.info(f"Port {port_num} is disabled in config; skipping")
+                continue
             vlan_id = self.vlan_start + i
             interface_name = f"{self.base_interface}.{vlan_id}"
 
@@ -2785,6 +2793,7 @@ def init_port_manager(
     simple_subnet: Optional[str] = None,
     mode_config_enabled: bool = False,
     events_path: Optional[str] = None,
+    disabled_ports: Optional[List[int]] = None,
 ) -> PortManager:
     """Initialize the global port manager.
 
@@ -2798,6 +2807,7 @@ def init_port_manager(
         simple_subnet: When setup_vlans is False, a CIDR to ARP-sweep for
             DHCP-addressed devices outside the vendor link-local list.
         mode_config_enabled: Expose handler-supported AP/PTP actions.
+        disabled_ports: Port numbers the provisioner leaves alone.
     """
     global _port_manager
     pm = PortManager(
@@ -2809,6 +2819,7 @@ def init_port_manager(
         setup_vlans=setup_vlans,
         events_path=events_path,
         mode_config_enabled=mode_config_enabled,
+        disabled_ports=disabled_ports,
     )
     if not setup_vlans and simple_subnet:
         pm._simple_subnet = simple_subnet

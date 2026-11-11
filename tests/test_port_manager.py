@@ -959,3 +959,39 @@ async def test_simple_and_multiport_modes_probe_identical_ip_sequences():
     assert sequences["multi"] == expected
     assert sequences["simple"] == expected
     assert sequences["multi"] == sequences["simple"]
+
+
+def test_disabled_port_gets_no_config_or_state():
+    """A disabled port is skipped; the other ports keep their VLANs."""
+    manager = PortManager(num_ports=3, disabled_ports=[1])
+    manager._generate_port_configs()
+
+    assert sorted(manager.ports) == [2, 3]
+    assert sorted(manager.port_states) == [2, 3]
+    assert manager.ports[2].vlan_id == 1992
+    assert manager.ports[3].vlan_id == 1993
+
+
+@pytest.mark.asyncio
+async def test_switch_event_on_disabled_port_is_ignored():
+    manager = PortManager(num_ports=2, disabled_ports=[1])
+    manager._generate_port_configs()
+
+    handled = await manager.handle_switch_port_event("ether1", True, "1Gbps")
+
+    assert handled is False
+    assert 1 not in manager.port_states
+
+
+def test_single_port_mode_ignores_disabled_ports():
+    manager = PortManager(setup_vlans=False, disabled_ports=[1])
+    manager._generate_port_configs()
+
+    assert list(manager.port_states) == [1]
+
+
+def test_ports_config_disabled_defaults_empty():
+    from provisioner.config import PortsConfig
+
+    assert PortsConfig().disabled == []
+    assert PortsConfig(disabled=[1]).disabled == [1]
