@@ -40,6 +40,7 @@ BaseHandler defines properties that control the provisioning flow. Override them
 | `verify_active_bank` | `= update_triggers_reboot` | FW verification checks the active bank (not hardcoded bank1). Use when device installs to inactive bank then activates it |
 | `fw2_skips_reboot` | `False` | Bank 2 update writes to inactive bank without activating. No reboot after FW2. Preserves auto-discovered state (azimuth, location) |
 | `config_after_all_firmware` | `False` | Moves config apply to AFTER all firmware updates and skips config verification. Use when config changes the management network (VLAN, DHCP), making the device unreachable for further operations |
+| `ptp_apply_requires_reboot` | `False` | The apply-mode path reboots the device after a verified PTP apply, waits for it, and verifies the config again. A failed reboot or a failed second verify fails the job. AP and SM applies do not reboot. Tachyon: `True` |
 
 ### Class-Level Traits (consulted before instantiation)
 
@@ -79,6 +80,10 @@ prevents the generic naming-only fallback. `generate_ptp_settings()` must
 validate or create the vendor radio-role settings from the protected host
 profile before the handler applies the rendered configuration. Do not add RF
 values to shared mode code.
+
+A handler sets `ptp_apply_requires_reboot` when PTP is not active until the
+device reboots. Tachyon sets it: on the 2026-09-28 bench run, side A ran
+without PTP after the apply until one reboot (#181).
 
 ### Property Combinations by Vendor
 

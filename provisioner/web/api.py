@@ -4090,6 +4090,28 @@ async def _run_apply_mode(
                 if not success:
                     error_detail = "antenna gain"
 
+            if (
+                success
+                and req.mode == "ptp"
+                and getattr(handler, "ptp_apply_requires_reboot", False) is True
+            ):
+                # The handler says PTP is not active until the device reboots.
+                _step("reboot", "loading")
+                rebooted = await handler.reboot() and await handler.wait_for_reboot()
+                _step("reboot", bool(rebooted))
+                if not rebooted:
+                    success = False
+                    error_detail = "reboot after PTP apply"
+                else:
+                    _step("verify", "loading")
+                    success = await handler.verify_config() is True
+                    mismatches = list(getattr(handler, "last_verify_mismatches", []) or [])
+                    error_detail = None if success else (
+                        "verify after reboot"
+                        + (": mismatch: " + ", ".join(mismatches[:6]) if mismatches else "")
+                    )
+                    _step("verify", bool(success), error_detail)
+
             if success:
                 logger.info(f"Mode {mode} applied successfully on port {port_number}")
                 if req.mode == "sm":

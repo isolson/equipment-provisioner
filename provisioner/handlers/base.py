@@ -1432,3 +1432,12 @@ class BaseHandler(ABC):
         post-upgrade boot exceeds the default. Plain reboots are unaffected.
         """
         return 180
+
+    @property
+    def ptp_apply_requires_reboot(self) -> bool:
+        """Whether a PTP mode apply needs a reboot before the mode is active.
+
+        When True, the apply-mode path reboots the device after a verified
+        PTP apply, waits for it, and then verifies the config again.
+        """
+        return False

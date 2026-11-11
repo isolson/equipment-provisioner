@@ -219,6 +219,17 @@ class TachyonHandler(BaseHandler):
             raise ValueError(
                 "Tachyon PTP settings profile must include wireless.radios.wlan0.vaps"
             )
+        if side == "a":
+            # Side A runs wlan0 as an AP. The radio rejects rogue-DHCP blocking
+            # in AP mode (HTTP 400, bench run 2026-09-28). The reference has it
+            # off: bench-evidence/tachyon/TNA-303L-65/unknown/known-good.structure.json
+            try:
+                wan = config.setdefault("network", {}).setdefault("zones", {}).setdefault("wan", {})
+                wan.setdefault("dhcp_snooping", {})["block_rogue_servers_enabled"] = False
+            except (AttributeError, TypeError):
+                raise ValueError(
+                    "Tachyon PTP settings profile has an invalid network.zones.wan section"
+                )
         return config
 
     def __init__(self, ip: str, credentials: Dict[str, str], interface: Optional[str] = None,
@@ -253,6 +264,16 @@ class TachyonHandler(BaseHandler):
     @property
     def update_triggers_reboot(self) -> bool:
         """Tachyon devices reboot automatically after POST /update."""
+        return True
+
+    @property
+    def ptp_apply_requires_reboot(self) -> bool:
+        """PTP is not active after the apply until the radio reboots.
+
+        Bench run 2026-09-28 (TNA-303L-65, 1.15.1 rev 8541): side A read back
+        PTP on, but it ran without PTP and had no peer for 4 minutes. One
+        reboot made PTP active (#181).
+        """
         return True
 
     @property
