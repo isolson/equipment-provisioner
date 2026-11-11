@@ -121,6 +121,27 @@ async def test_unknown_advanced_option_never_contacts_device():
     h._run_command.assert_not_awaited()
 
 
+def test_router_allows_interim_wan_ssh_from_server_vlan_only():
+    from provisioner.handlers.mikrotik_business import profile_text, check_expressions
+    text = profile_text("router")
+    rule = 'add chain=input action=accept protocol=tcp dst-port=22 in-interface-list=WAN src-address=100.126.15.0/24 comment="SSH from server VLAN 15 via WAN"'
+    assert text.index(rule) < text.index('comment="drop everything else (WAN + untrusted VLANs)"')
+    assert "set ssh     disabled=no address=192.168.10.0/24,100.126.15.0/24" in text
+    # Only SSH is opened; Winbox and HTTPS stay Internal-only.
+    assert "set winbox  disabled=no address=192.168.10.0/24\n" in text
+    assert "set www-ssl disabled=no certificate=webfig-local address=192.168.10.0/24\n" in text
+    checks = check_expressions("router")
+    assert "wan_ssh" in checks and "wan_ssh_before_drop" in checks
+    assert r"100\\.126\\.15\\.0/24" in checks["service_ssh"]
+
+
+def test_switch_has_no_wan_ssh_exception():
+    from provisioner.handlers.mikrotik_business import profile_text, check_expressions
+    assert "100.126.15.0/24" not in profile_text("switch").split("/ip service", 1)[1].split("/ip neighbor", 1)[0]
+    assert "wan_ssh" not in check_expressions("switch")
+    assert 'address="192.168.10.0/24"' in check_expressions("switch")["service_ssh"]
+
+
 def test_replacement_keeps_dynamic_firewall_counters():
     from provisioner.handlers.mikrotik_business import CLEANUP
     assert "/ip firewall filter remove [find where dynamic=no]" in CLEANUP

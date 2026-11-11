@@ -25,6 +25,13 @@ reporting success.
   business IPv6 policy is defined.
 - Syslog and NTP target **100.126.15.28**. DNS uses 100.126.15.20 and 9.9.9.9.
   The router includes the standard UniFi DHCP option 43 and inform-port remap.
+- **Interim exception (router only):** until the wghub01 WireGuard
+  aggregator exists ([Ops issue #666](https://github.com/sixtyops/treehouse-architecture/issues/666)),
+  SSH is also accepted from server VLAN 15 (`100.126.15.0/24`) over the WAN.
+  The input rule sits before the final drop, and the SSH service lists both
+  `192.168.10.0/24` and `100.126.15.0/24`. Winbox and HTTPS stay Internal-only.
+  This deviates from the business standard's "no management from WAN" by
+  operator decision; remove it when the aggregator is live.
 - Current device credentials are retained. Identity is serial-bound and
   unassigned; no customer, site slot or inventory claim is created.
 
