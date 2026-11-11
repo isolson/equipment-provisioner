@@ -163,6 +163,13 @@ class CambiumHandler(BaseHandler):
                     "wirelessInterfaceTDDRatio",
                     "wirelessInterfaceRateMaxMCS",
                     "prefferedAPTable",
+                    # AP-only sector settings. Traced to the ePMP 4600 field
+                    # AP reference (bench-evidence/cambium/ePMP_4600/5.10.4).
+                    # Only the AP workflow writes them; the SM baseline never.
+                    "wirelessStaIsolate",
+                    "networkLLDP",
+                    "networkLLDPMode",
+                    "wirelessInterfaceSyncSource",
                 )
             ]
             + [
@@ -358,14 +365,30 @@ class CambiumHandler(BaseHandler):
             "wirelessInterfaceTDDAntennaGain": str(effective_gain),
         })
 
+    #: Models whose AP profile traces to model-specific evidence. AP is
+    #: advertised for these exact models only, and each resolves its own
+    #: ``AP/<dir>/`` profile (never the family-wide AP template). The
+    #: qualification matrix still gates the offer on recorded transitions.
+    #: Keys are normalized model names; values are profile directories.
+    AP_PROFILE_MODELS = {
+        "epmp 4600": "ePMP_4600",
+    }
+
+    @classmethod
+    def _ap_profile_dir(cls, model: Optional[str]) -> Optional[str]:
+        model_key = " ".join(str(model or "").lower().replace("cambium ", "").split())
+        return cls.AP_PROFILE_MODELS.get(model_key)
+
     @classmethod
     def qualified_post_provision_modes_for_model(
         cls, model: Optional[str] = None
     ) -> Tuple[str, ...]:
-        """Expose PTP for models in an explicitly certified family."""
+        """Expose AP for evidence-backed models and PTP for certified families."""
         modes = tuple(cls.qualified_post_provision_modes)
         from ..vendor_registry import config_family_for_model
 
+        if "ap" not in modes and cls._ap_profile_dir(model):
+            modes = ("ap",) + modes
         family = config_family_for_model("cambium", model)
         if (
             "ptp" not in modes
@@ -375,6 +398,15 @@ class CambiumHandler(BaseHandler):
         ):
             return modes + ("ptp",)
         return modes
+
+    @classmethod
+    def model_mode_profile_dir(
+        cls, model: Optional[str], mode: str
+    ) -> Optional[str]:
+        """AP profiles are model-scoped; PTP keeps the family resolution."""
+        if str(mode).lower() == "ap":
+            return cls._ap_profile_dir(model)
+        return None
 
     @classmethod
     def generate_ptp_settings(

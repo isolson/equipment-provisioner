@@ -3465,6 +3465,16 @@ class ModePlan(BaseModel):
     sm_config_path: Optional[str] = None
 
 
+def _model_scoped_profile_dir(
+    device_type: Optional[str], device_model: Optional[str], mode: str
+) -> Optional[str]:
+    """Return the handler's model-scoped profile directory for *mode*, if any."""
+    handler_class = HandlerManager.handler_class_for(device_type) if device_type else None
+    if handler_class is None:
+        return None
+    return handler_class.model_mode_profile_dir(device_model, mode)
+
+
 def _plan_mode_change(
     request: Request,
     provisioner: Any,
@@ -3616,6 +3626,12 @@ def _plan_mode_change(
         raise HTTPException(
             status_code=409,
             detail="A certified PTP settings profile is required for this family and link",
+        )
+    if not template and _model_scoped_profile_dir(device_type, device_model, req.mode):
+        raise HTTPException(
+            status_code=409,
+            detail="A model-specific %s profile is required for %s on %s"
+            % (req.mode.upper(), device_model, device_firmware),
         )
     plan.changes = [
         {"field": "radio role", "from": current_mode or "sm", "to": mode},
@@ -3986,6 +4002,21 @@ async def _run_apply_mode(
                 "on port %s",
                 port_number,
             )
+            return
+        if (
+            req.mode != "sm"
+            and not template
+            and _model_scoped_profile_dir(device_type, device_model, req.mode)
+        ):
+            # Never fall back to naming-only for a model whose mode profile
+            # is model-scoped: that would record a mode the radio never got.
+            logger.error(
+                "Model-specific %s profile disappeared before applying mode on port %s",
+                req.mode, port_number,
+            )
+            finish = getattr(port_manager, "finish_mode_job", None)
+            if callable(finish):
+                finish(port_number, False, "Model-specific profile missing")
             return
 
         # Create handler and connect
