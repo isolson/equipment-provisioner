@@ -5,6 +5,7 @@ contract is developed. They do not implement fleet reset/enrollment or KDF.
 """
 import asyncio
 import hashlib
+import ipaddress
 import json
 import os
 import secrets
@@ -13,7 +14,14 @@ from pathlib import Path
 
 PROFILE_MARKER = "treehouse-business-v1:"
 PROFILE_ROOT = Path(__file__).resolve().parents[2] / "configs/templates/mikrotik/modes"
-MANAGEMENT_IPS = {"router": "192.168.10.1", "switch": "192.168.10.2"}
+MODES = ("router", "switch")
+ROUTER_IP = "192.168.10.1"
+# The switch takes its management address from the router's DHCP. The bench
+# host reaches the business LAN from this /32 on the isolated interface.
+BENCH_SOURCE = "192.168.10.254"
+MANAGEMENT_NETWORK = ipaddress.ip_network("192.168.10.0/24")
+SWITCH_PORTS = ("ether1", "ether2", "ether3", "ether4", "ether5", "sfp1")
+_MAC = r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}"
 
 # Full import replaces only the preflight-approved bench layout. Users and
 # certificates survive. No reset or factory-default claim is made by this flow.
@@ -41,7 +49,7 @@ CLEANUP = """
 
 
 def profile_text(mode):
-    if mode not in MANAGEMENT_IPS:
+    if mode not in MODES:
         raise ValueError("Unknown business role")
     return CLEANUP + (PROFILE_ROOT / ("business-%s.rsc" % mode)).read_text()
 
@@ -51,7 +59,7 @@ async def ensure_source(handler):
     if not handler.interface:
         raise ValueError("A dedicated bench interface is required")
     proc = await asyncio.create_subprocess_exec(
-        "ip", "address", "replace", "192.168.10.254/32", "dev", handler.interface,
+        "ip", "address", "replace", BENCH_SOURCE + "/32", "dev", handler.interface,
         "noprefixroute", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     await proc.communicate()
     if proc.returncode:
@@ -59,8 +67,9 @@ async def ensure_source(handler):
 
 
 async def connect(handler):
+    # A switch has no fixed address. Use the detected address, then the router.
     await ensure_source(handler)
-    for ip in dict.fromkeys([handler.ip] + list(MANAGEMENT_IPS.values())):
+    for ip in dict.fromkeys([handler.ip, ROUTER_IP]):
         handler.ip = ip
         handler._bind_ip_cache = None
         if await handler.connect():
@@ -75,23 +84,32 @@ def check_expressions(mode):
     def count(name, path, where, n):
         checks[name] = '[:len [%s find%s]] = %d' % (path, ' where '+where if where else '', n)
     count('physical_ports', '/interface ethernet', '', 6)
-    count('bridge', '/interface bridge', 'name="bridge" and vlan-filtering=yes and dhcp-snooping=yes', 1)
+    # The router keeps DHCP snooping. The switch has no single trusted port.
+    count('bridge', '/interface bridge', 'name="bridge" and vlan-filtering=yes and dhcp-snooping=%s' % ('yes' if router else 'no'), 1)
     count('bridge_ports', '/interface bridge port', 'bridge="bridge" and pvid=10 and ingress-filtering=yes', 5 if router else 6)
-    for port in ['ether2', 'ether4', 'ether5'] + ([] if router else ['ether1']):
+    trunks = ['ether2', 'ether4', 'ether5'] if router else list(SWITCH_PORTS)
+    for port in trunks:
         count('trunk_'+port, '/interface bridge port', 'interface="%s" and frame-types=admit-all' % port, 1)
-    for port in ['ether3', 'sfp1']:
+    for port in (['ether3', 'sfp1'] if router else []):
         count('access_'+port, '/interface bridge port', 'interface="%s" and frame-types=admit-only-untagged-and-priority-tagged' % port, 1)
     count('wan_bridge', '/interface bridge port', 'interface="ether1"', 0 if router else 1)
     for vlan in [10,20,40,70]:
-        tagged = 'bridge' if vlan == 10 else ('bridge,ether2,ether4,ether5' if router else 'ether1,ether2,ether4,ether5')
-        checks['vlan_%s_tagged'%vlan] = '[:tostr [/interface bridge vlan get [find where dynamic=no and vlan-ids=%d] tagged]] = "%s"' % (vlan,tagged.replace(',', ';'))
+        tagged = 'bridge' if vlan == 10 else ';'.join((['bridge'] if router else []) + trunks)
+        checks['vlan_%s_tagged'%vlan] = '[:tostr [/interface bridge vlan get [find where dynamic=no and vlan-ids=%d] tagged]] = "%s"' % (vlan,tagged)
     count('vlan_interfaces', '/interface vlan', '', 4 if router else 1)
-    count('management_address','/ip address','address="%s/24" and interface="vlan10-internal" and disabled!=yes'%MANAGEMENT_IPS[mode],1)
-    count('address_count','/ip address','dynamic=no',4 if router else 1)
+    if router:
+        count('management_address','/ip address','address="%s/24" and interface="vlan10-internal" and disabled!=yes'%ROUTER_IP,1)
+    else:
+        count('management_address','/ip address','interface="vlan10-internal" and dynamic=yes and disabled!=yes',1)
+    count('address_count','/ip address','dynamic=no',4 if router else 0)
     count('nat_count','/ip firewall nat','disabled!=yes',2 if router else 0)
     count('dhcp_servers','/ip dhcp-server','disabled!=yes',4 if router else 0)
     count('dhcp_networks','/ip dhcp-server network','',4 if router else 0)
-    count('dhcp_clients','/ip dhcp-client','disabled!=yes and interface="ether1"',1 if router else 0)
+    if router:
+        count('dhcp_clients','/ip dhcp-client','disabled!=yes and interface="ether1"',1)
+    else:
+        count('dhcp_clients','/ip dhcp-client','disabled!=yes',1)
+        count('management_dhcp_client','/ip dhcp-client','disabled!=yes and interface="vlan10-internal" and add-default-route=yes and use-peer-dns=no and use-peer-ntp=no',1)
     if router:
         for name,vlan,prefix,lease in [('internal',10,24,'12h'),('iot',20,24,'12h'),('guest',40,22,'2h'),('openroam',70,23,'2h')]:
             count('scope_'+name,'/ip dhcp-server network','address="192.168.%d.0/%d" and gateway="192.168.%d.1"'%(vlan,prefix,vlan),1)
@@ -104,8 +122,10 @@ def check_expressions(mode):
         for name in ['Guest: internet only','OpenRoam: internet only','IoT !-> Internal','IoT !-> Guest','IoT !-> OpenRoam','drop unsolicited WAN']:
             count('isolation_'+name,'/ip firewall filter','comment="%s" and chain=forward and action=drop and disabled!=yes'%name,1)
     else:
-        count('management_route','/ip route','dst-address="0.0.0.0/0" and gateway="192.168.10.1" and disabled!=yes',1)
-        count('trusted_uplink','/interface bridge port','interface="ether1" and trusted=yes',1)
+        count('static_routes','/ip route','dynamic=no',0)
+        count('management_route','/ip route','dst-address="0.0.0.0/0" and dynamic=yes and disabled!=yes',1)
+        count('trusted_ports','/interface bridge port','trusted=yes',0)
+        count('wan_list','/interface list','name="WAN"',0)
     for service in ['ssh','www-ssl','winbox']:
         count('service_'+service,'/ip service','name="%s" and disabled!=yes and address="192.168.10.0/24"'%service,1)
     for service in ['telnet','ftp','www','api','api-ssl']:
@@ -138,7 +158,49 @@ async def read_state(handler, mode):
     values=dict(line.strip().split('=',1) for line in output.splitlines() if '=' in line)
     checks={key: values.get(key) == 'true' for key in expressions}
     return {'mode':mode,'profile':'business-v1','checks':checks,
-            'management_ip':MANAGEMENT_IPS[mode]}
+            'management_ip':handler.ip}
+
+
+async def device_macs(handler):
+    """Return the lowercase MAC addresses of the device's physical ports."""
+    output = await handler._run_command(
+        ':foreach i in=[/interface ethernet find] do={:put [/interface ethernet get $i mac-address]}')
+    return {mac.lower() for mac in re.findall(r"\b%s\b" % _MAC, output)}
+
+
+async def _arp_mac(interface, ip, limit):
+    """ARP one address from the bench source. Return the replying MAC."""
+    async with limit:
+        proc = await asyncio.create_subprocess_exec(
+            "arping", "-c", "1", "-w", "1", "-I", interface, "-s", BENCH_SOURCE, ip,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return None
+    match = re.search(r"\[(%s)\]" % _MAC, stdout.decode(errors="ignore"))
+    return match.group(1).lower() if match else None
+
+
+async def find_switch(interface, macs):
+    """Find the addresses on the business LAN that answer ARP with one of macs.
+
+    The switch gets its address by DHCP, so the executor sweeps the /24 on the
+    isolated bench interface. The router address and the bench source are skipped.
+    """
+    skip = {ROUTER_IP, BENCH_SOURCE}
+    hosts = [str(ip) for ip in MANAGEMENT_NETWORK.hosts() if str(ip) not in skip]
+    limit = asyncio.Semaphore(64)
+    replies = await asyncio.gather(*(_arp_mac(interface, ip, limit) for ip in hosts))
+    return [ip for ip, mac in zip(hosts, replies) if mac in macs]
+
+
+async def _candidates(handler, mode, macs):
+    if mode == "router":
+        return [ROUTER_IP]
+    return await find_switch(handler.interface, macs)
 
 
 async def apply(handler, mode):
@@ -148,6 +210,11 @@ async def apply(handler, mode):
     serial=info.serial_number
     if not serial or info.model!='hEX S' or info.hardware_version!='arm' or info.firmware_version!='7.23.5':
         raise ValueError('Unqualified business hardware or firmware')
+    # Record the port MACs before the import. The switch's new DHCP address is
+    # found by these MACs, and the serial check below pins the result to this unit.
+    macs=await device_macs(handler) if mode=='switch' else set()
+    if mode=='switch' and not macs:
+        raise ValueError('Device MAC addresses could not be read')
     remote='business-profile.rsc'
     async with handler._ssh.start_sftp_client() as sftp:
         async with sftp.open(remote,'w') as f:
@@ -161,20 +228,24 @@ async def apply(handler, mode):
         raise RuntimeError('Business profile import preflight failed')
     await handler._run_command('/execute {/import file-name=business-profile.rsc}')
     await handler.disconnect()
-    handler.ip=MANAGEMENT_IPS[mode]
-    handler._bind_ip_cache=None
     state=None
     try:
         for attempt in range(30):
             await asyncio.sleep(3)
+            state=None
             try:
-                if not await handler.connect():
-                    continue
-                fresh=await handler.get_info()
-                if fresh.serial_number != serial:
-                    raise ValueError('Device identity changed after import')
-                state=await read_state(handler,mode)
-                if all(state['checks'].values()):
+                for ip in await _candidates(handler, mode, macs):
+                    await handler.disconnect()
+                    handler.ip=ip
+                    handler._bind_ip_cache=None
+                    if not await handler.connect():
+                        continue
+                    fresh=await handler.get_info()
+                    if fresh.serial_number != serial:
+                        raise ValueError('Device identity changed after import')
+                    state=await read_state(handler,mode)
+                    break
+                if state and all(state['checks'].values()):
                     state.update(model=fresh.model,firmware=fresh.firmware_version,architecture=fresh.hardware_version)
                     state['render_sha256']=hashlib.sha256(text.encode()).hexdigest()
                     break

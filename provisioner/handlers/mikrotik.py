@@ -25,16 +25,21 @@ class MikrotikHandler(BaseHandler):
     supports_network_modes = True
     network_mode_descriptions = {
         "router": "ether1 WAN; ether2/4/5 trunks; ether3/SFP Internal access. VLANs 10/20/40/70 with DHCP, NAT and isolation. Management: 192.168.10.1.",
-        "switch": "ether1 uplink; ether2/4/5 trunks; ether3/SFP Internal access. VLANs 10/20/40/70; no routing or DHCP server. Management: 192.168.10.2.",
+        "switch": "Any port can be the uplink: native VLAN 10, tagged 20/40/70 on every port. No routing or DHCP server. Management: DHCP lease on VLAN 10.",
     }
     network_mode_management_note = "Internal VLAN 10 is native/untagged; 20/40/70 are tagged on trunks. Current login is retained. Syslog and NTP: 100.126.15.28. Applying replaces this bench profile."
 
     @classmethod
     def discovery_arp_source(cls, ip: str) -> Optional[str]:
-        from .mikrotik_business import MANAGEMENT_IPS
+        from .mikrotik_business import BENCH_SOURCE, MANAGEMENT_NETWORK
         # ARP bypasses overlapping host management routes and source-restricted
         # ICMP. The original factory source is already assigned on bench VLANs.
-        return "192.168.88.11" if ip == "192.168.88.1" or ip in MANAGEMENT_IPS.values() else None
+        # A business switch can hold any DHCP address on the business LAN.
+        try:
+            business = ipaddress.ip_address(ip) in MANAGEMENT_NETWORK and ip != BENCH_SOURCE
+        except ValueError:
+            business = False
+        return "192.168.88.11" if ip == "192.168.88.1" or business else None
 
     async def connect_network_mode(self) -> bool:
         from . import mikrotik_business
@@ -53,7 +58,7 @@ class MikrotikHandler(BaseHandler):
         marker = (await self._run_command(":put [/system note get note]")).strip()
         if marker.startswith(mikrotik_business.PROFILE_MARKER):
             mode = marker[len(mikrotik_business.PROFILE_MARKER):]
-            if mode not in mikrotik_business.MANAGEMENT_IPS:
+            if mode not in mikrotik_business.MODES:
                 raise ValueError("Unknown managed business profile")
             state = await mikrotik_business.read_state(self, mode)
             info = await self.get_info()
@@ -135,7 +140,7 @@ class MikrotikHandler(BaseHandler):
     async def apply_network_mode(self, mode: str) -> Dict[str, Any]:
         """Apply and verify the complete hardware-qualified business profile."""
         from . import mikrotik_business
-        if mode not in mikrotik_business.MANAGEMENT_IPS:
+        if mode not in mikrotik_business.MODES:
             raise ValueError("Unknown network mode")
         before = await self.network_mode_state()
         self._validate_network_mode_layout(before)

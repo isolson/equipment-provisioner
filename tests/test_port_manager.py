@@ -583,6 +583,41 @@ async def test_ping_device_arp_fallback_false_skips_mikrotik(address):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("device_type,address,expect_arp", [
+    ("mikrotik", "192.168.10.37", True),    # business switch DHCP lease
+    ("mikrotik", "192.168.10.1", False),    # registered default keeps old path
+    ("mikrotik", "10.0.0.5", False),        # handler declines this address
+    ("cambium", "192.168.10.37", False),    # handler without the hook
+])
+async def test_presence_check_uses_handler_arp_source_for_unregistered_address(
+    device_type, address, expect_arp,
+):
+    """A device that moved to a DHCP address keeps its handler's ARP source."""
+    manager = PortManager(num_ports=1)
+    manager._generate_port_configs()
+    state = manager.port_states[1]
+    state.device_type = device_type
+    state.device_ip = address
+    arp_calls, ping_calls = [], []
+
+    async def mock_arp_probe(interface, ip, source_ip=None):
+        arp_calls.append((ip, source_ip))
+        return True
+
+    async def mock_ping(interface, ip, arp_fallback=True):
+        ping_calls.append(ip)
+        return True
+
+    manager._arp_probe = mock_arp_probe  # type: ignore[method-assign]
+    manager._ping_device = mock_ping  # type: ignore[method-assign]
+    assert await manager._device_present("eth0.1992", state) is True
+    if expect_arp:
+        assert arp_calls == [(address, "192.168.88.11")] and ping_calls == []
+    else:
+        assert arp_calls == [] and ping_calls == [address]
+
+
+@pytest.mark.asyncio
 async def test_arp_probe_includes_source_ip_in_command():
     """arping must use -s 192.168.88.11 so the ARP request comes from the same /24.
 
@@ -862,7 +897,7 @@ def test_boot_ping_derivation_matches_historical_order():
         "192.168.1.20",   # was DeviceLinkLocalIP.UBIQUITI
         "192.168.88.1",   # was DeviceLinkLocalIP.MIKROTIK
         "192.168.10.1",   # Business router
-        "192.168.10.2",   # First business switch
+        "192.168.10.2",   # Older fixed-address business switch
         "169.254.100.1",  # was DeviceLinkLocalIP.TARANA
     ]
 
