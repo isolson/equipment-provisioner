@@ -26,6 +26,9 @@ inspect it, then choose and apply a role. The API authenticates, checks physical
 identity and firmware, verifies the supported layout, applies through the
 vendor handler, and reads the state back. An unknown layout, changed device,
 busy port, unqualified model/firmware, or failed readback is refused.
+[Business wired profiles](business-wired-profiles.md#allowed-routeros-releases)
+lists the RouterOS releases the workflow allows. That list is not a
+hardware qualification; this record covers 7.23.5 only.
 
 - **Business router** (`router`): ether1 WAN; ether2–ether5 and SFP bridged as LAN; IPv4/IPv6
   forwarding, the existing NAT rule, and DHCP client/server enabled.

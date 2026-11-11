@@ -70,6 +70,10 @@ async def _operate(request, port_number, change: Optional[NetworkModeRequest] = 
         pm.update_port_device_info(port_number, serial=info.serial_number,
                                    model=info.model, firmware_version=info.firmware_version)
         state = await handler.network_mode_state()
+        refusal = getattr(handler, "network_mode_firmware_refusal", None)
+        reason = refusal(state.get("firmware")) if refusal else None
+        if reason:
+            raise HTTPException(409, reason)
         handler.validate_network_mode_layout(state)
         model = state.get("model")
         firmware = str(state.get("firmware") or "").split()[0]
