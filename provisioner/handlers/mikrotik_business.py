@@ -1,15 +1,15 @@
 """E60iUGS business profiles, owned by the MikroTik handler.
 
-These bench profiles implement business network policy while Ops' renderer
-contract is developed. They do not implement fleet reset/enrollment or KDF.
+These bench profiles implement business network policy and consume per-device
+login credentials transiently through the Ops render-credential contract
+(``mikrotik_render_credentials``). They persist no per-device secret on the
+bench, and they do not implement fleet reset/enrollment or KDF.
 """
 import asyncio
 import hashlib
-import json
-import os
-import secrets
 import re
 from pathlib import Path
+from typing import Dict, Optional
 
 PROFILE_MARKER = "treehouse-business-v1:"
 PROFILE_ROOT = Path(__file__).resolve().parents[2] / "configs/templates/mikrotik/modes"
@@ -193,25 +193,39 @@ async def apply(handler, mode):
     return state
 
 
-SECRET_ROOT = Path("/var/lib/provisioner/device-secrets/mikrotik")
+# The interim flow wrote per-device secrets here. #167 forbids any persistent
+# per-device secret store on the bench; this location is only ever removed now.
+LEGACY_SECRET_ROOT = Path("/var/lib/provisioner/device-secrets/mikrotik")
+
+# WireGuard base64 public key: 43 chars + '=' padding.
+_WG_PUBLIC_KEY = re.compile(r"[A-Za-z0-9+/]{43}=")
 
 
-def _secret_file(serial):
-    # Hash the filename as well: directory listings need no device identity.
-    SECRET_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return SECRET_ROOT / (hashlib.sha256(serial.encode()).hexdigest() + ".json")
+def cleanup_bench_secret_store() -> int:
+    """Remove any per-device secret files the interim bench flow left behind.
 
-
-def _save_secrets(path, data):
-    temp = path.with_suffix(".tmp")
-    fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    Deletes the legacy directory and its files without reading or printing any
+    value, and returns how many files were removed. Idempotent: returns 0 when
+    nothing is present. This is the inventory-and-remove step required by #167.
+    Fails closed: raises ``RuntimeError`` when the legacy directory is still
+    present after the attempt, so the business flow does not continue.
+    """
+    root = LEGACY_SECRET_ROOT
+    if not root.exists():
+        return 0
+    removed = 0
     try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(data, stream)
-        os.replace(str(temp), str(path))
-    finally:
-        if temp.exists():
-            temp.unlink()
+        for child in sorted(root.glob("*")):
+            if child.is_file() or child.is_symlink():
+                child.unlink()
+                removed += 1
+        root.rmdir()
+    except OSError:
+        # Do not chain the OS error: keep file names out of the message.
+        pass
+    if root.exists():
+        raise RuntimeError("Legacy per-device secret store could not be removed")
+    return removed
 
 
 async def advanced_state(handler):
@@ -219,45 +233,145 @@ async def advanced_state(handler):
     count = (await handler._run_command(':put [:len [/interface wireguard find where name="wg-management"]]')).strip()
     public = None
     if count == "1":
+        # Only the public half is ever read back; the private key never leaves
+        # the device.
         public = (await handler._run_command(':put [/interface wireguard get [find where name="wg-management"] public-key]')).strip()
     return {"romon_enabled":enabled, "romon_port":"ether3", "wireguard_public_key":public,
-            "wireguard_status":"key prepared; peer not configured" if public else "not prepared"}
+            "wireguard_status":"on-device management access prepared; peer not configured" if public else "not prepared"}
 
 
-async def apply_advanced(handler, romon_enabled=None, prepare_wireguard=False):
+async def apply_advanced(handler, romon_enabled=None, prepare_wireguard=False,
+                         romon_secret=None, rotate_wireguard=False):
+    """Apply opt-in advanced management. Persists no secret on the bench.
+
+    RoMON is enabled only with a per-device secret delivered transiently by the
+    management contract; the provisioner never generates, substitutes, or stores
+    one. WireGuard keys are generated on-device and only the public half is read
+    back.
+    """
+    cleanup_bench_secret_store()
     state = await handler.network_mode_state()
     if state.get("profile") != "business-v1" or not all(state["checks"].values()):
         raise ValueError("Apply and verify a business profile before advanced options")
-    info = await handler.get_info()
-    path = _secret_file(info.serial_number)
-    data = json.loads(path.read_text()) if path.exists() else {}
     if romon_enabled is not None:
         if romon_enabled:
-            data.setdefault("romon_secret", secrets.token_hex(32))
-            _save_secrets(path, data)  # Fail before writing device if storage is unavailable.
-            secret = data["romon_secret"]
-            if not re.fullmatch(r"[0-9a-f]{64}", secret):
-                raise ValueError("Stored RoMON secret is invalid")
+            secret = (romon_secret or "").strip()
+            # No self-generated or fleet secret is ever used. The per-device
+            # RoMON secret must arrive transiently from the management contract.
+            if not secret:
+                raise ValueError("Enabling RoMON requires a per-device secret from the management contract")
+            if not (16 <= len(secret) <= 128) or not secret.isprintable():
+                raise ValueError("The provided RoMON secret is not acceptable")
+            esc = handler._escape_routeros_string(secret)
             await handler._run_command('/tool romon set enabled=no')
             await handler._run_command('/tool romon port set [find where interface=all] forbid=yes')
             await handler._run_command('/tool romon port remove [find where interface!=all]')
             await handler._run_command('/tool romon port add interface=ether3 forbid=no comment="business local management"')
-            # Never log this command or expose the private readback.
-            await handler._run_command('/tool romon set secrets="%s" enabled=yes' % secret)
+            # Run directly so the transient secret is never logged; it is not stored.
+            await handler._ssh.run('/tool romon set secrets="%s" enabled=yes' % esc, check=False)
         else:
             await handler._run_command('/tool romon set enabled=no')
     if prepare_wireguard:
         count = (await handler._run_command(':put [:len [/interface wireguard find where name="wg-management"]]')).strip()
-        if count == '0':
+        if rotate_wireguard and count != "0":
+            # One-time remediation: the interim flow exported this key's private
+            # half to disk. Replace it on-device before enrollment; the new
+            # public half must be re-published to any peer that held the old one.
+            await handler._run_command('/interface wireguard remove [find where name="wg-management"]')
+            count = "0"
+        if count == "0":
             await handler._run_command('/interface wireguard add name=wg-management disabled=yes comment="Pending management concentrator"')
-        private = (await handler._run_command(':put [/interface wireguard get [find where name="wg-management"] private-key]')).strip()
+        # Read back only the public half. The private key is never read, logged,
+        # or stored; repeat calls without rotate_wireguard keep the same key.
         public = (await handler._run_command(':put [/interface wireguard get [find where name="wg-management"] public-key]')).strip()
-        if not re.fullmatch(r"[A-Za-z0-9+/]{43}=", private) or not re.fullmatch(r"[A-Za-z0-9+/]{43}=", public):
+        if not _WG_PUBLIC_KEY.fullmatch(public):
             raise RuntimeError("WireGuard key generation was not verified")
-        data.update(wireguard_private_key=private, wireguard_public_key=public)
-        _save_secrets(path, data)
     result = await advanced_state(handler)
     verified = await read_state(handler,state["mode"])
     if not all(verified["checks"].values()) or (romon_enabled is not None and result['romon_enabled'] != romon_enabled):
         raise RuntimeError("Advanced management did not pass readback")
     return result
+
+
+# Same name that apply() uploads and removes.
+UPLOADED_PROFILE = "business-profile.rsc"
+
+
+async def uploaded_profile_removed(handler):
+    """Return True when the uploaded profile file is absent on the device."""
+    async with handler._ssh.start_sftp_client() as sftp:
+        return not await sftp.exists(UPLOADED_PROFILE)
+
+
+async def _login_result(handler, username: str, password: str) -> str:
+    """Return ``"accepted"`` or ``"rejected"`` for ``username``/``password``.
+
+    Opens an independent SSH connection so it tests the login itself, not the
+    already-open provisioning session. ``"rejected"`` means the device refused
+    the authentication. Any other failure (transport error, failed probe after
+    login) raises ``RuntimeError``, because it proves nothing about the login.
+    Never logs the password.
+    """
+    import asyncssh
+    try:
+        conn = await handler._open_ssh_connection(username=username, password=password)
+    except asyncssh.PermissionDenied:
+        return "rejected"
+    except Exception:
+        # Do not chain: SSH error text can echo credentials.
+        raise RuntimeError("Login check could not reach the device") from None
+    try:
+        probe = await conn.run("/system identity print", check=False)
+    finally:
+        conn.close()
+        await conn.wait_closed()
+    if probe.exit_status != 0:
+        raise RuntimeError("Login check probe failed")
+    return "accepted"
+
+
+async def accept_credentials(handler, release_result, *, previous_credentials: Optional[Dict[str, str]] = None):
+    """Replace the consumed label login with the intended ``localadmin`` login.
+
+    Applies the transiently released ``localadmin`` password on-device, verifies
+    a fresh ``localadmin`` login works, then disables the previous login and
+    verifies it fails. Fail-safe: the previous login is only disabled after the
+    new one is proven, so a failure never strands the device without a working
+    login. Nothing is persisted; the password stays in memory for this call.
+    """
+    cleanup_bench_secret_store()
+    new_password = release_result.password
+    esc = handler._escape_routeros_string(new_password)
+    exists = (await handler._run_command(':put [:len [/user find where name="localadmin"]]')).strip()
+    if exists == "0":
+        # Password is embedded in the SSH command body, never argv, and this
+        # runs directly so it is never logged.
+        await handler._ssh.run('/user add name=localadmin group=full password="%s"' % esc, check=False)
+    else:
+        await handler._ssh.run('/user set [find name="localadmin"] group=full disabled=no password="%s"' % esc, check=False)
+
+    try:
+        new_login = await _login_result(handler, "localadmin", new_password)
+    except RuntimeError:
+        new_login = None
+    if new_login != "accepted":
+        raise RuntimeError("localadmin login was not verified; previous login left intact")
+
+    previous = previous_credentials or {}
+    previous_user = previous.get("username")
+    previous_disabled = False
+    if previous_user and previous_user != "localadmin":
+        await handler._ssh.run(
+            '/user set [find name="%s"] disabled=yes' % handler._escape_routeros_string(previous_user),
+            check=False,
+        )
+        # Only a confirmed authentication rejection proves the old login is
+        # disabled. A transport or probe failure raises from _login_result.
+        if await _login_result(handler, previous_user, previous.get("password", "")) != "rejected":
+            raise RuntimeError("Previous login still accepted after replacement")
+        previous_disabled = True
+
+    # Subsequent operations and disconnect use the accepted login.
+    handler.credentials = {"username": "localadmin", "password": new_password}
+    handler._credentials_confirmed = True
+    return {"local_login_verified": True, "previous_login_disabled": previous_disabled}
