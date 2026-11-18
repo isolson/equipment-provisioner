@@ -146,6 +146,18 @@ provisioner module, registry entry or template. The profile is the data file
 Switch Standard (`architecture/48-business-switch.md` in
 treehouse-architecture). The file lists each TSW202 deviation from it.
 
+Connect the switch to the bench port and set `--iface` to that port's
+provisioner VLAN interface: port N uses `enp3s0.199N`. The default
+`enp3s0.1993` is port 3. The 2026-11-18 Echo Shores run used port 1 and
+`--iface enp3s0.1991`.
+
+Use a separate mode-0600 credentials file for each unit, for example
+`/root/tsw202-echoshores-sw02.env`. Factory TSW202 units have a unique password
+on the label; the factory username paired with `admin01` does not work. After firmware update, the switch
+may drop the next HTTPS connection (seen at the NTP step as
+`RemoteDisconnected`). Re-run the same command; the tool is idempotent and
+continues from the settings that differ.
+
 ```bash
 # Plan only (no device writes)
 sudo /opt/provisioner/venv/bin/python scripts/tsw202_business_switch.py \
@@ -194,3 +206,9 @@ operator has verified out of band.
 Every write compares the current value first, so a rerun changes only what
 differs. `--stop-after` ends the run after a named stage. The label password
 is not changed; production credentials are a separate step.
+
+### Bench run — 2026-11-18
+
+Echo Shores unit 2, serial `6012110497`, used `--unit 2 --site echoshores` and
+received identity `th.echoshores.sw02` at `192.168.10.3`. Firmware updated from
+10.1 to 10.4. Both configuration read-backs passed (22 checks).
