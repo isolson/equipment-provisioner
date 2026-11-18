@@ -75,7 +75,7 @@ git checkout <previous-good-sha>      # see .deployed-rev history / git log prod
 ## Hotfix flow (while refactor work is in flight on main)
 
 1. `git checkout -b hotfix/<thing> production`
-2. Fix, test. If urgent, deploy from this branch with `--allow-branch`.
+2. Fix, test. If urgent, deploy from this branch with `--allow-branch`. Add a `Bench:` line to the PR naming the deployed SHA and recording the target, runtime versions, scenario, PASS result, and log link. Hotfixes use the same real-target evidence rule as other changes.
 3. `git checkout production && git merge --ff-only hotfix/<thing> && git push origin production`, then deploy from `production`.
 4. Open a PR of the same branch into `main`; resolve any refactor-moved-the-code conflicts in the PR (production already has the fix).
 
