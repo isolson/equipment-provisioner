@@ -10,6 +10,8 @@ cookies, device passwords, wireless keys, or private addresses.
 Keep raw HAR files and exports in the protected bench audit directory. Do not
 commit them to Git. Use a sanitized trace for a code or documentation change.
 
+See [GPEN21 SwOS Lite bench notes](gpen21-swos-lite.md) for the verified 2026-11-18 API and profile run.
+
 ## Tachyon
 
 Applies to Tachyon TNA radio devices and TNS switches. Confirm the model before

@@ -1,5 +1,7 @@
 # Business wired profiles — hEX S bench release
 
+GPEN21 SwOS Lite bench results are recorded in [GPEN21 SwOS Lite](gpen21-swos-lite.md).
+
 The Business router and Business switch profiles implement the business VLAN
 policy on the E60iUGS ARM hEX S running RouterOS 7.23.5. Other boards remain
 unqualified in this provisioner. Select **Wired modes**, inspect the device,
