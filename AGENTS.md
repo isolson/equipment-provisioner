@@ -5,9 +5,9 @@ The provisioner detects VLAN-isolated devices and applies firmware and config th
 The Lenovo ThinkPad Yoga 11e host serves a touchscreen web UI on port 8080.
 
 Real-target lab:
-Target: Lenovo ThinkPad Yoga 11e operator bench
+Target: Tachyon, Cambium, MikroTik, and Tarana operator bench radios in bench-evidence/, reached through the Lenovo ThinkPad Yoga 11e kiosk host
 Paths: provisioner/handlers/**, provisioner/firmware_sources/**
-Test command: pytest
+Test command: Operator-run procedure in docs/live-testing-sop.md; agents do not run it
 Evidence location: bench-evidence/
 Link: https://github.com/isolson/personal-processes/blob/main/docs/real-target-labs.md
 PR line: Bench: <SHA> | <target> | <versions> | <path or scenario> | PASS | <log link>

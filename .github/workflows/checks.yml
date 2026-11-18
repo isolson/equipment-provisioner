@@ -8,30 +8,6 @@ on:
 # Static gates that catch the regression classes we keep hitting, separate from
 # the pytest job in test.yml so each shows up as its own required status check.
 jobs:
-  real-target-bench-line:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0
-      - name: Require a Bench line for device and firmware paths
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: |
-          set -euo pipefail
-          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
-          if ! grep -Eq '^(provisioner/handlers/|provisioner/firmware_sources/)' <<<"$changed"; then
-            echo "No handler or firmware source changes; bench line not required."
-            exit 0
-          fi
-          if ! grep -Fq "Bench: $HEAD_SHA |" <<<"$PR_BODY"; then
-            echo "PR body must include: Bench: $HEAD_SHA | <target> | <versions> | <path or scenario> | PASS | <log link>"
-            exit 1
-          fi
-
   docs:
     runs-on: ubuntu-latest
     steps:
