@@ -14,6 +14,8 @@ touching production code:
 
 These are wired into ``conftest.py`` as the ``stub_aiohttp`` and ``fake_curl``
 fixtures.
+
+These synthetic responses support unit tests only; they are not bench evidence.
 """
 
 import json

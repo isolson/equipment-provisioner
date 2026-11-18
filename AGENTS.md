@@ -4,6 +4,14 @@ Use this file for all agent instructions; `CLAUDE.md` is a symlink to it.
 The provisioner detects VLAN-isolated devices and applies firmware and config through vendor handlers.
 The Lenovo ThinkPad Yoga 11e host serves a touchscreen web UI on port 8080.
 
+Real-target lab:
+Target: Lenovo ThinkPad Yoga 11e operator bench
+Paths: provisioner/handlers/**, provisioner/firmware_sources/**
+Test command: pytest
+Evidence location: bench-evidence/
+Link: https://github.com/isolson/personal-processes/blob/main/docs/real-target-labs.md
+PR line: Bench: <SHA> | <target> | <versions> | <path or scenario> | PASS | <log link>
+
 ## Agent rules
 
 These rules match `AGENT_LOOP_REPO_RULES` in `dev-host/config/network-provisioner-loop.env`. They apply to loop and worker agents.
