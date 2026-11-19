@@ -100,7 +100,8 @@ class TestHandlerRouting:
         assert "tachyon" in supported
         assert "tarana" in supported
         assert "ubiquiti" in supported
-        assert len(supported) == 5
+        assert "mikrotik_swos_lite" in supported
+        assert len(supported) == 6
 
 
 class TestCredentialHandling:

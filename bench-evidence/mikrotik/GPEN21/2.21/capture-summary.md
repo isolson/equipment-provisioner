@@ -27,3 +27,12 @@ for the field map. Request bodies are omitted. The known-good page captures
 are empty because the unit was off the bench at export time. Production login,
 SFP link testing, PoE load testing, and a physical power cycle are not
 claimed.
+
+The redacted request structure is recorded in
+[`requests.structure.json`](requests.structure.json). It records editable
+page fields, response status, and read-back structure. Serial, MAC, identity,
+management address, and SNMP community values are omitted. The board name is
+in `sys.b.i07`; the firmware version is in `sys.b.i06`. The profile reached
+the new management address through a temporary network namespace and macvlan
+on the port VLAN interface. The host main namespace did not receive an
+address in `192.168.10.0/24`.

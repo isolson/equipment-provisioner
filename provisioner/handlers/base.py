@@ -110,6 +110,10 @@ class BaseHandler(ABC):
     #: vendors whose firmware/config assets are model-specific.
     requires_model_preflight = False
 
+    #: Run apply_config({}) when this device profile is handler-owned and no
+    #: standard config asset exists.
+    requires_config_apply = False
+
     #: The config resolver may compose role/replacement overlays for this
     #: vendor. False ⇒ overlays are refused with an operator-visible note
     #: (base-only resolution). Enable per vendor only after bench
@@ -886,7 +890,7 @@ class BaseHandler(ABC):
                 "step_plan",
                 True,
                 self.provisioning_step_plan(
-                    has_config=bool(config or config_path),
+                    has_config=bool(config or config_path or self.requires_config_apply),
                     dual_bank=dual_bank,
                     need_fw1=need_fw1,
                     need_fw2=need_fw2,
@@ -1098,7 +1102,11 @@ class BaseHandler(ABC):
             #   device unreachable for subsequent operations.
             # ================================================================
 
-            missing_secrets = self.missing_required_secrets() if (config or config_path) else []
+            missing_secrets = (
+                self.missing_required_secrets()
+                if (config or config_path or self.requires_config_apply)
+                else []
+            )
             if missing_secrets:
                 result.error_message = (
                     "Required secret not configured on the host: %s "
@@ -1115,10 +1123,10 @@ class BaseHandler(ABC):
                 # PHASE 6: CONFIG APPLY
                 _logger.info(f"[PROVISION] Phase 6: Apply config")
                 _logger.info(f"[PROVISION] Config path: {config_path}, inline config: {bool(config)}")
-                if config or config_path:
-                    if config:
-                        _logger.info(f"[PROVISION] Applying inline config with {len(config)} keys")
-                        success = await self.apply_config(config)
+                if config or config_path or self.requires_config_apply:
+                    if config or not config_path:
+                        _logger.info(f"[PROVISION] Applying inline config with {len(config or {})} keys")
+                        success = await self.apply_config(config or {})
                     else:
                         _logger.info(f"[PROVISION] Applying config from file: {config_path}")
                         success = await self.apply_config_file(config_path)
@@ -1312,7 +1320,7 @@ class BaseHandler(ABC):
                 # device unreachable for subsequent operations.
                 _logger.info(f"[PROVISION] Applying config after all firmware (config_after_all_firmware=True)")
                 _logger.info(f"[PROVISION] Config path: {config_path}, inline config: {bool(config)}")
-                if config or config_path:
+                if config or config_path or self.requires_config_apply:
                     _logger.info(
                         "[PROVISION] Preparing the verified session before config apply..."
                     )
@@ -1321,9 +1329,9 @@ class BaseHandler(ABC):
                         await notify("config_upload", False, result.error_message)
                         return result
 
-                    if config:
-                        _logger.info(f"[PROVISION] Applying inline config with {len(config)} keys")
-                        success = await self.apply_config(config)
+                    if config or not config_path:
+                        _logger.info(f"[PROVISION] Applying inline config with {len(config or {})} keys")
+                        success = await self.apply_config(config or {})
                     else:
                         _logger.info(f"[PROVISION] Applying config from file: {config_path}")
                         success = await self.apply_config_file(config_path)

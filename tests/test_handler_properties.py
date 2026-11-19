@@ -18,6 +18,7 @@ import pytest
 from provisioner.handlers.base import DeviceInfo
 from provisioner.handlers.cambium import CambiumHandler
 from provisioner.handlers.mikrotik import MikrotikHandler
+from provisioner.handlers.mikrotik_swos_lite import MikrotikSwosLiteHandler
 from provisioner.handlers.tachyon import TachyonHandler
 from provisioner.handlers.tarana import TaranaHandler
 from provisioner.handlers.ubiquiti import UbiquitiHandler
@@ -311,6 +312,7 @@ TRAIT_NAMES = (
     "allows_arbitrary_template_fallback",
     "config_alias_prefix_matching",
     "requires_model_preflight",
+    "requires_config_apply",
 )
 
 
@@ -324,6 +326,7 @@ def test_base_handler_trait_defaults():
         "allows_arbitrary_template_fallback": True,
         "config_alias_prefix_matching": False,
         "requires_model_preflight": False,
+        "requires_config_apply": False,
     }
 
 
@@ -333,6 +336,7 @@ def test_tachyon_trait_overrides():
         "allows_arbitrary_template_fallback": False,
         "config_alias_prefix_matching": True,
         "requires_model_preflight": True,
+        "requires_config_apply": False,
     }
 
 
@@ -345,6 +349,12 @@ def test_cambium_trait_overrides():
     # Every Cambium model maps to a family tree, so the vendor-root fallback
     # (which holds AP/PTP mode templates) is refused.
     assert _traits(CambiumHandler) == dict(_traits(BaseHandler), allows_arbitrary_template_fallback=False)
+
+
+def test_swos_lite_requires_profile_apply_without_a_template():
+    assert _traits(MikrotikSwosLiteHandler) == dict(
+        _traits(BaseHandler), requires_config_apply=True
+    )
 
 
 def test_handler_class_for_resolves_vendor_strings():

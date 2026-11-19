@@ -144,6 +144,12 @@ def test_dashboard_vendor_metadata_renders_identically_to_the_old_map():
             "defaultUser": "admin",
             "icon": "/static/vendor-icons/mikrotik.png",
         },
+        "mikrotik_swos_lite": {
+            "name": "SwOS Lite GPEN21",
+            "color": "#0E0E10",
+            "defaultUser": "admin",
+            "icon": "/static/vendor-icons/mikrotik_swos_lite.png",
+        },
         "tachyon": {
             "name": "Tachyon",
             "color": "#a855f7",

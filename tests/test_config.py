@@ -62,6 +62,7 @@ class TestConfigDefaults:
             "tarana",
             "ubiquiti",
             "mikrotik",
+            "mikrotik_swos_lite",
         ]
         assert set(type(config.device_ips).model_fields) == set(
             VENDOR_LINK_LOCAL_IPS
@@ -523,7 +524,7 @@ class TestCredentialsBackfill:
             '    password: "${UBIQUITI_PASSWORD}"\n',
         )
         assert set(config.credentials) == {
-            "cambium", "mikrotik", "tachyon", "tarana", "ubiquiti",
+            "cambium", "mikrotik", "mikrotik_swos_lite", "tachyon", "tarana", "ubiquiti",
         }
         assert config.credentials["cambium"].username == "admin"
         assert config.credentials["mikrotik"].username == "admin"
@@ -532,7 +533,7 @@ class TestCredentialsBackfill:
         assert config.credentials["ubiquiti"].username == "ubnt"
         # With the env vars unset, every ${...} password resolves to empty —
         # same as the pre-Story-3 typed-field model.
-        for device_type in ("cambium", "mikrotik", "tarana", "tachyon", "ubiquiti"):
+        for device_type in ("cambium", "mikrotik", "mikrotik_swos_lite", "tarana", "tachyon", "ubiquiti"):
             assert config.credentials[device_type].password == ""
         assert config.credentials["mikrotik"].bootstrap_password == ""
 

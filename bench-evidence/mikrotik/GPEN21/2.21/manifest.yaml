@@ -19,6 +19,7 @@ raw_files:
   readback.py: "Nine-check read-back script."
   known-good-2.21/readback.txt: "Nine of nine checks passed after the 2.21 reboot."
   known-good-2.21/: "Page captures are empty because the unit was off the bench at export time."
+  requests.structure.json: "Redacted API request fields, response statuses, board/version fields, namespace reconnect, and two read-back structure records."
   device-backup: "The factory pages were captured on 2.17. The device backup download returned an empty file and reported 'Default configuration. Nothing to save.'"
 evidence_scope: >-
   SwOS Lite HTTP API with digest authentication. The business-switch profile

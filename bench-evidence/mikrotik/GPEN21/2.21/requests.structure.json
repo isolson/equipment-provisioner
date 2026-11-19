@@ -1,0 +1,33 @@
+{
+  "source": "Redacted SwOS Lite HTTP request and read-back structures",
+  "artifact_purpose": "hardware-validation",
+  "reusable_template": false,
+  "capture_date": "2026-11-18",
+  "authentication": "HTTP Digest; username admin; password omitted",
+  "board": {"endpoint": "GET /sys.b", "field": "i07", "encoding": "hex ASCII", "value": "4750454e3231"},
+  "version": {"endpoint": "GET /sys.b", "field": "i06", "encoding": "hex ASCII", "examples": {"2.17": "322e3137", "2.21": "322e3231"}},
+  "redacted_fields": ["sys.b.i04 serial", "sys.b.i03 MAC", "sys.b.i05 identity", "sys.b.i09 management address", "snmp.b.i02 community"],
+  "writes": [
+    {"endpoint": "POST /vlan.b", "content_type": "text/plain", "body_structure": [{"i01": "0x0a", "i02": "0x07"}, {"i01": "0x14", "i02": "0x07"}, {"i01": "0x28", "i02": "0x07"}, {"i01": "0x46", "i02": "0x07"}], "status": 200},
+    {"endpoint": "POST /fwd.b", "content_type": "text/plain", "body_structure": {"i10": "0x00", "i11": "0x00", "i1f": "0x04", "i1a": ["0x00", "0x00", "0x00"], "i1b": "0x00", "i1d": ["0x00", "0x00", "0x00"], "i1e": ["0x00", "0x00", "0x00"], "i15": ["0x02", "0x02", "0x02"], "i17": ["0x00", "0x00", "0x00"], "i18": ["0x0a", "0x0a", "0x0a"], "i19": "0x00"}, "status": 200},
+    {"endpoint": "POST /snmp.b", "content_type": "text/plain", "body_structure": {"i01": "0x00", "i02": "<redacted community hex>", "i03": "''", "i04": "''"}, "status": 200},
+    {"endpoint": "POST /sys.b", "content_type": "text/plain", "body_structure": {"i0a": "0x01", "i09": "<mgmt_ip little-endian>", "i05": "<identity hex>", "i19": "0x00", "i1a": "0x00", "i12": "0x07", "i1b": "0x0a", "i0d": "0x01", "i08": "0x07", "i21": "0x00", "i1c": "0x00"}, "status": "request timed out after address move; expected"},
+    {"endpoint": "POST /sys.b", "content_type": "text/plain", "body_structure": {"i05": "<identity hex>"}, "status": 200, "note": "Later write from new address"}
+  ],
+  "firmware_update": [
+    {"endpoint": "POST /pboot", "body": "*", "status": 303, "redirect_followed": false},
+    {"endpoint": "POST /upgrade", "content_type": "multipart/form-data", "field": "blob", "status": 200},
+    {"endpoint": "GET /sys.b", "field": "i0c", "staged_value": 1},
+    {"endpoint": "POST /reboot", "body": "*", "status": 303, "redirect_followed": false},
+    {"endpoint": "GET /sys.b", "field": "i06", "value_hex_ascii": "322e3231", "decoded_version": "2.21"}
+  ],
+  "readbacks": {
+    "vlan.b": {"rows": [{"i01": 10, "i02": 7, "i03": 0}, {"i01": 20, "i02": 7, "i03": 0}, {"i01": 40, "i02": 7, "i03": 0}, {"i01": 70, "i02": 7, "i03": 0}]},
+    "fwd.b": {"i15": [2, 2, 2], "i18": [10, 10, 10], "i1f": 4},
+    "snmp.b": {"i01": 0},
+    "sys.b": {"i0a": 1, "i1b": 10}
+  },
+  "management_reconnect": {"method": "temporary network namespace with macvlan", "parent_interface_pattern": "enp3s0.199N", "namespace_address": "<mgmt_ip>/24", "host_main_namespace_address_added": false},
+  "readback_checks": ["identity", "static management address", "mgmt VLAN 10", "PoE out mode", "SFP1 uplink", "VLAN mode strict", "default VLAN 10", "VLANs 10/20/40/70 all ports", "SNMP off"],
+  "readback_passes": 2
+}
