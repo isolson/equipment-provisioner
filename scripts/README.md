@@ -180,6 +180,12 @@ same pin. A mismatch during a run stops the tool; it does not accept a changed
 certificate automatically. --cert-sha256 can pin a fingerprint that the
 operator has verified out of band.
 
+The provisioner omits --serial because the unauthenticated status endpoint
+does not return it. The runner probes that endpoint with the observed
+certificate, logs in through the same certificate-pinned client, reads the
+serial from the authenticated device status, then records the pin under that
+serial before it makes further profile requests.
+
 **What it does:**
 1. Creates a temporary network namespace with a macvlan on `--iface`
    (default `enp3s0.1993`, provisioner port 3) holding 192.168.1.250/24 and

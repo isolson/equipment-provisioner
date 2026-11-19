@@ -1,4 +1,4 @@
-"""Provision the TSW202 business-switch profile.
+"""Provision the TSW202 business-switch profile through its bench runner.
 
 The API paths, payloads, field values, and stage order come from the
 TSW202/RutOS 00.01.10.4 capture and its bench runner. See
@@ -6,36 +6,27 @@ bench-evidence/teltonika/TSW202/TSW2_R_00.01.10.4/capture-summary.md.
 """
 
 import asyncio
-import importlib.util
-import json
 import os
+import re
 import shlex
+import stat
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from .base import BaseHandler, DeviceInfo, ProvisioningResult
 
-PROFILE_PATH = Path(__file__).resolve().parents[2] / "scripts/tsw202_business_switch_profile.json"
 RUNNER_PATH = Path(__file__).resolve().parents[2] / "scripts/tsw202_business_switch.py"
-PIN_FILE = Path("/var/lib/provisioner/tsw202-pins.json")
-BACKUP_DIR = Path("/var/lib/provisioner/tsw202-backups")
+CREDENTIAL_DIR = Path("/run/provisioner")
 FIRMWARE = {
     "version": "TSW2_R_00.01.10.4",
     "filename": "TSW2_R_00.01.10.4_WEBUI.bin",
     "url": "https://firmware.teltonika-networks.com/1.10.4/TSW2/TSW2_R_00.01.10.4_WEBUI.bin",
     "md5": "b2a4da07cb055ed198434d3e60c62fef",
 }
-
-
-def _load_runner():
-    spec = importlib.util.spec_from_file_location("tsw202_business_switch_runner", RUNNER_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("TSW202 runner is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+READBACK_CHECK_COUNT = 22
 
 
 class TeltonikaHandler(BaseHandler):
@@ -65,9 +56,7 @@ class TeltonikaHandler(BaseHandler):
         return "teltonika"
 
     async def connect(self) -> bool:
-        # The bench runner performs the serial pin check before login and
-        # keeps the factory address inside its handler-local network namespace.
-        return self._connected
+        return False
 
     async def disconnect(self) -> None:
         self._connected = False
@@ -75,10 +64,7 @@ class TeltonikaHandler(BaseHandler):
     async def get_info(self) -> DeviceInfo:
         if self._info:
             return self._info
-        self._info = DeviceInfo(
-            device_type=self.device_type, model="TSW202", ip_address=self._device_ip
-        )
-        return self._info
+        return DeviceInfo(device_type=self.device_type, model="TSW202", ip_address=self._device_ip)
 
     async def backup_config(self) -> bytes:
         return b""
@@ -118,103 +104,103 @@ class TeltonikaHandler(BaseHandler):
             result.error_message = "TSW202 label credentials are required"
             result.needs_credentials = True
             return result
+
         firmware_path = kwargs.get("firmware_path")
         firmware_dir = str(Path(firmware_path).parent) if firmware_path else "/var/tmp/tsw202"
         try:
-            info, old_firmware = await asyncio.to_thread(
+            output = await asyncio.to_thread(
                 self._run_profile, site, unit, username, password, firmware_dir
             )
         except Exception as exc:
-            message = str(exc)
-            result.error_message = message
-            if "login failed" in message.lower() or "credential" in message.lower():
-                result.needs_credentials = True
+            result.error_message = str(exc)
             return result
-        self._info = info
+
+        if self._login_rejected(output):
+            result.error_message = "TSW202 label credentials were rejected"
+            result.needs_credentials = True
+            return result
+        if not self._readbacks_passed(output):
+            if self._is_connection_drop(output):
+                result.error_message = "TSW202 connection failed after one retry"
+            else:
+                result.error_message = "TSW202 runner did not return two passing read-backs"
+            return result
+
+        old_version = self._old_firmware(output)
+        self._info = DeviceInfo(
+            device_type=self.device_type,
+            model="TSW202",
+            hostname="th.{}.sw{:02d}".format(site, unit),
+            firmware_version=FIRMWARE["version"],
+            ip_address="192.168.10.{}".format(1 + unit),
+        )
         result.success = True
-        result.device_info = info
-        result.old_firmware = old_firmware
+        result.device_info = self._info
+        result.old_firmware = old_version
         result.new_firmware = FIRMWARE["version"]
         result.config_applied = "business-switch"
         return result
 
     def _run_profile(
         self, site: str, unit: int, username: str, password: str, firmware_dir: str
-    ) -> tuple[DeviceInfo, Optional[str]]:
+    ) -> str:
         if not self.interface:
             raise RuntimeError("TSW202 requires a provisioning VLAN interface")
-        runner = _load_runner()
-        with PROFILE_PATH.open() as profile_file:
-            profile = json.load(profile_file)
-        credential_fd, credential_path = tempfile.mkstemp(prefix="tsw202-", suffix=".env")
-        os.fchmod(credential_fd, 0o600)
+        if "\n" in username or "\n" in password:
+            raise RuntimeError("TSW202 credentials cannot contain newlines")
+
+        CREDENTIAL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory_stat = CREDENTIAL_DIR.stat()
+        if (
+            not stat.S_ISDIR(directory_stat.st_mode)
+            or directory_stat.st_uid != os.geteuid()
+            or directory_stat.st_mode & 0o077
+        ):
+            raise RuntimeError("TSW202 credential directory must be owner-only")
+
+        fd, credential_path = tempfile.mkstemp(
+            prefix="tsw202-", suffix=".env", dir=str(CREDENTIAL_DIR)
+        )
+        os.fchmod(fd, 0o600)
         try:
-            with os.fdopen(credential_fd, "w") as credential_file:
-                if "\n" in username or "\n" in password:
-                    raise RuntimeError("TSW202 credentials cannot contain newlines")
+            with os.fdopen(fd, "w") as credential_file:
                 credential_file.write("TSW202_LABEL_USERNAME=" + shlex.quote(username) + "\n")
                 credential_file.write("TSW202_LABEL_PASSWORD=" + shlex.quote(password) + "\n")
-            args = SimpleNamespace(
-                dry_run=False,
-                unit=unit,
-                site=site,
-                cred_file=credential_path,
-                serial="",
-                pin_file=str(PIN_FILE),
-                trust_new_cert=False,
-                cert_sha256=None,
-                backup_dir=str(BACKUP_DIR),
-                firmware_dir=firmware_dir,
-            )
-            addresses = [profile["factory_netns_address"], profile["management"]["netns_address"]]
-            runner.netns_up(self.interface, addresses)
-            try:
-                serial, fingerprint = self._identify_serial(runner)
-                args.serial = serial
-                pins = runner._read_pins(args.pin_file)
-                args.trust_new_cert = serial not in pins
-                if args.trust_new_cert:
-                    args.cert_sha256 = fingerprint
-                api_runner = runner.Runner(args, profile)
-                api_runner.connect()
-                old_firmware = api_runner.api.get("/api/firmware/device/status").get("version")
-                api_runner.backup()
-                api_runner.firmware()
-                for attempt in (1, 2):
-                    try:
-                        api_runner.hardening()
-                        break
-                    except runner.StepError as exc:
-                        if attempt == 2 or "HTTPS request failed" not in str(exc):
-                            raise
-                        api_runner.connect(quiet=True)
-                api_runner.vlans()
-                api_runner.move()
-                results = []
-                for index in (0, 1):
-                    if index:
-                        import time
-
-                        time.sleep(30)
-                        api_runner.connect(quiet=True)
-                    results.extend(api_runner.readback())
-                if not results or any(not passed for _name, passed, _detail in results):
-                    raise RuntimeError("TSW202 read-back failed")
-                data = api_runner.api.get("/api/system/device/status")
-                return (
-                    DeviceInfo(
-                        device_type=self.device_type,
-                        model="TSW202",
-                        serial_number=serial,
-                        mac_address=data.get("mac"),
-                        hostname=api_runner.hostname,
-                        firmware_version=FIRMWARE["version"],
-                        ip_address=api_runner.mgmt_ip,
-                    ),
-                    old_firmware,
-                )
-            finally:
-                runner.netns_down()
+            command = [
+                sys.executable,
+                str(RUNNER_PATH),
+                "--cred-file",
+                credential_path,
+                "--unit",
+                str(unit),
+                "--site",
+                site,
+                "--iface",
+                self.interface,
+                "--firmware-dir",
+                firmware_dir,
+            ]
+            for attempt in (1, 2):
+                try:
+                    completed = subprocess.run(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        check=False,
+                        timeout=1800,
+                    )
+                    output = completed.stdout or ""
+                except subprocess.TimeoutExpired as exc:
+                    output = exc.stdout or ""
+                    if isinstance(output, bytes):
+                        output = output.decode(errors="replace")
+                    if attempt == 1 and self._is_connection_drop(output):
+                        continue
+                    return output + "\nRUNNER TIMEOUT"
+                if completed.returncode == 0 or not self._is_connection_drop(output):
+                    return output
+            return output
         finally:
             try:
                 os.unlink(credential_path)
@@ -222,20 +208,54 @@ class TeltonikaHandler(BaseHandler):
                 pass
 
     @staticmethod
-    def _identify_serial(runner: Any):
-        import urllib.request
-
-        host = "192.168.1.2"
-        fingerprint = runner.peer_fingerprint(host)
-        opener = urllib.request.build_opener(
-            runner._PinnedHTTPSHandler(fingerprint), runner._RefuseRedirect()
+    def _is_connection_drop(output: str) -> bool:
+        lowered = output.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "remotedisconnected",
+                "connectionreseterror",
+                "https request failed",
+            )
         )
-        with opener.open("https://%s/api/unauthorized/status" % host, timeout=5) as response:
-            payload = json.loads(response.read())
-        data = payload.get("data") or {}
-        if data.get("device_model") != "TSW202":
-            raise RuntimeError("unauthenticated status did not identify a TSW202")
-        serial = data.get("serial") or (data.get("mnfinfo") or {}).get("serial")
-        if not serial:
-            raise RuntimeError("TSW202 status did not return a serial for TLS pinning")
-        return str(serial), fingerprint
+
+    @staticmethod
+    def _login_rejected(output: str) -> bool:
+        lowered = output.lower()
+        return "login failed (http 401)" in lowered or "login failed (http 403)" in lowered
+
+    @staticmethod
+    def _readbacks_passed(output: str) -> bool:
+        final_line = output.rstrip().splitlines()[-1].strip() if output.strip() else ""
+        blocks = []
+        active = None
+        results = []
+        for line in output.splitlines():
+            header = re.match(r"^read-back ([12]):", line.strip())
+            if header:
+                active = []
+                blocks.append(active)
+                continue
+            if line.startswith("RESULT:"):
+                results.append(line.strip())
+                active = None
+                continue
+            if active is not None:
+                check = re.match(r"^\s+(PASS|FAIL)\s{2}(.+)$", line)
+                if check:
+                    text = re.split(r"\s{2}\(", check.group(2), maxsplit=1)[0]
+                    active.append((check.group(1), text))
+        return (
+            bool(results)
+            and results[-1] == "RESULT: PASS"
+            and final_line == "RESULT: PASS"
+            and len(blocks) == 2
+            and all(len(block) == READBACK_CHECK_COUNT for block in blocks)
+            and all(status == "PASS" for block in blocks for status, _name in block)
+            and [name for _status, name in blocks[0]] == [name for _status, name in blocks[1]]
+        )
+
+    @staticmethod
+    def _old_firmware(output: str) -> Optional[str]:
+        match = re.search(r"^firmware: device ([^,]+), target ", output, re.MULTILINE)
+        return match.group(1) if match else None

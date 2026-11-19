@@ -397,9 +397,15 @@ class Runner(object):
     def connect(self, quiet: bool = False) -> str:
         for host in (self.mgmt_ip, self.p["factory_address"]):
             try:
-                fingerprint = pin_peer(host, self.args.serial, self.args.pin_file,
-                                       self._allow_pin_update and self.args.trust_new_cert,
-                                       self.args.cert_sha256 if self._allow_pin_update else None)
+                if self.args.serial:
+                    fingerprint = pin_peer(host, self.args.serial, self.args.pin_file,
+                                           self._allow_pin_update and self.args.trust_new_cert,
+                                           self.args.cert_sha256 if self._allow_pin_update else None)
+                else:
+                    fingerprint = peer_fingerprint(host)
+                    expected = normalize_fingerprint(self.args.cert_sha256) if self.args.cert_sha256 else None
+                    if expected and expected != fingerprint:
+                        raise CertificatePinError("TLS certificate does not match --cert-sha256")
             except CertificatePinError:
                 raise
             except (OSError, socket.timeout):
@@ -407,13 +413,20 @@ class Runner(object):
             info = probe(host, fingerprint)
             if info and info.get("device_model") == self.p["model"]:
                 observed_serial = info.get("serial") or (info.get("mnfinfo") or {}).get("serial")
-                if observed_serial and str(observed_serial) != self.args.serial:
+                if self.args.serial and observed_serial and str(observed_serial) != self.args.serial:
                     raise StepError("device serial does not match the requested TLS pin serial")
                 self.api = Api(host, self.user, self.password, fingerprint)
                 self.api.login()
                 serial = self.api.get("/api/system/device/status")["mnfinfo"]["serial"]
-                if str(serial) != self.args.serial:
+                serial = str(serial)
+                if self.args.serial and serial != self.args.serial:
                     raise StepError("authenticated device serial does not match the requested TLS pin serial")
+                if not self.args.serial:
+                    pins = _read_pins(self.args.pin_file)
+                    pin_peer(host, serial, self.args.pin_file,
+                             trust_new_cert=serial not in pins,
+                             expected_fingerprint=fingerprint if serial not in pins else None)
+                    self.args.serial = serial
                 self._allow_pin_update = False
                 if not quiet:
                     log("reached %s at %s" % (info.get("device_model"), host))
@@ -990,7 +1003,7 @@ class Runner(object):
 def parse_args(argv: List[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Apply the business-switch profile to a Teltonika TSW202 (bench tool).")
     ap.add_argument("--cred-file", required=True, help="root-only env file with TSW202_LABEL_USERNAME/TSW202_LABEL_PASSWORD")
-    ap.add_argument("--serial", required=True, help="expected device serial used to select its TLS certificate pin")
+    ap.add_argument("--serial", help="expected device serial used to select its TLS certificate pin")
     ap.add_argument("--unit", type=int, required=True, help="switch number at the site (1 -> 192.168.10.2)")
     ap.add_argument("--site", default="business", help="site name for the th.{site}.swNN hostname")
     ap.add_argument("--dry-run", action="store_true", help="read and plan only; no writes")
