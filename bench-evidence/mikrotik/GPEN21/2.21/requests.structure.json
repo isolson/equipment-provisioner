@@ -27,7 +27,7 @@
     "snmp.b": {"i01": 0},
     "sys.b": {"i0a": 1, "i1b": 10}
   },
-  "management_reconnect": {"method": "temporary network namespace with macvlan", "parent_interface_pattern": "enp3s0.199N", "namespace_address": "<mgmt_ip>/24", "host_main_namespace_address_added": false},
+  "management_reconnect": {"method": "temporary network namespace with macvlan", "parent_interface_pattern": "enp3s0.199N", "factory_namespace_address": "192.168.88.250/24", "namespace_address": "<mgmt_ip>/24", "host_main_namespace_address_added": false},
   "readback_checks": ["identity", "static management address", "mgmt VLAN 10", "PoE out mode", "SFP1 uplink", "VLAN mode strict", "default VLAN 10", "VLANs 10/20/40/70 all ports", "SNMP off"],
   "readback_passes": 2
 }

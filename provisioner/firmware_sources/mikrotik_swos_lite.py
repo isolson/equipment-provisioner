@@ -22,8 +22,10 @@ class MikrotikSwosLiteFirmwareSource(BaseFirmwareSource):
                 if response.status != 200:
                     return []
                 version = (await response.text()).strip()
-        if not re.fullmatch(r"\d+\.\d+", version):
+        match = re.fullmatch(r"(\d+\.\d+)\.\d+", version)
+        if not match:
             return []
+        version = match.group(1)
         filename = "swos-gpen21-%s.bin" % version
         return [
             RemoteFirmwareInfo(

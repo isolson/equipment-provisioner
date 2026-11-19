@@ -42,6 +42,7 @@ Identity is limited to 15 characters. The provisioner derives
 `th.{site}.sw{unit:02d}` and requires that name to fit. The bench unit used
 `echoshores.sw03`. SwOS Lite has no default gateway setting; the switch answers
 only hosts on its `192.168.10.0/24` LAN. Reach it from the site LAN or router.
+This format allows a site name of at most 7 characters; the kiosk rejects longer names for a GPEN21.
 PoE out “auto on” powers 802.3af/at devices;
 “force on” is for passive-PoE devices only and can damage other devices.
 Keep PoE out at auto on (`i1c` 0) by default. Force on (`i1c` 1) is a
