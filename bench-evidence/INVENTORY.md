@@ -1,5 +1,8 @@
 # Capture inventory and gaps (2026-09-02)
 
+- Teltonika TSW202 TSW2_R_00.01.10.4: record added 2026-11-18. Factory backup is from 10.1 before the first write; run 1 disconnected at NTP, and the idempotent re-run passed the hardening, VLAN, management move, and two read-backs. Production login, RADIUS, SNMP polling, PoE load test, and physical power cycle are not claimed.
+- MikroTik GPEN21 SwOS Lite 2.21: record added 2026-11-18. Factory page captures are from 2.17; the device backup was empty. Known-good page captures are empty because the unit was off the bench at export time.
+
 Classification of the bench files on hand, by evidence record. Raw files live
 on the bench host under `/var/lib/provisioner/bench-evidence/` and in the
 local mirror `~/bench-evidence-staging/`. "Good" means usable as the record's

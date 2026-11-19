@@ -1,0 +1,32 @@
+vendor: mikrotik
+model: GPEN21
+os: SwOS Lite
+firmware: "2.21"
+captured_utc: 2026-11-18
+config_role: SWITCH
+operations: [config-apply, firmware-update, reboot, config-readback]
+result: success
+capture_format: command-readback
+artifact_purpose: hardware-validation
+reusable_template: false
+canonical_template_status: unknown
+fixture_witness: baseline
+no_config_backup: partial
+raw_evidence_path: /var/lib/provisioner/bench-evidence/mikrotik/GPEN21/2.21/
+raw_files:
+  factory-2.17/: "Factory pages captured before any write: sys.b, link.b, vlan.b, fwd.b, snmp.b, index.html.txt, and engine.js.txt."
+  gpen21_apply.py: "One-off apply script with dry run."
+  readback.py: "Nine-check read-back script."
+  known-good-2.21/readback.txt: "Nine of nine checks passed after the 2.21 reboot."
+  known-good-2.21/: "Page captures are empty because the unit was off the bench at export time."
+  device-backup: "The factory pages were captured on 2.17. The device backup download returned an empty file and reported 'Default configuration. Nothing to save.'"
+evidence_scope: >-
+  SwOS Lite HTTP API with digest authentication. The business-switch profile
+  was applied on 2.17 and passed read-back 9/9. The upgrade to 2.21 used
+  POST /pboot ("*", 303 is normal), POST /upgrade (multipart field blob,
+  200). The client read sys.b field i0c as 1 after the device staged the
+  image, then sent POST /reboot ("*"). After
+  reboot the version was 2.21 and two read-backs passed 9/9. PoE out was
+  then set to force on for a passive AP and the read-back passed. Production
+  login, SFP link test, PoE load test, and physical power cycle are not
+  claimed.
