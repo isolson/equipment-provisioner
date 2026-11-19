@@ -1,5 +1,6 @@
 """Tests for the per-port business-switch site and unit job."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -28,22 +29,16 @@ def test_site_job_validation_checks_site_and_handler_hostname_limit(monkeypatch)
         api._validate_business_switch_job("abcdefghijk", 99, "fake")
 
 
-def test_business_switch_job_set_get_and_clear():
-    api.clear_business_switch_job(4)
-    saved = api.set_business_switch_job(4, "yard", 7, "aa:bb", "SERIAL")
-    assert saved == api.get_business_switch_job(4)
-    api.clear_business_switch_job(4)
-    assert api.get_business_switch_job(4) is None
-
-
 def test_start_validates_and_snapshots_the_opt_in_job(monkeypatch):
     from provisioner.web.app import create_app
 
-    api.clear_business_switch_job(4)
     monkeypatch.setattr(HandlerManager, "handler_class_for", lambda _kind: _SiteJobHandler)
     captured = {}
+    state = SimpleNamespace(business_switch_job=None)
 
     class Ports:
+        port_states = {4: state}
+
         def get_port_status(self):
             return {
                 4: {
@@ -66,20 +61,28 @@ def test_start_validates_and_snapshots_the_opt_in_job(monkeypatch):
     response = client.post("/api/provision", json={"port_number": 4, "site": "yard", "unit": 7})
 
     assert response.status_code == 200
-    assert captured["args"][-1] == {"site": "yard", "unit": 7, "mac": "aa:bb", "serial": None}
-    assert client.get("/api/business-switch-jobs/4").json() == {"site": "yard", "unit": 7}
+    expected = {"site": "yard", "unit": 7, "mac": "aa:bb", "serial": None}
+    assert captured["args"][-1] == expected
+    assert state.business_switch_job == expected
     invalid = client.post(
         "/api/provision",
         json={"port_number": 4, "site": "invalid-site", "unit": 7},
     )
     assert invalid.status_code == 422
-    api.clear_business_switch_job(4)
+    retry = client.post("/api/provision", json={"port_number": 4})
+    assert retry.status_code == 200
+    assert captured["args"][-1] == expected
 
 
 @pytest.mark.asyncio
 async def test_provision_runner_keeps_job_for_credential_retry_then_clears():
-    api.set_business_switch_job(4, "yard", 7, "aa:bb", "SERIAL")
-    state = SimpleNamespace(needs_credentials=False, provisioning_task=None, expecting_reboot=False)
+    job = {"site": "yard", "unit": 7, "mac": "aa:bb", "serial": "SERIAL"}
+    state = SimpleNamespace(
+        needs_credentials=False,
+        provisioning_task=None,
+        expecting_reboot=False,
+        business_switch_job=job,
+    )
 
     class Ports:
         port_states = {4: state}
@@ -91,44 +94,62 @@ async def test_provision_runner_keeps_job_for_credential_retry_then_clears():
         port_manager = Ports()
 
         async def _provision_port_device(self, *args, **kwargs):
-            assert kwargs["business_switch_job"] == api.get_business_switch_job(4)
+            assert kwargs["business_switch_job"] == job
             state.needs_credentials = True
             return False
 
     request = api.ProvisionRequest(port_number=4)
-    snapshot = api.get_business_switch_job(4)
     await api._run_provisioning(
-        Provisioner(), 4, "fake", "192.0.2.4", request, snapshot
+        Provisioner(), 4, "fake", "192.0.2.4", request, dict(state.business_switch_job)
     )
-    assert api.get_business_switch_job(4)["site"] == "yard"
+    assert state.business_switch_job["site"] == "yard"
 
     async def successful_run(*_args, **_kwargs):
         state.needs_credentials = False
         return True
 
     Provisioner._provision_port_device = successful_run
-    snapshot = api.get_business_switch_job(4)
     await api._run_provisioning(
-        Provisioner(), 4, "fake", "192.0.2.4", request, snapshot
+        Provisioner(), 4, "fake", "192.0.2.4", request, dict(state.business_switch_job)
     )
-    assert api.get_business_switch_job(4) is None
+    assert state.business_switch_job is None
 
 
-def test_non_opt_in_handler_trait_is_off_by_default():
-    from provisioner.handlers.base import BaseHandler
+def test_handler_without_site_job_trait_keeps_default_behavior(monkeypatch):
+    from provisioner.fingerprint import DeviceFingerprint, DeviceType
+    from provisioner.handlers.base import ProvisioningResult
 
-    assert BaseHandler.needs_site_job is False
-    assert BaseHandler.max_hostname_length is None
+    class PlainHandler:
+        async def provision(self, **kwargs):
+            self.received = kwargs
+            return ProvisioningResult(success=True)
+
+    handler = PlainHandler()
+    manager = HandlerManager({})
+    monkeypatch.setattr(manager, "get_handler", lambda *_args, **_kwargs: handler)
+    fingerprint = DeviceFingerprint(device_type=DeviceType.TACHYON)
+
+    result = asyncio.run(
+        manager.provision_device(fingerprint=fingerprint, ip="192.0.2.4")
+    )
+
+    assert result.success
+    assert not hasattr(handler, "business_switch_site")
+    assert not hasattr(handler, "business_switch_unit")
+    assert "business_switch_site" not in handler.received
 
 
 def test_device_identity_change_clears_saved_job():
     from provisioner.port_manager import PortManager
 
-    api.set_business_switch_job(1, "yard", 7, "old-mac", "OLD-SERIAL")
-    state = SimpleNamespace(checklist=SimpleNamespace(mac_address=None, serial_number=None))
+    job = {"site": "yard", "unit": 7, "mac": "old-mac", "serial": "OLD-SERIAL"}
+    state = SimpleNamespace(
+        business_switch_job=job,
+        checklist=SimpleNamespace(mac_address=None, serial_number=None),
+    )
     manager = PortManager.__new__(PortManager)
     manager.port_states = {1: state}
 
     manager.update_port_device_info(1, mac="new-mac")
 
-    assert api.get_business_switch_job(1) is None
+    assert state.business_switch_job is None

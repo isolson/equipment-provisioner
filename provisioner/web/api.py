@@ -262,38 +262,6 @@ async def get_port_events(
 
 # Store temporary credential overrides (in-memory, cleared on restart)
 _credential_overrides: Dict[int, CredentialOverride] = {}
-_business_switch_jobs: Dict[int, Dict[str, Any]] = {}
-
-
-def set_business_switch_job(
-    port_number: int,
-    site: str,
-    unit: int,
-    mac: Optional[str],
-    serial: Optional[str],
-) -> Dict[str, Any]:
-    job = {"site": site, "unit": unit, "mac": mac, "serial": serial}
-    _business_switch_jobs[port_number] = job
-    return dict(job)
-
-
-def get_business_switch_job(port_number: int) -> Optional[Dict[str, Any]]:
-    job = _business_switch_jobs.get(port_number)
-    return dict(job) if job else None
-
-
-def clear_business_switch_job(port_number: int) -> None:
-    _business_switch_jobs.pop(port_number, None)
-
-
-def bind_business_switch_job_device(
-    port_number: int, mac: Optional[str], serial: Optional[str]
-) -> None:
-    job = _business_switch_jobs.get(port_number)
-    if not job:
-        return
-    job["mac"] = job.get("mac") or mac
-    job["serial"] = job.get("serial") or serial
 
 
 def _validate_business_switch_job(site: str, unit: int, device_type: str) -> str:
@@ -316,51 +284,6 @@ def _validate_business_switch_job(site: str, unit: int, device_type: str) -> str
             detail="Derived hostname exceeds the device hostname limit",
         )
     return hostname
-
-
-class BusinessSwitchJobRequest(BaseModel):
-    port_number: int
-    site: str
-    unit: int = Field(strict=True, ge=1, le=99)
-
-
-@router.post("/business-switch-jobs")
-async def set_business_switch_job_endpoint(job: BusinessSwitchJobRequest, request: Request):
-    status = request.app.state.provisioner.port_manager.get_port_status().get(job.port_number)
-    if not status or not status.get("device_detected"):
-        raise HTTPException(status_code=400, detail="No detected device on port")
-    handler_class = HandlerManager.handler_class_for(status["device_type"])
-    if not handler_class or not getattr(handler_class, "needs_site_job", False):
-        raise HTTPException(status_code=400, detail="This device does not need a site and unit")
-    _validate_business_switch_job(job.site, job.unit, status["device_type"])
-    set_business_switch_job(
-        job.port_number,
-        job.site,
-        job.unit,
-        status.get("device_mac"),
-        status.get("device_serial"),
-    )
-    return {"message": "Site and unit saved"}
-
-
-@router.get("/business-switch-jobs")
-async def list_business_switch_jobs():
-    return {
-        port: {"site": job["site"], "unit": job["unit"]}
-        for port, job in _business_switch_jobs.items()
-    }
-
-
-@router.get("/business-switch-jobs/{port_number}")
-async def get_business_switch_job_endpoint(port_number: int):
-    job = get_business_switch_job(port_number)
-    return {"site": job["site"], "unit": job["unit"]} if job else None
-
-
-@router.delete("/business-switch-jobs/{port_number}")
-async def clear_business_switch_job_endpoint(port_number: int):
-    clear_business_switch_job(port_number)
-    return {"message": "Site and unit cleared"}
 
 
 @router.get("/device-settings")
@@ -467,6 +390,7 @@ async def provision_device(
         if handler_class else False
     )
     if needs_site_job:
+        state = port_manager.port_states[req.port_number]
         if req.site is not None or req.unit is not None:
             if req.site is None or req.unit is None:
                 raise HTTPException(
@@ -474,25 +398,13 @@ async def provision_device(
                     detail="Site and unit are both required",
                 )
             _validate_business_switch_job(req.site, req.unit, status["device_type"])
-            set_business_switch_job(
-                req.port_number, req.site, req.unit,
-                status.get("device_mac"), status.get("device_serial"),
-            )
-        job = get_business_switch_job(req.port_number)
-        if job and (
-            (
-                job.get("mac")
-                and status.get("device_mac")
-                and job["mac"].lower() != status["device_mac"].lower()
-            )
-            or (
-                job.get("serial")
-                and status.get("device_serial")
-                and job["serial"] != status["device_serial"]
-            )
-        ):
-            clear_business_switch_job(req.port_number)
-            job = None
+            state.business_switch_job = {
+                "site": req.site,
+                "unit": req.unit,
+                "mac": status.get("device_mac"),
+                "serial": status.get("device_serial"),
+            }
+        job = state.business_switch_job
         if not job:
             raise HTTPException(status_code=422, detail="Enter a site and unit before starting")
         _validate_business_switch_job(job["site"], job["unit"], status["device_type"])
@@ -529,7 +441,7 @@ async def provision_device(
         status["device_type"],
         status["device_ip"],
         req,
-        get_business_switch_job(req.port_number) if needs_site_job else None,
+        dict(state.business_switch_job) if needs_site_job else None,
     )
     
     return ProvisionResponse(
@@ -1211,7 +1123,8 @@ async def _run_provisioning(
             provisioner.port_manager.mark_port_provisioning(port_number, False, success=success)
             state = provisioner.port_manager.port_states.get(port_number)
             if success or not getattr(state, "needs_credentials", False):
-                clear_business_switch_job(port_number)
+                if state is not None:
+                    state.business_switch_job = None
 
 
 # ============================================================================

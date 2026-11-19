@@ -274,6 +274,7 @@ class PortState:
     boot_wait_started: Optional[float] = None  # When the current boot wait began
     # Active post-provision mode change: {id, mode, started, steps, status}
     mode_job: Optional[Dict[str, Any]] = None
+    business_switch_job: Optional[Dict[str, Any]] = None
     # Seconds until auto-provisioning may run again for the same unit.
     reprovision_wait: int = 0
 
@@ -1817,8 +1818,7 @@ class PortManager:
         state.device_type = None
         state.boot_wait_started = None
         state.mode_job = None
-        from .web.api import clear_business_switch_job
-        clear_business_switch_job(port_num)
+        state.business_switch_job = None
         state.device_ip = None
         state.device_mac = None
         state.device_serial = None
@@ -1913,20 +1913,15 @@ class PortManager:
         """
         if port_num in self.port_states:
             state = self.port_states[port_num]
-            if mac or serial:
-                from .web.api import (
-                    bind_business_switch_job_device,
-                    clear_business_switch_job,
-                    get_business_switch_job,
-                )
-                job = get_business_switch_job(port_num)
-                if job and (
-                    (mac and job.get("mac") and job["mac"].lower() != mac.lower())
-                    or (serial and job.get("serial") and job["serial"] != serial)
-                ):
-                    clear_business_switch_job(port_num)
-                else:
-                    bind_business_switch_job_device(port_num, mac, serial)
+            job = state.business_switch_job
+            if job and (
+                (mac and job.get("mac") and job["mac"].lower() != mac.lower())
+                or (serial and job.get("serial") and job["serial"] != serial)
+            ):
+                state.business_switch_job = None
+            elif job:
+                job["mac"] = job.get("mac") or mac
+                job["serial"] = job.get("serial") or serial
             if mac:
                 state.device_mac = mac
                 state.checklist.mac_address = mac
@@ -2225,27 +2220,7 @@ class PortManager:
             bool(getattr(handler_class, "needs_site_job", False))
             if handler_class else False
         )
-        site_job = None
-        if needs_site_job:
-            from .web.api import get_business_switch_job
-            stored = get_business_switch_job(state.port_number)
-            if stored and (
-                (
-                    stored.get("mac")
-                    and state.device_mac
-                    and stored["mac"].lower() != state.device_mac.lower()
-                )
-                or (
-                    stored.get("serial")
-                    and state.device_serial
-                    and stored["serial"] != state.device_serial
-                )
-            ):
-                from .web.api import clear_business_switch_job
-                clear_business_switch_job(state.port_number)
-                stored = None
-            if stored:
-                site_job = {"site": stored["site"], "unit": stored["unit"]}
+        site_job = state.business_switch_job if needs_site_job else None
         return {
             "vlan_id": state.vlan_id,
             "link_up": state.link_up,

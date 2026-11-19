@@ -733,14 +733,20 @@
             updateBusinessSwitchPreview(portNum);
         }
 
-        function updateBusinessSwitchPreview(portNum) {
-            const preview = document.getElementById(`business-preview-${portNum}`);
-            if (!preview) return;
-            const job = window.businessSwitchDrafts?.[portNum] || ports[portNum]?.business_switch_job || {};
+        function businessSwitchPreview(job) {
             const site = String(job.site || '');
             const unit = Number(job.unit);
-            if (!/^[a-z0-9]{2,12}$/.test(site) || !Number.isInteger(unit) || unit < 1 || unit > 99) { preview.textContent = ''; return; }
-            preview.textContent = `th.${site}.sw${String(unit).padStart(2, '0')} · 192.168.10.${1 + unit}`;
+            if (!/^[a-z0-9]{2,12}$/.test(site) || !Number.isInteger(unit) || unit < 1 || unit > 99) return '';
+            return `th.${site}.sw${String(unit).padStart(2, '0')} · 192.168.10.${1 + unit}`;
+        }
+
+        function updateBusinessSwitchPreview(portNum) {
+            const job = window.businessSwitchDrafts?.[portNum] || ports[portNum]?.business_switch_job || {};
+            const value = businessSwitchPreview(job);
+            for (const id of [`business-preview-${portNum}`, 'business-modal-preview']) {
+                const preview = document.getElementById(id);
+                if (preview) preview.textContent = value;
+            }
         }
 
         // ================================================================
@@ -1201,10 +1207,9 @@
                 </div>
             `;
             if (port.needs_site_job || port.business_switch_job) {
-                const preview = document.getElementById('business-modal-preview');
                 const job = window.businessSwitchDrafts?.[portNum] || siteDraft;
-                const site = String(job.site || ''); const unit = Number(job.unit);
-                if (preview && /^[a-z0-9]{2,12}$/.test(site) && Number.isInteger(unit) && unit >= 1 && unit <= 99) preview.textContent = `th.${site}.sw${String(unit).padStart(2, '0')} · 192.168.10.${1 + unit}`;
+                const preview = document.getElementById('business-modal-preview');
+                if (preview) preview.textContent = businessSwitchPreview(job);
             }
             setPortModalFooter(`
                 <button onclick="startProvisioning(${portNum})" class="modal-action modal-action-primary">
@@ -1354,7 +1359,7 @@
                 return;
             }
             if (ports[portNum]?.needs_site_job || ports[portNum]?.business_switch_job) {
-                if (!/^[a-z0-9]{2,12}$/.test(businessSite || '') || !Number.isInteger(businessUnit) || businessUnit < 1 || businessUnit > 99) {
+                if (!businessSwitchPreview({ site: businessSite, unit: businessUnit })) {
                     showToast('Enter a site of 2 to 12 lowercase letters or digits and a unit from 1 through 99', 'warning');
                     return;
                 }
