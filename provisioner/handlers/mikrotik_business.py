@@ -68,6 +68,10 @@ async def connect(handler):
     return False
 
 
+# Interim WAN SSH from server VLAN 15 until the wghub01 aggregator exists.
+WAN_SSH_COMMENT = "SSH from server VLAN 15 via WAN"
+
+
 def check_expressions(mode):
     """Independent live contract checks, not an import exit-code proxy."""
     router = mode == "router"
@@ -100,6 +104,8 @@ def check_expressions(mode):
         count('unifi_inform','/ip firewall nat','chain=dstnat and action=dst-nat and comment="UniFi controller inform 8080->8089"',1)
         for field,value in [('dst-address','172.233.208.174'),('dst-port','8080'),('to-ports','8089'),('protocol','tcp')]:
             checks['unifi_'+field] = '[:tostr [/ip firewall nat get [find where comment="UniFi controller inform 8080->8089"] %s]] = "%s"' % (field,value)
+        count('wan_ssh','/ip firewall filter','comment="%s" and chain=input and action=accept and protocol="tcp" and dst-port="22" and in-interface-list="WAN" and src-address="100.126.15.0/24" and disabled!=yes' % WAN_SSH_COMMENT,1)
+        checks['wan_ssh_before_drop'] = '[:find [/ip firewall filter find where chain=input] [/ip firewall filter find where comment="%s"]] < [:find [/ip firewall filter find where chain=input] [/ip firewall filter find where comment="drop everything else (WAN + untrusted VLANs)"]]' % WAN_SSH_COMMENT
         count('masquerade','/ip firewall nat','chain=srcnat and action=masquerade and out-interface-list="WAN"',1)
         for name in ['Guest: internet only','OpenRoam: internet only','IoT !-> Internal','IoT !-> Guest','IoT !-> OpenRoam','drop unsolicited WAN']:
             count('isolation_'+name,'/ip firewall filter','comment="%s" and chain=forward and action=drop and disabled!=yes'%name,1)
@@ -107,7 +113,12 @@ def check_expressions(mode):
         count('management_route','/ip route','dst-address="0.0.0.0/0" and gateway="192.168.10.1" and disabled!=yes',1)
         count('trusted_uplink','/interface bridge port','interface="ether1" and trusted=yes',1)
     for service in ['ssh','www-ssl','winbox']:
-        count('service_'+service,'/ip service','name="%s" and disabled!=yes and address="192.168.10.0/24"'%service,1)
+        if router and service == 'ssh':
+            # 7.24 lists live sessions as dynamic rows and no longer matches a
+            # multi-entry address list with "="; the anchored regex is exact.
+            count('service_ssh','/ip service',r'name="ssh" and dynamic=no and disabled!=yes and address~"^192\\.168\\.10\\.0/24;100\\.126\\.15\\.0/24\$"',1)
+        else:
+            count('service_'+service,'/ip service','name="%s" and disabled!=yes and address="192.168.10.0/24"'%service,1)
     for service in ['telnet','ftp','www','api','api-ssl']:
         count('disabled_'+service,'/ip service','name="%s" and disabled=yes'%service,1)
     count('https_certificate','/certificate','name="webfig-local" and private-key=yes',1)
