@@ -16,7 +16,7 @@ Upgrade sequence:
 
 - `POST /pboot` with `*`; status 303 is normal.
 - `POST /upgrade` with multipart field `blob`; status 200.
-- Set `sys.b` field `i0c=1` to stage the image.
+- Read `sys.b` field `i0c`; the device sets it to 1 when the image is staged.
 - `POST /reboot` with `*`.
 
 ## What the capture did

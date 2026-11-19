@@ -24,7 +24,8 @@ evidence_scope: >-
   SwOS Lite HTTP API with digest authentication. The business-switch profile
   was applied on 2.17 and passed read-back 9/9. The upgrade to 2.21 used
   POST /pboot ("*", 303 is normal), POST /upgrade (multipart field blob,
-  200), sys.b i0c=1 to stage the image, then POST /reboot ("*"). After
+  200). The client read sys.b field i0c as 1 after the device staged the
+  image, then sent POST /reboot ("*"). After
   reboot the version was 2.21 and two read-backs passed 9/9. PoE out was
   then set to force on for a passive AP and the read-back passed. Production
   login, SFP link test, PoE load test, and physical power cycle are not
