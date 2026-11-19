@@ -87,11 +87,13 @@ from .firmware_sources.base import BaseFirmwareSource
 from .firmware_sources.cambium import CambiumFirmwareSource
 from .firmware_sources.mikrotik import MikrotikFirmwareSource
 from .firmware_sources.tachyon import TachyonFirmwareSource
+from .firmware_sources.teltonika import TeltonikaFirmwareSource
 from .firmware_sources.ubiquiti import UbiquitiFirmwareSource
 from .handlers.base import BaseHandler
 from .handlers.cambium import CambiumHandler
 from .handlers.mikrotik import MikrotikHandler
 from .handlers.tachyon import TachyonHandler
+from .handlers.teltonika import TeltonikaHandler
 from .handlers.tarana import TaranaHandler
 from .handlers.ubiquiti import UbiquitiHandler
 
@@ -659,6 +661,18 @@ register(VendorSpec(
         "af-11fx": ["airfiber"],
     },
     ui_style={"name": "Ubiquiti", "color": "#0559C9"},
+))
+
+register(VendorSpec(
+    device_type=DeviceType.TELTONIKA,
+    handler_cls=TeltonikaHandler,
+    firmware_source_cls=TeltonikaFirmwareSource,
+    firmware_source_defaults={"enabled": True, "auto_download": True},
+    default_credentials={"username": "admin", "password": ""},
+    # The handler creates its local namespace before using the factory address.
+    link_local_ips=("192.168.1.2",),
+    model_firmware_patterns={"tsw202": ["TSW2_R_00.01.10.4"]},
+    ui_style={"name": "Teltonika", "color": "#E2231A"},
 ))
 
 register(VendorSpec(

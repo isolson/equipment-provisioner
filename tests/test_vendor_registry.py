@@ -79,7 +79,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # The canonical provisionable vendor set: every spec with
 # provisionable=True. Every derived view is asserted against this.
-CANONICAL = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti"}
+CANONICAL = {"cambium", "mikrotik", "tachyon", "tarana", "ubiquiti", "teltonika"}
 
 # Vendors with an auto-fetch firmware source (documented exception:
 # tarana has none).
@@ -198,7 +198,7 @@ class TestDerivedViews:
             for s in vendor_registry.specs()
             if s.model_firmware_patterns
         }
-        assert contributing == {"cambium", "tachyon", "ubiquiti"}
+        assert contributing == {"cambium", "tachyon", "ubiquiti", "teltonika"}
 
     def test_vendor_ip_registry_is_the_registry_derivation(self):
         assert set(vendor_ips.VENDOR_LINK_LOCAL_IPS) == CANONICAL, (
@@ -268,9 +268,9 @@ class TestDerivedViews:
         assert {e["device_type"] for e in entries} == CANONICAL
 
     def test_setup_template_requirements_cover_template_vendors(self):
-        assert set(_template_requirements(object())) == CANONICAL - {"mikrotik"}, (
-            "mikrotik is the documented exception: configured via "
-            "netinstall/ZTP .rsc, not templates."
+        assert set(_template_requirements(object())) == CANONICAL - {"mikrotik", "teltonika"}, (
+            "mikrotik uses netinstall/ZTP .rsc and teltonika uses its "
+            "ordered business-switch API profile, not templates."
         )
 
     def test_declared_template_dirs_exist(self):

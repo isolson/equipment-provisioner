@@ -139,9 +139,9 @@ This is a smaller, targeted update — it does not reconfigure VLANs or bridge s
 
 ## tsw202_business_switch.py
 
-Bench tool that applies the Treehouse business-switch profile to a Teltonika
-TSW202. It runs ahead of a real handler and is vendor-isolated: it uses no
-provisioner module, registry entry or template. The profile is the data file
+Bench runner for the Treehouse business-switch profile on a Teltonika
+TSW202. The opt-in provisioner handler uses this runner so bench and kiosk
+provisioning share the same request order and checks. The profile is the data file
 `scripts/tsw202_business_switch_profile.json`. Its authority is the Business
 Switch Standard (`architecture/48-business-switch.md` in
 treehouse-architecture). The file lists each TSW202 deviation from it.
@@ -179,6 +179,12 @@ change. The tool records the pin before login. Every HTTPS request checks the
 same pin. A mismatch during a run stops the tool; it does not accept a changed
 certificate automatically. --cert-sha256 can pin a fingerprint that the
 operator has verified out of band.
+
+The provisioner omits --serial because the unauthenticated status endpoint
+does not return it. The runner probes that endpoint with the observed
+certificate, logs in through the same certificate-pinned client, reads the
+serial from the authenticated device status, then records the pin under that
+serial before it makes further profile requests.
 
 **What it does:**
 1. Creates a temporary network namespace with a macvlan on `--iface`

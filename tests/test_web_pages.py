@@ -162,6 +162,12 @@ def test_dashboard_vendor_metadata_renders_identically_to_the_old_map():
             "defaultUser": "ubnt",
             "icon": "/static/vendor-icons/ubiquiti.png",
         },
+        "teltonika": {
+            "name": "Teltonika",
+            "color": "#E2231A",
+            "defaultUser": "admin",
+            "icon": "/static/vendor-icons/teltonika.png",
+        },
         "evolution_digital": {
             "name": "Evolution",
             "color": "#ec4899",

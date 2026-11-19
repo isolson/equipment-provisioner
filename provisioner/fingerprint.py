@@ -40,6 +40,7 @@ class DeviceType(str, Enum):
     TACHYON = "tachyon"
     TARANA = "tarana"
     UBIQUITI = "ubiquiti"
+    TELTONIKA = "teltonika"
     EVOLUTION_DIGITAL = "evolution_digital"
     UNKNOWN = "unknown"
 
@@ -474,6 +475,15 @@ class DeviceFingerprinter:
         else:
             logger.info(f"Fingerprinting device at {ip}")
 
+        # The TSW202's factory address collides with the provisioner host.
+        # Confirm its model through the handler-local namespace before login.
+        if mac and mac[:8].upper() == "20:97:27":
+            return DeviceFingerprint(
+                device_type=DeviceType.TELTONIKA,
+                mac_address=mac,
+                confidence=0.65,
+            )
+
         # Probe open ports
         open_ports = await self._scan_ports(ip)
         logger.debug(f"Open ports on {ip}: {open_ports}")
@@ -535,6 +545,7 @@ class DeviceFingerprinter:
         logger.info(f"Fingerprint result for {ip}: {fingerprint.device_type.value} "
                     f"(confidence: {fingerprint.confidence:.0%})")
         return fingerprint
+
 
     async def _scan_ports(self, ip: str) -> list[int]:
         """Scan common ports to determine which services are available."""
