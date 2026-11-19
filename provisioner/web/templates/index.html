@@ -623,6 +623,7 @@
             if (port.last_result === 'success' || port.last_result === 'complete') return { phase: 'complete', tone: 'success', icon: 'check', headline: 'COMPLETE', detail: null, progress: null, mode_chip: null };
             if (port.last_result === 'failed') return { phase: 'failed', tone: 'error', icon: 'x', headline: 'FAILED', detail: port.last_error, progress: null, mode_chip: null };
             if (!port.link_up) return { phase: 'no_link', tone: 'idle', icon: 'dash', headline: 'NO LINK', detail: null, progress: null, mode_chip: null };
+            if (port.needs_site_job) return { phase: 'needs_site_job', tone: 'active', icon: 'alert', headline: 'NEEDS SITE', detail: 'Enter site and unit to start', progress: null, mode_chip: null };
             if (port.device_detected) return { phase: 'detected', tone: 'active', icon: 'spinner', headline: 'DETECTED', detail: null, progress: null, mode_chip: null };
             return { phase: 'idle', tone: 'idle', icon: 'dash', headline: 'NO LINK', detail: null, progress: null, mode_chip: null };
         }
@@ -678,7 +679,7 @@
             const card = document.getElementById(`port-card-${n}`);
             if (!card) return;
             const p = presentationForPort(port);
-            const sig = JSON.stringify([p, port?.device_type, port?.device_model, port?.link_speed, port?.device_mode, port?.device_detected, port?.link_up]);
+            const sig = JSON.stringify([p, port?.device_type, port?.device_model, port?.link_speed, port?.device_mode, port?.device_detected, port?.link_up, port?.needs_site_job, port?.business_switch_job]);
             if (lastCardSig[n] === sig) return;
             lastCardSig[n] = sig;
 
@@ -689,6 +690,9 @@
             const identity = document.getElementById(`card-identity-${n}`);
             if (port && port.device_detected) {
                 identity.innerHTML = `${vendorPill(port)}<span class="card-model truncate">${escapeHtml(port.device_model || '')}</span><span class="ml-auto port-badge">P${n}</span>${port.link_speed ? `<span class="mono">${escapeHtml(formatSpeed(port.link_speed))}</span>` : ''}`;
+            } else if (port?.needs_site_job) {
+                const draft = window.businessSwitchDrafts?.[n] || port.business_switch_job || {};
+                identity.innerHTML = `${vendorPill(port)}<span class="card-model">Site and unit</span><span class="ml-auto port-badge">P${n}</span>`;
             } else {
                 identity.innerHTML = `<span style="color: var(--fg-dim)">Port ${n}</span><span class="ml-auto port-badge">P${n}</span>`;
             }
@@ -706,6 +710,11 @@
                 footer.innerHTML = `<span class="mode-chip">SM VERIFIED</span><span>Tap for details</span>`;
             } else if (p.reset_hint) {
                 footer.innerHTML = `<span style="color: var(--tone-warning)">May need factory reset</span><span>Tap for details</span>`;
+            } else if (port?.needs_site_job) {
+                window.businessSwitchDrafts = window.businessSwitchDrafts || {};
+                const draft = window.businessSwitchDrafts[n] || port.business_switch_job || {};
+                footer.innerHTML = `<div class="w-full grid grid-cols-2 gap-2" onclick="event.stopPropagation()"><input aria-label="Site" placeholder="Site (a-z, 0-9)" maxlength="12" value="${escapeHtml(draft.site || '')}" oninput="updateBusinessSwitchDraft(${n}, 'site', this.value)" class="min-w-0 bg-white border border-gray-300 rounded px-2 py-1 text-sm"><input aria-label="Unit" placeholder="Unit 1-99" type="number" min="1" max="99" value="${draft.unit || ''}" oninput="updateBusinessSwitchDraft(${n}, 'unit', this.value)" class="min-w-0 bg-white border border-gray-300 rounded px-2 py-1 text-sm"><div class="col-span-2 text-xs font-mono text-gray-500" id="business-preview-${n}"></div><button class="col-span-2 text-sm font-medium" onclick="event.stopPropagation(); openProvisionModal(${n})">Review and start</button></div>`;
+                updateBusinessSwitchPreview(n);
             } else {
                 footer.innerHTML = `<span>${clickable ? 'Tap for details' : ''}</span><span class="mono">${port?.device_ip ? escapeHtml(port.device_ip) : ''}</span>`;
             }
@@ -716,6 +725,22 @@
             if (!port) return;
             if (!(port.device_detected || port.last_result || port.link_up)) return;
             openPortModal(n);
+        }
+
+        function updateBusinessSwitchDraft(portNum, key, value) {
+            window.businessSwitchDrafts = window.businessSwitchDrafts || {};
+            window.businessSwitchDrafts[portNum] = { ...(window.businessSwitchDrafts[portNum] || ports[portNum]?.business_switch_job || {}), [key]: value };
+            updateBusinessSwitchPreview(portNum);
+        }
+
+        function updateBusinessSwitchPreview(portNum) {
+            const preview = document.getElementById(`business-preview-${portNum}`);
+            if (!preview) return;
+            const job = window.businessSwitchDrafts?.[portNum] || ports[portNum]?.business_switch_job || {};
+            const site = String(job.site || '');
+            const unit = Number(job.unit);
+            if (!/^[a-z0-9]{2,12}$/.test(site) || !Number.isInteger(unit) || unit < 1 || unit > 99) { preview.textContent = ''; return; }
+            preview.textContent = `th.${site}.sw${String(unit).padStart(2, '0')} · 192.168.10.${1 + unit}`;
         }
 
         // ================================================================
@@ -1122,6 +1147,7 @@
             selectedPort = portNum;
             const port = ports[portNum];
             const vendor = deviceVendors[port.device_type] || deviceVendors.unknown;
+            const siteDraft = window.businessSwitchDrafts?.[portNum] || port.business_switch_job || {};
 
             document.getElementById('modal-title').textContent = `Provision Port ${portNum}`;
             document.getElementById('modal-content').innerHTML = `
@@ -1130,6 +1156,16 @@
                         <div class="font-bold text-lg flex items-center gap-2" style="color: ${vendor.color}">${vendor.icon ? `<img src="${vendor.icon}" class="w-5 h-5 rounded object-contain" alt="">` : ''}<span>${vendor.name}</span></div>
                         <div class="text-sm text-gray-600">${port.device_ip || 'Unknown IP'}</div>
                     </div>
+
+                    ${port.needs_site_job || port.business_switch_job ? `
+                    <div class="space-y-2">
+                        <div class="text-sm font-medium text-gray-600">Site and unit</div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <input id="business-site" aria-label="Site" placeholder="Site (2-12 lowercase letters or digits)" maxlength="12" value="${escapeHtml(siteDraft.site || '')}" oninput="updateBusinessSwitchDraft(${portNum}, 'site', this.value)" class="min-w-0 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900">
+                            <input id="business-unit" aria-label="Unit" type="number" min="1" max="99" placeholder="Unit 1-99" value="${siteDraft.unit || ''}" oninput="updateBusinessSwitchDraft(${portNum}, 'unit', this.value)" class="min-w-0 bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900">
+                        </div>
+                        <div id="business-modal-preview" class="text-sm font-mono text-gray-600"></div>
+                    </div>` : ''}
 
                     <div>
                         <div class="text-sm font-medium text-gray-600 mb-2">Options</div>
@@ -1164,6 +1200,12 @@
                     </div>
                 </div>
             `;
+            if (port.needs_site_job || port.business_switch_job) {
+                const preview = document.getElementById('business-modal-preview');
+                const job = window.businessSwitchDrafts?.[portNum] || siteDraft;
+                const site = String(job.site || ''); const unit = Number(job.unit);
+                if (preview && /^[a-z0-9]{2,12}$/.test(site) && Number.isInteger(unit) && unit >= 1 && unit <= 99) preview.textContent = `th.${site}.sw${String(unit).padStart(2, '0')} · 192.168.10.${1 + unit}`;
+            }
             setPortModalFooter(`
                 <button onclick="startProvisioning(${portNum})" class="modal-action modal-action-primary">
                     Start Provisioning
@@ -1304,9 +1346,18 @@
             const skipConfig = document.getElementById('skip-config')?.checked || false;
             const operatorIdEl = document.getElementById('operator-id');
             const operatorId = operatorIdEl?.value ? Number(operatorIdEl.value) : null;
+            const businessSite = document.getElementById('business-site')?.value;
+            const businessUnitValue = document.getElementById('business-unit')?.value;
+            const businessUnit = businessUnitValue ? Number(businessUnitValue) : null;
             if (operatorId !== null && (!Number.isInteger(operatorId) || operatorId < 0 || operatorId > 16383)) {
                 showToast('Operator ID must be an integer from 0 through 16383', 'warning');
                 return;
+            }
+            if (ports[portNum]?.needs_site_job || ports[portNum]?.business_switch_job) {
+                if (!/^[a-z0-9]{2,12}$/.test(businessSite || '') || !Number.isInteger(businessUnit) || businessUnit < 1 || businessUnit > 99) {
+                    showToast('Enter a site of 2 to 12 lowercase letters or digits and a unit from 1 through 99', 'warning');
+                    return;
+                }
             }
 
             try {
@@ -1318,6 +1369,7 @@
                     skip_config: skipConfig,
                 };
                 if (operatorId !== null) body.operator_id = operatorId;
+                if (businessSite) { body.site = businessSite; body.unit = businessUnit; }
 
                 const response = await fetch('/api/provision', {
                     method: 'POST',

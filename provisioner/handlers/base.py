@@ -87,6 +87,8 @@ class BaseHandler(ABC):
 
     # Class-level traits, consulted via HANDLER_MAP *before* a handler is
     # instantiated (config-template lookup, pre-provision model preflight).
+    max_hostname_length = None  # type: Optional[int]
+    needs_site_job = False
     # Instance @property overrides (which may depend on self._device_info)
     # remain the mechanism for flow control inside provision().
 
@@ -273,6 +275,8 @@ class BaseHandler(ABC):
         self.ip = ip
         self.credentials = credentials
         self.interface = interface
+        self.business_switch_site = None
+        self.business_switch_unit = None
         self._connected = False
         self._device_info: Optional[DeviceInfo] = None
         self._connection_failure_kind: Optional[ConnectionFailureKind] = None
