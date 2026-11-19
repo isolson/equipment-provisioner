@@ -20,6 +20,45 @@ class TestDeviceFingerprinter:
         assert result.device_type == DeviceType.MIKROTIK
         assert result.confidence > 0.5
 
+    def test_swos_lite_title_beats_generic_mikrotik_signatures(self):
+        result = DeviceFingerprinter()._analyze_http_response(
+            {}, '<html><title>MikroTik SwOS Lite</title></html>'
+        )
+        assert result is not None
+        assert result.device_type == DeviceType.MIKROTIK_SWOS_LITE
+
+    @pytest.mark.asyncio
+    async def test_swos_lite_probe_precedes_routeros_api_probe_at_factory_ip(self, monkeypatch):
+        fingerprinter = DeviceFingerprinter()
+        async def scan(_ip):
+            return [80, 8728]
+        async def http(_ip, _https):
+            return DeviceFingerprint(device_type=DeviceType.MIKROTIK_SWOS_LITE)
+        async def routeros(*_args):
+            raise AssertionError("SwOS Lite title should short-circuit RouterOS API probing")
+        monkeypatch.setattr(fingerprinter, "_scan_ports", scan)
+        monkeypatch.setattr(fingerprinter, "_probe_http", http)
+        monkeypatch.setattr(fingerprinter, "_get_mikrotik_info", routeros)
+        result = await fingerprinter.fingerprint("192.168.88.1")
+        assert result.device_type == DeviceType.MIKROTIK_SWOS_LITE
+
+    @pytest.mark.asyncio
+    async def test_routeros_api_order_remains_unchanged_at_factory_ip(self, monkeypatch):
+        fingerprinter = DeviceFingerprinter()
+        calls = []
+        async def scan(_ip):
+            return [80, 8728]
+        async def http(_ip, _https):
+            return DeviceFingerprint(device_type=DeviceType.MIKROTIK)
+        async def routeros(_ip, result):
+            calls.append(result.device_type)
+        monkeypatch.setattr(fingerprinter, "_scan_ports", scan)
+        monkeypatch.setattr(fingerprinter, "_probe_http", http)
+        monkeypatch.setattr(fingerprinter, "_get_mikrotik_info", routeros)
+        result = await fingerprinter.fingerprint("192.168.88.1")
+        assert result.device_type == DeviceType.MIKROTIK
+        assert calls == [DeviceType.MIKROTIK]
+
     def test_analyze_cambium_response(self):
         """Test identification of Cambium from HTTP response."""
         fingerprinter = DeviceFingerprinter()

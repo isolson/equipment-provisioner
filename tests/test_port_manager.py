@@ -844,7 +844,7 @@ def test_probe_list_derivation_matches_historical_all():
         ("192.168.1.1", ["tachyon"]),
         ("192.168.1.20", ["ubiquiti"]),
         ("169.254.100.1", ["tarana"]),
-        ("192.168.88.1", ["mikrotik"]),
+        ("192.168.88.1", ["mikrotik", "mikrotik_swos_lite"]),
         ("192.168.10.1", ["mikrotik"]),
         ("192.168.10.2", ["mikrotik"]),
     ]

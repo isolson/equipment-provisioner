@@ -36,6 +36,7 @@ def _create_bound_socket(interface: str, family: int = socket.AF_INET) -> socket
 class DeviceType(str, Enum):
     """Supported device types."""
     MIKROTIK = "mikrotik"
+    MIKROTIK_SWOS_LITE = "mikrotik_swos_lite"
     CAMBIUM = "cambium"
     TACHYON = "tachyon"
     TARANA = "tarana"
@@ -144,6 +145,7 @@ class DeviceFingerprinter:
     # Known HTTP response signatures (more specific patterns first)
     # Patterns are weighted - more specific patterns have higher weight
     HTTP_SIGNATURES = {
+        DeviceType.MIKROTIK_SWOS_LITE: [(r"<title>\s*MikroTik SwOS Lite\s*</title>", 10)],
         DeviceType.MIKROTIK: [
             (r"RouterOS", 3),
             (r"MikroTik", 3),
@@ -483,6 +485,12 @@ class DeviceFingerprinter:
             device_type=DeviceType.UNKNOWN,
             mac_address=mac,
         )
+
+        if ip == "192.168.88.1" and 80 in open_ports:
+            swos_result = await self._probe_http(ip, False)
+            if swos_result and swos_result.device_type == DeviceType.MIKROTIK_SWOS_LITE:
+                swos_result.mac_address = mac
+                return swos_result
 
         # MikroTik API port is a strong indicator
         if 8728 in open_ports or 8729 in open_ports:

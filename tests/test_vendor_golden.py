@@ -52,6 +52,7 @@ def test_handler_map_golden():
         for dt, cls in HandlerManager.HANDLER_MAP.items()
     ] == [
         ("mikrotik", "provisioner.handlers.mikrotik.MikrotikHandler"),
+        ("mikrotik_swos_lite", "provisioner.handlers.mikrotik_swos_lite.MikrotikSwosLiteHandler"),
         ("cambium", "provisioner.handlers.cambium.CambiumHandler"),
         ("tachyon", "provisioner.handlers.tachyon.TachyonHandler"),
         ("tarana", "provisioner.handlers.tarana.TaranaHandler"),
@@ -71,11 +72,13 @@ def test_source_map_golden():
         "ubiquiti": "provisioner.firmware_sources.ubiquiti.UbiquitiFirmwareSource",
         "cambium": "provisioner.firmware_sources.cambium.CambiumFirmwareSource",
         "mikrotik": "provisioner.firmware_sources.mikrotik.MikrotikFirmwareSource",
+        "mikrotik_swos_lite": "provisioner.firmware_sources.mikrotik_swos_lite.MikrotikSwosLiteFirmwareSource",
     }
 
 
 def test_model_firmware_patterns_golden():
     expected = {
+        "gpen21": ["swos-gpen21"],
         # Cambium
         "epmp 4518": ["epmp-ax", "epmp_ax"],
         "epmp 4525": ["epmp-ax", "epmp_ax"],
@@ -140,6 +143,11 @@ def test_default_credentials_golden():
             "bootstrap_password": "", "onboarding_password": "",
             "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
+        "mikrotik_swos_lite": {
+            "username": "admin", "password": "", "backup_password": "",
+            "bootstrap_password": "", "onboarding_password": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
+        },
         "tachyon": {
             "username": "root", "password": "admin", "backup_password": "",
             "bootstrap_password": "", "onboarding_password": "",
@@ -157,7 +165,7 @@ def test_default_credentials_golden():
         },
     }
     assert list(_default_credentials()) == [
-        "cambium", "mikrotik", "tachyon", "tarana", "ubiquiti",
+        "cambium", "mikrotik", "mikrotik_swos_lite", "tachyon", "tarana", "ubiquiti",
     ]
 
 
@@ -172,6 +180,10 @@ def test_default_firmware_sources_golden():
             "enabled": True, "check_interval": 86400, "auto_download": True,
             "channel": "long-term", "include_beta": False, "models": [],
         },
+        "mikrotik_swos_lite": {
+            "enabled": False, "check_interval": 86400, "auto_download": False,
+            "channel": "release", "include_beta": False, "models": [],
+        },
         "ubiquiti": {
             "enabled": False, "check_interval": 86400, "auto_download": False,
             "channel": "release", "include_beta": False, "models": [],
@@ -182,7 +194,7 @@ def test_default_firmware_sources_golden():
         },
     }
     assert list(_default_firmware_sources()) == [
-        "tachyon", "mikrotik", "ubiquiti", "cambium",
+        "tachyon", "mikrotik", "ubiquiti", "cambium", "mikrotik_swos_lite",
     ]
 
 
@@ -193,10 +205,11 @@ def test_vendor_ips_golden():
         "ubiquiti": ["192.168.1.20"],
         "tarana": ["169.254.100.1"],
         "mikrotik": ["192.168.88.1", "192.168.10.1", "192.168.10.2"],
+        "mikrotik_swos_lite": ["192.168.88.1"],
     }
     # Insertion order IS the detection-probe order (#74) — assert it too.
     assert list(VENDOR_LINK_LOCAL_IPS) == [
-        "cambium", "tachyon", "ubiquiti", "tarana", "mikrotik",
+        "cambium", "tachyon", "ubiquiti", "tarana", "mikrotik", "mikrotik_swos_lite",
     ]
 
 
@@ -206,7 +219,7 @@ def test_probe_and_boot_ping_orders_golden():
         ("192.168.1.1", ["tachyon"]),
         ("192.168.1.20", ["ubiquiti"]),
         ("169.254.100.1", ["tarana"]),
-        ("192.168.88.1", ["mikrotik"]),
+        ("192.168.88.1", ["mikrotik", "mikrotik_swos_lite"]),
         ("192.168.10.1", ["mikrotik"]),
         ("192.168.10.2", ["mikrotik"]),
     ]
@@ -218,7 +231,7 @@ def test_probe_and_boot_ping_orders_golden():
 
 def test_device_ips_config_golden():
     assert device_ips_vendors() == [
-        "cambium", "tachyon", "tarana", "ubiquiti", "mikrotik",
+        "cambium", "tachyon", "tarana", "ubiquiti", "mikrotik", "mikrotik_swos_lite",
     ]
     dump = DeviceIPsConfig().model_dump()
     assert dump == {
@@ -227,14 +240,16 @@ def test_device_ips_config_golden():
         "tarana": "169.254.100.1",
         "ubiquiti": "192.168.1.20",
         "mikrotik": "192.168.88.1",
+        "mikrotik_swos_lite": "192.168.88.1",
     }
-    assert list(dump) == ["cambium", "tachyon", "tarana", "ubiquiti", "mikrotik"]
+    assert list(dump) == ["cambium", "tachyon", "tarana", "ubiquiti", "mikrotik", "mikrotik_swos_lite"]
 
 
 def test_builtin_credentials_golden():
     assert BUILTIN_CREDENTIALS == {
         "cambium": [{"username": "admin", "password": "admin"}],
         "mikrotik": [{"username": "admin", "password": ""}],
+        "mikrotik_swos_lite": [{"username": "admin", "password": ""}],
         "tachyon": [{"username": "root", "password": "admin"}],
         "tarana": [{"username": "admin", "password": "admin123"}],
         "ubiquiti": [{"username": "ubnt", "password": "ubnt"}],
@@ -251,6 +266,10 @@ def test_vendor_ui_metadata_golden():
         "mikrotik": {
             "name": "MikroTik", "color": "#0E0E10",
             "defaultUser": "admin", "icon": "/static/vendor-icons/mikrotik.png",
+        },
+        "mikrotik_swos_lite": {
+            "name": "SwOS Lite GPEN21", "color": "#0E0E10",
+            "defaultUser": "admin", "icon": "/static/vendor-icons/mikrotik_swos_lite.png",
         },
         "tachyon": {
             "name": "Tachyon", "color": "#a855f7",
@@ -274,12 +293,12 @@ def test_vendor_ui_metadata_golden():
         },
     }
     assert list(metadata) == [
-        "cambium", "mikrotik", "tachyon", "tarana", "ubiquiti",
+        "cambium", "mikrotik", "mikrotik_swos_lite", "tachyon", "tarana", "ubiquiti",
         "evolution_digital", "unknown",
     ]
 
 
 def test_provisionable_device_types_golden():
     assert provisionable_device_types() == [
-        "cambium", "mikrotik", "tachyon", "tarana", "ubiquiti",
+        "cambium", "mikrotik", "mikrotik_swos_lite", "tachyon", "tarana", "ubiquiti",
     ]

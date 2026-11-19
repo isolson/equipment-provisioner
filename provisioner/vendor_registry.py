@@ -86,11 +86,13 @@ from .fingerprint import DeviceType
 from .firmware_sources.base import BaseFirmwareSource
 from .firmware_sources.cambium import CambiumFirmwareSource
 from .firmware_sources.mikrotik import MikrotikFirmwareSource
+from .firmware_sources.mikrotik_swos_lite import MikrotikSwosLiteFirmwareSource
 from .firmware_sources.tachyon import TachyonFirmwareSource
 from .firmware_sources.ubiquiti import UbiquitiFirmwareSource
 from .handlers.base import BaseHandler
 from .handlers.cambium import CambiumHandler
 from .handlers.mikrotik import MikrotikHandler
+from .handlers.mikrotik_swos_lite import MikrotikSwosLiteHandler
 from .handlers.tachyon import TachyonHandler
 from .handlers.tarana import TaranaHandler
 from .handlers.ubiquiti import UbiquitiHandler
@@ -488,6 +490,17 @@ register(VendorSpec(
         "Remove power, then hold the reset button while you apply power "
         "until the LED flashes."
     ),
+))
+
+register(VendorSpec(
+    device_type=DeviceType.MIKROTIK_SWOS_LITE,
+    handler_cls=MikrotikSwosLiteHandler,
+    firmware_source_cls=MikrotikSwosLiteFirmwareSource,
+    firmware_source_defaults={"enabled": False, "auto_download": False},
+    default_credentials={"username": "admin", "password": ""},
+    link_local_ips=("192.168.88.1",),
+    model_firmware_patterns={"gpen21": ["swos-gpen21"]},
+    ui_style={"name": "SwOS Lite GPEN21", "color": "#0E0E10"},
 ))
 
 register(VendorSpec(

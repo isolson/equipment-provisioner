@@ -98,6 +98,26 @@ async def test_single_bank_skips_fw2_phase(spy_handler_factory):
 
 
 @pytest.mark.asyncio
+async def test_handler_owned_profile_applies_without_config_asset(spy_handler_factory):
+    spy = spy_handler_factory()
+    spy.requires_config_apply = True
+
+    result = await spy.provision(firmware_current=True, dual_bank=False)
+
+    assert result.success, result.error_message
+    assert "apply_config" in spy.call_names
+    assert "verify_config" in spy.call_names
+    plan = [
+        step["key"]
+        for step in spy.provisioning_step_plan(
+            has_config=True, dual_bank=False, need_fw1=False, need_fw2=False
+        )
+    ]
+    assert "config_upload" in plan
+    assert "config_verify" in plan
+
+
+@pytest.mark.asyncio
 async def test_step_plan_uses_handler_capabilities(spy_handler_factory):
     """Single-bank handlers must not advertise a second firmware-bank step."""
     spy = spy_handler_factory(supports_dual_bank=False)

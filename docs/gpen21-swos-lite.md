@@ -19,8 +19,9 @@ gzip-compressed `engine.js`.
 
 The field map used was:
 
-- `sys.b`: `i05` identity; `i0a` address mode (0 DHCP with fallback, 1 static,
-  2 DHCP only); `i09` static IP; `i1b` allow-from-VLAN; `i1c` PoE out mode
+- `sys.b`: `i07` board name (hex ASCII, `GPEN21`); `i05` identity; `i0a`
+  address mode (0 DHCP with fallback, 1 static, 2 DHCP only); `i09` static
+  IP; `i1b` allow-from-VLAN; `i1c` PoE out mode
   (0 auto on, 1 force on, 2 off); `i1d` PoE out status (read-only); `i06`
   version (hex ASCII); `i0c` upgrade staged flag.
 - `fwd.b`: `i1f` set-as-uplink port bitmask (SFP1 is `0x4`); `i15` VLAN mode
@@ -37,11 +38,15 @@ SNMP off, and management static at `192.168.10.{1+unit}`, reachable only on
 VLAN 10. Write order was `vlan.b`, `fwd.b`, `snmp.b`, then `sys.b`; the
 management address change drops the connection.
 
-Identity is limited to 15 characters. `th.echoshores.sw03` was truncated, so
-the tested identity was `echoshores.sw03`. SwOS Lite has no default gateway
-setting; the switch answers only hosts on its `192.168.10.0/24` LAN. Reach it
-from the site LAN or router. PoE out “auto on” powers 802.3af/at devices;
+Identity is limited to 15 characters. The provisioner derives
+`th.{site}.sw{unit:02d}` and requires that name to fit. The bench unit used
+`echoshores.sw03`. SwOS Lite has no default gateway setting; the switch answers
+only hosts on its `192.168.10.0/24` LAN. Reach it from the site LAN or router.
+This format allows a site name of at most 7 characters; the kiosk rejects longer names for a GPEN21.
+PoE out “auto on” powers 802.3af/at devices;
 “force on” is for passive-PoE devices only and can damage other devices.
+Keep PoE out at auto on (`i1c` 0) by default. Force on (`i1c` 1) is a
+manual change for passive APs only.
 
 ## Firmware update
 
@@ -54,9 +59,9 @@ POST `/upgrade` as multipart field `blob` (200). `sys.b` field `i0c` becomes
 body `*`; the first three attempts appeared to fail because they skipped the
 reboot.
 
-For bench access, the host has factory addresses on each port VLAN. Use a
-temporary network namespace with a macvlan on the port's VLAN interface, as
-the TSW202 tool does.
+For bench access, use a temporary network namespace with a macvlan on the
+port VLAN interface. Put the factory and management source addresses in that
+namespace. Do not add `192.168.10.0/24` to the host's main namespace.
 
 ## Bench run — 2026-11-18
 
