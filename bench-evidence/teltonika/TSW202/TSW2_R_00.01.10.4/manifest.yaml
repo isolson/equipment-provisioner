@@ -1,0 +1,25 @@
+vendor: teltonika
+model: TSW202
+firmware: TSW2_R_00.01.10.4
+captured_utc: 2026-11-18
+config_role: SWITCH
+operations: [firmware-update, config-apply, management-move, config-readback]
+result: success
+capture_format: command-readback
+artifact_purpose: hardware-validation
+reusable_template: false
+canonical_template_status: unknown
+fixture_witness: baseline
+no_config_backup: present
+raw_evidence_path: /var/lib/provisioner/bench-evidence/teltonika/TSW202/TSW2_R_00.01.10.4/
+raw_files:
+  no-config.device-backup.tar.gz: "Factory configuration backup from firmware TSW2_R_00.01.10.1, taken before the first write."
+  run1-apply.log: "Backup and firmware upgrade from TSW2_R_00.01.10.1 to TSW2_R_00.01.10.4, then RemoteDisconnected at the NTP step."
+  run2-apply.log: "Idempotent re-run with hardening, VLANs, management move, and two passing read-backs."
+evidence_scope: >-
+  The bench tool scripts/tsw202_business_switch.py with
+  scripts/tsw202_business_switch_profile.json upgraded a factory TSW202 from
+  TSW2_R_00.01.10.1 to TSW2_R_00.01.10.4 with keep_settings=1. The
+  business-switch profile was applied, management moved to VLAN 10 static,
+  and two read-backs 30 seconds apart passed. Production login, RADIUS, SNMP
+  polling, PoE load test, and physical power cycle are not claimed.

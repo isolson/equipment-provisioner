@@ -1,0 +1,31 @@
+{
+  "source": "SwOS Lite HTTP API read-back",
+  "artifact_purpose": "hardware-validation",
+  "reusable_template": false,
+  "checks": {
+    "identity": true,
+    "static management address": true,
+    "mgmt VLAN 10": true,
+    "PoE out mode": true,
+    "SFP1 uplink": true,
+    "VLAN mode strict": true,
+    "default VLAN 10": true,
+    "VLANs 10/20/40/70 all ports": true,
+    "SNMP off": true
+  },
+  "values": {
+    "vlans": [
+      {"vlan": 10, "member_bitmask": "0x7"},
+      {"vlan": 20, "member_bitmask": "0x7"},
+      {"vlan": 40, "member_bitmask": "0x7"},
+      {"vlan": 70, "member_bitmask": "0x7"}
+    ],
+    "i15": [2, 2, 2],
+    "i18": [10, 10, 10],
+    "i1f": "0x4",
+    "snmp_i01": 0,
+    "poe_out_mode": "force on",
+    "poe_out_i1c": 1,
+    "poe_out_note": "Set for a passive AP; auto on is i1c 0"
+  }
+}

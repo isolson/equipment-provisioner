@@ -1,0 +1,7 @@
+{
+  "source": "Factory configuration backup taken before the first write",
+  "artifact_purpose": "hardware-validation",
+  "reusable_template": false,
+  "firmware_at_capture": "TSW2_R_00.01.10.1",
+  "note": "The supplied brief does not include redacted field values from this backup."
+}

@@ -1,0 +1,19 @@
+{
+  "source": "redacted factory page captures from firmware 2.17",
+  "artifact_purpose": "hardware-validation",
+  "reusable_template": false,
+  "address_mode": "DHCP with fallback",
+  "fallback_address": "192.168.88.1",
+  "allow_from_vlan": 0,
+  "poe_out_mode": "auto on",
+  "poe_out_i1c": 0,
+  "ports": ["Port1", "Port2", "SFP1"],
+  "vlan_table": [],
+  "vlan_mode_i15": [1, 1, 1],
+  "default_vlan_i18": [1, 1, 1],
+  "uplink_i1f": "0x1",
+  "snmp": {
+    "enabled": true,
+    "factory_community": "community_present"
+  }
+}

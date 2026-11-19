@@ -1,0 +1,31 @@
+{
+  "source": "bench command read-back",
+  "artifact_purpose": "hardware-validation",
+  "reusable_template": false,
+  "mode": "switch",
+  "profile": "business-switch",
+  "checks": {
+    "reached at management address": true,
+    "firmware": true,
+    "hostname": true,
+    "rms disabled": true,
+    "https redirect configured": true,
+    "http redirects to https (probe)": true,
+    "web shell disabled": true,
+    "ssh key-or-password": true,
+    "snmp agent as profile (inert)": true,
+    "snmp v3 users none": true,
+    "snmp traps disabled": true,
+    "snmp communities absent or loopback-only": true,
+    "snmp v2c factory community unanswered (probe)": true,
+    "ntp servers": true,
+    "remote syslog": true,
+    "lldp enabled": true,
+    "lldp filter (locked to 1 while LLDP is on)": true,
+    "loop detection on": true,
+    "per-port poe/edge/storm/loop": true,
+    "vlan table (per port: untagged 10, tagged 20/40/70; VLAN 1 empty)": true,
+    "management interface": true,
+    "no other interfaces (no DHCP client)": true
+  }
+}
