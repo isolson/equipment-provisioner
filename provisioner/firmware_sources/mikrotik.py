@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional
 
 import aiohttp
 
@@ -13,6 +13,16 @@ logger = logging.getLogger(__name__)
 
 LATEST_VERSION_URL = "https://upgrade.mikrotik.com/routeros/NEWESTa7.{channel}"
 DOWNLOAD_URL = "https://download.mikrotik.com/routeros/{version}/{filename}"
+
+# Latest version per channel from this process's last successful lookup.
+# The business wired modes read the long-term entry. An empty entry means
+# the checker has not reached the update server since the service started.
+_latest_known: Dict[str, str] = {}
+
+
+def latest_known_version(channel: str = "long-term") -> Optional[str]:
+    """Return the latest version the checker has seen for *channel*, or None."""
+    return _latest_known.get(channel)
 
 
 class MikrotikFirmwareSource(BaseFirmwareSource):
@@ -99,6 +109,13 @@ class MikrotikFirmwareSource(BaseFirmwareSource):
 
         async with aiohttp.ClientSession() as session:
             version, release_date = await self._fetch_latest_version(session, channel)
+            if version:
+                _latest_known[channel] = version.strip().split()[0]
+            if channel != "long-term":
+                # The business wired modes follow long-term on any channel.
+                long_term, _ = await self._fetch_latest_version(session, "long-term")
+                if long_term:
+                    _latest_known["long-term"] = long_term.strip().split()[0]
             if not version:
                 logger.warning("Could not resolve latest MikroTik version for channel '%s'", channel)
                 return []
