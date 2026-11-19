@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Bench tool: apply the business-switch profile to a Teltonika TSW202.
+"""Bench runner for the business-switch profile on a Teltonika TSW202.
 
-This is a bench tool ahead of a real handler. It is vendor-isolated: it
-touches no provisioner module, registry, or template. The profile data lives
-next to it in ``tsw202_business_switch_profile.json``.
+The provisioner handler uses this runner to keep the tested request order
+and checks. The profile data lives next to it in
+``tsw202_business_switch_profile.json``.
 
 The tool must run as root on the bench host. It reaches the switch through a
 temporary network namespace with a macvlan child of the provisioning VLAN

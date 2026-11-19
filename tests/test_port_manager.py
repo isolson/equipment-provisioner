@@ -847,6 +847,7 @@ def test_probe_list_derivation_matches_historical_all():
         ("192.168.88.1", ["mikrotik"]),
         ("192.168.10.1", ["mikrotik"]),
         ("192.168.10.2", ["mikrotik"]),
+        ("192.168.1.2", ["teltonika"]),
     ]
 
 
@@ -864,6 +865,7 @@ def test_boot_ping_derivation_matches_historical_order():
         "192.168.10.1",   # Business router
         "192.168.10.2",   # First business switch
         "169.254.100.1",  # was DeviceLinkLocalIP.TARANA
+        "192.168.1.2",   # Teltonika TSW202 factory address
     ]
 
 

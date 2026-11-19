@@ -56,6 +56,7 @@ def test_handler_map_golden():
         ("tachyon", "provisioner.handlers.tachyon.TachyonHandler"),
         ("tarana", "provisioner.handlers.tarana.TaranaHandler"),
         ("ubiquiti", "provisioner.handlers.ubiquiti.UbiquitiHandler"),
+        ("teltonika", "provisioner.handlers.teltonika.TeltonikaHandler"),
     ]
     # Keys are DeviceType members (not plain strings) — get_handler looks
     # up fingerprint.device_type directly.
@@ -71,6 +72,7 @@ def test_source_map_golden():
         "ubiquiti": "provisioner.firmware_sources.ubiquiti.UbiquitiFirmwareSource",
         "cambium": "provisioner.firmware_sources.cambium.CambiumFirmwareSource",
         "mikrotik": "provisioner.firmware_sources.mikrotik.MikrotikFirmwareSource",
+        "teltonika": "provisioner.firmware_sources.teltonika.TeltonikaFirmwareSource",
     }
 
 
@@ -121,6 +123,7 @@ def test_model_firmware_patterns_golden():
         "af60-xr": ["airfiber"],
         "af60-hd": ["airfiber"],
         "af-11fx": ["airfiber"],
+        "tsw202": ["TSW2_R_00.01.10.4"],
     }
     actual = FirmwareManager.MODEL_FIRMWARE_PATTERNS
     assert actual == expected
@@ -155,9 +158,14 @@ def test_default_credentials_golden():
             "bootstrap_password": "", "onboarding_password": "",
             "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
         },
+        "teltonika": {
+            "username": "admin", "password": "", "backup_password": "",
+            "bootstrap_password": "", "onboarding_password": "",
+            "wpa_key": "", "snmp_community": "", "snmp_write_community": "", "installer_password": "",
+        },
     }
     assert list(_default_credentials()) == [
-        "cambium", "mikrotik", "tachyon", "tarana", "ubiquiti",
+        "cambium", "mikrotik", "tachyon", "tarana", "teltonika", "ubiquiti",
     ]
 
 
@@ -180,9 +188,14 @@ def test_default_firmware_sources_golden():
             "enabled": False, "check_interval": 86400, "auto_download": False,
             "channel": "release", "include_beta": False, "models": [],
         },
+        "teltonika": {
+            "enabled": True, "check_interval": 86400, "auto_download": True,
+            "channel": "release", "include_beta": False, "models": [],
+        },
     }
     assert list(_default_firmware_sources()) == [
         "tachyon", "mikrotik", "ubiquiti", "cambium",
+        "teltonika",
     ]
 
 
@@ -193,10 +206,12 @@ def test_vendor_ips_golden():
         "ubiquiti": ["192.168.1.20"],
         "tarana": ["169.254.100.1"],
         "mikrotik": ["192.168.88.1", "192.168.10.1", "192.168.10.2"],
+        "teltonika": ["192.168.1.2"],
     }
     # Insertion order IS the detection-probe order (#74) — assert it too.
     assert list(VENDOR_LINK_LOCAL_IPS) == [
         "cambium", "tachyon", "ubiquiti", "tarana", "mikrotik",
+        "teltonika",
     ]
 
 
@@ -209,16 +224,18 @@ def test_probe_and_boot_ping_orders_golden():
         ("192.168.88.1", ["mikrotik"]),
         ("192.168.10.1", ["mikrotik"]),
         ("192.168.10.2", ["mikrotik"]),
+        ("192.168.1.2", ["teltonika"]),
     ]
     assert boot_ping_ips() == [
         "169.254.1.1", "192.168.1.1", "192.168.1.20",
         "192.168.88.1", "192.168.10.1", "192.168.10.2", "169.254.100.1",
+        "192.168.1.2",
     ]
 
 
 def test_device_ips_config_golden():
     assert device_ips_vendors() == [
-        "cambium", "tachyon", "tarana", "ubiquiti", "mikrotik",
+        "cambium", "tachyon", "tarana", "ubiquiti", "mikrotik", "teltonika",
     ]
     dump = DeviceIPsConfig().model_dump()
     assert dump == {
@@ -227,8 +244,9 @@ def test_device_ips_config_golden():
         "tarana": "169.254.100.1",
         "ubiquiti": "192.168.1.20",
         "mikrotik": "192.168.88.1",
+        "teltonika": "192.168.1.2",
     }
-    assert list(dump) == ["cambium", "tachyon", "tarana", "ubiquiti", "mikrotik"]
+    assert list(dump) == ["cambium", "tachyon", "tarana", "ubiquiti", "mikrotik", "teltonika"]
 
 
 def test_builtin_credentials_golden():
@@ -238,6 +256,7 @@ def test_builtin_credentials_golden():
         "tachyon": [{"username": "root", "password": "admin"}],
         "tarana": [{"username": "admin", "password": "admin123"}],
         "ubiquiti": [{"username": "ubnt", "password": "ubnt"}],
+        "teltonika": [{"username": "admin", "password": ""}],
     }
 
 
@@ -264,6 +283,10 @@ def test_vendor_ui_metadata_golden():
             "name": "Ubiquiti", "color": "#0559C9",
             "defaultUser": "ubnt", "icon": "/static/vendor-icons/ubiquiti.png",
         },
+        "teltonika": {
+            "name": "Teltonika", "color": "#E2231A",
+            "defaultUser": "admin", "icon": "/static/vendor-icons/teltonika.png",
+        },
         "evolution_digital": {
             "name": "Evolution", "color": "#ec4899",
             "defaultUser": "", "icon": "/static/vendor-icons/evolution_digital.png",
@@ -274,12 +297,12 @@ def test_vendor_ui_metadata_golden():
         },
     }
     assert list(metadata) == [
-        "cambium", "mikrotik", "tachyon", "tarana", "ubiquiti",
+        "cambium", "mikrotik", "tachyon", "tarana", "teltonika", "ubiquiti",
         "evolution_digital", "unknown",
     ]
 
 
 def test_provisionable_device_types_golden():
     assert provisionable_device_types() == [
-        "cambium", "mikrotik", "tachyon", "tarana", "ubiquiti",
+        "cambium", "mikrotik", "tachyon", "tarana", "teltonika", "ubiquiti",
     ]
