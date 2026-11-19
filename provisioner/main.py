@@ -342,6 +342,13 @@ class Provisioner:
             from .web.websocket import notify_display_state
             await notify_display_state(sleeping=False)
 
+        handler_class = (
+            self.handler_manager.handler_class_for(device_type)
+            if self.handler_manager else None
+        )
+        if handler_class and getattr(handler_class, "needs_site_job", False):
+            return
+
         # Spawn provisioning as a cancellable task
         task = asyncio.create_task(self._run_port_provisioning(port_num, device_type, device_ip))
 
@@ -422,6 +429,7 @@ class Provisioner:
         self, port_num: int, device_type: str, device_ip: Optional[str],
         custom_credentials: Optional[Dict[str, str]] = None,
         provision_request=None,
+        business_switch_job=None,
     ) -> bool:
         """Provision a device detected on a VLAN port.
 
@@ -737,6 +745,7 @@ class Provisioner:
                 firmware_lookup_callback=firmware_lookup,
                 custom_credentials=custom_credentials,
                 config_backup=self.config.features.config_backup,
+                business_switch_job=business_switch_job,
             )
 
             # Update MAC address and serial in checklist and DB if we got device info

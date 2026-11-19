@@ -274,6 +274,7 @@ class PortState:
     boot_wait_started: Optional[float] = None  # When the current boot wait began
     # Active post-provision mode change: {id, mode, started, steps, status}
     mode_job: Optional[Dict[str, Any]] = None
+    business_switch_job: Optional[Dict[str, Any]] = None
     # Seconds until auto-provisioning may run again for the same unit.
     reprovision_wait: int = 0
 
@@ -1817,6 +1818,7 @@ class PortManager:
         state.device_type = None
         state.boot_wait_started = None
         state.mode_job = None
+        state.business_switch_job = None
         state.device_ip = None
         state.device_mac = None
         state.device_serial = None
@@ -1911,6 +1913,15 @@ class PortManager:
         """
         if port_num in self.port_states:
             state = self.port_states[port_num]
+            job = state.business_switch_job
+            if job and (
+                (mac and job.get("mac") and job["mac"].lower() != mac.lower())
+                or (serial and job.get("serial") and job["serial"] != serial)
+            ):
+                state.business_switch_job = None
+            elif job:
+                job["mac"] = job.get("mac") or mac
+                job["serial"] = job.get("serial") or serial
             if mac:
                 state.device_mac = mac
                 state.checklist.mac_address = mac
@@ -2199,6 +2210,17 @@ class PortManager:
         self._ensure_events_loaded()
         state.reprovision_wait = self._reprovision_wait(state, current_time)
         workflow = workflow_for_port(state, self.mode_config_enabled)
+        from .handler_manager import HandlerManager
+
+        handler_class = (
+            HandlerManager.handler_class_for(state.device_type)
+            if state.device_type else None
+        )
+        needs_site_job = (
+            bool(getattr(handler_class, "needs_site_job", False))
+            if handler_class else False
+        )
+        site_job = state.business_switch_job if needs_site_job else None
         return {
             "vlan_id": state.vlan_id,
             "link_up": state.link_up,
@@ -2235,6 +2257,8 @@ class PortManager:
             "event_seq": state.event_seq,
             "run_id": state.run_id,
             "mode_job": state.mode_job,
+            "needs_site_job": needs_site_job and site_job is None,
+            "business_switch_job": site_job,
             "reprovision_wait": state.reprovision_wait,
         }
 

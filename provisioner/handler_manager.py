@@ -197,6 +197,7 @@ class HandlerManager:
         firmware_lookup_callback: Optional[Callable[[str, str], tuple]] = None,
         custom_credentials: Optional[Dict[str, str]] = None,
         config_backup: bool = False,
+        business_switch_job: Optional[Dict[str, Any]] = None,
     ) -> ProvisioningResult:
         """Provision a device with configuration and/or firmware.
 
@@ -225,6 +226,10 @@ class HandlerManager:
                 success=False,
                 error_message=f"No handler for device type {fingerprint.device_type.value}"
             )
+
+        if business_switch_job is not None:
+            handler.business_switch_site = business_switch_job.get("site")
+            handler.business_switch_unit = business_switch_job.get("unit")
 
         logger.info(f"Starting provisioning for {fingerprint.device_type.value} at {ip}")
 

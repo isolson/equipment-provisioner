@@ -98,6 +98,8 @@ class PortStatus(BaseModel):
     event_seq: int = 0
     run_id: Optional[str] = None
     mode_job: Optional[Dict[str, Any]] = None
+    needs_site_job: bool = False
+    business_switch_job: Optional[Dict[str, Any]] = None
     firmware_version: Optional[str] = None
     reprovision_wait: int = 0
 
@@ -124,6 +126,8 @@ class ProvisionRequest(TaranaSettingsRequest):
     # None falls back to config.yaml provisioning.default_role. Absent in
     # old clients, so requests are wire-compatible. UI exposure is R2.
     role: Optional[str] = None
+    site: Optional[str] = None
+    unit: Optional[int] = Field(default=None, strict=True, ge=1, le=99)
 
 
 class ProvisionResponse(BaseModel):
@@ -260,6 +264,28 @@ async def get_port_events(
 _credential_overrides: Dict[int, CredentialOverride] = {}
 
 
+def _validate_business_switch_job(site: str, unit: int, device_type: str) -> str:
+    if not re.fullmatch(r"[a-z0-9]{2,12}", site or ""):
+        raise HTTPException(
+            status_code=422,
+            detail="Site must use 2 to 12 lowercase letters or digits",
+        )
+    if isinstance(unit, bool) or not isinstance(unit, int) or not 1 <= unit <= 99:
+        raise HTTPException(
+            status_code=422,
+            detail="Unit must be an integer from 1 through 99",
+        )
+    hostname = "th.%s.sw%02d" % (site, unit)
+    handler_class = HandlerManager.handler_class_for(device_type)
+    limit = getattr(handler_class, "max_hostname_length", None) if handler_class else None
+    if limit is not None and len(hostname) > limit:
+        raise HTTPException(
+            status_code=422,
+            detail="Derived hostname exceeds the device hostname limit",
+        )
+    return hostname
+
+
 @router.get("/device-settings")
 async def get_device_settings(request: Request):
     """Get device-type-specific provisioning settings (defaults for UI)."""
@@ -358,6 +384,34 @@ async def provision_device(
     if status["provisioning"]:
         raise HTTPException(status_code=409, detail="Port already provisioning")
 
+    handler_class = HandlerManager.handler_class_for(status["device_type"])
+    needs_site_job = (
+        bool(getattr(handler_class, "needs_site_job", False))
+        if handler_class else False
+    )
+    if needs_site_job:
+        state = port_manager.port_states[req.port_number]
+        if req.site is not None or req.unit is not None:
+            if req.site is None or req.unit is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Site and unit are both required",
+                )
+            _validate_business_switch_job(req.site, req.unit, status["device_type"])
+            state.business_switch_job = {
+                "site": req.site,
+                "unit": req.unit,
+                "mac": status.get("device_mac"),
+                "serial": status.get("device_serial"),
+            }
+        job = state.business_switch_job
+        if not job:
+            raise HTTPException(status_code=422, detail="Enter a site and unit before starting")
+        _validate_business_switch_job(job["site"], job["unit"], status["device_type"])
+        req.site, req.unit = job["site"], job["unit"]
+    else:
+        req.site = req.unit = None
+
     # The provision flow uses the saved operator ID when the request has none.
     # Check the saved value against the same range before work starts.
     if status["device_type"] == "tarana" and req.operator_id is None:
@@ -387,6 +441,7 @@ async def provision_device(
         status["device_type"],
         status["device_ip"],
         req,
+        dict(state.business_switch_job) if needs_site_job else None,
     )
     
     return ProvisionResponse(
@@ -1011,6 +1066,7 @@ async def _run_provisioning(
     device_type: str,
     device_ip: str,
     req: ProvisionRequest,
+    business_switch_job: Optional[Dict[str, Any]] = None,
 ):
     """Run provisioning in background task.
 
@@ -1044,6 +1100,7 @@ async def _run_provisioning(
             device_ip,
             custom_credentials=custom_credentials,
             provision_request=req,
+            business_switch_job=business_switch_job,
         )
 
         # Clear credentials after use
@@ -1064,6 +1121,10 @@ async def _run_provisioning(
             state.expecting_reboot = False
         if not cancelled:
             provisioner.port_manager.mark_port_provisioning(port_number, False, success=success)
+            state = provisioner.port_manager.port_states.get(port_number)
+            if success or not getattr(state, "needs_credentials", False):
+                if state is not None:
+                    state.business_switch_job = None
 
 
 # ============================================================================
