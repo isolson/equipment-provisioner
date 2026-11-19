@@ -70,6 +70,21 @@ Extend the Ops contract with an executor job resource under
    results. Failed or interrupted execution never claims completion. Retain
    only the digest and contract-redacted evidence after the job.
 
+## Render-credential client (dormant)
+
+`provisioner/handlers/mikrotik_render_credentials.py` is a separate, narrow
+client. It targets the Ops per-device render-credential contract in
+treehouse-architecture
+[`docs/api-reference/ops-render-credentials.md` at commit `af890d2`](https://github.com/sixtyops/treehouse-architecture/blob/af890d2a6fb7dd3f88e1d7b1a04c65b9e95864af/docs/api-reference/ops-render-credentials.md)
+(status: proposed release contract). It releases and completes only the
+business router `localadmin` login. The executor-job contract above stays the
+next render slice; this client does not replace it.
+
+No flow calls this client. It stays off until both `render_credentials_url`
+and `render_credentials_token` are set and Ops serves the routes. The wiring
+into a business acceptance action is
+[#206](https://github.com/isolson/equipment-provisioner/issues/206) slice 3.
+
 ## Hardware and qualification blockers
 
 - Ops maps the alias `hEX S` to RB760iGS. Our unit is E60iUGS ARM. Add an exact
