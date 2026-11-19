@@ -137,6 +137,10 @@ TARANA_PASSWORD=
 TACHYON_PASSWORD=
 UBIQUITI_PASSWORD=
 
+# Ops factory-login intake for verified business router and switch jobs
+FACTORY_LOGIN_OPS_URL=https://api.infra.treehouse.mn
+FACTORY_LOGIN_PROVISIONER_API_KEY=
+
 # Notification webhooks (optional)
 SLACK_WEBHOOK_URL=
 DISCORD_WEBHOOK_URL=
