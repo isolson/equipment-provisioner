@@ -1,0 +1,18 @@
+{
+  "device_props": {
+    "networkMode": "2",
+    "mgmtVLANEnable": "1",
+    "mgmtVLANVID": "12",
+    "wirelessDeviceCountryCode": "US",
+    "wirelessInterfaceMode": "1",
+    "wirelessInterfacePTPMode": "0",
+    "wirelessInterfaceProtocolMode": "1",
+    "wirelessStaIsolate": "1",
+    "networkLLDP": "1",
+    "networkLLDPMode": "1",
+    "wirelessInterfaceSyncSource": "3",
+    "wirelessInterfaceTDDFrameSize": "5000",
+    "wirelessInterfaceTDDRatio": "4",
+    "wirelessInterfaceRateMaxMCS": "255"
+  }
+}
